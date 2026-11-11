@@ -127,6 +127,55 @@ describe("pipeline status report", () => {
     });
   });
 
+  it("measures pending age from the due-age view when the join supplies it", () => {
+    const stages = summarizeTaskStages([
+      // Due-age join present, nothing due: three days since creation, but all of it scheduled.
+      {
+        task_type: "NORMALIZE_OBSERVATION",
+        status: "PENDING",
+        task_count: 2,
+        oldest_age_seconds: 259_200,
+        oldest_due_age_seconds: null,
+        due_task_count: null,
+      },
+      // Due-age join present: one of three tasks has been due for longer than the SLO.
+      {
+        task_type: "PUBLISH_EMBEDDING",
+        status: "PENDING",
+        task_count: 3,
+        oldest_age_seconds: 259_200,
+        oldest_due_age_seconds: 7201,
+        due_task_count: 1,
+      },
+      // No due-age column (pre-107 row shape): fall back to the created_at age.
+      {
+        task_type: "ROUTE_LANE",
+        status: "PENDING",
+        task_count: 1,
+        oldest_age_seconds: 9000,
+      },
+    ]);
+
+    expect(stages.find((stage) => stage.stage === "NORMALIZATION")).toMatchObject({
+      status: "BACKLOG_HEALTHY",
+      pending: 2,
+      scheduled_pending: 2,
+      oldest_age_seconds: 0,
+    });
+    expect(stages.find((stage) => stage.stage === "EMBEDDINGS")).toMatchObject({
+      status: "BACKLOG_AGED",
+      pending: 3,
+      scheduled_pending: 2,
+      oldest_age_seconds: 7201,
+    });
+    expect(stages.find((stage) => stage.stage === "LANE_ROUTING")).toMatchObject({
+      status: "BACKLOG_AGED",
+      pending: 1,
+      scheduled_pending: 0,
+      oldest_age_seconds: 9000,
+    });
+  });
+
   it("marks actionable dead-lettered work as an error stage", () => {
     const stages = summarizeTaskStages([
       {

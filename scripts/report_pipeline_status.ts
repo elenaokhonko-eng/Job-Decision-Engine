@@ -56,6 +56,8 @@ interface TaskHealthRow {
   oldest_status_age_seconds?: number | null;
   /** PENDING only: seconds since the longest-waiting due task became claimable (v_pipeline_task_due_age). */
   oldest_due_age_seconds?: number | null;
+  /** PENDING only: tasks whose available_at has passed (v_pipeline_task_due_age); null when none is due. */
+  due_task_count?: number | null;
   actionable_dead_letter_count?: number;
   stale_historical_dead_letter_count?: number;
 }
@@ -70,6 +72,8 @@ interface StageSummary {
   stage: PipelineStage;
   status: "SUCCESS" | "BACKLOG_HEALTHY" | "BACKLOG_AGED" | "RETRYING" | "BLOCKED" | "ERROR" | "IDLE";
   pending: number;
+  /** PENDING tasks scheduled for later; excluded from the pending-age SLO but reported. */
+  scheduled_pending: number;
   retry_wait: number;
   blocked_dependency: number;
   dead_letter: number;
@@ -97,6 +101,7 @@ function initialStageSummary(stage: PipelineStage): StageSummary {
     stage,
     status: "IDLE",
     pending: 0,
+    scheduled_pending: 0,
     retry_wait: 0,
     blocked_dependency: 0,
     dead_letter: 0,
@@ -189,6 +194,19 @@ export function providerCallWindowMinutes(value = process.env.PIPELINE_PROVIDER_
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 7 * 24 * 60) : 90;
 }
 
+/** Queue health per task type and status, with status age (migration 099) and due age (migration 107). */
+export const TASK_HEALTH_SQL = `
+  SELECT health.task_type, health.status, health.task_count, health.oldest_age_seconds,
+         status_age.oldest_status_age_seconds, due_age.oldest_due_age_seconds, due_age.due_task_count
+  FROM v_pipeline_task_queue_health AS health
+  LEFT JOIN v_pipeline_task_status_age AS status_age
+    USING (workspace_id, task_type, status)
+  LEFT JOIN v_pipeline_task_due_age AS due_age
+    USING (workspace_id, task_type, status)
+  WHERE health.workspace_id = $1
+    AND health.status IN ('PENDING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY', 'DEAD_LETTER')
+  ORDER BY health.task_type, health.status`;
+
 export function summarizeTaskStages(rows: readonly TaskHealthRow[], maxPendingAgeSeconds = 7200): StageSummary[] {
   const stages = new Map<PipelineStage, StageSummary>(
     STAGES.map((stage) => [stage, initialStageSummary(stage)]),
@@ -200,7 +218,13 @@ export function summarizeTaskStages(rows: readonly TaskHealthRow[], maxPendingAg
     const summary = stages.get(stage);
     if (!summary) continue;
     const count = Number(row.task_count);
-    if (row.status === "PENDING") summary.pending += count;
+    if (row.status === "PENDING") {
+      summary.pending += count;
+      // A row without the due-age join (undefined) predates migration 107 and reports nothing as scheduled.
+      if (row.due_task_count !== undefined) {
+        summary.scheduled_pending += Math.max(0, count - Number(row.due_task_count ?? 0));
+      }
+    }
     if (row.status === "RETRY_WAIT") summary.retry_wait += count;
     if (row.status === "BLOCKED_DEPENDENCY") summary.blocked_dependency += count;
     if (row.status === "DEAD_LETTER") {
@@ -365,19 +389,7 @@ async function run(): Promise<void> {
       deadLetterHealth,
       providerCallRows,
     ] = await Promise.all([
-      pool.query<TaskHealthRow>(
-        `SELECT health.task_type, health.status, health.task_count, health.oldest_age_seconds,
-                status_age.oldest_status_age_seconds, due_age.oldest_due_age_seconds
-         FROM v_pipeline_task_queue_health AS health
-         LEFT JOIN v_pipeline_task_status_age AS status_age
-           USING (workspace_id, task_type, status)
-         LEFT JOIN v_pipeline_task_due_age AS due_age
-           USING (workspace_id, task_type, status)
-         WHERE health.workspace_id = $1
-           AND health.status IN ('PENDING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY', 'DEAD_LETTER')
-         ORDER BY health.task_type, health.status`,
-        [context.workspaceId],
-      ),
+      pool.query<TaskHealthRow>(TASK_HEALTH_SQL, [context.workspaceId]),
       pool.query<SourceConnectorRow>(
         `SELECT COALESCE(observation.source_name, 'UNKNOWN') AS connector,
                 COUNT(*)::int AS observations,

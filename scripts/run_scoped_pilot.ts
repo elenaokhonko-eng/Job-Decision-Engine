@@ -114,14 +114,19 @@ interface PilotTarget extends pg.QueryResultRow {
   readonly has_documents: boolean;
 }
 
-interface ScopedTaskHealth {
+export interface ScopedTaskHealth {
+  /** Every PENDING task, including work scheduled for later. */
   readonly pending: number;
+  /** PENDING tasks whose available_at has passed: the only pending work a run could claim. */
+  readonly duePending: number;
   readonly retryWait: number;
   readonly blocked: number;
   readonly running: number;
   readonly activeRunning: number;
   readonly deadLetter: number;
+  /** Seconds since the longest-waiting due PENDING task became claimable (as in migration 107). */
   readonly oldestPendingAgeSeconds: number;
+  /** Seconds since the longest-held RETRY_WAIT task entered that status (as in migration 099). */
   readonly oldestRetryWaitAgeSeconds: number;
 }
 
@@ -217,13 +222,14 @@ export function createScopedEvaluationOptionsWithContext(
   return { ...createScopedEvaluationOptions(jobVersionId, profileVersionId), context };
 }
 
-async function readScopedTaskHealth(
+export async function readScopedTaskHealth(
   client: pg.Pool | pg.PoolClient,
   workspaceId: string,
   jobVersionId: string,
 ): Promise<ScopedTaskHealth> {
   const { rows } = await client.query<{
     pending: number;
+    due_pending: number;
     retry_wait: number;
     blocked: number;
     running: number;
@@ -233,6 +239,7 @@ async function readScopedTaskHealth(
     oldest_retry_wait_age_seconds: number;
   }>(
     `SELECT COUNT(*) FILTER (WHERE task.status = 'PENDING')::INTEGER AS pending,
+            COUNT(*) FILTER (WHERE task.status = 'PENDING' AND task.available_at <= NOW())::INTEGER AS due_pending,
             COUNT(*) FILTER (WHERE task.status = 'RETRY_WAIT')::INTEGER AS retry_wait,
             COUNT(*) FILTER (WHERE task.status = 'BLOCKED_DEPENDENCY')::INTEGER AS blocked,
             COUNT(*) FILTER (WHERE task.status = 'RUNNING')::INTEGER AS running,
@@ -241,8 +248,11 @@ async function readScopedTaskHealth(
                 AND COALESCE(task.lease_expires_at > NOW(), TRUE)
             )::INTEGER AS active_running,
             COUNT(*) FILTER (WHERE task.status = 'DEAD_LETTER')::INTEGER AS dead_letter,
-            COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(task.created_at) FILTER (WHERE task.status = 'PENDING'))), 0)::INTEGER AS oldest_pending_age_seconds,
-            COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(task.created_at) FILTER (WHERE task.status = 'RETRY_WAIT'))), 0)::INTEGER AS oldest_retry_wait_age_seconds
+            -- Pending age counts only due work, from when it became claimable (migration 107);
+            -- retry age counts from entry into RETRY_WAIT (migration 099). Same metrics as the worker.
+            COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(GREATEST(task.created_at, task.available_at))
+              FILTER (WHERE task.status = 'PENDING' AND task.available_at <= NOW()))), 0)::INTEGER AS oldest_pending_age_seconds,
+            COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(task.updated_at) FILTER (WHERE task.status = 'RETRY_WAIT'))), 0)::INTEGER AS oldest_retry_wait_age_seconds
      FROM pipeline_tasks task
      WHERE task.workspace_id = $1
        AND (
@@ -261,6 +271,7 @@ async function readScopedTaskHealth(
   const row = rows[0];
   return {
     pending: Number(row?.pending ?? 0),
+    duePending: Number(row?.due_pending ?? 0),
     retryWait: Number(row?.retry_wait ?? 0),
     blocked: Number(row?.blocked ?? 0),
     running: Number(row?.running ?? 0),
@@ -634,6 +645,7 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
           oldestRetryWaitAgeSeconds: after.oldestRetryWaitAgeSeconds,
           activePendingCountBefore: before.pending,
           activePendingCount: after.pending,
+          activeDuePendingCount: after.duePending,
           oldestActivePendingAgeSecondsBefore: before.oldestPendingAgeSeconds,
           oldestActivePendingAgeSeconds: after.oldestPendingAgeSeconds,
           failOnRetryWait: true,
