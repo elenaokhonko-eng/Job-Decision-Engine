@@ -9,6 +9,7 @@ import {
   hasApprovedLaneFunction,
   hasInvestigationFunction,
   hasNonTechnicalProjectSubject,
+  titleNamesTechnologyWork,
   hasNonTechnicalRoleFamily,
   hasProductTransformationFunction,
   isRegulatorEmployer,
@@ -237,6 +238,19 @@ const IN_SECTOR_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
   {
     title: "Digital Transformation Lead",
     description: "Lead digital transformation for a government agency: digital services for citizens, cloud migration of case systems and data pipelines with engineering teams.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
+  },
+  // Sector only in the employer's About Us: admitted because the title names technology work.
+  {
+    title: "Head, Technology Transformation",
+    description: "About Us\nWe are a life insurer serving millions of policyholders.\nThe Role\nLead the technology transformation portfolio: cloud migration of core systems, data pipelines for analytics and agile delivery with engineering teams.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
+  },
+  {
+    title: "Assistant Director, Digital Strategy & Transformation",
+    description: "About Us\nWe are a government ministry responsible for national defence.\nWhat You Will Do\nShape the digital strategy and transformation roadmap: cloud migration of enterprise systems, data pipelines for decision support and engineering teams across agencies.",
     favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
     expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
   },
@@ -572,15 +586,15 @@ describe("Sector rules", () => {
     expect(hasNonTechnicalProjectSubject("Project Manager", "deliver cloud migration and data pipelines for the bank")).toBe(false);
   });
 
-  it("reads the product-lane sector from the job's own scope, not the employer's About Us", () => {
+  it("takes the employer's sector only when the title names technology work", () => {
     const sectors = config.lanes.TECHNICAL_PRODUCT_TRANSFORMATION.required_sector_concepts;
     expect(matchedSector("a university and an academic environment", sectors)).toEqual([]);
-    const aboutOnly = route(
-      "Digital Transformation Manager",
-      "About Us\nWe are a leading bank.\nThe Role\nLead digital transformation for our hotel portfolio: cloud migration of property systems and data pipelines with engineering teams.",
-      "TECHNICAL_PRODUCT_TRANSFORMATION",
-    );
-    expect(aboutOnly.primaryLane).toBe("UNCLASSIFIED");
+    const roleText = "About Us\nWe are a leading bank.\nThe Role\nLead the transformation of our branch network: cloud migration of branch systems and data pipelines with engineering teams.";
+    expect(titleNamesTechnologyWork("Transformation Manager")).toBe(false);
+    expect(route("Transformation Manager", roleText, "TECHNICAL_PRODUCT_TRANSFORMATION").primaryLane).toBe("UNCLASSIFIED");
+    expect(titleNamesTechnologyWork("Digital Transformation Manager")).toBe(true);
+    expect(route("Digital Transformation Manager", roleText, "TECHNICAL_PRODUCT_TRANSFORMATION").primaryLane)
+      .toBe("TECHNICAL_PRODUCT_TRANSFORMATION");
   });
 
   it("treats a technology-adjacent director or head as a product-lane title", () => {

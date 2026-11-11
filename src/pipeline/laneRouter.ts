@@ -1044,6 +1044,13 @@ const NON_TECHNICAL_PROJECT_SCOPE = /\b(?:construction\s+(?:project|works|site|p
  * A title without a technical qualifier is also excluded when its own scope describes
  * building, estates, facilities, events or fundraising work.
  */
+// A title that itself names technology work may take its sector from the employer context.
+const TECHNOLOGY_WORK_TITLE = /\b(?:technology|tech|digital|data|ai|it|platforms?)\b/i;
+
+export function titleNamesTechnologyWork(title: string): boolean {
+  return TECHNOLOGY_WORK_TITLE.test(title);
+}
+
 export function hasNonTechnicalProjectSubject(title: string, scopeText: string): boolean {
   if (NON_TECHNICAL_PROJECT_TITLE.test(title)) return true;
   return !TECHNICAL_TITLE_QUALIFIER.test(title) && NON_TECHNICAL_PROJECT_SCOPE.test(scopeText);
@@ -1343,12 +1350,20 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
   const preferenceEnabled = input.preferenceEnabled ?? (() => true);
   const preferenceRank = input.preferenceRank ?? (() => 1000);
   const exclusionText = extractCoreJobText(title, description, LANE_EXCLUSION_TEXT_MAX_CHARS).toLowerCase();
-  // The employer intro feeds only the LEGAL/FINTECH tie-break and the regulator rule. Sector and
-  // technology checks read the job's own scope (title and role text, without "About Us" blocks).
-  const employerIntro = stripHtmlToText(description).slice(0, 800);
+  // Technology phrases and, by default, the sector come from the job's own scope (title and
+  // role text, without "About Us" blocks). The employer intro feeds the LEGAL/FINTECH
+  // tie-break and the regulator rule. When the title itself names technology work, the
+  // sector may also come from the employer context (company name and About Us).
+  const rawPlain = stripHtmlToText(description);
+  const employerIntro = rawPlain.slice(0, 800);
   const scopeText = stripEmployerBoilerplatePhrases(
     extractCoreJobText(title, description, LANE_SCOPE_TEXT_MAX_CHARS)
   ).toLowerCase();
+  const sectorText = titleNamesTechnologyWork(title)
+    ? stripEmployerBoilerplatePhrases(
+        `${scopeText} ${input.companyName ?? ""} ${rawPlain.slice(0, LANE_SCOPE_TEXT_MAX_CHARS)}`
+      ).toLowerCase()
+    : scopeText;
 
   let bestLane = "UNCLASSIFIED";
   let bestScore = -1;
@@ -1385,7 +1400,7 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
       laneDef.included_domain_concepts,
       laneDef.minimum_domain_signals,
       laneDef.required_sector_concepts,
-      scopeText
+      sectorText
     );
     functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, title)
       || (laneKey === "TECHNICAL_PRODUCT_TRANSFORMATION" && hasNonTechnicalProjectSubject(title, scopeText))
@@ -1531,7 +1546,7 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
           `${bestLane}:domain_score=${(domainScoreMap[bestLane] ?? 0).toFixed(3)}`,
           `${bestLane}:function_score=${(functionScoreMap[bestLane] ?? 0).toFixed(3)}`,
           ...(config.lanes[bestLane]?.required_sector_concepts?.length
-            ? [`${bestLane}:sector=${matchedSector(scopeText, config.lanes[bestLane].required_sector_concepts).join("|")}`]
+            ? [`${bestLane}:sector=${matchedSector(sectorText, config.lanes[bestLane].required_sector_concepts).join("|")}`]
             : []),
         ],
     processingStatus: noActiveLaneMatch ? "UNMATCHED" : "LANE_ROUTED",

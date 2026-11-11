@@ -7,8 +7,9 @@ description: "Roles between business product management and hands-on AI engineer
 # - role family: the title names a product, programme/project, transformation or
 #   technology-adjacent director/head function (hasProductTransformationFunction in
 #   src/pipeline/laneRouter.ts);
-# - sector: the job's own scope (title and role text, not the employer's "About Us")
-#   names the sector of another target lane;
+# - sector: the job's own scope (title and role text) names the sector of another target
+#   lane; only a title that names technology, digital, data, AI, IT or platform work may
+#   take the sector from the employer context (company name, About Us);
 # - technology: the role text has two distinct technology, data or AI phrases;
 # - no non-technical project subject (construction, estates, facilities, fit-out,
 #   events, fundraising: hasNonTechnicalProjectSubject).
