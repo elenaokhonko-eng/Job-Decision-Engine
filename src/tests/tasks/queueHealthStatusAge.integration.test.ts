@@ -7,7 +7,7 @@ import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pg
 import { enforcePipelineWorkerExitPolicy } from "../../tasks/pipelineWorkerExitPolicy.js";
 import { claimPipelineTasks } from "../../tasks/pipelineTasks.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
-import { oldestStatusAgeSeconds } from "../../../scripts/process_pipeline_tasks.js";
+import { oldestDuePendingAgeSeconds, oldestStatusAgeSeconds } from "../../../scripts/process_pipeline_tasks.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
@@ -76,6 +76,68 @@ describe.skipIf(skipReal)("v_pipeline_task_status_age (PostgreSQL)", () => {
     expect(() => enforcePipelineWorkerExitPolicy({ ...policyInput, oldestRetryWaitAgeSeconds: retryAge })).not.toThrow();
     expect(() => enforcePipelineWorkerExitPolicy({ ...policyInput, oldestRetryWaitAgeSeconds: Number(rows[0].oldest_age_seconds) }))
       .toThrow(/Retry backlog age exceeded SLO/);
+  });
+
+  it("measures pending age only for due tasks, from when they became claimable", async () => {
+    if (!client || !context) throw new Error("The queue health test database is not initialized.");
+    const taskType = "FETCH_JOB_CONTENT";
+    // Created 3 days ago and scheduled for tomorrow: deliberately deferred, not stalled.
+    await client.query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, available_at, created_at, updated_at)
+       VALUES ($1, $2, $3, '{}'::jsonb, 'PENDING', NOW() + INTERVAL '1 day', NOW() - INTERVAL '3 days', NOW())`,
+      [context.workspaceId, taskType, `${taskType}:scheduled:${randomUUID()}`],
+    );
+
+    const readRows = async () => (await client!.query(
+      `SELECT health.task_type, health.status, health.task_count, health.oldest_age_seconds,
+              status_age.oldest_status_age_seconds, due_age.oldest_due_age_seconds
+       FROM v_pipeline_task_queue_health AS health
+       LEFT JOIN v_pipeline_task_status_age AS status_age USING (workspace_id, task_type, status)
+       LEFT JOIN v_pipeline_task_due_age AS due_age USING (workspace_id, task_type, status)
+       WHERE health.workspace_id = $1 AND health.task_type = $2 AND health.status = 'PENDING'`,
+      [context!.workspaceId, taskType],
+    )).rows;
+
+    const scheduledOnly = await readRows();
+    expect(scheduledOnly).toHaveLength(1);
+    expect(Number(scheduledOnly[0].oldest_age_seconds)).toBeGreaterThan(2 * 86_400);
+    expect(scheduledOnly[0].oldest_due_age_seconds).toBeNull();
+    expect(oldestDuePendingAgeSeconds(scheduledOnly)).toBe(0);
+
+    // Created 3 days ago, became due 3 minutes ago: ages from the moment it became claimable.
+    await client.query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, available_at, created_at, updated_at)
+       VALUES ($1, $2, $3, '{}'::jsonb, 'PENDING', NOW() - INTERVAL '3 minutes', NOW() - INTERVAL '3 days', NOW())`,
+      [context.workspaceId, taskType, `${taskType}:released:${randomUUID()}`],
+    );
+    const withDue = await readRows();
+    const dueAge = oldestDuePendingAgeSeconds(withDue);
+    expect(dueAge).toBeGreaterThanOrEqual(170);
+    expect(dueAge).toBeLessThan(600);
+
+    const policyInput = {
+      claimedThisRun: 10, completedThisRun: 10, failedThisRun: 0, exitReason: "MAX_TASKS_REACHED" as const, deadLetteredThisRun: 0,
+      actionableCurrentDeadLetterCount: 0, staleHistoricalDeadLetterCount: 0, retryWaitCount: 0, oldestRetryWaitAgeSeconds: 0,
+      activePendingCountBefore: 10, activePendingCount: 5, oldestActivePendingAgeSecondsBefore: dueAge,
+      oldestActivePendingTaskType: taskType, oldestPendingTaskSameRuns: 3, pendingAgeTrendRuns: 3, failOnRetryWait: false,
+      maxRetryWaitCount: 500, maxRetryWaitAgeSeconds: 21_600, maxPendingAgeSeconds: 7_200, noProgressPendingThreshold: 1,
+    };
+    expect(() => enforcePipelineWorkerExitPolicy({ ...policyInput, oldestActivePendingAgeSeconds: dueAge })).not.toThrow();
+
+    // A due task that has waited past the SLO still fails the run.
+    await client.query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, available_at, created_at, updated_at)
+       VALUES ($1, $2, $3, '{}'::jsonb, 'PENDING', NOW() - INTERVAL '5 hours', NOW() - INTERVAL '3 days', NOW())`,
+      [context.workspaceId, taskType, `${taskType}:stalled:${randomUUID()}`],
+    );
+    const stalledAge = oldestDuePendingAgeSeconds(await readRows());
+    expect(stalledAge).toBeGreaterThan(4 * 3_600);
+    expect(stalledAge).toBeLessThan(6 * 3_600);
+    expect(() => enforcePipelineWorkerExitPolicy({
+      ...policyInput,
+      oldestActivePendingAgeSecondsBefore: stalledAge,
+      oldestActivePendingAgeSeconds: stalledAge,
+    })).toThrow(/Pending queue age exceeded SLO/);
   });
 
   it("claims a due retry before an older PENDING backlog of the same type", async () => {
