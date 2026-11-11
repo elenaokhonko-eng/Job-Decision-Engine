@@ -103,6 +103,61 @@ describe("government security clearance requirements", () => {
   });
 });
 
+describe("review probes (#178): wording that is not a U.S. clearance or placement", () => {
+  const SG_REGULATOR = "Synthetic Monetary Regulator";
+  function singaporeGate(description: string) {
+    return applyGlobalGates({
+      id: "probe",
+      title: "Data Governance Officer",
+      company_name: SG_REGULATOR,
+      location: "Singapore (Hybrid)",
+      workplace_type: "HYBRID",
+      employment_type: "PERMANENT",
+      raw_description: description,
+    } as any, policy);
+  }
+
+  it("does not read a bare 'public trust' value as a U.S. Public Trust clearance", () => {
+    const text = "Officers must maintain public trust and uphold the integrity of the regulator. Build data quality checks in Python. Hybrid, 2 days a week in the office.";
+    expect(status(text.toLowerCase())).toBe("ALLOWED");
+    expect(singaporeGate(text).rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+  });
+
+  it("still reads Public Trust as a clearance with clearance wording or U.S. federal context", () => {
+    expect(status("must obtain a public trust clearance.")).toBe("INCOMPATIBLE");
+    expect(status("this is a public trust position.\nmust pass the required public trust background investigation.")).toBe("INCOMPATIBLE");
+    expect(status("supports a federal agency modernization program.\nmust be able to obtain and maintain public trust.")).toBe("INCOMPATIBLE");
+  });
+
+  it("does not treat a non-country '-based role' as a placement", () => {
+    const text = "This cloud-based role supports clients across Japan. Build data pipelines in Python. Hybrid, 2 days a week in the office.";
+    expect(status(text.toLowerCase())).toBe("ALLOWED");
+    expect(singaporeGate(text).rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+    expect(status("this web-based position serves customers in germany.")).toBe("ALLOWED");
+  });
+
+  it("treats US-, United States- and US-state-based roles or candidates as U.S. placements", () => {
+    expect(status("this is a remote, us-based role.")).toBe("INCOMPATIBLE");
+    expect(status("this is a united states-based position.")).toBe("INCOMPATIBLE");
+    expect(status("we are hiring california-based candidates for this role.")).toBe("INCOMPATIBLE");
+  });
+
+  it("does not take a bare 'security clearance' as U.S. from EEO, benefits or legal boilerplate", () => {
+    const text = [
+      "Active security clearance required.",
+      "Build data pipelines in Python.",
+      "We are an equal opportunity employer in the United States. All qualified applicants receive consideration without regard to race, religion, national origin, disability or protected veteran status, as protected by federal, state or local law.",
+      "We offer competitive benefits, including 401(k) and health insurance, to employees in the USA.",
+    ].join("\n");
+    expect(status(text.toLowerCase())).toBe("ALLOWED");
+  });
+
+  it("reads a bare 'security clearance' as U.S. with federal or defence context in its section", () => {
+    expect(status("this role supports a government contract for a federal agency.\nactive security clearance required.")).toBe("INCOMPATIBLE");
+    expect(status("you will support dod mission systems.\nmust hold an active security clearance.")).toBe("INCOMPATIBLE");
+  });
+});
+
 describe("US-based remote roles", () => {
   it("treats a remote, US-based role as a worker-territory restriction", () => {
     expect(status("this is a remote, us-based role.")).toBe("INCOMPATIBLE");
