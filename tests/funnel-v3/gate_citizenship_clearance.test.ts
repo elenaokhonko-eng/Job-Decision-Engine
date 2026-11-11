@@ -11,6 +11,7 @@ import {
   evaluateWorkerTerritoryRequirements,
   extractExplicitWorkerTerritoryRequirements,
   extractGovernmentEligibilityRequirements,
+  isUnitedStatesOnlyLocation,
   loadWorkabilityPolicy,
 } from "../../src/pipeline/workabilityPolicy.js";
 import { GATE_VERSION } from "../../src/contracts/version.js";
@@ -122,6 +123,81 @@ describe("US-based remote roles", () => {
       expect(result.rejection_codes).toContain("GATE_JOB_LOCATION_MISMATCH");
     },
   );
+});
+
+describe("remote jobs located in the United States", () => {
+  function fullGate(location: string, description: string, workplaceType = "REMOTE") {
+    return evaluateHardGatesForJob({
+      job: {
+        title: "Data Platform Engineer",
+        company_name: "Synthetic Cloud Works",
+        description,
+        location,
+        workplace_type: workplaceType,
+        employment_type: "PERMANENT",
+        compensation_raw: null,
+      },
+      requirements: [],
+      profileFacts: [],
+      policy,
+      stage3Preferences: {},
+      territoryScope: remoteTerritoryScopeForPolicy(policy),
+    });
+  }
+  const BODY = "Build data pipelines in Python and Spark. This is a remote position.";
+
+  it.each([
+    ["United States", BODY],
+    ["Remote (US)", BODY],
+    ["US - Remote", BODY],
+    ["Anywhere in the US", BODY],
+    ["California", BODY],
+    ["Texas, United States", BODY],
+    ["Austin, TX", BODY],
+    ["Denver, CO (Remote)", BODY],
+    ["United States", `${BODY} You can work from anywhere in the US.`],
+  ])("rejects %s with a remote flag as GATE_JOB_LOCATION_MISMATCH", (location, description) => {
+    const result = fullGate(location, description);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_JOB_LOCATION_MISMATCH");
+    expect(result.rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+    expect(result.workability_facts.location_restriction).toBe("UNITED_STATES");
+  });
+
+  it.each([
+    ["United States", `${BODY} Work from anywhere: we hire across time zones.`],
+    ["United States", `${BODY} This is a global remote role.`],
+    ["California", `${BODY} We are open to candidates worldwide.`],
+    ["Remote (US)", `${BODY} Candidates in Singapore are also welcome.`],
+    ["United States", `${BODY} We are hiring across APAC.`],
+    ["Austin, TX", `${BODY} Our team spans North America and Asia.`],
+  ])("passes %s when the posting opens remote work wider (%s)", (location, description) => {
+    const result = fullGate(location, description);
+    expect(result.status, JSON.stringify(result.rejection_codes)).not.toBe("HARD_REJECT");
+    expect(result.rejection_codes).not.toContain("GATE_JOB_LOCATION_MISMATCH");
+  });
+
+  it("passes a US-headquartered company hiring in Singapore", () => {
+    const result = fullGate("Singapore", "We are a company headquartered in San Francisco, California. Build data pipelines in Python. This is a remote position.");
+    expect(result.status).toBe("PASS");
+  });
+
+  it("leaves bare 'Remote' and non-remote US locations to the existing rules", () => {
+    expect(fullGate("Remote", BODY).status).toBe("PASS");
+    expect(fullGate("Austin, TX", "Build data pipelines in Python. Hybrid, 2 days a week in the office.", "HYBRID").rejection_codes)
+      .not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+  });
+
+  it("recognises US-only locations and nothing else", () => {
+    expect(isUnitedStatesOnlyLocation("United States")).toBe(true);
+    expect(isUnitedStatesOnlyLocation("Boston, MA")).toBe(true);
+    expect(isUnitedStatesOnlyLocation("Washington, DC")).toBe(true);
+    expect(isUnitedStatesOnlyLocation("Singapore")).toBe(false);
+    expect(isUnitedStatesOnlyLocation("Toronto, ON")).toBe(false);
+    expect(isUnitedStatesOnlyLocation("Tbilisi, Georgia")).toBe(false);
+    expect(isUnitedStatesOnlyLocation("United States / Singapore")).toBe(false);
+    expect(isUnitedStatesOnlyLocation("Remote")).toBe(false);
+  });
 });
 
 describe("end to end through the hard gate", () => {

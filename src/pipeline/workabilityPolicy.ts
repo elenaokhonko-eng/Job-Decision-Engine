@@ -635,6 +635,54 @@ export function extractExplicitWorkerTerritoryRequirements(value: unknown): Expl
   return requirements;
 }
 
+// ── Remote jobs located in the United States ──
+// A remote posting whose location field is only the United States, a US state or a
+// US city hires there unless the posting opens the role wider. "Georgia" is left out
+// because it is also a country; ", GA" still matches.
+const US_STATE_NAMES = [
+  "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware", "florida",
+  "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine", "maryland",
+  "massachusetts", "michigan", "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada",
+  "new hampshire", "new jersey", "new mexico", "new york", "north carolina", "north dakota", "ohio", "oklahoma",
+  "oregon", "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee", "texas", "utah",
+  "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming", "district of columbia", "puerto rico",
+];
+const US_STATE_CODES = new Set([
+  "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga", "hi", "id", "il", "in", "ia", "ks", "ky", "la", "me",
+  "md", "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj", "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa",
+  "ri", "sc", "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv", "wi", "wy", "dc", "pr",
+]);
+const US_STATE_NAME_PATTERN = new RegExp(`\\b(?:${US_STATE_NAMES.map(escapeRegExp).join("|")})\\b`, "i");
+
+/**
+ * True when a location field names the United States (country, state, state code
+ * after a comma, or a listed US city) and no other territory.
+ */
+export function isUnitedStatesOnlyLocation(location: unknown): boolean {
+  const text = normalizeTerritorySearchText(location).replace(/\s+/g, " ").trim();
+  if (!text) return false;
+  const territories = extractTerritories(text);
+  if (territories.some((territory) => territory !== "UNITED_STATES")) return false;
+  if (territories.includes("UNITED_STATES")) return true;
+  if (US_STATE_NAME_PATTERN.test(text)) return true;
+  return [...text.matchAll(/,\s*([a-z]{2})\b/g)].some((match) => US_STATE_CODES.has(match[1] ?? ""));
+}
+
+/** "Work from anywhere in the US" is not global; these phrases are. */
+const GLOBAL_REMOTE_PHRASE = /\b(?:work\s+from\s+anywhere|remote\s+from\s+anywhere|anywhere\s+in\s+the\s+world|global(?:ly)?[\s-]+remote|fully\s+global|remote[\s,(-]+(?:global|worldwide)|worldwide|open\s+to\s+(?:candidates|applicants|talent)\s+(?:worldwide|globally|anywhere|from\s+any\s+country|in\s+any\s+country)|any\s+country|hir(?:e|ing)\s+(?:globally|worldwide|internationally|anywhere))\b(?!\s+(?:in|within|across)\s+(?:the\s+)?(?:us|usa|united\s+states)\b)/i;
+
+/**
+ * True when a posting explicitly opens remote work beyond the United States: worldwide or
+ * global remote, or a named authorized region (Singapore, Southeast Asia, APAC, Asia).
+ */
+export function postingOpensRemoteBeyondUnitedStates(description: unknown, authorizedRegions: readonly string[]): boolean {
+  const text = normalizeTerritorySearchText(description);
+  if (GLOBAL_REMOTE_PHRASE.test(text)) return true;
+  if (/\basia\b/i.test(text)) return true;
+  return authorizedRegions.length > 0
+    && extractTerritories(text).some((territory) => isTerritoryAuthorized(territory, authorizedRegions));
+}
+
 // ── Government citizenship and security-clearance requirements ──
 // A national security clearance or a citizenship condition restricts who may be
 // hired even when the sentence names no country the territory table recognizes:
