@@ -58,6 +58,80 @@ The field is an optional array of 1–200 strings, each 2–120 characters. If i
 
 One shared resolver, `resolveEffectiveWorkabilityPolicy` (`src/pipeline/effectiveWorkabilityPolicy.ts`), builds the workspace policy plus this list. The hard gate, the recommendation decider (readiness) and the HN pre-filter all use it, and they all call `findOnsiteException`. Gate, decision and readiness rows therefore carry the same `workability_policy_hash`.
 
-**Seeding.** Add the field to the private `work_preferences.json` under `mobility` and run `scripts/seed_workspace_preferences.ts --apply`. That script writes only to `STAGE3_STAGING_DATABASE_URL`. Activating the stage3 revision in production is a separate, owner-approved step. Re-gate after activation.
+**Seeding.** Add the field to the private `work_preferences.json` under `mobility` and run `scripts/seed_workspace_preferences.ts --apply`. That script writes only to `STAGE3_STAGING_DATABASE_URL`. Activate it in production with `scripts/activate_workspace_preferences.ts` (see "Activating workspace preferences in production" below), then re-gate.
 
 **Policy hash on merge.** `workability_policy_hash` changes for every workspace when this policy ships, because the hashed policy now contains the on-site exception config. Every gate, decision and readiness row written afterwards carries the new hash, with or without the stage3 field. A non-empty employer list changes the hash again. Stored decisions are not re-gated automatically, so a scoped re-gate is expected. Run `scripts/replay_hard_gate_policy_2026_11.ts`: its default is a read-only dry run that previews work-mode enrichment without fetching pages. `--apply` refuses any new HARD_REJECT unless `--allow-new-rejections=<n>` equals the dry-run count (always required with `--include-non-rejected` or `--ids-file`), reports re-gated, skipped (with reasons) and unchanged counts, compares applied outcomes with the dry run, and exits non-zero when processed differs from eligible. For rollback, `scripts/regate_job_ids.ts --ids-file=<path>` (dry run by default) re-gates an explicit id list; it uses only APIs that predate this change, so it can be restored after a revert and run under the reverted gate code. Bumping `GATE_VERSION` also makes queued `APPLY_HARD_GATES` tasks re-run instead of being treated as already satisfied.
+
+## Activating workspace preferences in production
+
+`scripts/seed_workspace_preferences.ts` stays the staging-only seeder: it writes only to `STAGE3_STAGING_DATABASE_URL` and refuses `DATABASE_URL`. A production change to the active `stage3` or `lane_intent` revision goes through `scripts/activate_workspace_preferences.ts` (logic in `src/policy/preferenceActivation.ts`), with these guards:
+
+- **Explicit target database.** The script loads no `.env` or `.env.local`. The URL comes only from `--env=<file>`, which is parsed and never merged into the process environment, or, without `--env`, from the environment the caller set (for example `npx tsx --env-file=<file>`). Within that one source, `DATABASE_URL_UNPOOLED` wins over `DATABASE_URL`. Every dry run and apply prints `targetDatabase`: host, port, `current_database()`, the cluster `system_identifier` (`pg_control_system()`, null when the role cannot read it), the variable name and the source. Credentials are never printed.
+- **Dry run by default.** The dry run opens a `READ ONLY` transaction, so it cannot write. It prints:
+  - the active revision id, number and `preference_hash` of each domain, and the proposed hash;
+  - the changed field paths, with list counts (`itemsAdded`, `itemsRemoved`, `reordered`). Values are printed only with `--show-values`;
+  - the follow-up work (`followUps`): re-gate, re-route, re-decide or re-materialize;
+  - the `diffHash` and the exact apply arguments.
+- **Selection.** `--only=<selector>` (repeatable or comma-separated) takes only the named stage3 section or field (`mobility`, `mobility.onsite_exception_employers`), or `lane_intent` or `lane_intent.<key>`, from the file. Everything else stays as in the active revision. Without `--only`, every stage3 section in the file plus `lane_intent` is taken. A selected path missing from the file is refused, because the command never removes fields.
+- **Unknown fields are refused.** Zod objects strip undeclared keys, so before validation the command walks the schema and refuses any undeclared field. A field such as `mobility.onsite_exception_employers` is accepted only once the code that defines it (PR #173) is deployed. Schema failures report the path and Zod issue code, never the value.
+- **Apply needs all of these:**
+  - `--apply`;
+  - `--confirm-workspace=<uuid>`, equal to the resolved workspace;
+  - `PREFERENCES_PROD_ACTIVATION_ALLOWED=true` in the environment;
+  - `--expect-diff-hash=<hash>`, equal to the hash recomputed under lock;
+  - `--operator=<who>` and `--reason=<why>`;
+  - an OWNER membership for the resolved workspace;
+  - migration 108.
+
+  `PREFERENCES_PROD_ACTIVATION_ALLOWED` is read from the process environment only, never from the `--env` file.
+
+  The OWNER check is a target-membership check, not authentication. It confirms that `WORKSPACE_KEY` / `WORKSPACE_USER_KEY` resolve to an active OWNER membership in the target database. Anyone who holds the database credentials can pass it, so access to those credentials is the real control.
+
+  The diff hash binds the action, the target database (host, port, database name and `system_identifier`), the workspace and user, each domain's starting revision id and hash, and the target content hash. Each of the following is therefore refused with `DIFF_HASH_MISMATCH`:
+  - an apply against a different database than the dry run, including a different host for the same cluster;
+  - a different file or a different selection;
+  - any activation between the dry run and the apply.
+- **One transaction.** One transaction takes an advisory lock and `FOR UPDATE` on the active pointers, then saves the revision (`saveWorkspacePreferenceRevision`, which reuses an identical stored revision), moves the active pointer (the migration-075 trigger writes the `SWITCH` event), verifies the active hash and writes one `workspace_user_preference_change_audit` row per domain. Any failure rolls back everything. Revisions are never updated or deleted. Audit rows are append-only: row triggers reject UPDATE and DELETE, and a statement trigger rejects TRUNCATE.
+- **Rollback.** `--rollback-to=<revision id>` re-activates a stored revision of the same workspace user, under the same guards and with its own diff hash. It creates no revision. The old revision must still validate against today's schema.
+
+`workspace_user_preference_change_audit` (migration 108) records the domain, `APPLY` or `ROLLBACK`, the previous and active revision ids and hashes, the activation event id, the diff hash, the operator, the reason, the changed field paths (never values), the tool and the database role.
+
+### Runbook
+
+Pass the private `work_preferences.json` with `--file` (the default is `$PROFILE_DIR/work_preferences.json`, else `private/profile/work_preferences.json`). `<prod env file>` holds the production `DATABASE_URL_UNPOOLED` or `DATABASE_URL`. Use the same `--env` file for the dry run and the apply, and check that `targetDatabase` in the output is production. Do not paste preference values into `--reason`.
+
+```bash
+# 1. Dry run (read-only). Note workspaceId and diffHash.
+npx tsx scripts/activate_workspace_preferences.ts --env=<prod env file> \
+  --file=<path to private work_preferences.json> --only=mobility.onsite_exception_employers
+
+# Optional: the same dry run with values, on a private terminal only.
+npx tsx scripts/activate_workspace_preferences.ts --env=<prod env file> \
+  --file=<path to private work_preferences.json> --only=mobility.onsite_exception_employers --show-values
+
+# 2. Apply exactly what was reviewed.
+PREFERENCES_PROD_ACTIVATION_ALLOWED=true npx tsx scripts/activate_workspace_preferences.ts --env=<prod env file> \
+  --file=<path to private work_preferences.json> --only=mobility.onsite_exception_employers \
+  --apply --confirm-workspace=<workspaceId> --expect-diff-hash=<diffHash> \
+  --operator=<your name> --reason="<why, without values>"
+
+# 3. Rollback: dry run, then apply with the rollback diff hash.
+#    <previous revision id> is domains[].activeRevisionId from step 1.
+npx tsx scripts/activate_workspace_preferences.ts --env=<prod env file> --rollback-to=<previous revision id>
+PREFERENCES_PROD_ACTIVATION_ALLOWED=true npx tsx scripts/activate_workspace_preferences.ts --env=<prod env file> \
+  --rollback-to=<previous revision id> --apply --confirm-workspace=<workspaceId> \
+  --expect-diff-hash=<rollback diffHash> --operator=<your name> --reason="<why>"
+```
+
+In PowerShell, set `$env:PREFERENCES_PROD_ACTIVATION_ALLOWED = 'true'` before step 2 and remove it afterwards with `Remove-Item Env:PREFERENCES_PROD_ACTIVATION_ALLOWED`.
+
+**After activation.** New gate, routing and decision runs read the new revision at once. Stored rows are not re-processed automatically, so run the dry run's `followUps`, each from its own reviewed dry run. The re-gate step needs PR #173's scripts, `scripts/replay_hard_gate_policy_2026_11.ts` and `scripts/regate_job_ids.ts`.
+
+| Changed path | Follow-up |
+|---|---|
+| `stage3.mobility`, `stage3.watchlist`, `stage3.compensation`, `stage3.freshness` | Re-gate: `scripts/replay_hard_gate_policy_2026_11.ts` or `scripts/regate_job_ids.ts --ids-file` (both from PR #173). |
+| `stage3.compensation`, `stage3.freshness`, `lane_intent` | Re-decide. Stored decisions keep their pinned preference revision until `DECIDE_RECOMMENDATION` runs again. |
+| `lane_intent` | Re-route with `scripts/reroute_all_gate_pass.ts`. Route currency follows lane `routing_content_hash`, not `lane_intent`. |
+| `stage3.mobility`, `stage3.freshness`, `stage3.culture_priorities`, `stage3.application_priority_weights` | Re-materialize with `scripts/materialize_application_rankings.ts`. |
+
+With PR #173 deployed, a non-empty `mobility.onsite_exception_employers` list is part of `workability_policy_hash`, so rows written after activation carry a new hash.
