@@ -22,6 +22,13 @@ scope:
       - TECHNICAL_DELIVERY
       - TECHNICAL_LEADERSHIP
 
+  # The work must be about a healthcare system of some sort: a health, bio, pharma, medtech,
+  # clinical or healthcare sector phrase in the job's own scope, or in the employer's own
+  # description (routing.sector_evidence). Benefit, perk and EEO words never count.
+  required_sector_concepts:
+    any:
+      - HEALTH_LIFE_SCIENCES_SECTOR
+
   included_domain_concepts:
     any:
       - PHARMACEUTICAL
@@ -51,6 +58,9 @@ routing:
   minimum_domain_score: 0.60
   minimum_function_score: 0.60
   minimum_semantic_score: 0.35
+  # A pharma/medtech company's or a hospital's generic engineering role qualifies through the
+  # employer's own description (company name, opening, About Us), never its benefits text.
+  sector_evidence: JOB_SCOPE_OR_EMPLOYER
   secondary_lane_threshold: 0.30
 
 sourcing:

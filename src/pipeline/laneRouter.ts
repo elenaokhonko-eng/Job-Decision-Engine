@@ -35,7 +35,7 @@ const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
 // v2.4.0: routeLaneCandidates, bare-heading boilerplate end, 12k scope window, boilerplate
 // phrase stripping, product/transformation and investigation title families.
-const LANE_ROUTER_RULE_VERSION = "lane_router_v2.4.0";
+const LANE_ROUTER_RULE_VERSION = "lane_router_v2.5.0";
 
 
 // ── Cosine similarity ─────────────────────────────────────────────────────────
@@ -400,7 +400,19 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "sanctions",
   ],
   "legaltech": ["legaltech", "legal technology", "legal ai", "contract analytics", "contract intelligence"],
-  "healthcare": ["healthcare", "health data", "clinical", "medical", "life sciences"],
+  // Bare "medical" is benefits and EEO vocabulary ("medical, dental and vision"), not a domain.
+  "healthcare": [
+    "healthcare",
+    "health data",
+    "clinical",
+    "medical devices",
+    "medical device",
+    "medical imaging",
+    "medical data",
+    "medical records",
+    "medical research",
+    "life sciences",
+  ],
   "biotech": ["biotech", "biotechnology", "drug discovery", "bioinformatics", "computational biology", "genomics"],
   "pharmaceutical": ["pharmaceutical", "pharma", "drug discovery", "therapeutics"],
   "investment management": ["investment management", "asset management", "fund management", "portfolio management", "institutional investing"],
@@ -773,20 +785,75 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "judiciary",
     "regtech",
   ],
+  // The work is about a healthcare system of some sort: a pharma, biotech or medtech company,
+  // a hospital or health system, clinical research, patients and their records, drug
+  // development or medical devices. Benefit, perk and EEO words ("health insurance",
+  // "wellness", "work-life", "customer care", "be patient", "innovation lab") are not here
+  // and are also stripped first (stripEmployerBoilerplatePhrases).
   "health life sciences sector": [
     "pharmaceutical",
+    "pharmaceuticals",
     "pharma",
+    "biopharma",
+    "biopharmaceutical",
     "biotech",
     "biotechnology",
     "life sciences",
+    "life science",
+    "medtech",
+    "medical technology",
+    "medical technologies",
+    "medical devices",
+    "medical device",
+    "medical imaging",
+    "medical research",
+    "medical records",
+    "in vitro diagnostics",
+    "molecular diagnostics",
     "hospital",
     "hospitals",
+    "health system",
+    "health systems",
+    "healthcare",
     "public healthcare",
+    "public health",
+    "digital health",
+    "population health",
+    "global health",
+    "health services",
+    "health insurer",
     "healthcare institutions",
     "healthcare provider",
-    "medical devices",
+    "healthcare providers",
     "healthtech",
     "health tech",
+    "health-tech",
+    "health data",
+    "health records",
+    "health informatics",
+    "electronic health records",
+    "electronic medical records",
+    "ehr",
+    "emr",
+    "telehealth",
+    "telemedicine",
+    "clinical",
+    "clinicians",
+    "patients",
+    "patient care",
+    "patient data",
+    "patient outcomes",
+    "patient safety",
+    "drug discovery",
+    "drug development",
+    "therapeutics",
+    "vaccines",
+    "genomics",
+    "bioinformatics",
+    "computational biology",
+    "biomedical",
+    "nursing",
+    "pharmacy",
   ],
   "financial services sector": [
     "bank",
@@ -836,6 +903,75 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "nonprofit",
     "united nations",
     "international development",
+  ],
+  // Sectors no lane covers. "software supply chain", "retail banking" and "game theory" are
+  // not these sectors and are not listed; brand names ("<brand> Resorts") are not sectors, and
+  // "warehousing" is left out because it is also "data warehousing".
+  "uncovered sector": [
+    // Bare "logistics" is also practicalities ("timezones & logistics"); name the industry.
+    "logistics company",
+    "logistics companies",
+    "logistics provider",
+    "logistics platform",
+    "logistics industry",
+    "logistics network",
+    "logistics startups",
+    "logistics startup",
+    "logistics technology",
+    "global logistics",
+    "third-party logistics",
+    "freight",
+    "freight forwarding",
+    "trucking",
+    "physical supply chain",
+    "global supply chain",
+    "supply chain management",
+    "shipping and logistics",
+    "retail",
+    "retailer",
+    "retailers",
+    "retail chain",
+    "retail stores",
+    "grocery",
+    "supermarket",
+    "supermarkets",
+    "consumer goods",
+    "fmcg",
+    "cpg",
+    "hospitality",
+    "hotel",
+    "hotels",
+    "restaurant",
+    "restaurants",
+    "food and beverage",
+    "food delivery",
+    "gaming",
+    "video games",
+    "video game",
+    "game studio",
+    "games studio",
+    "igaming",
+    "casino",
+    "casinos",
+    "sports betting",
+    "betting",
+    "esports",
+    "travel industry",
+    "travel management",
+    "travel company",
+    "airline",
+    "airlines",
+    "cruise line",
+    "cruise lines",
+    // Bare "fashion" is also "in a collaborative fashion".
+    "fashion brand",
+    "fashion brands",
+    "fashion retailer",
+    "fashion industry",
+    "fashion house",
+    "apparel",
+    "cosmetics",
+    "beauty brand",
   ],
   "enforcement sector": [
     "law enforcement",
@@ -1131,16 +1267,66 @@ export function matchedDomainSignals(description: string, concepts: string[] | u
   return signals.filter((signal) => !signals.some((other) => other !== signal && other.includes(signal))).sort();
 }
 
+export type LaneSectorEvidence = {
+  kind: "SECTOR" | "EXEMPT" | "EXCLUDED" | "NOT_REQUIRED";
+  signals: string[];
+};
+
+/**
+ * The lane's sector evidence:
+ * - EXCLUDED: an uncovered sector (scope.excluded_sector_concepts) and no covered override, read
+ *   from the job's scope and the employer's own description (exclusionText);
+ * - EXEMPT: an uncovered sector, but the role itself is sector-exempt work (an AI/data phrase in
+ *   the title, or routing.sector_exempt_minimum_signals distinct phrases in the scope); the
+ *   exemption lifts only the exclusion, never a required sector;
+ * - SECTOR: the required sector phrases found (an empty list means the requirement failed);
+ * - NOT_REQUIRED: the lane has no sector rule.
+ */
+export function laneSectorEvidence(
+  laneDef: LaneDefinition,
+  scopeText: string,
+  sectorText: string,
+  title = "",
+  exclusionText = sectorText
+): LaneSectorEvidence {
+  const exemptSignals = (): string[] | null => {
+    const concepts = laneDef.sector_exempt_domain_concepts;
+    if (!concepts?.length) return null;
+    const inTitle = matchedDomainSignals(title.toLowerCase(), concepts);
+    const inScope = matchedDomainSignals(scopeText, concepts);
+    if (inTitle.length > 0 || inScope.length >= (laneDef.sector_exempt_minimum_signals ?? 1)) {
+      return [...new Set([...inTitle, ...inScope])].sort();
+    }
+    return null;
+  };
+
+  if (laneDef.excluded_sector_concepts?.length) {
+    const excluded = matchedSector(exclusionText, laneDef.excluded_sector_concepts);
+    const overridden = laneDef.excluded_sector_override_concepts?.length
+      && matchedSector(exclusionText, laneDef.excluded_sector_override_concepts).length > 0;
+    if (excluded.length > 0 && !overridden) {
+      const exempt = exemptSignals();
+      return exempt ? { kind: "EXEMPT", signals: exempt } : { kind: "EXCLUDED", signals: excluded };
+    }
+  }
+  if (!laneDef.required_sector_concepts?.length) return { kind: "NOT_REQUIRED", signals: [] };
+  return { kind: "SECTOR", signals: matchedSector(sectorText, laneDef.required_sector_concepts) };
+}
+
+function sectorQualifies(evidence: LaneSectorEvidence): boolean {
+  if (evidence.kind === "EXCLUDED") return false;
+  return evidence.kind !== "SECTOR" || evidence.signals.length > 0;
+}
+
 function laneDomainScopeScore(
   description: string,
   laneKey: string,
   concepts: string[] | undefined,
   minimumSignals = 1,
-  sectorConcepts?: string[],
-  jobScopeText = description
+  sectorFound = true
 ): number {
   if (!hasRequiredInstitutionalContext(laneKey, description)) return 0;
-  if (sectorConcepts?.length && matchedSector(jobScopeText, sectorConcepts).length === 0) return 0;
+  if (!sectorFound) return 0;
   if (minimumSignals <= 1) return conceptScopeScore(description, concepts);
   return matchedDomainSignals(description, concepts).length >= minimumSignals ? 1 : 0;
 }
@@ -1211,7 +1397,39 @@ function isBareSectionHeading(line: string): boolean {
   return /^[A-Z0-9]/.test(value);
 }
 
-export function extractCoreJobText(title: string, description: string, maxChars = 2000): string {
+const BOILERPLATE_HEADINGS = new Set([
+  "equal opportunity employer",
+  "benefits & perks",
+  "benefits",
+  "about us",
+  "about the company",
+  "about our company",
+  "who we are",
+  "our mission",
+  "company overview",
+  "company description",
+  "diversity & inclusion",
+  "diversity and inclusion",
+  "what we offer",
+  "perks",
+  "our story",
+]);
+
+/** Boilerplate headings that describe the employer itself (not benefits or EEO). */
+const EMPLOYER_HEADINGS = new Set([
+  "about us",
+  "about the company",
+  "about our company",
+  "who we are",
+  "our mission",
+  "company overview",
+  "company description",
+  "our story",
+]);
+
+type JobTextSection = { heading: string | null; body: string[] };
+
+function splitJobSections(description: string): JobTextSection[] {
   const raw = (description || "").trim();
 
   let mergedText = raw;
@@ -1236,24 +1454,7 @@ export function extractCoreJobText(title: string, description: string, maxChars 
     .map((l) => l.trim())
     .filter(Boolean);
 
-  const boilerplateHeadings = new Set([
-    "equal opportunity employer",
-    "benefits & perks",
-    "benefits",
-    "about us",
-    "about the company",
-    "about our company",
-    "who we are",
-    "our mission",
-    "company overview",
-    "company description",
-    "diversity & inclusion",
-    "diversity and inclusion",
-    "what we offer",
-    "perks",
-    "our story",
-  ]);
-
+  const boilerplateHeadings = BOILERPLATE_HEADINGS;
   const sections: Array<{ heading: string | null; body: string[] }> = [];
   let current: { heading: string | null; body: string[] } = { heading: null, body: [] };
 
@@ -1282,14 +1483,41 @@ export function extractCoreJobText(title: string, description: string, maxChars 
     current.body.push(line);
   }
   flush();
+  return sections;
+}
 
-  const kept = sections
-    .filter((s) => !s.heading || !boilerplateHeadings.has(s.heading))
+export function extractCoreJobText(title: string, description: string, maxChars = 2000): string {
+  const kept = splitJobSections(description)
+    .filter((s) => !s.heading || !BOILERPLATE_HEADINGS.has(s.heading))
     .flatMap((s) => s.body)
     .join(" ")
     .slice(0, maxChars);
 
   return `${title}. ${kept}`.trim();
+}
+
+/** Characters of the posting's opening read as the employer's self-description. */
+export const EMPLOYER_INTRO_MAX_CHARS = 800;
+
+/**
+ * The employer's own description: the company name, the opening of the posting and its
+ * "About Us"-type sections. Benefits, perks and EEO sections are not included, and benefit
+ * and EEO phrases are stripped, so a perk list cannot make the employer look like a health
+ * or finance company.
+ */
+export function extractEmployerContextText(companyName: string, description: string): string {
+  const sections = splitJobSections(description);
+  const intro = sections
+    .filter((s) => !s.heading || !BOILERPLATE_HEADINGS.has(s.heading) || EMPLOYER_HEADINGS.has(s.heading))
+    .flatMap((s) => s.body)
+    .join(" ")
+    .slice(0, EMPLOYER_INTRO_MAX_CHARS);
+  const about = sections
+    .filter((s) => s.heading && EMPLOYER_HEADINGS.has(s.heading))
+    .flatMap((s) => s.body)
+    .join(" ")
+    .slice(0, LANE_SCOPE_TEXT_MAX_CHARS);
+  return stripEmployerBoilerplatePhrases(`${companyName} ${intro} ${about}`).toLowerCase();
 }
 
 /** Negative-concept exclusion keeps its original window: title plus the first 2,000 kept characters. */
@@ -1305,10 +1533,42 @@ export const LANE_SCOPE_TEXT_MAX_CHARS = 12000;
  * ("healthcare coverage", "support your mental health") and recruitment-scam warnings
  * ("recruitment fraud"). It is removed before domain/function matching.
  */
-const EMPLOYER_BOILERPLATE_PHRASES = /\b(?:(?:comprehensive|private|family|group)\s+)?(?:health(?:care)?|medical|dental|vision|life)\s+(?:insurance|coverage|cover|benefits?|plans?)\b|\bmental\s+health\b|\bhealth\s+(?:and|&)\s+well-?being\b|\bwellness\s+(?:programs?|programmes?|benefits?|allowance)\b|\b(?:group|staff|employee|travel)\s+insurance\b|\b(?:recruitment|recruiting|hiring|job|employment)\s+(?:fraud|scams?)\b/gi;
+const EMPLOYER_BOILERPLATE_PHRASES = /\b(?:(?:comprehensive|private|family|group)\s+)?(?:health(?:care)?|medical|dental|vision|life)\s+(?:insurance|coverage|cover|benefits?|plans?|care\s+(?:benefits?|plans?|coverage))\b|\bmental\s+health\b|\bhealth\s+(?:and|&)\s+(?:well-?being|wellness|safety)\b|\b(?:occupational|employee)\s+health\b|\b(?:wellness|well-?being)\s+(?:programs?|programmes?|benefits?|allowance|stipend|days?)\b|\b(?:group|staff|employee|travel)\s+insurance\b|\b(?:recruitment|recruiting|hiring|job|employment)\s+(?:fraud|scams?)\b|\b(?:medical|health)\s+(?:condition|conditions|status|leave|history)\b|\bgenetic\s+information\b|\bwork[- ]life\b|\bcustomer\s+care\b/gi;
+
+/**
+ * A benefits enumeration ("benefit offerings such as medical, dental, and flexible time off",
+ * "healthcare, 401(k) and paid time off") names perks, not the role's sector, even when no
+ * "insurance" or "coverage" follows the health word. The clause around a perk marker is
+ * removed, bounded to 160 characters either side so a list without punctuation cannot erase
+ * the role description.
+ */
+const BENEFIT_CLAUSE = /[^.!?;:]{0,160}\b(?:dental|401\s*\(?k\)?|paid\s+time\s+off|pto|parental\s+leave|maternity\s+leave|flexible\s+time\s+off|retirement\s+(?:plans?|savings|benefits?)|pension(?:\s+(?:plans?|scheme|contributions?))?|benefits?\s+(?:package|packages|offerings?|include|includes)|perks|multisport|(?:private|free|subsidi[sz]ed)\s+(?:health(?:care)?|medical))\b[^.!?;:]{0,160}/gi;
 
 export function stripEmployerBoilerplatePhrases(text: string): string {
-  return text.replace(EMPLOYER_BOILERPLATE_PHRASES, " ");
+  return text.replace(BENEFIT_CLAUSE, " ").replace(EMPLOYER_BOILERPLATE_PHRASES, " ");
+}
+
+// A list of three or more short items ("finance, manufacturing, defense, healthcare, and the
+// public sector"), or of two or more with a final "and"/"or".
+const SHORT_LIST_ITEM = "[a-z][a-z&/\\- ]{0,40}?";
+const SHORT_LIST = new RegExp(
+  `\\b${SHORT_LIST_ITEM}(?:,\\s+${SHORT_LIST_ITEM}){2,}(?:,?\\s+(?:and|or|&)\\s+${SHORT_LIST_ITEM})?\\b` +
+    `|\\b${SHORT_LIST_ITEM}(?:,\\s+${SHORT_LIST_ITEM})+,?\\s+(?:and|or|&)\\s+${SHORT_LIST_ITEM}\\b`,
+  "g"
+);
+// Industries outside health and life sciences; one of them in the same list makes it a list
+// of industries served, not the employer's sector.
+const OTHER_INDUSTRY = /\b(?:finance|financial\s+services|banking|insurance|payments|benefits|manufacturing|defen[cs]e|aerospace|space|energy|utilities|power\s+grids?|telecom\w*|retail|consumer|e-?commerce|logistics|transportation|automotive|education|government|public\s+sector|state\s+and\s+local|nonprofit|non-profit|media|entertainment|gaming|hospitality|travel|real\s+estate|construction|agriculture|software|technology|business\s+services|legal|industrial)\b/;
+
+/**
+ * Removes lists of industries ("serves the defense, space, healthcare, and energy sectors";
+ * "critical infrastructure including medical devices, power grids and telecommunication
+ * networks"). A health word in such a list says whom the employer serves, not that the work
+ * is about a healthcare system. A list of health terms alone ("clinicians, nurses and
+ * patients") is kept.
+ */
+export function stripIndustryLists(text: string): string {
+  return text.replace(SHORT_LIST, (list) => (OTHER_INDUSTRY.test(list) ? " " : list));
 }
 
 export type LaneRoutingConfidence = "High" | "Medium" | "Low" | "None";
@@ -1364,6 +1624,15 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
         `${scopeText} ${input.companyName ?? ""} ${rawPlain.slice(0, LANE_SCOPE_TEXT_MAX_CHARS)}`
       ).toLowerCase()
     : scopeText;
+  // Lanes with sector_evidence JOB_SCOPE_OR_EMPLOYER also read the employer's own description
+  // (company name, opening, About Us; never benefits, perks or EEO text) for their required
+  // sector. The uncovered-sector exclusion always reads it.
+  const employerSectorText = stripIndustryLists(
+    `${scopeText} ${extractEmployerContextText(String(input.companyName ?? ""), description)}`
+  );
+  const laneSectorText = (laneDef: LaneDefinition): string =>
+    laneDef.sector_evidence === "JOB_SCOPE_OR_EMPLOYER" ? employerSectorText : sectorText;
+  const sectorEvidenceByLane: Record<string, LaneSectorEvidence> = {};
 
   let bestLane = "UNCLASSIFIED";
   let bestScore = -1;
@@ -1394,13 +1663,16 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
     );
     lanePreferenceAdjustments[laneKey] = lanePreference.tieBreakAdjustment;
     lanePreferenceEvidence[laneKey] = lanePreference.evidence;
+    const sectorEvidence = laneSectorEvidence(laneDef, scopeText, laneSectorText(laneDef), title, employerSectorText);
+    sectorEvidenceByLane[laneKey] = sectorEvidence;
+    // A lane whose sector may come from the employer reads its domain phrases there too, so a
+    // pharma company's generic engineering role is in the lane's domain.
     domainScoreMap[laneKey] = laneDomainScopeScore(
-      scopeText,
+      laneDef.sector_evidence === "JOB_SCOPE_OR_EMPLOYER" ? employerSectorText : scopeText,
       laneKey,
       laneDef.included_domain_concepts,
       laneDef.minimum_domain_signals,
-      laneDef.required_sector_concepts,
-      sectorText
+      sectorQualifies(sectorEvidence)
     );
     functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, title)
       || (laneKey === "TECHNICAL_PRODUCT_TRANSFORMATION" && hasNonTechnicalProjectSubject(title, scopeText))
@@ -1458,6 +1730,14 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
 
   if (qualifyingPrimary.length === 0) {
     laneEvidence.push(...buildNoMatchEvidence(primaryCandidates));
+    // Sector blockers name the phrases, so an uncovered-sector or no-sector UNCLASSIFIED is explainable.
+    for (const [laneKey, evidence] of Object.entries(sectorEvidenceByLane)) {
+      if (evidence.kind === "EXCLUDED") {
+        laneEvidence.push(`${laneKey}:excluded_sector=${evidence.signals.join("|")}`);
+      } else if (evidence.kind === "SECTOR" && evidence.signals.length === 0) {
+        laneEvidence.push(`${laneKey}:sector_missing`);
+      }
+    }
     bestScore = Math.max(0, bestScore);
   } else {
     qualifyingPrimary.sort((a, b) => {
@@ -1545,9 +1825,11 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
           ...laneEvidence,
           `${bestLane}:domain_score=${(domainScoreMap[bestLane] ?? 0).toFixed(3)}`,
           `${bestLane}:function_score=${(functionScoreMap[bestLane] ?? 0).toFixed(3)}`,
-          ...(config.lanes[bestLane]?.required_sector_concepts?.length
-            ? [`${bestLane}:sector=${matchedSector(sectorText, config.lanes[bestLane].required_sector_concepts).join("|")}`]
-            : []),
+          ...(sectorEvidenceByLane[bestLane]?.kind === "SECTOR"
+            ? [`${bestLane}:sector=${sectorEvidenceByLane[bestLane].signals.join("|")}`]
+            : sectorEvidenceByLane[bestLane]?.kind === "EXEMPT"
+              ? [`${bestLane}:sector_exempt=${sectorEvidenceByLane[bestLane].signals.join("|")}`]
+              : []),
         ],
     processingStatus: noActiveLaneMatch ? "UNMATCHED" : "LANE_ROUTED",
   };
