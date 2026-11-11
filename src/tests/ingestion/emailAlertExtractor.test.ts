@@ -3,9 +3,17 @@ import {
   decodeGmailRawEmail,
   extractEmailJobCards,
   extractEmailJobCardsWithLinkSummary,
+  isEmailAlertPostingLink,
   type EmailJobCard,
 } from "../../ingestion/emailAlertExtractor.js";
-import { linkedInDigestAlertRaw, linkedInJobId } from "../fixtures/gmailDigestAlerts.js";
+import {
+  LINKEDIN_ALERT_MANAGEMENT_LINKS,
+  linkedInDigestAlertRaw,
+  linkedInJobId,
+  linkedInLayoutAlertRaw,
+  type LinkedInLayoutCard,
+} from "../fixtures/gmailDigestAlerts.js";
+import { isUnknownEmployerName } from "../../ingestion/postingIdentity.js";
 
 function gmailRaw(mime: string): string {
   return Buffer.from(mime, "utf8").toString("base64url");
@@ -156,6 +164,78 @@ describe("job-card link classification and collapsing", () => {
     expect(cards).toEqual([]);
     expect(links.jobCards).toBe(0);
     expect(links.nonJobLinksSkipped).toBe(links.linksSeen);
+  });
+
+  describe("LinkedIn alert layout (logo cell, title, \"Company · Location\" subtitle)", () => {
+    const CARDS: LinkedInLayoutCard[] = [
+      { jobId: "4400000101", title: "Synthetic AI COE Lead", subtitle: "Example Charter Holdings &middot; Example City (Hybrid)", logoAlt: "Example Charter Holdings" },
+      { jobId: "4400000102", title: "Research Engineer II (Computer Science / Data)", subtitle: "Example Technological University &middot; Example City (On-site)", logoAlt: "Example Technological University" },
+      { jobId: "4400000103", title: "Synthetic AI Product Owner", subtitle: "Example Bet &amp; Co &middot; Example City", logoAlt: "Example Bet &amp; Co" },
+      { jobId: "4400000104", title: "Synthetic Platform Architect", subtitle: null, logoAlt: "Example Alt Text Pte Ltd" },
+      { jobId: "4400000105", title: "Synthetic Data Steward", subtitle: null, logoAlt: "" },
+    ];
+
+    it("stores the employer named by the card, never a logo URL or attribute fragment", async () => {
+      const { cards } = await extractEmailJobCardsWithLinkSummary(linkedInLayoutAlertRaw(CARDS));
+
+      expect(cards.map((card) => [card.sourceUrl, card.title, card.companyName, card.companySource])).toEqual([
+        ["https://www.linkedin.com/jobs/view/4400000101", "Synthetic AI COE Lead", "Example Charter Holdings", "EMAIL_CARD"],
+        ["https://www.linkedin.com/jobs/view/4400000102", "Research Engineer II (Computer Science / Data)", "Example Technological University", "EMAIL_CARD"],
+        ["https://www.linkedin.com/jobs/view/4400000103", "Synthetic AI Product Owner", "Example Bet & Co", "EMAIL_CARD"],
+        // No subtitle: the company-logo alt text names the employer.
+        ["https://www.linkedin.com/jobs/view/4400000104", "Synthetic Platform Architect", "Example Alt Text Pte Ltd", "EMAIL_CARD"],
+        // Neither: unknown (""), never a placeholder or a URL.
+        ["https://www.linkedin.com/jobs/view/4400000105", "Synthetic Data Steward", "", null],
+      ]);
+      for (const card of cards) {
+        expect(card.companyName).not.toMatch(/_logo|company-logo|https?:|[?&]\w+=|["<>]|=/i);
+        expect(card.companyName === "" || !isUnknownEmployerName(card.companyName)).toBe(true);
+      }
+    });
+
+    it("never stages alert-management, Job Alert Manager or MyCareersFuture remove-alert links as postings", async () => {
+      const { cards, links } = await extractEmailJobCardsWithLinkSummary(linkedInLayoutAlertRaw(CARDS));
+
+      expect(cards).toHaveLength(CARDS.length);
+      expect(cards.every((card) => /^https:\/\/www\.linkedin\.com\/jobs\/view\/\d+$/.test(card.sourceUrl))).toBe(true);
+      expect(cards.map((card) => card.title)).not.toContain(LINKEDIN_ALERT_MANAGEMENT_LINKS[0].text);
+      expect(links.nonJobLinksSkipped).toBeGreaterThanOrEqual(LINKEDIN_ALERT_MANAGEMENT_LINKS.length);
+      expect(links.linksSeen).toBe(links.jobCards + links.nonJobLinksSkipped + links.duplicateLinksCollapsed);
+      for (const link of LINKEDIN_ALERT_MANAGEMENT_LINKS) {
+        expect(isEmailAlertPostingLink(link.url, link.text)).toBe(false);
+      }
+    });
+
+    it("yields no card at all for an alert that only carries management links", async () => {
+      const html = LINKEDIN_ALERT_MANAGEMENT_LINKS
+        .map((link) => `<p><a href="${link.url.replace(/&/g, "&amp;")}">${link.text}</a></p>`).join("");
+      const { cards, links } = await extractEmailJobCardsWithLinkSummary(htmlRaw(html));
+
+      expect(cards).toEqual([]);
+      expect(links.nonJobLinksSkipped).toBe(links.linksSeen);
+    });
+  });
+
+  it("does not read a company label out of a logo URL next to a plain-text job link", async () => {
+    const text = [
+      "Synthetic Analyst",
+      "Logo: https://media.example.com/dms/image/v2/C4E0BAQ/company-logo_100_100/0/1631425624819/x_logo?e=1&t=2\" alt=\"Exa",
+      "View job: https://careers.example.com/jobs/4200000777",
+    ].join("\n");
+    const raw = gmailRaw(["MIME-Version: 1.0", "Content-Type: text/plain; charset=utf-8", "", text].join("\r\n"));
+    const { cards } = await extractEmailJobCardsWithLinkSummary(raw);
+
+    expect(cards.map((card) => card.sourceUrl)).toEqual(["https://careers.example.com/jobs/4200000777"]);
+    expect(cards[0]?.companyName).toBe("");
+    expect(cards[0]?.companySource).toBeNull();
+  });
+
+  it("still reads an explicit Company: label", async () => {
+    const html = '<table><tr><td><a href="https://careers.example.com/jobs/4200000778">Synthetic Analyst</a>'
+      + "<p>Company: Example Analytics</p></td></tr></table>";
+    const { cards } = await extractEmailJobCardsWithLinkSummary(htmlRaw(html));
+
+    expect(cards[0]?.companyName).toBe("Example Analytics");
   });
 
   it("recognises a LinkedIn job link behind a Google redirect and slugged job paths", async () => {

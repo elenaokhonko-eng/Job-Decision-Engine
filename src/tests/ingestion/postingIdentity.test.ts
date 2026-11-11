@@ -1,5 +1,58 @@
 import { describe, expect, it } from "vitest";
-import { normalizePostingUrl, stableSourcePostingIdentity } from "../../ingestion/postingIdentity.js";
+import { companyMatches } from "../../ingestion/jobContentFetcher.js";
+import { savedPostingMatchesDiscovery } from "../../ingestion/linkedInSavedExport.js";
+import { isUnknownEmployerName, normalizePostingUrl, stableSourcePostingIdentity } from "../../ingestion/postingIdentity.js";
+
+// Synthetic shapes of the LinkedIn logo URL tails older Gmail cards stored as the employer.
+const LOGO_LIKE_EMPLOYERS = [
+  "logo_100_100/company-logo_100_100/0/1631425624819/example_holdings_logo?e=2147483647&v=beta&t=abc",
+  "logo_100_100/B56ZexampleQ-/0/1750812406096?e=2147483647&t=abc\" alt=\"Exa",
+  "https://media.example.com/dms/image/v2/C4E0BAQ/company-logo_100_100/0/1/example_logo.png",
+  "<img src=\"x\">",
+  "src=\"https://media.example.com/x\"",
+];
+
+describe("unknown employer values", () => {
+  it.each(["", "   ", "Unknown", "Unknown Company", ...LOGO_LIKE_EMPLOYERS])("treats %j as no employer", (value) => {
+    expect(isUnknownEmployerName(value)).toBe(true);
+  });
+
+  it.each([
+    "Example Holdings",
+    "Example Analytics Pte. Ltd.",
+    "Booking.com",
+    "AT&T",
+    "Example A/S",
+    "Example Research (Asia) / Example Labs",
+    "Example Technological University",
+  ])("keeps %j as a real employer name", (value) => {
+    expect(isUnknownEmployerName(value)).toBe(false);
+  });
+
+  it("matches on the posting alone when the card employer is a logo URL, but never on an empty posting employer", () => {
+    for (const expected of LOGO_LIKE_EMPLOYERS) {
+      expect(companyMatches(expected, "Example Holdings", "linkedin.com")).toBe(true);
+      expect(companyMatches(expected, "", "linkedin.com")).toBe(false);
+    }
+  });
+
+  it("still requires a real card employer to match", () => {
+    expect(companyMatches("Example Holdings", "Example Holdings", "linkedin.com")).toBe(true);
+    expect(companyMatches("Example Holdings", "Other Analytics", "linkedin.com")).toBe(false);
+  });
+
+  it("lets a saved export attach to a logo-employer card on the title alone, and only on the title", () => {
+    const discovery = { title: "Synthetic Data Architect", companyName: LOGO_LIKE_EMPLOYERS[0]! };
+    expect(savedPostingMatchesDiscovery(discovery, { title: "Synthetic Data Architect", companyName: "Example Holdings" }))
+      .toEqual({ matches: true });
+    expect(savedPostingMatchesDiscovery(discovery, { title: "Different Role", companyName: "Example Holdings" }))
+      .toEqual({ matches: false, reason: "TITLE_MISMATCH" });
+    expect(savedPostingMatchesDiscovery(
+      { title: "Synthetic Data Architect", companyName: "Example Holdings" },
+      { title: "Synthetic Data Architect", companyName: "Other Analytics" },
+    )).toEqual({ matches: false, reason: "COMPANY_MISMATCH" });
+  });
+});
 
 describe("stable posting identity normalization", () => {
   it("normalizes LinkedIn jobs/view and comm/jobs/view variants to the stable posting ID", () => {

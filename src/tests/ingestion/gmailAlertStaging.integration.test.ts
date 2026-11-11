@@ -11,9 +11,11 @@ import {
   careerSiteAlertRaw,
   digestAlertRaw,
   digestVacancyUrl,
+  LINKEDIN_ALERT_MANAGEMENT_LINKS,
   LINKEDIN_NON_JOB_LINKS_PER_DIGEST,
   linkedInDigestAlertRaw,
   linkedInJobId,
+  linkedInLayoutAlertRaw,
 } from "../fixtures/gmailDigestAlerts.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
@@ -447,6 +449,34 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
     });
     expect(JSON.stringify(rows)).not.toContain("Unknown Company");
     expect((await stagingState()).fetchTasks).toBe(4);
+  });
+
+  it("stages LinkedIn-layout cards with the card's employer, never a logo URL, and no alert-management observation or task", async () => {
+    const cards = [
+      { jobId: "4400000201", title: "Synthetic AI COE Lead", subtitle: "Example Charter Holdings &middot; Example City (Hybrid)", logoAlt: "Example Charter Holdings" },
+      { jobId: "4400000202", title: "Synthetic Data Steward", subtitle: null, logoAlt: "" },
+    ];
+    await seedDigests(1, cards.length, () => linkedInLayoutAlertRaw(cards));
+
+    const summary = await parseEmails({ limit: 20 }, { pool: stagingPool(), log: () => undefined, now: () => 0 });
+
+    expect(summary).toMatchObject({ parsedEmails: 1, extractedJobs: 2, failedEmails: 0 });
+    const { rows } = await db().query<{ source_url: string; company_name: string; raw_payload: Record<string, unknown> }>(
+      `SELECT source_url, company_name, raw_payload
+       FROM raw_job_observations WHERE workspace_id = $1 AND source_name = 'GMAIL_ALERT' ORDER BY source_url`,
+      [workspaceId()],
+    );
+    expect(rows.map((row) => [row.source_url, row.company_name])).toEqual([
+      ["https://www.linkedin.com/jobs/view/4400000201", "Example Charter Holdings"],
+      ["https://www.linkedin.com/jobs/view/4400000202", ""],
+    ]);
+    expect(rows[0]?.raw_payload).toMatchObject({ company_name: "Example Charter Holdings", discovered_company_source: "EMAIL_CARD" });
+    expect(rows[1]?.raw_payload).not.toHaveProperty("discovered_company_source");
+    expect(JSON.stringify(rows.map((row) => row.company_name))).not.toMatch(/logo|https?:|=/i);
+    for (const link of LINKEDIN_ALERT_MANAGEMENT_LINKS) {
+      expect(rows.map((row) => row.source_url)).not.toContain(link.url);
+    }
+    expect(await stagingState()).toMatchObject({ observations: 2, fetchTasks: 2, orphanTasks: 0, processedAlerts: 1 });
   });
 
   it("flags a broken funnel when most decoded alerts have no vacancy link", async () => {

@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { simpleParser } from "mailparser";
 import { decodeHTML } from "entities";
+import { isUnknownEmployerName } from "./postingIdentity.js";
 import { linkedInJobIdFromUrl } from "./searchApi/searchApiClient.js";
 
 const MAX_EMAIL_BYTES = 10 * 1024 * 1024;
@@ -248,6 +249,19 @@ function withoutCampaignParameters(urlValue: string): string {
   return url.toString();
 }
 
+/**
+ * An image or media asset, never a posting: LinkedIn's media CDN (licdn.com),
+ * a `/dms/image/` or `company-logo_<w>_<h>` path, or an image file extension.
+ * HTML-only alerts get a generated text part that spells out every image URL.
+ */
+function isImageAssetUrl(url: URL): boolean {
+  const host = url.hostname.toLowerCase();
+  return host === "licdn.com" || host.endsWith(".licdn.com")
+    || /\.(?:png|jpe?g|gif|svg|webp|ico|bmp)$/i.test(url.pathname)
+    || /\/dms\/image\//i.test(url.pathname)
+    || url.pathname.split("/").some((segment) => /^company-logo_\d+_\d+$/i.test(segment));
+}
+
 type LinkClassification =
   | { readonly kind: "JOB"; readonly key: string; readonly canonicalUrl: string }
   | { readonly kind: "NON_JOB" };
@@ -268,6 +282,7 @@ function classifyLink(url: string, text: string, context: string): LinkClassific
   } catch {
     return { kind: "NON_JOB" };
   }
+  if (isImageAssetUrl(parsed)) return { kind: "NON_JOB" };
   if (isLinkedInHost(parsed.hostname)) {
     const jobId = /\/(?:comm\/)?jobs\/view\//i.test(parsed.pathname) ? linkedInJobIdFromUrl(parsed.toString()) : null;
     if (!jobId) return { kind: "NON_JOB" };
@@ -321,7 +336,22 @@ function nearestMarkupBlock(html: string, index: number): string {
     if (length <= MAX_CONTEXT_CHARS && (!best || length < best.length)) best = { start, end, length };
   }
   if (best) return html.slice(best.start, best.end);
-  return html.slice(Math.max(0, index - 900), Math.min(html.length, index + 1_400));
+  return withoutPartialTags(html.slice(Math.max(0, index - 900), Math.min(html.length, index + 1_400)));
+}
+
+/**
+ * Drops a tag cut in half at either end of a fixed-width HTML window, so an
+ * attribute tail such as `.../company-logo_100_100/...?e=1" alt="Ex` never
+ * survives tag stripping as visible text.
+ */
+function withoutPartialTags(fragment: string): string {
+  let result = fragment;
+  const firstClose = result.indexOf(">");
+  const firstOpen = result.indexOf("<");
+  if (firstClose >= 0 && (firstOpen < 0 || firstClose < firstOpen)) result = result.slice(firstClose + 1);
+  const lastOpen = result.lastIndexOf("<");
+  if (lastOpen >= 0 && result.indexOf(">", lastOpen) < 0) result = result.slice(0, lastOpen);
+  return result;
 }
 
 function textFromPlainAround(text: string, index: number, length: number): string {
@@ -355,9 +385,35 @@ function extractTitle(anchorText: string, context: string): string {
   return candidate ?? "Unknown Title";
 }
 
-/** The employer the card's context names ("Company: X"), or "" when it names none. */
+/**
+ * The employer the card's context names ("Company: X"), or "" when it names
+ * none. The label must be a whole word, so `company-logo_100_100/...` in a
+ * logo URL is not a label, and a URL-, logo- or markup-like value is never an
+ * employer.
+ */
 function extractCompany(context: string): string {
-  return context.match(/(?:company|employer)\s*[:\-]\s*([^\n|,]{2,120})/i)?.[1]?.trim() ?? "";
+  const value = context.match(/(?:^|[^\w/.-])(?:company|employer)\s*[:\-]\s*([^\n|,]{2,120})/i)?.[1]?.trim() ?? "";
+  return isUnknownEmployerName(value) ? "" : value;
+}
+
+/** LinkedIn's card subtitle "Company · Location" (U+00B7 middle dot). */
+const LINKEDIN_CARD_SUBTITLE = /^(.{2,120}?)\s+·\s+\S/;
+
+/**
+ * The employer of a LinkedIn job-alert card. A card is a logo link, a title
+ * link and a "Company · Location" subtitle line; the subtitle is read from the
+ * first lines of the card's markup (the title line is skipped). Without a
+ * subtitle the company-logo image's alt text is used. A URL-, logo- or
+ * markup-like value is never an employer, so the result may be "" (unknown).
+ */
+function linkedInCardEmployer(cardLines: readonly string[], title: string, imageAlts: readonly string[]): string {
+  const titleKey = title.replace(/\s+/g, " ").trim().toLowerCase();
+  for (const line of cardLines.slice(0, 6)) {
+    if (line.toLowerCase() === titleKey) continue;
+    const company = line.match(LINKEDIN_CARD_SUBTITLE)?.[1]?.trim() ?? "";
+    if (company && !isUnknownEmployerName(company)) return company;
+  }
+  return imageAlts.find((alt) => !isUnknownEmployerName(alt) && !/^(?:company )?logo$/i.test(alt)) ?? "";
 }
 
 const GENERIC_SENDER_NAME = /^(?:no[- ]?reply|do[- ]?not[- ]?reply|notifications?|alerts?|job alerts?|jobs?|careers?|recruit(?:ing|ment|er)?|talent(?: acquisition)?|hr|team|support|info|admin|mailer|linkedin|indeed|glassdoor|jobstreet|mycareersfuture)$/i;
@@ -413,6 +469,23 @@ interface LinkOccurrence {
 interface CardGroup {
   readonly canonicalUrl: string;
   readonly occurrences: LinkOccurrence[];
+  /** True for a LinkedIn `/jobs/view/<id>` card. */
+  readonly linkedIn: boolean;
+  /** Offset of the job's first HTML anchor, or null when it was only linked from plain text. */
+  htmlStart: number | null;
+  /** Decoded alt texts of images inside the job's anchors (the LinkedIn company logo). */
+  readonly imageAlts: string[];
+  /** Plain-text lines of the card's markup, from its first anchor to the next job's (LinkedIn only). */
+  cardLines: readonly string[];
+}
+
+/** Upper bound on one LinkedIn card's markup; real cards carry long tracking URLs. */
+const LINKEDIN_CARD_MAX_CHARS = 20_000;
+
+function anchorImageAlts(innerHtml: string): string[] {
+  return [...innerHtml.matchAll(/<img\b([^>]*)>/gi)]
+    .map((image) => decodeHtmlEntities(anchorAttribute(image[1] ?? "", "alt") ?? "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
 }
 
 /** Per-email link accounting: `linksSeen = jobCards + nonJobLinksSkipped + duplicateLinksCollapsed`. */
@@ -458,7 +531,8 @@ function mergeCardGroup(group: CardGroup, senderName: string): CollapsedEmailJob
   const best = <T>(values: readonly T[], rank: (value: T) => number): T =>
     values.reduce((chosen, value) => (rank(value) > rank(chosen) ? value : chosen));
   const titled = best(scored, (entry) => entry.titleRank);
-  const cardCompany = best(scored, (entry) => (entry.company === "" ? 0 : 1)).company;
+  const linkedInCompany = group.linkedIn ? linkedInCardEmployer(group.cardLines, titled.title, group.imageAlts) : "";
+  const cardCompany = linkedInCompany || best(scored, (entry) => (entry.company === "" ? 0 : 1)).company;
   const senderCompany = cardCompany ? "" : employerFromSender(senderName, group.canonicalUrl);
   const location = best(scored, (entry) => (entry.location === "Unknown" ? 0 : 1)).location;
   const evidence = best(scored, (entry) => entry.occurrence.context.length).occurrence;
@@ -486,7 +560,12 @@ export async function extractEmailJobCardsWithLinkSummary(
   let nonJobLinksSkipped = 0;
   let duplicateLinksCollapsed = 0;
 
-  const addLink = (urlValue: string, visibleText: string, context: string): void => {
+  const addLink = (
+    urlValue: string,
+    visibleText: string,
+    context: string,
+    anchor?: { readonly index: number; readonly innerHtml: string },
+  ): void => {
     linksSeen += 1;
     const url = safeAbsoluteHttpUrl(urlValue);
     const classification: LinkClassification = url ? classifyLink(url, visibleText, context) : { kind: "NON_JOB" };
@@ -494,13 +573,23 @@ export async function extractEmailJobCardsWithLinkSummary(
       nonJobLinksSkipped += 1;
       return;
     }
+    const imageAlts = anchor ? anchorImageAlts(anchor.innerHtml) : [];
     const existing = groups.get(classification.key);
     if (existing) {
       duplicateLinksCollapsed += 1;
       existing.occurrences.push({ text: visibleText, context });
+      existing.imageAlts.push(...imageAlts);
+      if (anchor && existing.htmlStart === null) existing.htmlStart = anchor.index;
       return;
     }
-    groups.set(classification.key, { canonicalUrl: classification.canonicalUrl, occurrences: [{ text: visibleText, context }] });
+    groups.set(classification.key, {
+      canonicalUrl: classification.canonicalUrl,
+      occurrences: [{ text: visibleText, context }],
+      linkedIn: classification.key.startsWith("linkedin:"),
+      htmlStart: anchor ? anchor.index : null,
+      imageAlts,
+      cardLines: [],
+    });
   };
 
   for (const match of bodies.html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi)) {
@@ -508,7 +597,20 @@ export async function extractEmailJobCardsWithLinkSummary(
     if (!rawHref) continue;
     const index = match.index ?? 0;
     const context = htmlToPlainText(nearestMarkupBlock(bodies.html, index));
-    addLink(rawHref, htmlToPlainText(match[2] ?? ""), context);
+    addLink(rawHref, htmlToPlainText(match[2] ?? ""), context, { index, innerHtml: match[2] ?? "" });
+  }
+
+  // A LinkedIn card's markup runs from its first anchor to the next job's first anchor.
+  const cardStarts = [...groups.values()]
+    .map((group) => group.htmlStart)
+    .filter((start): start is number => start !== null)
+    .sort((left, right) => left - right);
+  for (const group of groups.values()) {
+    const start = group.htmlStart;
+    if (!group.linkedIn || start === null) continue;
+    const next = cardStarts.find((candidate) => candidate > start) ?? bodies.html.length;
+    const markup = withoutPartialTags(bodies.html.slice(start, Math.min(next, start + LINKEDIN_CARD_MAX_CHARS)));
+    group.cardLines = htmlToPlainText(markup).split(/\r?\n/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
   }
 
   const plain = bodies.text || htmlToPlainText(bodies.html);
