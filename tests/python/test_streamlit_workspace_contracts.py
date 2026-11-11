@@ -1,4 +1,10 @@
+from pathlib import Path
+import re
+
 from streamlit_workspace_contracts import (
+    LANE_FILTER_OPTIONS,
+    TARGET_LANE_KEYS,
+    UNCLASSIFIED_LANE,
     validate_application_row,
     validate_application_workspace_summary,
     validate_apply_now_row,
@@ -15,6 +21,21 @@ from streamlit_workspace_contracts import (
 )
 
 WORKSPACE_ID = "workspace-1"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_target_lane_keys_match_the_lane_registry():
+    registry = (REPO_ROOT / "config" / "lanes" / "registry.yml").read_text(
+        encoding="utf-8"
+    )
+    registry_keys = tuple(
+        re.findall(r"^\s*-\s*lane_key:\s*([A-Z0-9_]+)\s*$", registry, re.MULTILINE)
+    )
+
+    assert TARGET_LANE_KEYS == registry_keys
+    assert "TECHNICAL_PRODUCT_TRANSFORMATION" in TARGET_LANE_KEYS
+    assert "INVESTIGATIONS_ENFORCEMENT" in TARGET_LANE_KEYS
+    assert LANE_FILTER_OPTIONS == ("All Lanes", *registry_keys, UNCLASSIFIED_LANE)
 
 
 def test_workspace_summary_contract_validates_scope_member_and_counts():

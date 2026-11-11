@@ -19,8 +19,30 @@ from streamlit_application_workflow import (
 from streamlit_archive import render_archive_hold_form, render_archive_jobs
 from streamlit_database import read_only_database_ssl_options
 from streamlit_formatters import as_number, format_percent, format_score, format_signal
-from streamlit_formatters import format_career_track
+from streamlit_formatters import format_career_track, safe_http_url
+from streamlit_job_review import (
+    CATEGORY_OPTIONS,
+    DEFAULT_CATEGORY_INDEX,
+    PAGE_SIZE,
+    REVIEW_CATEGORY,
+    SELF_SOURCED_CATEGORIES,
+    SERVER_PAGED_CATEGORIES,
+    VERIFY_THEN_APPLY_CATEGORY,
+    apply_now_exclusion_summary,
+    escape_markdown,
+    filter_by_sidebar,
+    job_eligibility,
+    job_outcome,
+    page_count,
+    review_option_label,
+    review_selector_options,
+    string_list,
+    unresolved_readiness_checks,
+    verification_action_applies,
+    verification_question_for_job,
+)
 from streamlit_workspace_contracts import (
+    LANE_FILTER_OPTIONS,
     validate_application_row,
     validate_application_workspace_summary,
     validate_document_selection_row,
@@ -32,6 +54,7 @@ from streamlit_workspace_contracts import (
     validate_profile_coverage_row,
     validate_profile_evidence_row,
     validate_ranked_job_row,
+    validate_review_row,
     validate_track_row,
     validate_verify_then_apply_row,
 )
@@ -400,7 +423,8 @@ VERIFY_THEN_APPLY_JOBS_QUERY = """
            jobs.title, jobs.company, jobs.canonical_url, jobs.source,
            jobs.location, jobs.workplace_type, jobs.employment_type,
            jobs.description, jobs.gate_status, jobs.rejection_codes,
-           jobs.gate_evidence_quotes, jobs.primary_lane, jobs.secondary_lanes,
+           jobs.gate_evidence_quotes, jobs.workability_facts,
+           jobs.primary_lane, jobs.secondary_lanes,
            jobs.lane_confidence, jobs.deterministic_match_score,
            jobs.deterministic_match_coverage, jobs.processing_state,
            jobs.recommendation_eligibility, jobs.recommendation_outcome,
@@ -408,7 +432,12 @@ VERIFY_THEN_APPLY_JOBS_QUERY = """
            jobs.recommendation_coverage_score,
            jobs.recommendation_evidence_completeness,
            jobs.recommendation_decided_at, jobs.observed_at,
+           jobs.nd_friendly_score, jobs.politics_stress_score,
+           jobs.sensory_overload_index, jobs.next_action, jobs.evaluation_summary,
+           jobs.eval_provider, jobs.eval_is_fallback, jobs.version_mismatch,
            jobs.current_artifact_status, jobs.current_artifact_reason,
+           jobs.blocked_task_count,
+           current_readiness.application_readiness,
            current_readiness.readiness_status,
            current_readiness.readiness_reason_codes
     FROM v_canonical_shortlist_scoped AS jobs
@@ -433,9 +462,15 @@ VERIFY_THEN_APPLY_JOBS_QUERY = """
 TRACK_JOBS_QUERY = """
     SELECT workspace_id, canonical_job_id, job_version_id, title, company,
            canonical_url, source, location, workplace_type, employment_type,
-           description, gate_status, primary_lane, lane_confidence,
-           deterministic_match_score, deterministic_match_coverage,
-           recommendation_eligibility, recommendation_outcome, version_mismatch,
+           description, gate_status, rejection_codes, gate_evidence_quotes,
+           workability_facts, processing_state, primary_lane, secondary_lanes,
+           lane_confidence, deterministic_match_score, deterministic_match_coverage,
+           recommendation_eligibility, recommendation_outcome,
+           recommendation_requirement_score, recommendation_coverage_score,
+           recommendation_evidence_completeness, nd_friendly_score,
+           politics_stress_score, sensory_overload_index, next_action,
+           evaluation_summary, eval_provider, eval_is_fallback, observed_at,
+           version_mismatch,
            current_artifact_status, current_artifact_reason, blocked_task_count,
            deterministic_decision_id, deterministic_context_fingerprint,
            deterministic_trace_notes, current_readiness.application_readiness,
@@ -455,6 +490,56 @@ TRACK_JOBS_QUERY = """
     ) AS current_readiness ON TRUE
     WHERE jobs.workspace_id = %s
     ORDER BY deterministic_match_score DESC NULLS LAST, observed_at DESC NULLS LAST
+    LIMIT 5000
+"""
+
+# Every current REVIEW decision, including the ones Apply Now leaves out: an
+# unresolved gate, VERIFY eligibility, a stale/blocked pipeline artifact or an
+# unresolved readiness assessment. The UI labels which of these applies.
+REVIEW_JOBS_QUERY = """
+    SELECT jobs.workspace_id, jobs.canonical_job_id, jobs.job_version_id,
+           jobs.title, jobs.company, jobs.canonical_url, jobs.source,
+           jobs.location, jobs.workplace_type, jobs.employment_type,
+           jobs.description, jobs.gate_status, jobs.rejection_codes,
+           jobs.gate_evidence_quotes, jobs.workability_facts,
+           jobs.primary_lane, jobs.secondary_lanes, jobs.lane_confidence,
+           jobs.deterministic_match_score, jobs.deterministic_match_coverage,
+           jobs.processing_state, jobs.recommendation_eligibility,
+           jobs.recommendation_outcome, jobs.recommendation_requirement_score,
+           jobs.recommendation_coverage_score,
+           jobs.recommendation_evidence_completeness,
+           jobs.recommendation_decided_at, jobs.observed_at,
+           jobs.nd_friendly_score, jobs.politics_stress_score,
+           jobs.sensory_overload_index, jobs.next_action, jobs.evaluation_summary,
+           jobs.eval_provider, jobs.eval_is_fallback, jobs.version_mismatch,
+           jobs.current_artifact_status, jobs.current_artifact_reason,
+           jobs.blocked_task_count, current_readiness.application_readiness,
+           current_readiness.readiness_status,
+           current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
+           current_readiness.readiness_reason_codes, current_readiness.availability_status,
+           current_readiness.availability_recheck_at,
+           EXISTS (
+             SELECT 1
+             FROM v_apply_now_jobs_stage3_scoped AS apply_now
+             WHERE apply_now.workspace_id = jobs.workspace_id
+               AND apply_now.canonical_job_id = jobs.canonical_job_id
+               AND apply_now.job_version_id::text = jobs.job_version_id::text
+           ) AS in_apply_now
+    FROM v_canonical_shortlist_scoped AS jobs
+    LEFT JOIN LATERAL (
+      SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
+             readiness_reason_codes, availability_status, availability_recheck_at
+      FROM v_application_readiness_current readiness
+      WHERE readiness.workspace_id = jobs.workspace_id
+        AND readiness.canonical_job_id = jobs.canonical_job_id
+        AND readiness.job_version_id::text = jobs.job_version_id::text
+      LIMIT 1
+    ) AS current_readiness ON TRUE
+    WHERE jobs.workspace_id = %s
+      AND jobs.recommendation_outcome = 'REVIEW'
+    ORDER BY jobs.deterministic_match_score DESC NULLS LAST,
+             jobs.recommendation_requirement_score DESC NULLS LAST,
+             jobs.observed_at DESC NULLS LAST
     LIMIT 5000
 """
 
@@ -630,22 +715,14 @@ def fetch_verify_then_apply_jobs():
     return _validate_workspace_rows(rows, workspace_id, validate_verify_then_apply_row)
 
 
-def verification_question_for_job(job):
-    codes = set(job.get("rejection_codes") or [])
-    questions = []
-    if "GATE_UNKNOWN_WORK_MODE" in codes:
-        questions.append("Ask whether the role is remote, hybrid, or on-site.")
-    if "NEEDS_VERIFICATION_LOCATION_DETAIL" in codes:
-        questions.append("Confirm the work location and any residency requirement.")
-    if "NEEDS_VERIFICATION_HIRING_TERRITORY" in codes:
-        questions.append("Ask whether this remote role can hire someone based in Singapore.")
-    if "NEEDS_VERIFICATION_OFFICE_DAYS" in codes:
-        questions.append("Confirm how many days per week are required in the office.")
-    if "NEEDS_VERIFICATION_TRAVEL" in codes:
-        questions.append("Confirm the expected travel percentage and frequency.")
-    if questions:
-        return " ".join(questions)
-    return "Confirm the unresolved workability detail shown in the gate evidence."
+def fetch_review_jobs():
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(REVIEW_JOBS_QUERY, (workspace_id,))
+    return _validate_workspace_rows(rows, workspace_id, validate_review_row)
 
 
 def fetch_track_jobs():
@@ -1016,12 +1093,6 @@ def activate_preference_mode(mode_key):
 
 def escape_text(value):
     return html.escape(str(value if value is not None else ""))
-
-def safe_http_url(value):
-    url = str(value or "").strip()
-    if url.startswith("http://") or url.startswith("https://"):
-        return url
-    return None
 
 def normalize_workability_facts(raw):
     if not isinstance(raw, dict):
@@ -1929,7 +2000,7 @@ if st.sidebar.button("⚡ Run Job Discovery & Evaluation Pipeline", help="Runs t
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔍 Filter Listings")
 search_query = st.sidebar.text_input("Keyword Search", "")
-lane_filter = st.sidebar.selectbox("Filter Target Lane", ["All Lanes", "CORE_AI_DATA", "LEGAL_REGTECH", "HEALTH_BIO_PHARMA", "INVESTMENT_MARKETS_FINTECH", "UNCLASSIFIED"])
+lane_filter = st.sidebar.selectbox("Filter Target Lane", list(LANE_FILTER_OPTIONS))
 status_filter = st.sidebar.selectbox(
     "Filter Pipeline Status",
     [
@@ -2102,18 +2173,27 @@ with tab_dashboard:
             except Exception as exc:
                 st.error(f"Current profile evidence could not be loaded: {exc}")
 
-    category_options = ["Top 10", "Apply Now", "Verify, then apply", "Track", "Processing", "Applied", "Skip", "Rejected / Unmatched", "Archive", "All"]
-    workspace_category = st.selectbox("Opportunity category", category_options, index=1, key="application_workspace_category")
+    workspace_category = st.selectbox(
+        "Opportunity category", list(CATEGORY_OPTIONS), index=DEFAULT_CATEGORY_INDEX,
+        key="application_workspace_category",
+    )
     verification_jobs = None
-    if workspace_category == "Verify, then apply":
+    if workspace_category == VERIFY_THEN_APPLY_CATEGORY:
         try:
             verification_jobs = fetch_verify_then_apply_jobs()
         except Exception as exc:
             st.error(f"Verification opportunities are unavailable from the canonical read model: {exc}")
+    review_jobs = None
+    if workspace_category == REVIEW_CATEGORY:
+        try:
+            review_jobs = fetch_review_jobs()
+        except Exception as exc:
+            st.error(f"Review decisions are unavailable from the canonical read model: {exc}")
     category_counts = {
         "Top 10": application_workspace_summary.get("top_ten_ready_count"),
         "Apply Now": application_workspace_summary.get("apply_now_count"),
-        "Verify, then apply": len(verification_jobs) if verification_jobs is not None else None,
+        VERIFY_THEN_APPLY_CATEGORY: len(verification_jobs) if verification_jobs is not None else None,
+        REVIEW_CATEGORY: len(review_jobs) if review_jobs is not None else None,
         "Track": application_workspace_summary.get("track_count"),
         "Processing": application_workspace_summary.get("processing_count"),
         "Applied": application_workspace_summary.get("applied_count"),
@@ -2129,13 +2209,17 @@ with tab_dashboard:
             category_count = None
             st.error(f"Archive count is unavailable: {exc}")
     st.subheader(f"{workspace_category} ({category_count if category_count is not None else 'unavailable'})")
-    page_size = 25
-    total_pages = max(1, ((int(category_count) + page_size - 1) // page_size) if category_count is not None else 1)
-    category_page = st.number_input(
-        "Page", min_value=1, max_value=total_pages, value=1, step=1,
-        key=f"application_workspace_page_{workspace_category}",
-    )
-    category_offset = (int(category_page) - 1) * page_size
+    page_size = PAGE_SIZE
+    # One page control per category: Archive and Rejected are paged by their
+    # read model (LIMIT/OFFSET) here; every other category is loaded whole and
+    # paged by the "Page" control in the listing below.
+    category_offset = 0
+    if workspace_category in SERVER_PAGED_CATEGORIES:
+        category_page = st.number_input(
+            "Page", min_value=1, max_value=page_count(category_count, page_size), value=1, step=1,
+            key=f"application_workspace_page_{workspace_category}",
+        )
+        category_offset = (int(category_page) - 1) * page_size
     archive_rows = []
     archive_operations_status = None
 
@@ -2147,8 +2231,10 @@ with tab_dashboard:
             category_rows = fetch_top_ten_ready_jobs()
         elif workspace_category == "Apply Now":
             category_rows = fetch_apply_now_jobs()
-        elif workspace_category == "Verify, then apply":
+        elif workspace_category == VERIFY_THEN_APPLY_CATEGORY:
             category_rows = verification_jobs
+        elif workspace_category == REVIEW_CATEGORY:
+            category_rows = review_jobs
         elif workspace_category == "Track":
             category_rows = fetch_track_jobs()
         elif workspace_category == "Applied":
@@ -2179,18 +2265,18 @@ with tab_dashboard:
         archive_rows = category_rows
         filtered_jobs = []
     else:
-        if workspace_category == "Verify, then apply":
-            category_rows = [
-                job for job in category_rows
-                if (lane_filter in (None, "All Lanes") or job.get("primary_lane") == lane_filter)
-                and (status_filter in (None, "All Statuses") or job.get("processing_state") == status_filter)
-                and (board_filter == "All Sources" or (job.get("source") or "UNKNOWN") == board_filter)
-                and (
-                    track_filter in (None, "All Tracks")
-                    or (track_filter == "Unassigned" and not job.get("primary_lane"))
-                    or job.get("primary_lane") == track_filter
-                )
-            ]
+        if workspace_category in SELF_SOURCED_CATEGORIES:
+            for category_job in category_rows:
+                category_job["decision_eligibility"] = category_job.get("recommendation_eligibility")
+                category_job["decision_outcome"] = category_job.get("recommendation_outcome")
+            category_rows = filter_by_sidebar(
+                category_rows,
+                lane_filter=lane_filter,
+                status_filter=status_filter,
+                board_filter=board_filter,
+                track_filter=track_filter,
+                search_query=search_query,
+            )
         elif workspace_category not in ("Applied", "Rejected / Unmatched"):
             for category_job in category_rows:
                 category_job["decision_eligibility"] = category_job.get("recommendation_eligibility")
@@ -2302,7 +2388,7 @@ with tab_dashboard:
 
             return (rank_missing, rank_sort, outcome_rank, eligibility_rank, status_rank, match_sort, priority_sort)
 
-        if workspace_category == "Verify, then apply":
+        if workspace_category in SELF_SOURCED_CATEGORIES:
             sorted_filtered_jobs = sorted(
                 filtered_jobs,
                 key=lambda job: (
@@ -2315,19 +2401,21 @@ with tab_dashboard:
             )
         else:
             sorted_filtered_jobs = sorted(filtered_jobs, key=status_sort_key)
-        listing_page_size = 25
-        listing_page_count = max(1, (len(sorted_filtered_jobs) + listing_page_size - 1) // listing_page_size)
-        listing_page = st.number_input(
-            "Listings page",
-            min_value=1,
-            max_value=listing_page_count,
-            value=1,
-            step=1,
-            key=f"application_listing_page_{workspace_category}",
-        )
-        start_index = (int(listing_page) - 1) * listing_page_size
-        active_jobs = sorted_filtered_jobs[start_index:start_index + listing_page_size]
-        rejected_jobs = [] if workspace_category in ("Rejected / Unmatched", "Verify, then apply", "Archive") else rejected_jobs_audit
+        if workspace_category in SERVER_PAGED_CATEGORIES:
+            # Already one page from the read model; its "Page" control is above.
+            active_jobs = sorted_filtered_jobs
+        else:
+            listing_page = st.number_input(
+                "Page",
+                min_value=1,
+                max_value=page_count(len(sorted_filtered_jobs), page_size),
+                value=1,
+                step=1,
+                key=f"application_listing_page_{workspace_category}",
+            )
+            start_index = (int(listing_page) - 1) * page_size
+            active_jobs = sorted_filtered_jobs[start_index:start_index + page_size]
+        rejected_jobs = [] if workspace_category in ("Rejected / Unmatched", VERIFY_THEN_APPLY_CATEGORY, REVIEW_CATEGORY, "Archive") else rejected_jobs_audit
 
         if workspace_category == "Archive":
             st.subheader("Archived jobs")
@@ -2353,8 +2441,10 @@ with tab_dashboard:
             )
         else:
             st.subheader(f"{workspace_category} opportunities")
-            if workspace_category == "Verify, then apply":
+            if workspace_category == VERIFY_THEN_APPLY_CATEGORY:
                 st.caption("Sorted by deterministic profile-match score. These jobs have a current match and decision, but stay out of READY and document generation until the open workability question is resolved.")
+            elif workspace_category == REVIEW_CATEGORY:
+                st.caption("Every current REVIEW decision, sorted by deterministic profile-match score. Each card says why the job is, or is not, also in Apply Now.")
         if workspace_category == "Archive":
             pass
         elif not active_jobs and not rejected_jobs:
@@ -2383,9 +2473,12 @@ with tab_dashboard:
                     else:
                         badge_style = "📌"
                     
-                    with st.expander(f"{badge_style} {title} — {company} ({status})"):
-                        st.markdown(f"**Decision:** `{outcome}` ({eligibility}) | **Gate:** `{gate_status}`")
-                        if workspace_category == "Verify, then apply":
+                    with st.expander(f"{badge_style} {escape_markdown(title)} — {escape_markdown(company)} ({escape_markdown(status)})"):
+                        st.text(f"Decision: {outcome} ({eligibility}) | Gate: {gate_status}")
+                        if workspace_category == REVIEW_CATEGORY:
+                            st.text(apply_now_exclusion_summary(job))
+                        verification_action = verification_action_applies(job, workspace_category)
+                        if verification_action:
                             st.text(f"Open question: {verification_question_for_job(job)}")
                         render_employer_confirmation(
                             job,
@@ -2461,9 +2554,8 @@ with tab_dashboard:
                                 pass
                         st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"active_desc_{idx}")
 
-                        verify_first = workspace_category == "Verify, then apply"
-                        if verify_first or is_document_generation_eligible(job):
-                            if verify_first:
+                        if verification_action or is_document_generation_eligible(job):
+                            if verification_action:
                                 st.caption("Settle the open question with the employer before you send these documents.")
                             render_pipeline_review_action(api_request, job, f"active_{job.get('job_version_id')}")
 
@@ -2541,31 +2633,30 @@ with tab_dashboard:
                         st.caption(f"⚠️ Showing first {display_limit} rejected listings to maintain UI performance. Use the search inputs above to filter down further.")
 
     with col_right:
-        st.subheader("🤖 Scoring & Match Analysis Details")
-        st.write("Select an evaluated job/version to view deterministic match scores, gate evidence, and the latest AI evaluation summary.")
-        
-        evaluated_jobs = [j for j in filtered_jobs if j.get("processing_state") == "AI_EVALUATED"]
-        
-        def format_job_option(j):
-            outcome = j.get("decision_outcome") or "TRACK"
-            eligibility = j.get("decision_eligibility") or "VERIFY"
-            version_warn = " ⚠️ stale" if j.get("version_mismatch") else ""
-            suffix = str(j.get("job_version_id") or "")[:8]
-            return f"{j.get('company') or 'Unknown'} — {j.get('title') or 'Job Title'} [{outcome}/{eligibility}]{version_warn} ({suffix})"
-            
-        selected_job_title = st.selectbox(
-            "Select evaluated job/version", 
-            [format_job_option(j) for j in evaluated_jobs] if evaluated_jobs else ["No Evaluated Jobs Available"]
+        st.subheader("Job review details")
+        st.write(
+            f"Select any job in {workspace_category} to review its decision, gate evidence, "
+            "workability facts, readiness and, when present, the latest AI evaluation summary."
         )
-        
-        # Get actual job object
+
+        review_options = review_selector_options(
+            sorted_filtered_jobs if workspace_category != "Archive" else []
+        )
         job_to_show = None
-        if evaluated_jobs and selected_job_title != "No Evaluated Jobs Available":
-            options = {format_job_option(j): j for j in evaluated_jobs}
-            job_to_show = options.get(selected_job_title)
+        if review_options:
+            selected_key = st.selectbox(
+                f"Select a job to review ({len(review_options)} in {workspace_category})",
+                list(review_options),
+                format_func=lambda key: review_option_label(review_options[key]),
+                key=f"review_job_selector_{workspace_category}",
+            )
+            job_to_show = review_options.get(selected_key)
 
         if job_to_show:
-            st.markdown(f"#### Selected: **{job_to_show.get('title') or ''}** at *{job_to_show.get('company') or ''}*")
+            st.markdown(
+                f"#### Selected: **{escape_markdown(job_to_show.get('title') or 'Untitled role')}** "
+                f"at *{escape_markdown(job_to_show.get('company') or 'Unknown company')}*"
+            )
             url = safe_http_url(job_to_show.get("canonical_url"))
             if url:
                 st.markdown(f"🔗 [View Posting]({url})")
@@ -2574,60 +2665,105 @@ with tab_dashboard:
 
             if job_to_show.get("version_mismatch"):
                 st.warning("Stale evaluation detected: the canonical job/version changed since the last stored AI evaluation.")
-            
-            # Show score metrics
+
             st.markdown("---")
-            outcome = job_to_show.get("decision_outcome") or "TRACK"
-            eligibility = job_to_show.get("decision_eligibility") or "VERIFY"
-            st.markdown(f"### Deterministic Decision: `{outcome}` ({eligibility})")
+            outcome = job_outcome(job_to_show) or "NO_DECISION"
+            eligibility = job_eligibility(job_to_show) or "UNKNOWN"
+            st.markdown(f"### Deterministic Decision: {escape_markdown(outcome)} ({escape_markdown(eligibility)})")
+            st.text(
+                f"Lane: {job_to_show.get('primary_lane') or 'UNCLASSIFIED'} | "
+                f"Pipeline state: {job_to_show.get('processing_state') or 'UNKNOWN'} | "
+                f"Artifacts: {job_to_show.get('current_artifact_status') or 'UNKNOWN'}"
+            )
+            if job_outcome(job_to_show) == "REVIEW":
+                st.text(apply_now_exclusion_summary(job_to_show))
 
             match_score = job_to_show.get("deterministic_match_score")
             coverage = job_to_show.get("deterministic_match_coverage")
             evidence_pct = job_to_show.get("decision_evidence_completeness")
+            if evidence_pct is None:
+                evidence_pct = job_to_show.get("recommendation_evidence_completeness")
 
-            match_str = format_score(match_score)
-            cov_str = format_percent(coverage)
-            evidence_str = format_percent(evidence_pct, fraction=True, decimals=0)
-            
             metric_a, metric_b, metric_c = st.columns(3)
             with metric_a:
-                st.metric("Deterministic Match", match_str)
+                st.metric("Deterministic Match", format_score(match_score))
             with metric_b:
-                st.metric("Match Coverage", cov_str)
+                st.metric("Match Coverage", format_percent(coverage))
             with metric_c:
-                st.metric("Evidence Completeness", evidence_str)
-
-            st.markdown("#### Workplace Signals (from AI evaluation payload)")
-            aut = job_to_show.get("nd_friendly_score")
-            pol = job_to_show.get("politics_stress_score")
-            env = job_to_show.get("sensory_overload_index")
-
-            aut_str = format_percent(aut, decimals=0)
-            pol_str = format_percent(pol, decimals=0)
-            env_str = format_percent(env, decimals=0)
-
-            sig1, sig2, sig3 = st.columns(3)
-            with sig1:
-                st.metric("Autonomy", aut_str)
-            with sig2:
-                st.metric("Politics", pol_str)
-            with sig3:
-                st.metric("Sensory", env_str)
+                st.metric("Evidence Completeness", format_percent(evidence_pct, fraction=True, decimals=0))
 
             st.markdown("#### Gate Evidence")
-            st.markdown(f"**Gate status:** `{job_to_show.get('gate_status') or 'N/A'}`")
-            st.markdown(f"**Reason codes:** {', '.join(job_to_show.get('rejection_codes') or []) or 'None'}")
-            st.markdown(f"**Evidence quotes:** {'; '.join(job_to_show.get('gate_evidence_quotes') or []) or 'None'}")
+            st.text(f"Gate status: {job_to_show.get('gate_status') or 'N/A'}")
+            st.text(f"Reason codes: {', '.join(string_list(job_to_show.get('rejection_codes'))) or 'None'}")
+            evidence_quotes = string_list(job_to_show.get("gate_evidence_quotes"))
+            if evidence_quotes:
+                st.text("Evidence quotes:\n" + "\n".join(f"- {quote}" for quote in evidence_quotes))
+            else:
+                st.text("Evidence quotes: None")
 
-            st.markdown("#### Workability Facts")
-            st.json(normalize_workability_facts(job_to_show.get("workability_facts") or {}))
+            st.markdown("#### Readiness")
+            st.text(f"Readiness status: {job_to_show.get('readiness_status') or 'not assessed'}")
+            st.text(
+                "Readiness reason codes: "
+                + (", ".join(string_list(job_to_show.get("readiness_reason_codes"))) or "None")
+            )
+            open_checks = unresolved_readiness_checks(job_to_show)
+            if open_checks:
+                st.text("Checks needing verification:\n" + "\n".join(f"- {line}" for line in open_checks))
+            render_employer_confirmation(
+                job_to_show,
+                api_request,
+                f"detail_employer_confirmation_{job_to_show.get('job_version_id')}",
+                api_configured=bool(get_api_base_url()),
+            )
+
+            if verification_action_applies(job_to_show, workspace_category):
+                st.markdown("#### Verify, then apply")
+                st.text(f"Open question: {verification_question_for_job(job_to_show)}")
+                st.caption(
+                    "Settle the open question with the employer before you send these documents. "
+                    "Preparing documents does not record the answer or release the job to Apply Now."
+                )
+                render_pipeline_review_action(
+                    api_request, job_to_show, f"detail_{job_to_show.get('job_version_id')}"
+                )
+
+            st.markdown("#### Workability Facts (latest AI evaluation)")
+            if job_to_show.get("workability_facts"):
+                st.json(normalize_workability_facts(job_to_show.get("workability_facts")))
+            else:
+                st.caption("No AI-evaluation workability facts are stored for this job version.")
+
+            if any(
+                job_to_show.get(field) is not None
+                for field in ("nd_friendly_score", "politics_stress_score", "sensory_overload_index")
+            ):
+                st.markdown("#### Workplace Signals (from AI evaluation payload)")
+                sig1, sig2, sig3 = st.columns(3)
+                with sig1:
+                    st.metric("Autonomy", format_percent(job_to_show.get("nd_friendly_score"), decimals=0))
+                with sig2:
+                    st.metric("Politics", format_percent(job_to_show.get("politics_stress_score"), decimals=0))
+                with sig3:
+                    st.metric("Sensory", format_percent(job_to_show.get("sensory_overload_index"), decimals=0))
 
             st.markdown("#### AI Evaluation (display-only)")
-            st.write(job_to_show.get("evaluation_summary") or "N/A")
-            st.caption(f"Provider: {job_to_show.get('eval_provider') or 'N/A'} | Fallback: {job_to_show.get('eval_is_fallback')}")
-            st.caption(f"LLM suggestion: {job_to_show.get('next_action') or 'N/A'} | Strategic value: {job_to_show.get('strategic_value') or 'N/A'}")
+            if job_to_show.get("evaluation_summary"):
+                st.text(job_to_show.get("evaluation_summary"))
+                st.caption(
+                    f"Provider: {escape_markdown(job_to_show.get('eval_provider') or 'N/A')} | "
+                    f"Fallback: {job_to_show.get('eval_is_fallback')}"
+                )
+                st.caption(
+                    f"LLM suggestion: {escape_markdown(job_to_show.get('next_action') or 'N/A')} | "
+                    f"Strategic value: {escape_markdown(job_to_show.get('strategic_value') or 'N/A')}"
+                )
+            else:
+                st.caption("No AI evaluation summary is stored for this job version.")
+        elif workspace_category == "Archive":
+            st.info("Archived jobs are reviewed and restored from the Archive listing.")
         else:
-            st.info("No evaluated jobs in view. Run the discovery & evaluation pipeline to populate AI_EVALUATED rows.")
+            st.info(f"No jobs in {workspace_category} match the current filters.")
 
 with tab_add_job:
     render_manual_application_flow(api_request)

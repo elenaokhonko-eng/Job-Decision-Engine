@@ -4,14 +4,18 @@ This repository is a TypeScript/PostgreSQL job-decision pipeline with GitHub Act
 
 ## Product goal
 
-Discover broadly across four career lanes, reject deterministic non-fits before generative AI, evaluate only a bounded shortlist, and preserve enough evidence to explain every decision and generate grounded application documents.
+Discover broadly across the career lanes in `config/lanes/registry.yml`, reject deterministic non-fits before generative AI, evaluate only a bounded shortlist, and preserve enough evidence to explain every decision and generate grounded application documents.
 
-Target lanes:
+Target lanes (`config/lanes/registry.yml`; `TargetLaneKeySchema` in `src/policy/laneIntentContracts.ts`):
 
 - `CORE_AI_DATA`
 - `LEGAL_REGTECH`
 - `HEALTH_BIO_PHARMA`
 - `INVESTMENT_MARKETS_FINTECH`
+- `SOCIAL_IMPACT_MULTILATERAL`
+- `UNIVERSITY_AI_RESEARCH`
+- `TECHNICAL_PRODUCT_TRANSFORMATION`
+- `INVESTIGATIONS_ENFORCEMENT`
 
 ## Non-negotiable invariants
 

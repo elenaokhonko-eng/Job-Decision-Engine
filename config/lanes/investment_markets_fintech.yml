@@ -1,7 +1,7 @@
 schema_version: "2.2.0"
 lane_key: INVESTMENT_MARKETS_FINTECH
 display_name: "Investment, Markets & FinTech"
-description: "AI, data, quantitative and platform work in investing, asset management, institutional markets, and investment-focused fintech."
+description: "AI, data, quantitative, platform and technology work in investing, asset management, institutional markets, banking and fintech."
 
 scope:
   required_function_concepts:
@@ -20,6 +20,7 @@ scope:
       - TECHNICAL_PRODUCT_DELIVERY
       - TECHNICAL_ARCHITECTURE
       - TECHNICAL_DELIVERY
+      - TECHNICAL_LEADERSHIP
 
   included_domain_concepts:
     any:
@@ -37,6 +38,8 @@ scope:
       - WEALTHTECH
       - INVESTTECH
       - TRADING_INFRASTRUCTURE
+      # Banking and fintech employers route here, ahead of LEGAL_REGTECH (legalFintechTieBreak).
+      - BANKING_FINTECH
 
   excluded_domain_concepts:
     any:
@@ -93,20 +96,14 @@ positive_concepts:
   - securities
   - robo-advisory
   - market data
+# Banking and fintech (payments, cards, lending, retail banking) are in scope for routing;
+# finance-function work stays excluded. scope.excluded_domain_concepts still drives the
+# discovery pre-screen and is unchanged here.
 negative_concepts:
-  - payments
-  - cards
-  - consumer lending
-  - bnpl
   - corporate finance
   - treasury
   - m&a
   - private equity
-  - investment banking
   - deal advisory
   - fundraising
-  - generic commercial banking
-  - retail banking
-  - merchant acquiring
-  - remittance
 semantic_threshold: 0.35

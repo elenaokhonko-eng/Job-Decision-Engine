@@ -66,7 +66,7 @@ describe("Funnel V3 Independent Test Suite — Travel (T01-T07)", () => {
     }, policy20);
 
     expect(result.status).toBe("HARD_REJECT");
-    expect(result.rejection_codes).toContain("GATE_LIFESTYLE_INCOMPATIBLE");
+    expect(result.rejection_codes).toContain("GATE_TRAVEL_ABOVE_LIMIT");
   });
 
   it("T05: fixed 21% reject (> 20)", () => {
@@ -81,7 +81,7 @@ describe("Funnel V3 Independent Test Suite — Travel (T01-T07)", () => {
     }, policy20);
 
     expect(result.status).toBe("HARD_REJECT");
-    expect(result.rejection_codes).toContain("GATE_LIFESTYLE_INCOMPATIBLE");
+    expect(result.rejection_codes).toContain("GATE_TRAVEL_ABOVE_LIMIT");
   });
 
   it("T06: frequent travel even no % reject", () => {
@@ -236,7 +236,7 @@ describe("Funnel V3 Independent Test Suite — Work Composition (C01-C11)", () =
     expect(result.status).toBe("PASS");
   });
 
-  it("C09: conclusively zero technical contribution reject", () => {
+  it("C09: zero technical contribution is not a hard gate; lane routing decides", () => {
     const fixture = COMPOSITION_FIXTURES.C09;
     const result = applyGlobalGates({
       id: fixture.id,
@@ -247,8 +247,9 @@ describe("Funnel V3 Independent Test Suite — Work Composition (C01-C11)", () =
       raw_description: fixture.raw_description,
     });
 
-    expect(result.status).toBe("HARD_REJECT");
-    expect(result.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
+    expect(result.status).toBe("PASS");
+    expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
+    expect(result.rejection_codes).not.toContain("GATE_OUT_OF_SCOPE_DOMAIN");
   });
 
   it("C10: incidental stakeholder word not automatically reject", () => {
@@ -298,7 +299,7 @@ describe("Funnel V3 Independent Test Suite — Title Taxonomy (R01-R10)", () => 
     expect(result.evidence_quotes.join(" ")).toMatch(/forward.?deployed|fde/i);
   });
 
-  it("R02: generic Director / Programme / Project / Delivery / Consultant reject", () => {
+  it("R02: generic Project Manager is not hard-rejected; lane routing decides", () => {
     const fixture = TITLE_FIXTURES.R02;
     const result = applyGlobalGates({
       id: fixture.id,
@@ -309,8 +310,8 @@ describe("Funnel V3 Independent Test Suite — Title Taxonomy (R01-R10)", () => 
       raw_description: fixture.raw_description,
     });
 
-    expect(result.status).toBe("HARD_REJECT");
-    expect(result.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
+    expect(result.status).toBe("PASS");
+    expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
   });
 
   it("R03: Technical Programme Director passes title recognition", () => {

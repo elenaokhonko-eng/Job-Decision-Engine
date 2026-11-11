@@ -370,7 +370,7 @@ describe("confirmed facts that fill an unknown", () => {
 
   it("fills unknown office days, travel, a required on-call, employment type and location", () => {
     const merged = applyConfirmedFactsToGateInput(
-      gateInput({ location: "Asia Pacific", sourceLocation: null }),
+      gateInput({ location: "Multiple locations", sourceLocation: null }),
       [requirement("OFFICE_DAYS", "Some office attendance is expected")],
       [OFFICE_2_3, TRAVEL_10, ON_CALL, PERMANENT, SINGAPORE],
       POLICY,

@@ -31,7 +31,8 @@ import {
   postingSourceEvidence,
   type ConfirmedFactAssessmentOutcome,
 } from "../pipeline/postingStatedFacts.js";
-import { extractTerritories, resolveWorkspaceWorkabilityPolicy } from "../pipeline/workabilityPolicy.js";
+import { resolveEffectiveWorkabilityPolicy } from "../pipeline/effectiveWorkabilityPolicy.js";
+import { extractTerritories } from "../pipeline/workabilityPolicy.js";
 import { enqueuePipelineTask } from "../tasks/pipelineTasks.js";
 import { pipelineTaskStageVersion } from "../tasks/pipelineTaskCurrentness.js";
 import { createTaskIntentV2 } from "../tasks/taskIntent.js";
@@ -210,7 +211,8 @@ export async function assessFactAgainstPosting(
     [ctx.workspaceId, jobVersionId],
   );
   const sourceEvidence = postingSourceEvidence(job.normalized_evidence);
-  const { policy } = await resolveWorkspaceWorkabilityPolicy(client, { context: ctx });
+  // The same effective policy (workspace policy + stage3 on-site exception employers) the gate uses.
+  const { policy } = await resolveEffectiveWorkabilityPolicy(client, { context: ctx });
   const posting = assessPostingFacts({
     workplaceType: job.workplace_type,
     employmentType: job.employment_type,

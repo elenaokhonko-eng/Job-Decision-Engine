@@ -19,6 +19,7 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/
 import { batchEmbeddingFromPerInput } from "../fixtures/embeddingBatchMock.js";
 import { insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
 import { buildEvidenceRevisionHash, buildJobSourceEvidence } from "../../ingestion/jobSourceEvidence.js";
+import { computeReplayRows, parseReplayArgs, summarizeReplay } from "../../../scripts/replay_hard_gate_policy_2026_11.js";
 
 // Real PostgreSQL: the confirmed-fact table and views, the hard gate, embedding publication, the lane
 // router, the deterministic matcher, the recommendation decider and the stage task worker all run
@@ -506,6 +507,26 @@ describe.skipIf(skipReal)("employer-confirmed job facts through the gate, matchi
     expect(state.recommendation_eligibility).toBe("INELIGIBLE");
     expect(readinessCheck(state, "WORK_MODE")).toMatchObject({ status: "BLOCKED" });
   }, 120_000);
+
+  it("the hard-gate policy replay dry run loads confirmed facts and reproduces the stored decisions", async () => {
+    const ids = [jobs.hybrid.canonicalJobId, jobs.onsite.canonicalJobId];
+    await db().query("BEGIN READ ONLY");
+    let rows;
+    try {
+      rows = await computeReplayRows(db(), ctx(), parseReplayArgs([]), ids);
+    } finally {
+      await db().query("ROLLBACK");
+    }
+    const byId = new Map(rows.map((row) => [row.canonicalJobId, row]));
+    // The confirmed hybrid job replays as PASS and the confirmed on-site job as HARD_REJECT, exactly as
+    // stored; without the confirmed facts both would replay as NEEDS_VERIFICATION.
+    expect(byId.get(jobs.hybrid.canonicalJobId)).toMatchObject({ oldDecision: "PASS", newStatus: "PASS" });
+    expect(byId.get(jobs.onsite.canonicalJobId)).toMatchObject({ oldDecision: "HARD_REJECT", newStatus: "HARD_REJECT" });
+    for (const row of rows) expect([...row.newCodes].sort()).toEqual([...row.oldCodes].sort());
+    const report = summarizeReplay(rows);
+    expect(report.newlyRejected).toBe(0);
+    expect(report.changedJobIds).toEqual([]);
+  });
 
   it("records a confirmation that contradicts a stated remote posting as a conflict and leaves the gate unchanged", async () => {
     const before = await latestGate(jobs.statedRemote);

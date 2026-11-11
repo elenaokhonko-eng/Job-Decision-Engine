@@ -22,6 +22,7 @@ import path from "node:path";
 import { load as loadYaml } from "js-yaml";
 import type pg from "pg";
 import { MAX_SOURCE_RESPONSE_BYTES } from "./adapters/baseAdapter.js";
+import { isUnknownEmployerName } from "./postingIdentity.js";
 import {
   UnsafePostingUrlError,
   companyMatches,
@@ -701,7 +702,7 @@ export function createEmployerBoardFallback(options: EmployerBoardLookupOptions)
   return async (input, dependencies) => {
     const companyName = input.expected.companyName.trim();
     const key = employerKey(companyName);
-    if (!key || key === "unknown" || key === "unknown company" || !input.expected.title.trim()) {
+    if (!key || isUnknownEmployerName(companyName) || !input.expected.title.trim()) {
       return blocked("EMPLOYER_BOARD_NOT_FOUND", "The discovery card has no usable employer name or title.");
     }
     const session = new LookupSession(dependencies, input.now, maxRequests);

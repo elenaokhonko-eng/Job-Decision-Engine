@@ -17,6 +17,21 @@ from streamlit_application_workflow import has_current_ready_assessment
 
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
+# Target lanes in config/lanes/registry.yml order; primary_lane is one of these or
+# UNCLASSIFIED. tests/python/test_streamlit_workspace_contracts.py keeps them in sync.
+TARGET_LANE_KEYS = (
+    "CORE_AI_DATA",
+    "LEGAL_REGTECH",
+    "HEALTH_BIO_PHARMA",
+    "INVESTMENT_MARKETS_FINTECH",
+    "SOCIAL_IMPACT_MULTILATERAL",
+    "UNIVERSITY_AI_RESEARCH",
+    "TECHNICAL_PRODUCT_TRANSFORMATION",
+    "INVESTIGATIONS_ENFORCEMENT",
+)
+UNCLASSIFIED_LANE = "UNCLASSIFIED"
+LANE_FILTER_OPTIONS = ("All Lanes", *TARGET_LANE_KEYS, UNCLASSIFIED_LANE)
+
 
 APPLICATION_STATUSES = frozenset(
     {
@@ -359,6 +374,62 @@ def validate_verify_then_apply_row(
         ):
             raise TypeError(f"Read-model field {field} must be a string array.")
     _optional_score(row, "deterministic_match_score")
+
+
+def validate_review_row(row: Mapping[str, object], workspace_id: object) -> None:
+    """Validate a current REVIEW decision row from the scoped shortlist.
+
+    Review rows may have any gate, eligibility, pipeline artifact or readiness
+    state; the UI explains which of them keeps the job out of Apply Now.
+
+    Raises:
+        ValueError: If scope or the REVIEW outcome is invalid.
+        TypeError: If an evidence array has an invalid type.
+    """
+    _require_fields(
+        row,
+        (
+            "workspace_id",
+            "canonical_job_id",
+            "job_version_id",
+            "title",
+            "company",
+            "gate_status",
+            "rejection_codes",
+            "gate_evidence_quotes",
+            "processing_state",
+            "recommendation_eligibility",
+            "recommendation_outcome",
+            "current_artifact_status",
+            "readiness_status",
+            "readiness_reason_codes",
+            "in_apply_now",
+        ),
+    )
+    _require_scope(row, workspace_id)
+    for field in ("canonical_job_id", "job_version_id", "title", "company"):
+        _require_string(row, field)
+    if row.get("recommendation_outcome") != "REVIEW":
+        raise ValueError("Review rows must carry a current REVIEW decision.")
+    if not isinstance(row.get("in_apply_now"), bool):
+        raise TypeError("Review row in_apply_now must be a boolean.")
+    for field in ("rejection_codes", "gate_evidence_quotes", "readiness_reason_codes"):
+        value = row.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, (list, tuple)) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise TypeError(f"Read-model field {field} must be a string array.")
+    for field in (
+        "deterministic_match_score",
+        "deterministic_match_coverage",
+        "recommendation_requirement_score",
+        "recommendation_coverage_score",
+        "recommendation_evidence_completeness",
+    ):
+        if field in row:
+            _optional_score(row, field)
 
 
 def validate_track_row(row: Mapping[str, object], workspace_id: object) -> None:

@@ -20,6 +20,7 @@ import {
   reconcileStaleSupersededEmbeddingDeadLetters,
 } from "../src/tasks/deadLetterPolicy.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
+import { pipelineTaskPayloadUuidSql, pipelineTaskTargetsArchivedJobSql } from "../src/tasks/jobArchiveGuard.js";
 import { inspectProfileEmbeddingReadiness } from "../src/embeddings/profileEmbeddingRepair.js";
 import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 
@@ -80,6 +81,8 @@ interface QueueHealthRow {
   oldest_status_age_seconds: number | null;
   /** PENDING only: seconds since the longest-waiting due task became claimable; null when none is due. */
   oldest_due_age_seconds: number | null;
+  /** PENDING only: tasks whose available_at has passed; null when none is due. */
+  due_task_count: number | null;
 }
 
 /**
@@ -103,8 +106,29 @@ export function oldestDuePendingAgeSeconds(rows: readonly QueueHealthRow[]): num
     .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_due_age_seconds ?? 0)), 0);
 }
 
+/**
+ * PENDING tasks a run could have claimed (available_at has passed). Tasks scheduled for later are
+ * excluded, so a queue holding only future work does not count as unclaimed.
+ */
+export function duePendingCount(rows: readonly QueueHealthRow[]): number {
+  return rows
+    .filter((row) => row.status === "PENDING")
+    .reduce((total, row) => total + Number(row.due_task_count ?? 0), 0);
+}
+
+function pendingCount(rows: readonly QueueHealthRow[]): number {
+  return rows
+    .filter((row) => row.status === "PENDING")
+    .reduce((total, row) => total + Number(row.task_count), 0);
+}
+
 interface QueueHealth {
+  /** Every PENDING task, including work scheduled for later. */
   pending: number;
+  /** PENDING tasks whose available_at has passed. */
+  duePending: number;
+  /** PENDING tasks scheduled for later (pending - duePending). */
+  scheduledPending: number;
   retryWait: number;
   blockedDependency: number;
   deadLetter: number;
@@ -184,7 +208,7 @@ function scopedTaskTargetClause(jobVersionParam: number, observationParam: numbe
   )`;
 }
 
-async function readQueueHealth(
+export async function readQueueHealth(
   pool: pg.Pool,
   workspaceId: string,
   scope?: QueueHealthScope,
@@ -203,7 +227,8 @@ async function readQueueHealth(
                 EXTRACT(EPOCH FROM NOW() - MIN(task.created_at))::INTEGER AS oldest_age_seconds,
                 EXTRACT(EPOCH FROM NOW() - MIN(task.updated_at))::INTEGER AS oldest_status_age_seconds,
                 EXTRACT(EPOCH FROM NOW() - MIN(GREATEST(task.created_at, task.available_at))
-                  FILTER (WHERE task.status = 'PENDING' AND task.available_at <= NOW()))::INTEGER AS oldest_due_age_seconds
+                  FILTER (WHERE task.status = 'PENDING' AND task.available_at <= NOW()))::INTEGER AS oldest_due_age_seconds,
+                COUNT(*) FILTER (WHERE task.status = 'PENDING' AND task.available_at <= NOW())::INTEGER AS due_task_count
          FROM pipeline_tasks AS task
          WHERE task.workspace_id = $1
            AND task.task_type = ANY($2::text[])
@@ -260,8 +285,11 @@ async function readQueueHealth(
         .filter((row) => row.status === status)
         .reduce((total, row) => total + Number(row.task_count), 0);
 
+      const duePending = duePendingCount(queueResult.rows);
       return {
         pending: byStatus("PENDING"),
+        duePending,
+        scheduledPending: Math.max(0, byStatus("PENDING") - duePending),
         retryWait: byStatus("RETRY_WAIT"),
         blockedDependency: byStatus("BLOCKED_DEPENDENCY"),
         deadLetter: actionableCurrentDeadLetter + staleHistoricalDeadLetter,
@@ -275,7 +303,7 @@ async function readQueueHealth(
 
     const queueResult = await client.query<QueueHealthRow>(
       `SELECT health.task_type, health.status, health.task_count, health.oldest_age_seconds,
-              status_age.oldest_status_age_seconds, due_age.oldest_due_age_seconds
+              status_age.oldest_status_age_seconds, due_age.oldest_due_age_seconds, due_age.due_task_count
        FROM v_pipeline_task_queue_health AS health
        LEFT JOIN v_pipeline_task_status_age AS status_age
          USING (workspace_id, task_type, status)
@@ -298,8 +326,11 @@ async function readQueueHealth(
       .filter((row) => row.status === status)
       .reduce((total, row) => total + Number(row.task_count), 0);
 
+    const duePending = duePendingCount(queueResult.rows);
     return {
       pending: byStatus("PENDING"),
+      duePending,
+      scheduledPending: Math.max(0, byStatus("PENDING") - duePending),
       retryWait: byStatus("RETRY_WAIT"),
       blockedDependency: byStatus("BLOCKED_DEPENDENCY"),
       deadLetter: actionableCurrentDeadLetter + staleHistoricalDeadLetter,
@@ -314,7 +345,7 @@ async function readQueueHealth(
   }
 }
 
-async function readOldestPendingTask(
+export async function readOldestPendingTask(
   pool: pg.Pool,
   workspaceId: string,
   taskTypes: readonly string[],
@@ -343,6 +374,7 @@ async function readOldestPendingTask(
          AND task.status = 'PENDING'
          AND task.available_at <= NOW()
          AND task.task_type = ANY($2::text[])
+         AND ${operationalTaskSql("task")}
          ${targetClause}
        ORDER BY GREATEST(task.created_at, task.available_at) ASC, task.id ASC
        LIMIT 1`,
@@ -359,6 +391,72 @@ async function readOldestPendingTask(
   } finally {
     client.release();
   }
+}
+
+/**
+ * TRUE when a pipeline task row counts as operational work, using the same exclusions as the
+ * operational_tasks CTE of v_pipeline_task_queue_health / v_pipeline_task_status_age /
+ * v_pipeline_task_due_age (migrations 097, 099, 107): tasks of test-fixture jobs are excluded, and
+ * tasks of archived jobs are excluded except NORMALIZE_OBSERVATION.
+ */
+function operationalTaskSql(taskAlias: string): string {
+  return `(
+    NOT (
+      EXISTS (
+        SELECT 1
+        FROM canonical_jobs fixture_job
+        WHERE fixture_job.workspace_id = ${taskAlias}.workspace_id
+          AND fixture_job.id = ${pipelineTaskPayloadUuidSql(taskAlias, "canonical_job_id")}
+          AND fixture_job.is_test_fixture = TRUE
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM job_versions fixture_version
+        JOIN canonical_jobs fixture_job
+          ON fixture_job.workspace_id = fixture_version.workspace_id
+         AND fixture_job.id = fixture_version.canonical_job_id
+        WHERE fixture_version.workspace_id = ${taskAlias}.workspace_id
+          AND fixture_version.id = ${pipelineTaskPayloadUuidSql(taskAlias, "job_version_id")}
+          AND fixture_job.is_test_fixture = TRUE
+      )
+    )
+    AND (
+      ${taskAlias}.task_type = 'NORMALIZE_OBSERVATION'
+      OR NOT ${pipelineTaskTargetsArchivedJobSql(taskAlias)}
+    )
+  )`;
+}
+
+/**
+ * When the furthest-out scheduled PENDING task becomes due. Reporting only: scheduled work is excluded
+ * from the pending SLO, so this keeps a task scheduled far ahead (by mistake or a bug) visible.
+ * Applies the queue-health views' fixture and archive exclusions, so it agrees with scheduled_pending.
+ */
+export async function readLatestScheduledPendingAvailableAt(
+  pool: pg.Pool,
+  workspaceId: string,
+  taskTypes: readonly string[],
+  scope?: QueueHealthScope,
+): Promise<string | null> {
+  const jobVersionIds = scope?.jobVersionIds ?? null;
+  const observationIds = scope?.observationIds ?? null;
+  const params: unknown[] = scope
+    ? [workspaceId, [...taskTypes], jobVersionIds, observationIds]
+    : [workspaceId, [...taskTypes]];
+  const targetClause = scope ? scopedTaskTargetClause(3, 4) : "";
+  const { rows } = await pool.query<{ latest_available_at: Date | null }>(
+    `SELECT MAX(task.available_at) AS latest_available_at
+     FROM pipeline_tasks AS task
+     WHERE task.workspace_id = $1
+       AND task.status = 'PENDING'
+       AND task.available_at > NOW()
+       AND task.task_type = ANY($2::text[])
+       AND ${operationalTaskSql("task")}
+       ${targetClause}`,
+    params,
+  );
+  const latest = rows[0]?.latest_available_at;
+  return latest ? latest.toISOString() : null;
 }
 
 function requestShutdown(signal: NodeJS.Signals): void {
@@ -519,9 +617,7 @@ export async function processPipelineTasks(): Promise<void> {
     const activeQueueRowsBefore = queueHealthBefore.byType.filter(
       (row) => activeTaskTypes.includes(row.task_type as typeof activeTaskTypes[number]),
     );
-    const activePendingBefore = activeQueueRowsBefore
-      .filter((row) => row.status === "PENDING")
-      .reduce((total, row) => total + Number(row.task_count), 0);
+    const activePendingBefore = pendingCount(activeQueueRowsBefore);
     const oldestActivePendingAgeBefore = oldestDuePendingAgeSeconds(activeQueueRowsBefore);
     reconciliationReport.activePendingBefore = activePendingBefore;
     reconciliationReport.oldestActivePendingAgeSecondsBefore = oldestActivePendingAgeBefore;
@@ -578,9 +674,16 @@ export async function processPipelineTasks(): Promise<void> {
     deadLetterReport.staleHistoricalDeadLettersReconciled = staleHistoricalDeadLettersReconciled;
     deadLetterReport.staleHistoricalDeadLettersRemaining = queueHealth.staleHistoricalDeadLetter;
     const activeQueueRows = queueHealth.byType.filter((row) => activeTaskTypes.includes(row.task_type as typeof activeTaskTypes[number]));
-    const activePending = activeQueueRows
-      .filter((row) => row.status === "PENDING")
-      .reduce((total, row) => total + Number(row.task_count), 0);
+    const activePending = pendingCount(activeQueueRows);
+    // Only due work could have been claimed; scheduled work is reported separately, not counted as a stall.
+    const activeDuePending = duePendingCount(activeQueueRows);
+    const activeScheduledPending = Math.max(0, activePending - activeDuePending);
+    const latestScheduledAvailableAt = await readLatestScheduledPendingAvailableAt(
+      pool,
+      context.workspaceId,
+      activeTaskTypes,
+      queueHealthScope,
+    );
     const oldestActivePendingAgeSeconds = oldestDuePendingAgeSeconds(activeQueueRows);
     const oldestPendingTask = await readOldestPendingTask(
       pool,
@@ -629,6 +732,9 @@ export async function processPipelineTasks(): Promise<void> {
         `oldest_active_pending_age_seconds_after=${oldestActivePendingAgeSeconds}`,
         `oldest_active_pending_task_type=${oldestPendingTask?.taskType ?? "none"}`,
         `oldest_pending_same_task_runs=${consecutiveOldestTaskRuns}`,
+        `active_due_pending_after=${activeDuePending}`,
+        `scheduled_pending=${activeScheduledPending}`,
+        `latest_scheduled_available_at=${latestScheduledAvailableAt ?? "none"}`,
       ].join("\n") + "\n", "utf8");
     }
     console.log("Pipeline task queue health:", JSON.stringify(queueHealth, null, 2));
@@ -644,6 +750,9 @@ export async function processPipelineTasks(): Promise<void> {
       total_dead_letters: queueHealth.deadLetter,
       active_pending_before: activePendingBefore,
       active_pending_after: activePending,
+      active_due_pending_after: activeDuePending,
+      scheduled_pending: activeScheduledPending,
+      latest_scheduled_available_at: latestScheduledAvailableAt,
       net_active_pending_delta: activePending - activePendingBefore,
       oldest_active_pending_age_seconds_before: oldestActivePendingAgeBefore,
       oldest_active_pending_age_seconds_after: oldestActivePendingAgeSeconds,
@@ -686,6 +795,9 @@ export async function processPipelineTasks(): Promise<void> {
     console.log("Pipeline active pending progress:", JSON.stringify({
       active_pending_before: activePendingBefore,
       active_pending_after: activePending,
+      active_due_pending_after: activeDuePending,
+      scheduled_pending: activeScheduledPending,
+      latest_scheduled_available_at: latestScheduledAvailableAt,
       oldest_active_pending_age_seconds_before: oldestActivePendingAgeBefore,
       oldest_active_pending_age_seconds_after: oldestActivePendingAgeSeconds,
     }));
@@ -715,6 +827,7 @@ export async function processPipelineTasks(): Promise<void> {
       oldestRetryWaitAgeSeconds: queueHealth.oldestRetryWaitAgeSeconds,
       activePendingCountBefore: activePendingBefore,
       activePendingCount: activePending,
+      activeDuePendingCount: activeDuePending,
       oldestActivePendingAgeSecondsBefore: oldestActivePendingAgeBefore,
       oldestActivePendingAgeSeconds,
       oldestActivePendingTaskType: oldestPendingTask?.taskType ?? null,

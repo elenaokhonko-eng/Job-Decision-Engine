@@ -46,6 +46,13 @@ export const MobilityPreferencesSchema = z.object({
   timezone_preferences: z.record(TimezoneRegionSchema, z.number().min(0).max(100)).optional(),
   living_travel_excluded_regions: z.array(z.string()).optional(),
   living_travel_acceptable_regions: z.array(z.string()).optional(),
+  /**
+   * Employers whose full-time on-site roles are acceptable. Optional and
+   * additive: absent or empty means no employer exception. Names match the
+   * employer as whole words ("Example Bank" matches "Example Bank
+   * Singapore") or as a name prefix ("ExampleBank" matches "ExampleBankGroup").
+   */
+  onsite_exception_employers: z.array(z.string().trim().min(2).max(120)).max(200).optional(),
 });
 export type MobilityPreferences = z.infer<typeof MobilityPreferencesSchema>;
 
