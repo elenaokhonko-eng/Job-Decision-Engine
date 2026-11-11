@@ -4,6 +4,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { runMigrations } from "../../db/migrate.js";
 import { MAX_JOB_CARDS_PER_EMAIL } from "../../ingestion/emailAlertExtractor.js";
+import { SourceBroker } from "../../ingestion/sourceBroker.js";
+import { runNormalization } from "../../pipeline/normalize.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { isNoVacancyFunnelBroken, parseEmails, type ParseEmailsDependencies } from "../../../scripts/parse_emails.js";
@@ -478,6 +480,54 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
       expect(rows.map((row) => row.source_url)).not.toContain(link.url);
     }
     expect(await stagingState()).toMatchObject({ observations: 2, fetchTasks: 2, orphanTasks: 0, processedAlerts: 1 });
+  });
+
+  it("never lets an empty employer reach canonical_jobs: cards stay out of normalization and postings must name one", async () => {
+    await seedDigests(1, 1, () => linkedInLayoutAlertRaw([
+      { jobId: "4400000211", title: "Synthetic Data Steward", subtitle: null, logoAlt: "" },
+    ]));
+    await parseEmails({ limit: 20 }, { pool: stagingPool(), log: () => undefined, now: () => 0 });
+    const card = await db().query<{ company_name: string; processing_status: string; job_version_id: string | null }>(
+      "SELECT company_name, processing_status, job_version_id FROM raw_job_observations WHERE workspace_id = $1 AND source_name = 'GMAIL_ALERT'",
+      [workspaceId()],
+    );
+    expect(card.rows).toEqual([{ company_name: "", processing_status: "FETCH_PENDING", job_version_id: null }]);
+
+    // Guard 1: the normalizer reads only PENDING observations; a discovery card is FETCH_PENDING
+    // from the transaction that stages it, so it is never normalized.
+    const normalized = await runNormalization(db(), { context: context! });
+    expect(normalized.totalDiscovered).toBe(0);
+
+    // Guard 2: ObservationPersistenceSchema refuses an empty employer on anything that is not a
+    // Gmail discovery-only card, including a retrieved posting derived from that card.
+    const broker = new SourceBroker(stagingPool(), context);
+    await broker.startRun();
+    const posting = {
+      sourceName: "GMAIL_ALERT" as const,
+      sourceExternalId: "synthetic-derived-posting",
+      sourceUrl: "https://www.linkedin.com/jobs/view/4400000211",
+      retrievedAt: new Date("2026-11-11T00:00:00Z").toISOString(),
+      companyName: "  ",
+      title: "Synthetic Data Steward",
+      descriptionRaw: "Synthetic complete posting text for the empty-employer guard. ".repeat(10),
+      locationRaw: "Example City",
+      workplaceTypeRaw: "UNKNOWN",
+      employmentTypeRaw: "UNKNOWN",
+      compensationRaw: "UNKNOWN",
+      canonicalApplyUrl: "https://www.linkedin.com/jobs/view/4400000211",
+      sourceLane: "UNKNOWN",
+      searchPlanVersion: "1.0",
+    };
+    const derivedPayload = { source_content_status: "COMPLETE" };
+    await expect(broker.processObservation({ ...posting, rawPayload: derivedPayload }, derivedPayload)).rejects.toThrow(/company_name_raw/);
+    await expect(broker.processObservation({ ...posting, sourceName: "GREENHOUSE" as const, rawPayload: { id: 1 } }, { id: 1 }))
+      .rejects.toThrow(/company_name_raw/);
+
+    const blankCanonical = await db().query<{ blank: number }>(
+      "SELECT COUNT(*)::int AS blank FROM canonical_jobs WHERE BTRIM(COALESCE(company_name, '')) = ''",
+    );
+    expect(blankCanonical.rows[0]?.blank).toBe(0);
+    expect((await stagingState()).observations).toBe(1);
   });
 
   it("blocks an email over the per-email card cap visibly, stages nothing and keeps the raw alert", async () => {
