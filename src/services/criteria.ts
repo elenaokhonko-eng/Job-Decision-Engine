@@ -572,7 +572,7 @@ function evaluateWorkabilityRules(
     return {
       workable: false,
       needsVerify: false,
-      reason: `Explicit work-authorization restriction conflicts with the active preference: ${territory}`,
+      reason: `Explicit work-authorization restriction conflicts with the active preference: ${territory}${quotedRestrictionEvidence(workerTerritoryEvaluation)}`,
       reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
       facts: { ...baseFacts, location_restriction: territory }
     };
@@ -828,6 +828,14 @@ function makeVerification(codes: string[], evidence: string[], facts?: Partial<G
 /**
  * Extract a readable text corpus from a raw job (handles string, JSON-string, or object descriptions).
  */
+/** The posting's own words for each incompatible worker condition, quoted for the gate evidence. */
+function quotedRestrictionEvidence(evaluation: { readonly incompatibleRequirements: readonly { readonly evidenceText: string }[] }): string {
+  const quotes = [...new Set(evaluation.incompatibleRequirements.map((requirement) => requirement.evidenceText.trim()).filter(Boolean))]
+    .slice(0, 3)
+    .map((quote) => `"${quote.slice(0, 300)}"`);
+  return quotes.length > 0 ? `. Evidence: ${quotes.join("; ")}` : "";
+}
+
 export function extractDescriptionText(job: RawJob): string {
   if (!job.raw_description) return "";
   if (typeof job.raw_description === "object") {
@@ -1215,7 +1223,7 @@ export function applyGlobalGates(
   const disallowedTerritories: string[] = [...workerTerritoryEvaluation.incompatibleTerritories];
   if (disallowedTerritories.length > 0 || workerTerritoryEvaluation.status === "INCOMPATIBLE") {
     const territory = disallowedTerritories[0] ?? workerTerritoryEvaluation.incompatibleTerritories[0] ?? "UNKNOWN";
-    return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [`Explicit worker-territory restriction: ${territory}`], {
+    return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [`Explicit worker-territory restriction: ${territory}${quotedRestrictionEvidence(workerTerritoryEvaluation)}`], {
       location_restriction: territory,
     });
   }

@@ -607,6 +607,8 @@ export interface ExplicitWorkerTerritoryRequirement {
 export interface WorkerTerritoryEvaluation {
   readonly status: "ALLOWED" | "INCOMPATIBLE" | "NEEDS_VERIFICATION";
   readonly incompatibleTerritories: readonly string[];
+  /** The conditions that exclude the authorized regions; their text is the gate's evidence. */
+  readonly incompatibleRequirements: readonly ExplicitWorkerTerritoryRequirement[];
   readonly unresolvedRequirements: readonly ExplicitWorkerTerritoryRequirement[];
 }
 
@@ -624,6 +626,88 @@ export function extractExplicitWorkerTerritoryRequirements(value: unknown): Expl
       evidenceText: sentence,
     });
   }
+  const seen = new Set(requirements.map((requirement) => requirement.evidenceText.toLowerCase()));
+  for (const requirement of extractGovernmentEligibilityRequirements(String(value ?? ""))) {
+    if (seen.has(requirement.evidenceText.toLowerCase())) continue;
+    seen.add(requirement.evidenceText.toLowerCase());
+    requirements.push(requirement);
+  }
+  return requirements;
+}
+
+// ── Government citizenship and security-clearance requirements ──
+// A national security clearance or a citizenship condition restricts who may be
+// hired even when the sentence names no country the territory table recognizes:
+// "Must be able to obtain ... federal background investigation or VA clearance"
+// or a list item whose "U." was lost upstream ("S. Citizenship required").
+
+/** Markers that only the U.S. federal government uses, read inside one sentence. */
+const US_GOVERNMENT_MARKER = /\b(?:united\s+states|usa|u\s*\.\s*s\b\.?|us\s+(?:government|federal|citizens?|citizenship|persons?|department|army|navy|air\s+force|military)|federal\s+(?:background\s+investigation|government|agency|agencies|client|clients|contract|contracts|customer|customers|health(?:care)?|civilian|security\s+clearance)|va\s+clearance|veterans\s+affairs|dod|department\s+of\s+(?:defense|veterans\s+affairs|homeland\s+security|health\s+and\s+human\s+services)|dhs|public\s+trust|ts\s*\/\s*sci|polygraph|e-?qip|sf-?86)\b/i;
+/** Context that makes a truncated "S. Citizenship" read as U.S.; "federal" or "VA" near it is enough. */
+const US_FEDERAL_NEARBY = /\b(?:federal|va|veterans\s+affairs|dod|department\s+of\s+defense|public\s+trust|ts\s*\/\s*sci|polygraph|u\s*\.\s*s\b|united\s+states)\b/i;
+const UK_GOVERNMENT_MARKER = /\b(?:(?:sc|dv|bpss|ctc|nppv\d?)\s*(?:\(|level\b|clearance|cleared|vetting)|security\s+check\s*\(sc\)|developed\s+vetting|uk\s+(?:government|security\s+clearance)|hmg)\b/i;
+const AU_GOVERNMENT_MARKER = /\b(?:baseline\s+(?:security\s+)?clearance|nv[12]|negative\s+vetting|positive\s+vetting|agsva)\b/i;
+const CA_GOVERNMENT_MARKER = /\b(?:(?:enhanced\s+)?reliability\s+status|government\s+of\s+canada)\b/i;
+
+/** A government security clearance or investigation, never "customs clearance" or a generic background check. */
+const GOVERNMENT_CLEARANCE = /\b(?:(?:security|government|federal|secret|top\s+secret|ts\s*\/\s*sci|public\s+trust|va|dod|sc|dv|baseline|nv[12])\s+clearances?|ts\s*\/\s*sci|top\s+secret|public\s+trust|(?:federal|government|suitability)\s+background\s+investigations?|(?:active|current)\s+clearance|developed\s+vetting|negative\s+vetting|(?:enhanced\s+)?reliability\s+status)\b/i;
+const NON_SECURITY_CLEARANCE = /\b(?:customs|medical|trade|import|export|regulatory|tax|financial)\s+clearance\b/i;
+const MANDATORY_CUE = /\b(?:requir(?:e|ed|es|ement|ements)|must|mandatory|ability\s+to\s+(?:obtain|maintain|hold|pass)|able\s+to\s+(?:obtain|maintain|hold|pass)|eligib\w*|obtain|maintain|hold|possess|active|current)\b/i;
+const OPTIONAL_CUE = /\b(?:preferred|a\s+plus|nice\s+to\s+have|bonus|desirable|advantageous|not\s+required|no\s+(?:security\s+)?clearance|does\s+not\s+require|not\s+needed|optional)\b/i;
+/** Pay-range, pay-factor and benefits boilerplate mentions clearances or locations without requiring them. */
+const PAY_OR_BENEFITS_SENTENCE = /\b(?:salar(?:y|ies)|pay\s+(?:range|scale|rate|band)|base\s+pay|compensation|benefits?)\b/i;
+/** A conditional licence or approval check ("may be required ... whether any export license, security clearance ... is required"). */
+const CONDITIONAL_APPROVAL_SENTENCE = /\b(?:may|might|could)\s+be\s+required\b|\bwhether\b|\bexport\s+(?:licen[cs]e|control|controls|laws?|regulations?)\b/i;
+
+function clearanceGovernment(sentence: string, fullText: string): string | null {
+  const own = extractTerritories(sentence).filter((territory) => territory !== "UNITED_STATES");
+  if (own.length > 0) return own[0] ?? null;
+  if (US_GOVERNMENT_MARKER.test(sentence)) return "UNITED_STATES";
+  if (UK_GOVERNMENT_MARKER.test(sentence)) return "UNITED_KINGDOM";
+  if (AU_GOVERNMENT_MARKER.test(sentence)) return "AUSTRALIA";
+  if (CA_GOVERNMENT_MARKER.test(sentence)) return "CANADA";
+  // A bare "security clearance" takes the government from the posting only when the
+  // posting names U.S. federal work and no other country; otherwise it is left alone.
+  const otherCountries = extractTerritories(fullText).filter((territory) => territory !== "UNITED_STATES");
+  if (otherCountries.length === 0 && US_GOVERNMENT_MARKER.test(fullText)) return "UNITED_STATES";
+  return null;
+}
+
+/**
+ * Citizenship and government-clearance conditions that the territory pass cannot see.
+ * Each one is a single-territory (ANY) requirement with the posting's own words as evidence.
+ */
+export function extractGovernmentEligibilityRequirements(value: unknown): ExplicitWorkerTerritoryRequirement[] {
+  const text = String(value ?? "");
+  const requirements: ExplicitWorkerTerritoryRequirement[] = [];
+
+  // "S. Citizenship required": a list or markdown parser dropped "U.". Only U.S. federal
+  // context near it makes it a U.S. condition.
+  for (const match of text.matchAll(/(?:^|[^a-z.])(s\s*\.\s*citizen(?:s|ship)?\b[^\n]*)/gi)) {
+    const start = (match.index ?? 0) + match[0].length - (match[1] ?? "").length;
+    if (/u\s*\.\s*$/i.test(text.slice(Math.max(0, start - 4), start))) continue;
+    const line = (match[1] ?? "").trim();
+    if (OPTIONAL_CUE.test(line)) continue;
+    const window = text.slice(Math.max(0, start - 600), start + line.length + 600);
+    const nearby = window.split(/\n+/).find((candidate) => candidate !== line && US_FEDERAL_NEARBY.test(candidate) && !/(?:^|[^a-z.])s\s*\.\s*citizen/i.test(candidate));
+    if (!nearby) continue;
+    requirements.push({
+      territories: ["UNITED_STATES"],
+      operator: "ANY",
+      evidenceText: `${line} (U.S. federal context: "${nearby.trim().slice(0, 200)}")`,
+    });
+  }
+
+  const protectedText = protectTerritoryAbbreviationPeriods(text);
+  for (const part of protectedText.split(/[.!?;\n]+/)) {
+    const sentence = part.replaceAll(PROTECTED_ABBREVIATION_PERIOD, ".").trim();
+    if (!sentence || !GOVERNMENT_CLEARANCE.test(sentence) || NON_SECURITY_CLEARANCE.test(sentence)) continue;
+    if (!MANDATORY_CUE.test(sentence) || OPTIONAL_CUE.test(sentence)) continue;
+    if (PAY_OR_BENEFITS_SENTENCE.test(sentence) || CONDITIONAL_APPROVAL_SENTENCE.test(sentence)) continue;
+    const government = clearanceGovernment(sentence, text);
+    if (!government) continue;
+    requirements.push({ territories: [government], operator: "ANY", evidenceText: sentence });
+  }
   return requirements;
 }
 
@@ -634,6 +718,7 @@ export function evaluateWorkerTerritoryRequirements(
 ): WorkerTerritoryEvaluation {
   const allowed = new Set(normalizeTerritories([...authorizedRegions]));
   const incompatibleTerritories: string[] = [];
+  const incompatibleRequirements: ExplicitWorkerTerritoryRequirement[] = [];
   const unresolvedRequirements: ExplicitWorkerTerritoryRequirement[] = [];
   for (const requirement of requirements) {
     const territories = normalizeTerritories([...requirement.territories]);
@@ -648,6 +733,7 @@ export function evaluateWorkerTerritoryRequirements(
       : permittedCount === territories.length;
     if (!satisfied && rejectExplicitForeignTerritory && allowed.size > 0) {
       incompatibleTerritories.push(...territories.filter((territory) => !permitted(territory)));
+      incompatibleRequirements.push(requirement);
     }
   }
   const uniqueIncompatible = [...new Set(incompatibleTerritories)];
@@ -656,6 +742,7 @@ export function evaluateWorkerTerritoryRequirements(
       ? "INCOMPATIBLE"
       : unresolvedRequirements.length > 0 ? "NEEDS_VERIFICATION" : "ALLOWED",
     incompatibleTerritories: uniqueIncompatible,
+    incompatibleRequirements,
     unresolvedRequirements,
   };
 }
@@ -691,7 +778,11 @@ export function hasExplicitTerritoryRestriction(value: unknown, territory: strin
       || /\b(?:must\s+(?:be\s+)?(?:residing|living|based|located|authorized)|must\s+reside|must\s+live)\b/i.test(sentence)
       || /\b(?:only\s+(?:open\s+to|applicants?|candidates?|engineers?|developers?|people|individuals)\s+(?:in|from|based|located|residing))\b/i.test(sentence)
       || /\b(?:remote\s+(?:only\s+in|only\s+from|eligible\s+only\s+in))\b/i.test(sentence)
-      || /\b(?:open\s+only\s+to|eligible\s+only\s+in|based\s+in\s+[\w\s]+\s+only)\b/i.test(sentence);
+      || /\b(?:open\s+only\s+to|eligible\s+only\s+in|based\s+in\s+[\w\s]+\s+only)\b/i.test(sentence)
+      // "a remote, US-based role", "US-based candidates": the role or the worker is placed there.
+      // Pay-range and benefits boilerplate ("for US-based employees, the pay range is") is not.
+      || (!PAY_OR_BENEFITS_SENTENCE.test(sentence)
+        && /\b[a-z]+-based\s+(?:remote\s+|full[- ]time\s+|part[- ]time\s+)?(?:role|position|job|opportunity|candidates?|applicants?|hires?|contractors?|consultants?|talent)\b/i.test(sentence));
 
     if (isEmployerOrContext) {
       return hasExplicitWorkerConstraint;
