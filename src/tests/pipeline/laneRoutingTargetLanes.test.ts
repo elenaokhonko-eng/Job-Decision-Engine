@@ -10,7 +10,9 @@ import {
   hasInvestigationFunction,
   hasNonTechnicalRoleFamily,
   hasProductTransformationFunction,
+  legalFintechTieBreak,
   loadLanesConfig,
+  matchedSector,
   matchedDomainSignals,
   routeLaneCandidates,
   stripEmployerBoilerplatePhrases,
@@ -72,7 +74,7 @@ const TECHNICAL_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
   },
   {
     title: "Product Manager (ESG)",
-    description: "Own the roadmap for an ESG reporting platform. Work with engineers on data pipelines and cloud-native APIs for sustainability disclosures.",
+    description: "Own the roadmap for an ESG reporting platform used by government agencies. Work with engineers on data pipelines and cloud-native APIs for sustainability disclosures.",
     favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
     expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
   },
@@ -108,7 +110,7 @@ const TECHNICAL_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
   },
   {
     title: "Lead, Transformation Portfolio & Strategic Initiatives",
-    description: "Run the transformation portfolio and strategic initiatives office. Track technology transformation programmes, cloud migration and data platform milestones.",
+    description: "Run the transformation portfolio and strategic initiatives office at a life insurer. Track technology transformation programmes, cloud migration and data platform milestones.",
     favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
     expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
   },
@@ -120,7 +122,7 @@ const TECHNICAL_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
   },
   {
     title: "Sr. Technical Program Manager",
-    description: "Drive cross-functional technical programs across infrastructure and machine learning teams. Coordinate software engineering and data center teams, manage dependencies and land platform launches.",
+    description: "Drive cross-functional technical programs at a consumer technology company across infrastructure and machine learning teams. Coordinate software engineering and data center teams, manage dependencies and land platform launches.",
     favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
     expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
   },
@@ -164,6 +166,82 @@ const INVESTIGATION_FIXTURES: readonly RoutingFixture[] = [
   },
 ];
 
+// The user's LEGAL_REGTECH / INVESTMENT_MARKETS_FINTECH rule: banking or fintech in the title or
+// employer context routes to FINTECH; pure regulatory technology at a regulatory body or a
+// legal-tech company routes to LEGAL_REGTECH. Embedding scores are equal, so only the rule decides.
+const SECTOR_TIE_BREAK_FIXTURES: readonly RoutingFixture[] = [
+  {
+    title: "Legal Engineer, Product Specialist",
+    description: "We build a legal AI platform used by law firms and in-house legal teams. You will design legal workflows on the platform with software engineers, configure document intelligence features and train lawyers on adoption.",
+    expected: ["LEGAL_REGTECH"],
+  },
+  {
+    title: "Technology Manager",
+    description: "We are a digital bank and fintech serving millions of customers. Lead the engineering team that owns our financial crime and KYC platforms, run delivery of microservices and own system design decisions.",
+    expected: ["INVESTMENT_MARKETS_FINTECH"],
+  },
+  {
+    title: "Head of Regulatory Reporting IT, Banking",
+    description: "Lead the IT applications team that delivers regulatory reporting systems for a universal bank: regulatory change, data pipelines, AML reporting feeds and technical delivery with software engineers.",
+    expected: ["INVESTMENT_MARKETS_FINTECH"],
+  },
+  {
+    title: "RegTech Engineer",
+    description: "Join the regulatory authority's supervisory technology team. Build compliance automation and AML/KYC analytics that supervisors use to review banks, using Python data pipelines and software engineering practices.",
+    expected: ["LEGAL_REGTECH"],
+  },
+];
+
+// TECHNICAL_PRODUCT_TRANSFORMATION in the sectors of the other lanes...
+const IN_SECTOR_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
+  {
+    title: "Transformation Manager, Technology Programme",
+    description: "Lead a technology transformation programme at a retail bank: cloud migration of core banking systems, data pipelines for the risk function and agile delivery with engineering teams.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
+  },
+  {
+    title: "Digital Product Manager",
+    description: "Own digital products for a pharmaceutical company's medical affairs teams. Work with engineering teams on a cloud-native platform and with data scientists on content recommendations.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
+  },
+  {
+    title: "Product Lead, Legal Technology",
+    description: "Lead legal technology products for a government ministry's legal service: case-management platform roadmap, software engineers and data pipelines for court filings.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
+  },
+];
+
+// ...but not outside them, even with the same technology vocabulary.
+const OUT_OF_SECTOR_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
+  {
+    title: "Digital Transformation Manager",
+    description: "Lead digital transformation for a luxury hotel group: cloud migration of property systems, data pipelines for guest analytics and agile delivery with engineering teams.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
+    title: "Technology Programme Manager, Construction",
+    description: "Run the construction firm's site technology programme: cloud migration of project systems, data pipelines from site sensors and software development with engineering teams.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
+    title: "E-commerce Product Owner",
+    description: "Own the online store for a homeware retailer: cloud-native storefront, data pipelines for merchandising and agile delivery with engineering teams.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
+    title: "Digital Product Manager, Fashion",
+    description: "Lead digital products for a fashion house's online boutique: product roadmap, cloud migration of the storefront, data pipelines for collections and engineering teams across studios.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+];
+
 const ENGINEERING_FIXTURES: readonly RoutingFixture[] = [
   {
     title: "DevOps Engineering Lead (Vice President)",
@@ -173,7 +251,8 @@ const ENGINEERING_FIXTURES: readonly RoutingFixture[] = [
   {
     title: "Digital Software Engineer Senior Manager (Vice President)",
     description: "Manage software engineers building microservices and distributed systems for digital banking channels. Own system design, code quality and the SDLC.",
-    expected: ["CORE_AI_DATA"],
+    // Banking in the employer context: the sector rule routes it to FINTECH ahead of CORE_AI_DATA.
+    expected: ["INVESTMENT_MARKETS_FINTECH"],
   },
   {
     title: "SVP, Cloud Architect",
@@ -387,6 +466,36 @@ describe("Technical product lane domain signals", () => {
   });
 });
 
+describe("Sector rules", () => {
+  it("applies the LEGAL_REGTECH / FINTECH tie-break in its documented order", () => {
+    expect(legalFintechTieBreak("Head of Regulatory Reporting IT, Banking", "A regulator", "")).toBe("INVESTMENT_MARKETS_FINTECH");
+    expect(legalFintechTieBreak("RegTech Engineer", "", "Join the regulatory authority, which supervises banks.")).toBe("LEGAL_REGTECH");
+    expect(legalFintechTieBreak("Legal Engineer", "", "A legal AI platform for law firms.")).toBe("LEGAL_REGTECH");
+    expect(legalFintechTieBreak("Technology Manager", "", "We are a digital bank and fintech.")).toBe("INVESTMENT_MARKETS_FINTECH");
+    expect(legalFintechTieBreak("Compliance Engineer", "", "We build compliance software.")).toBeNull();
+  });
+
+  it("records the tie-break and the matched sector as evidence", () => {
+    const tieBreak = route(SECTOR_TIE_BREAK_FIXTURES[1].title, SECTOR_TIE_BREAK_FIXTURES[1].description);
+    expect(tieBreak.laneEvidence).toContain("SECTOR_TIE_BREAK:INVESTMENT_MARKETS_FINTECH_OVER_LEGAL_REGTECH");
+    const product = route(IN_SECTOR_PRODUCT_FIXTURES[0].title, IN_SECTOR_PRODUCT_FIXTURES[0].description, "TECHNICAL_PRODUCT_TRANSFORMATION");
+    expect(product.laneEvidence.some((e) => e.startsWith("TECHNICAL_PRODUCT_TRANSFORMATION:sector=") && e.includes("bank"))).toBe(true);
+  });
+
+  it("requires one of the other lanes' sectors for TECHNICAL_PRODUCT_TRANSFORMATION", () => {
+    const sectors = config.lanes.TECHNICAL_PRODUCT_TRANSFORMATION.required_sector_concepts;
+    expect(sectors).toHaveLength(7);
+    expect(matchedSector("a luxury hotel group and a fashion house", sectors)).toEqual([]);
+    expect(matchedSector("a pharmaceutical company", sectors)).toEqual(["pharmaceutical"]);
+  });
+
+  it("treats a technology-adjacent director or head as a product-lane title", () => {
+    expect(hasProductTransformationFunction("Deputy Director, Digital Platforms")).toBe(true);
+    expect(hasProductTransformationFunction("Head of Technology")).toBe(true);
+    expect(hasProductTransformationFunction("Director of Catering")).toBe(false);
+  });
+});
+
 describe("Routing evidence text", () => {
   it("keeps the role description after an About Us block that ends at a bare heading", () => {
     const text = extractCoreJobText(
@@ -415,6 +524,9 @@ describe("Target-lane routing fixtures", () => {
   const cases = [
     ...TECHNICAL_PRODUCT_FIXTURES,
     ...INVESTIGATION_FIXTURES,
+    ...SECTOR_TIE_BREAK_FIXTURES,
+    ...IN_SECTOR_PRODUCT_FIXTURES,
+    ...OUT_OF_SECTOR_PRODUCT_FIXTURES,
     ...ENGINEERING_FIXTURES,
     ...OUT_OF_SCOPE_FIXTURES,
   ];

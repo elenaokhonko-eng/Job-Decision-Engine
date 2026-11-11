@@ -414,7 +414,7 @@ describe("Composed Pipeline Integration — Six Lane Routes & Multi-Lane Selecti
     expect(new Set(routedLanes)).toEqual(new Set(ACTIVE_LANE_KEYS));
   });
 
-  it("multi-lane candidate deterministically selects primary lane based on priority rank", async () => {
+  it("multi-lane legal-AI candidate: the legal-tech sector rule selects LEGAL_REGTECH over a higher-ranked CORE_AI_DATA", async () => {
     // A job matching both LegalTech and Core AI with hybrid embeddings
     vi.mocked(agent.generateEmbeddingWithProvider).mockImplementation(async (text: string) => {
       const normalized = text.toLowerCase();
@@ -443,8 +443,11 @@ describe("Composed Pipeline Integration — Six Lane Routes & Multi-Lane Selecti
     const update = harness.updates.find((u) => u.jobId === multiLaneJob.id);
     expect(update).toBeDefined();
     expect(update?.processingState).toBe("LANE_ROUTED");
-    expect(update?.primaryLane).toBe("CORE_AI_DATA"); // Rank 1 in priority
-    expect(update?.secondaryLanes).toContain("LEGAL_REGTECH");
+    // Equal embedding scores would fall to priority rank (CORE_AI_DATA). The title and employer
+    // name legal AI, so legalFintechTieBreak routes to LEGAL_REGTECH and records why.
+    expect(update?.primaryLane).toBe("LEGAL_REGTECH");
+    expect(update?.laneEvidence).toContain("SECTOR_TIE_BREAK:LEGAL_REGTECH_OVER_CORE_AI_DATA");
+    expect(update?.secondaryLanes).toContain("CORE_AI_DATA");
   });
 
   it("semantic similarity cannot create a lane when deterministic negative concepts exclude it", async () => {

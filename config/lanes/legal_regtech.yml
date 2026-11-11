@@ -36,6 +36,8 @@ scope:
       - DOCUMENT_INTELLIGENCE
       - LEGAL_NLP
       - KNOWLEDGE_GRAPHS
+      - LEGAL_INDUSTRY
+      - REGULATORY_REPORTING
 
 prototypes:
   - prototype_key: regtech_compliance

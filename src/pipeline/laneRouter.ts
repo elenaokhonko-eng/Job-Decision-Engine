@@ -388,6 +388,9 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
   "regtech": [
     "regtech",
     "regulatory technology",
+    "suptech",
+    "supervisory technology",
+    "financial supervision",
     "compliance automation",
     "aml",
     "kyc",
@@ -527,6 +530,9 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "engineering director",
     "lead engineer",
     "principal engineer",
+    "head of it",
+    "it applications",
+    "it delivery",
   ],
   "cloud platform": [
     "cloud platform",
@@ -701,6 +707,138 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "non-compliance",
     "regulatory investigation",
     "regulatory investigations",
+  ],
+  "banking fintech": [
+    "banking",
+    "banks",
+    "fintech",
+    "neobank",
+    "digital bank",
+    "digital banking",
+    "financial services",
+    "financial institution",
+    "financial institutions",
+    "payments",
+    "brokerage",
+    "stockbroking",
+  ],
+  "legal industry": [
+    "law firm",
+    "law firms",
+    "lawyers",
+    "legal professionals",
+    "legal industry",
+    "legal workflows",
+    "legal work",
+    "in-house legal",
+  ],
+  "regulatory reporting": [
+    "regulatory reporting",
+    "regulatory change",
+    "regulatory requirements",
+  ],
+  // Industry sectors of the other lanes; TECHNICAL_PRODUCT_TRANSFORMATION requires one.
+  "technology sector": [
+    "technology company",
+    "tech company",
+    "software company",
+    "saas company",
+    "saas provider",
+    "ai company",
+    "technology firm",
+    "cloud provider",
+    "enterprise software",
+    "semiconductor",
+    "semiconductors",
+    "high-performance computing",
+    "accelerated computing",
+    "gpus",
+    "technology group",
+    "it services",
+  ],
+  "legal regulatory sector": [
+    "legal technology",
+    "legaltech",
+    "legal tech",
+    "legal ai",
+    "law firm",
+    "law firms",
+    "legal services",
+    "regulator",
+    "regulatory authority",
+    "regulatory body",
+    "prosecutors",
+    "courts",
+    "court services",
+    "judiciary",
+    "regtech",
+  ],
+  "health life sciences sector": [
+    "pharmaceutical",
+    "pharma",
+    "biotech",
+    "biotechnology",
+    "life sciences",
+    "hospital",
+    "hospitals",
+    "public healthcare",
+    "healthcare institutions",
+    "healthcare provider",
+    "medical devices",
+    "healthtech",
+    "health tech",
+  ],
+  "financial services sector": [
+    "bank",
+    "banks",
+    "banking",
+    "fintech",
+    "neobank",
+    "financial services",
+    "financial institution",
+    "insurer",
+    "insurance",
+    "asset management",
+    "wealth management",
+    "investment management",
+    "capital markets",
+    "securities",
+    "stockbroking",
+    "brokerage",
+    "stock exchange",
+    "finance app",
+  ],
+  "research academic sector": [
+    "university",
+    "research institute",
+    "research agency",
+    "research centre",
+    "research center",
+    "academic",
+    "national laboratory",
+  ],
+  "public social sector": [
+    "government agency",
+    "government agencies",
+    "public sector",
+    "public service",
+    "public agencies",
+    "public officers",
+    "whole-of-government",
+    "ministry",
+    "statutory board",
+    "govtech",
+    "digital government",
+    "multilateral",
+    "non-profit",
+    "nonprofit",
+    "united nations",
+    "international development",
+  ],
+  "enforcement sector": [
+    "law enforcement",
+    "regulatory enforcement",
+    "enforcement agency",
   ],
   "financial crime": [
     "financial crime",
@@ -879,7 +1017,7 @@ export function hasCoreTechnicalFunction(title: string): boolean {
 export function hasProductTransformationFunction(title: string): boolean {
   const value = String(title || "");
   if (!value || hasNonTechnicalRoleFamily(value)) return false;
-  return /\b(?:product\s+(?:manager|owner|lead|director|head|management|policy|portfolio)|head\s+of\s+product|chief\s+product|(?:digital|data|ai)\s+products?|(?:programme|program|project|delivery)\s+(?:manager|lead|director|head|management|owner)|(?:ai|product|technology|digital|data)\s+portfolio\s+(?:manager|lead)|portfolio\s+(?:delivery|lead)|pmo|transformation|strategic\s+initiatives|technical\s+(?:program|programme|project|product))\b/i.test(value);
+  return /\b(?:product\s+(?:manager|owner|lead|director|head|management|policy|portfolio)|head\s+of\s+product|chief\s+product|(?:digital|data|ai)\s+products?|(?:programme|program|project|delivery)\s+(?:manager|lead|director|head|management|owner)|(?:ai|product|technology|digital|data)\s+portfolio\s+(?:manager|lead)|portfolio\s+(?:delivery|lead)|pmo|transformation|strategic\s+initiatives|technical\s+(?:program|programme|project|product)|(?:head|director)\b[^;()]{0,30}\b(?:technology|digital|data|ai|it|engineering|platforms?|innovation))\b/i.test(value);
 }
 
 /**
@@ -920,6 +1058,30 @@ export function hasRequiredInstitutionalContext(laneKey: string, text: string): 
  * Distinct domain phrases found in the text. A phrase contained in another found phrase
  * ("cloud" in "cloud platform") is not counted separately.
  */
+/** Sector phrases (title, employer and full description) matched for a lane's required sectors. */
+export function matchedSector(employerContext: string, sectorConcepts: string[] | undefined): string[] {
+  return matchedDomainSignals(employerContext, sectorConcepts);
+}
+
+const BANKING_FINTECH_CONTEXT = /\b(?:bank|banks|banking|neobank|fintech|digital\s+bank|financial\s+services|financial\s+institutions?|financial\s+products|financial\s+super\s*app|brokerage|stockbroking|payments|investing|savings|money\s+transfers?|e-money)\b/i;
+const LEGAL_REGULATORY_EMPLOYER = /\b(?:regulator|regulatory\s+(?:authority|body|agency)|monetary\s+authority|securities\s+commission|supervisory\s+authority|legal\s*tech|legal\s+technology|legal\s+ai|law\s+firms?|courts?|judiciary)\b/i;
+
+export type LegalFintechTieBreak = "INVESTMENT_MARKETS_FINTECH" | "LEGAL_REGTECH" | null;
+
+/**
+ * Sector tie-break when both LEGAL_REGTECH and INVESTMENT_MARKETS_FINTECH qualify:
+ * banking or fintech in the title wins FINTECH; otherwise a regulatory body or legal-tech
+ * employer wins LEGAL_REGTECH; otherwise banking or fintech in the employer context
+ * (company name, opening of the posting) wins FINTECH; otherwise no tie-break.
+ */
+export function legalFintechTieBreak(title: string, companyName: string, employerIntro: string): LegalFintechTieBreak {
+  if (BANKING_FINTECH_CONTEXT.test(title)) return "INVESTMENT_MARKETS_FINTECH";
+  const employer = `${companyName} ${employerIntro}`;
+  if (LEGAL_REGULATORY_EMPLOYER.test(`${title} ${employer}`)) return "LEGAL_REGTECH";
+  if (BANKING_FINTECH_CONTEXT.test(employer)) return "INVESTMENT_MARKETS_FINTECH";
+  return null;
+}
+
 export function matchedDomainSignals(description: string, concepts: string[] | undefined): string[] {
   const found = new Set<string>();
   for (const concept of concepts ?? []) {
@@ -935,9 +1097,12 @@ function laneDomainScopeScore(
   description: string,
   laneKey: string,
   concepts: string[] | undefined,
-  minimumSignals = 1
+  minimumSignals = 1,
+  sectorConcepts?: string[],
+  employerContext = ""
 ): number {
   if (!hasRequiredInstitutionalContext(laneKey, description)) return 0;
+  if (sectorConcepts?.length && matchedSector(employerContext, sectorConcepts).length === 0) return 0;
   if (minimumSignals <= 1) return conceptScopeScore(description, concepts);
   return matchedDomainSignals(description, concepts).length >= minimumSignals ? 1 : 0;
 }
@@ -1102,7 +1267,7 @@ export const LANE_SCOPE_TEXT_MAX_CHARS = 12000;
  * ("healthcare coverage", "support your mental health") and recruitment-scam warnings
  * ("recruitment fraud"). It is removed before domain/function matching.
  */
-const EMPLOYER_BOILERPLATE_PHRASES = /\b(?:(?:comprehensive|private|family|group)\s+)?(?:health(?:care)?|medical|dental|vision|life)\s+(?:insurance|coverage|cover|benefits?|plans?)\b|\bmental\s+health\b|\bhealth\s+(?:and|&)\s+well-?being\b|\bwellness\s+(?:programs?|programmes?|benefits?|allowance)\b|\b(?:recruitment|recruiting|hiring|job|employment)\s+(?:fraud|scams?)\b/gi;
+const EMPLOYER_BOILERPLATE_PHRASES = /\b(?:(?:comprehensive|private|family|group)\s+)?(?:health(?:care)?|medical|dental|vision|life)\s+(?:insurance|coverage|cover|benefits?|plans?)\b|\bmental\s+health\b|\bhealth\s+(?:and|&)\s+well-?being\b|\bwellness\s+(?:programs?|programmes?|benefits?|allowance)\b|\b(?:group|staff|employee|travel)\s+insurance\b|\b(?:recruitment|recruiting|hiring|job|employment)\s+(?:fraud|scams?)\b/gi;
 
 export function stripEmployerBoilerplatePhrases(text: string): string {
   return text.replace(EMPLOYER_BOILERPLATE_PHRASES, " ");
@@ -1147,6 +1312,12 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
   const preferenceEnabled = input.preferenceEnabled ?? (() => true);
   const preferenceRank = input.preferenceRank ?? (() => 1000);
   const exclusionText = extractCoreJobText(title, description, LANE_EXCLUSION_TEXT_MAX_CHARS).toLowerCase();
+  // Employer context keeps "About Us" text that extractCoreJobText drops as boilerplate.
+  const rawPlain = stripHtmlToText(description);
+  const employerIntro = rawPlain.slice(0, 800);
+  const employerContext = stripEmployerBoilerplatePhrases(
+    `${title}. ${input.companyName ?? ""}. ${rawPlain.slice(0, LANE_SCOPE_TEXT_MAX_CHARS)}`
+  ).toLowerCase();
   const scopeText = stripEmployerBoilerplatePhrases(
     extractCoreJobText(title, description, LANE_SCOPE_TEXT_MAX_CHARS)
   ).toLowerCase();
@@ -1184,7 +1355,9 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
       scopeText,
       laneKey,
       laneDef.included_domain_concepts,
-      laneDef.minimum_domain_signals
+      laneDef.minimum_domain_signals,
+      laneDef.required_sector_concepts,
+      employerContext
     );
     functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, title)
       ? 0
@@ -1213,6 +1386,20 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
     .filter((c) => c.domainScore >= (c.laneDef.minimum_domain_score ?? 0))
     .filter((c) => c.functionScore >= (c.laneDef.minimum_function_score ?? 0))
     .filter((c) => !c.negativeExcluded);
+
+  // Sector rule: when the winning sector lane qualifies, it also takes precedence over the
+  // generic CORE_AI_DATA lane. TECHNICAL_PRODUCT_TRANSFORMATION (a role-family lane) is unaffected.
+  const sectorWinner = legalFintechTieBreak(title, String(input.companyName ?? ""), employerIntro);
+  if (sectorWinner && qualifyingPrimary.some((c) => c.laneKey === sectorWinner)) {
+    const overridden = [sectorWinner === "LEGAL_REGTECH" ? "INVESTMENT_MARKETS_FINTECH" : "LEGAL_REGTECH", "CORE_AI_DATA"];
+    for (const loser of overridden) {
+      const index = qualifyingPrimary.findIndex((c) => c.laneKey === loser);
+      if (index >= 0) {
+        qualifyingPrimary.splice(index, 1);
+        laneEvidence.push(`SECTOR_TIE_BREAK:${sectorWinner}_OVER_${loser}`);
+      }
+    }
+  }
 
   if (qualifyingPrimary.length === 0) {
     laneEvidence.push(...buildNoMatchEvidence(primaryCandidates));
@@ -1303,6 +1490,9 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
           ...laneEvidence,
           `${bestLane}:domain_score=${(domainScoreMap[bestLane] ?? 0).toFixed(3)}`,
           `${bestLane}:function_score=${(functionScoreMap[bestLane] ?? 0).toFixed(3)}`,
+          ...(config.lanes[bestLane]?.required_sector_concepts?.length
+            ? [`${bestLane}:sector=${matchedSector(employerContext, config.lanes[bestLane].required_sector_concepts).join("|")}`]
+            : []),
         ],
     processingStatus: noActiveLaneMatch ? "UNMATCHED" : "LANE_ROUTED",
   };

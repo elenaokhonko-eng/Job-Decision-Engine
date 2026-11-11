@@ -11,6 +11,7 @@ export const LaneScopeSchema = z
     required_function_concepts: LaneConceptSetSchema.optional(),
     included_domain_concepts: LaneConceptSetSchema.optional(),
     excluded_domain_concepts: LaneConceptSetSchema.optional(),
+    required_sector_concepts: LaneConceptSetSchema.optional(),
   })
   .passthrough();
 
