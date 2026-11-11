@@ -19,6 +19,13 @@
               "type": "string",
               "format": "uuid"
             },
+            "entry_kind": {
+              "type": "string",
+              "enum": [
+                "CONFIRMATION",
+                "WITHDRAWAL"
+              ]
+            },
             "fact_type": {
               "type": "string",
               "enum": [
@@ -35,13 +42,20 @@
               "additionalProperties": {}
             },
             "source_type": {
-              "type": "string",
-              "enum": [
-                "RECRUITER_EMAIL",
-                "RECRUITER_CALL",
-                "EMPLOYER_CAREERS_PAGE",
-                "HIRING_MANAGER",
-                "OTHER"
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "RECRUITER_EMAIL",
+                    "RECRUITER_CALL",
+                    "EMPLOYER_CAREERS_PAGE",
+                    "HIRING_MANAGER",
+                    "OTHER"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "source_note": {
@@ -54,6 +68,85 @@
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "posting_assessment": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "FILLS_UNKNOWN",
+                    "MATCHES_POSTING",
+                    "CONFLICTS_WITH_POSTING"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "posting_evidence": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "UNKNOWN",
+                        "STATED",
+                        "CONFLICTING"
+                      ]
+                    },
+                    "value": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": {}
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "source": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "STRUCTURED_FIELD",
+                            "EXTRACTED_REQUIREMENT",
+                            "DESCRIPTION",
+                            "SOURCE_EVIDENCE"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "evidence": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "summary": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "value",
+                    "source",
+                    "evidence",
+                    "summary"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "supersedes_fact_id": {
@@ -78,11 +171,14 @@
           },
           "required": [
             "confirmed_fact_id",
+            "entry_kind",
             "fact_type",
             "fact_value",
             "source_type",
             "source_note",
             "source_url",
+            "posting_assessment",
+            "posting_evidence",
             "supersedes_fact_id",
             "recorded_by_user_id",
             "recorded_at"

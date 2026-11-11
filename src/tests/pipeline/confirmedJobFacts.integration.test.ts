@@ -7,7 +7,12 @@ import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { upsertLaneRevision } from "../../lanes/registry.js";
 import { loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
-import { loadJobVerificationChecks, recordConfirmedJobFact } from "../../services/jobConfirmedFactService.js";
+import {
+  loadConfirmedFactHistory,
+  loadJobVerificationChecks,
+  recordConfirmedJobFact,
+  withdrawConfirmedJobFact,
+} from "../../services/jobConfirmedFactService.js";
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
 import { runPipelineStageTaskWorker, type PipelineStageTaskType } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
@@ -51,7 +56,7 @@ let pool: pg.Pool | undefined;
 let client: pg.PoolClient | undefined;
 let schemaName = "";
 let context: WorkspaceContext | undefined;
-const jobs: Record<"hybrid" | "onsite", FixtureJob> = {} as never;
+const jobs: Record<"hybrid" | "onsite" | "statedRemote", FixtureJob> = {} as never;
 
 function db(): pg.PoolClient {
   if (!client) throw new Error("The integration test database client is not initialized.");
@@ -67,8 +72,11 @@ async function syntheticEmbedding(text: string): Promise<number[]> {
   return text.toLowerCase().includes("zebra") ? [1, 0, 0, 0] : [0, 1, 0, 0];
 }
 
-/** A Singapore job whose posting never states a work mode (stored as the SG policy assumption). */
-async function seedUnknownWorkModeJob(key: string): Promise<FixtureJob> {
+/**
+ * A Singapore job whose posting never states a work mode (stored as the SG policy assumption), or,
+ * with `statedRemote`, one whose description says it is fully remote.
+ */
+async function seedUnknownWorkModeJob(key: string, options: { statedRemote?: boolean } = {}): Promise<FixtureJob> {
   const workspaceId = ctx().workspaceId;
   const title = `Zebra Telemetry Platform Engineer ${key}`;
   const company = `Synthetic Zebra Confirmed Fixture ${key}`;
@@ -77,15 +85,16 @@ async function seedUnknownWorkModeJob(key: string): Promise<FixtureJob> {
     `About the role: zebra telemetry platform engineer (${key}) at a synthetic fixture employer in Singapore.`,
     "Responsibilities: build and operate zebra telemetry ingestion services, write software, review designs and support releases.",
     "Requirements: production platform engineering experience with streaming telemetry systems and Python.",
+    ...(options.statedRemote ? ["This position is fully remote within Singapore."] : []),
   ].join(" ");
   const canonical = await db().query<{ id: string }>(
     `INSERT INTO canonical_jobs (
        workspace_id, company_name, normalized_title, canonical_url,
        location, location_summary, workplace_type, employment_type,
        processing_status, processing_state
-     ) VALUES ($1, $2, $3, $4, 'Singapore', 'Singapore', 'ASSUMED_HYBRID', 'PERMANENT', 'RAW_STAGED', 'RAW_STAGED')
+     ) VALUES ($1, $2, $3, $4, 'Singapore', 'Singapore', $5, 'PERMANENT', 'RAW_STAGED', 'RAW_STAGED')
      RETURNING id`,
-    [workspaceId, company, title, url],
+    [workspaceId, company, title, url, options.statedRemote ? "UNKNOWN" : "ASSUMED_HYBRID"],
   );
   const canonicalJobId = canonical.rows[0].id;
   const contentHash = `zebra-confirmed-content-${key}`;
@@ -119,7 +128,7 @@ async function seedUnknownWorkModeJob(key: string): Promise<FixtureJob> {
     compensationRaw: null,
     descriptionText: description,
   });
-  expect(evidence.workability.work_mode.status).not.toBe("SUPPORTED");
+  if (!options.statedRemote) expect(evidence.workability.work_mode.status).not.toBe("SUPPORTED");
   await db().query(
     `UPDATE raw_job_observations SET normalized_evidence = $1::jsonb WHERE workspace_id = $2 AND id = $3`,
     [JSON.stringify(evidence), workspaceId, observationId],
@@ -301,8 +310,9 @@ describe.skipIf(skipReal)("employer-confirmed job facts through the gate, matchi
       [ctx().workspaceId, version.rows[0].id],
     );
 
-    jobs.hybrid = await seedUnknownWorkModeJob("hybrid");
-    jobs.onsite = await seedUnknownWorkModeJob("onsite");
+    jobs.hybrid = await seedUnknownWorkModeJob("verify-a");
+    jobs.onsite = await seedUnknownWorkModeJob("verify-b");
+    jobs.statedRemote = await seedUnknownWorkModeJob("stated-remote", { statedRemote: true });
 
     // The first pipeline pass: the gate cannot establish the work mode, so the job is routed and
     // matched as a workability verification and the decision is VERIFY.
@@ -339,7 +349,7 @@ describe.skipIf(skipReal)("employer-confirmed job facts through the gate, matchi
   });
 
   it("starts as a VERIFY job with an open work-mode check and no confirmed facts", async () => {
-    for (const job of Object.values(jobs)) {
+    for (const job of [jobs.hybrid, jobs.onsite]) {
       const state = await jobState(job);
       expect(state.gate_decision).toBe("NEEDS_VERIFICATION");
       expect(state.recommendation_eligibility).toBe("VERIFY");
@@ -394,10 +404,14 @@ describe.skipIf(skipReal)("employer-confirmed job facts through the gate, matchi
       .rejects.toThrow(/append-only/);
     // A second root for the same chain is refused by the database, not only by the service.
     await expect(db().query(
-      `INSERT INTO job_confirmed_facts (workspace_id, canonical_job_id, job_version_id, fact_type, fact_value, source_type, recorded_by_user_id)
-       VALUES ($1, $2, $3, 'WORK_MODE', '{"work_mode":"REMOTE"}'::jsonb, 'OTHER', $4)`,
+      `INSERT INTO job_confirmed_facts (workspace_id, canonical_job_id, job_version_id, fact_type, fact_value, source_type,
+                                        posting_assessment, posting_evidence, recorded_by_user_id)
+       VALUES ($1, $2, $3, 'WORK_MODE', '{"work_mode":"REMOTE"}'::jsonb, 'OTHER', 'FILLS_UNKNOWN', '{}'::jsonb, $4)`,
       [ctx().workspaceId, jobs.hybrid.canonicalJobId, jobs.hybrid.jobVersionId, ctx().userId],
     )).rejects.toThrow(/uq_job_confirmed_facts_chain_root/);
+    await expect(db().query("TRUNCATE job_confirmed_facts")).rejects.toThrow(/append-only/);
+    expect(corrected.fact.posting_assessment).toBe("FILLS_UNKNOWN");
+    expect(corrected.fact.posting_evidence).toMatchObject({ state: "UNKNOWN" });
 
     const { rows: tasks } = await db().query<{ task_key: string; status: string; payload: Record<string, any> }>(
       `SELECT task_key, status, payload FROM pipeline_tasks
@@ -483,10 +497,78 @@ describe.skipIf(skipReal)("employer-confirmed job facts through the gate, matchi
     expect(readinessCheck(state, "WORK_MODE")).toMatchObject({ status: "BLOCKED" });
   }, 120_000);
 
+  it("records a confirmation that contradicts a stated remote posting as a conflict and leaves the gate unchanged", async () => {
+    const before = await latestGate(jobs.statedRemote);
+    expect(before.decision).toBe("PASS");
+    const recorded = await confirm(jobs.statedRemote, {
+      fact_type: "WORK_MODE",
+      value: { work_mode: "ONSITE" },
+      source_type: "RECRUITER_EMAIL",
+    });
+    expect(recorded.fact.posting_assessment).toBe("CONFLICTS_WITH_POSTING");
+    expect(recorded.fact.posting_evidence).toMatchObject({ state: "STATED", value: { work_mode: "REMOTE" } });
+    await runStages(jobs.statedRemote);
+
+    const after = await latestGate(jobs.statedRemote);
+    expect(after.decision).toBe("PASS");
+    expect(after.rejection_codes).toEqual(before.rejection_codes);
+    expect(after.evidence_quotes.some((quote) => quote.startsWith("User confirmation not applied (source: recruiter email): work mode is on-site only; the posting states work mode remote"))).toBe(true);
+    expect((await jobState(jobs.statedRemote)).processing_state).not.toBe("HARD_REJECTED");
+
+    const checks = await loadJobVerificationChecks(db(), ctx(), jobs.statedRemote.canonicalJobId);
+    expect(checks?.conflicts).toEqual([
+      expect.objectContaining({
+        confirmed_fact_id: recorded.fact.confirmed_fact_id,
+        fact_type: "WORK_MODE",
+        confirmed_value: { work_mode: "ONSITE" },
+        confirmed_source_type: "RECRUITER_EMAIL",
+        // The first gate run's enrichment stored the description's remote statement as the workplace type.
+        posting_evidence: expect.objectContaining({ state: "STATED", source: "STRUCTURED_FIELD", summary: "work mode remote" }),
+      }),
+    ]);
+  }, 120_000);
+
+  it("withdrawing a confirmation restores the unknown fact and re-runs the gate, with the withdrawal audited", async () => {
+    const current = await loadJobVerificationChecks(db(), ctx(), jobs.hybrid.canonicalJobId);
+    const hybridFact = current?.confirmed_facts.find((fact) => fact.fact_type === "WORK_MODE");
+    expect(hybridFact).toBeDefined();
+    const withdrawn = await withdrawConfirmedJobFact(db(), ctx(), jobs.hybrid.canonicalJobId, hybridFact!.confirmed_fact_id, {
+      job_version_id: jobs.hybrid.jobVersionId,
+      reason: "Recorded for the wrong job",
+    });
+    expect(withdrawn.fact).toMatchObject({
+      entry_kind: "WITHDRAWAL",
+      fact_type: "WORK_MODE",
+      source_type: null,
+      source_note: "Recorded for the wrong job",
+      supersedes_fact_id: hybridFact!.confirmed_fact_id,
+      recorded_by_user_id: ctx().userId,
+    });
+    expect(withdrawn.rerun.taskKey).toContain(`confirmed-fact:${withdrawn.fact.confirmed_fact_id}`);
+    // A withdrawn fact cannot be withdrawn again.
+    await expect(withdrawConfirmedJobFact(db(), ctx(), jobs.hybrid.canonicalJobId, hybridFact!.confirmed_fact_id, {
+      job_version_id: jobs.hybrid.jobVersionId,
+      reason: null,
+    })).rejects.toMatchObject({ status: 409, code: "FACT_NOT_CURRENT" });
+
+    await runStages(jobs.hybrid);
+    const gate = await latestGate(jobs.hybrid);
+    expect(gate.decision).toBe("NEEDS_VERIFICATION");
+    expect(gate.rejection_codes).toContain("GATE_UNKNOWN_WORK_MODE");
+    expect((await jobState(jobs.hybrid)).recommendation_eligibility).toBe("VERIFY");
+
+    const checks = await loadJobVerificationChecks(db(), ctx(), jobs.hybrid.canonicalJobId);
+    expect(checks?.confirmed_facts).toEqual([]);
+    expect(checks?.open_checks).toContain("WORK_MODE");
+    expect(checks?.rerun_pending).toBe(false);
+    const history = await loadConfirmedFactHistory(db(), ctx(), jobs.hybrid.canonicalJobId, jobs.hybrid.jobVersionId);
+    expect(history.map((entry) => entry.entry_kind)).toEqual(["WITHDRAWAL", "CONFIRMATION", "CONFIRMATION"]);
+  }, 120_000);
+
   it("refuses a fact for a job version that is not the job's current version", async () => {
     const otherVersion = await db().query<{ id: string }>(
       `INSERT INTO job_versions (workspace_id, canonical_job_id, version_number, content_hash, description_text)
-       VALUES ($1, $2, 2, 'zebra-confirmed-content-hybrid-v2', 'A synthetic repost of the zebra telemetry role.')
+       VALUES ($1, $2, 2, 'zebra-confirmed-content-verify-a-v2', 'A synthetic repost of the zebra telemetry role.')
        RETURNING id`,
       [ctx().workspaceId, jobs.hybrid.canonicalJobId],
     );
@@ -498,8 +580,9 @@ describe.skipIf(skipReal)("employer-confirmed job facts through the gate, matchi
     }))).rejects.toMatchObject({ status: 409, code: "JOB_VERSION_NOT_CURRENT" });
     // The database itself refuses a fact whose job version belongs to another job.
     await expect(db().query(
-      `INSERT INTO job_confirmed_facts (workspace_id, canonical_job_id, job_version_id, fact_type, fact_value, source_type, recorded_by_user_id)
-       VALUES ($1, $2, $3, 'TRAVEL_PCT', '{"travel_pct_max":5}'::jsonb, 'OTHER', $4)`,
+      `INSERT INTO job_confirmed_facts (workspace_id, canonical_job_id, job_version_id, fact_type, fact_value, source_type,
+                                        posting_assessment, posting_evidence, recorded_by_user_id)
+       VALUES ($1, $2, $3, 'TRAVEL_PCT', '{"travel_pct_max":5}'::jsonb, 'OTHER', 'FILLS_UNKNOWN', '{}'::jsonb, $4)`,
       [ctx().workspaceId, jobs.onsite.canonicalJobId, otherVersion.rows[0].id, ctx().userId],
     )).rejects.toThrow(/does not belong/);
   });

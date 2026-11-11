@@ -32,9 +32,33 @@ CHECKS = {
             "source_type": "RECRUITER_CALL",
             "source_note": "**bold** <script>alert(1)</script> [link](javascript:alert(1))",
             "source_url": None,
+            "entry_kind": "CONFIRMATION",
+            "posting_assessment": "FILLS_UNKNOWN",
+            "posting_evidence": {
+                "state": "UNKNOWN",
+                "value": None,
+                "source": None,
+                "evidence": None,
+                "summary": "unknown",
+            },
             "supersedes_fact_id": None,
             "recorded_by_user_id": "c0000000-0000-4000-8000-000000000002",
             "recorded_at": "2026-11-09T08:00:00.000Z",
+        }
+    ],
+    "conflicts": [
+        {
+            "confirmed_fact_id": "c3000000-0000-4000-8000-000000000002",
+            "fact_type": "EMPLOYMENT_TYPE",
+            "confirmed_value": {"employment_type": "PERMANENT"},
+            "confirmed_source_type": "RECRUITER_EMAIL",
+            "posting_evidence": {
+                "state": "STATED",
+                "value": {"employment_type": "CONTRACT"},
+                "source": "DESCRIPTION",
+                "evidence": "12 month <b>contract</b> role",
+                "summary": "contract employment",
+            },
         }
     ],
     "confirmed_fact_history_count": 1,

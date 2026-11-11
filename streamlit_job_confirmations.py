@@ -194,7 +194,43 @@ def confirmed_fact_line(fact: Mapping[str, object]) -> str:
     note = " ".join(str(fact.get("source_note") or "").split())
     if note:
         line += f" - {note}"
+    assessment = ASSESSMENT_LABELS.get(str(fact.get("posting_assessment")))
+    if assessment:
+        line += f" [{assessment}]"
     return line
+
+
+ASSESSMENT_LABELS = {
+    "FILLS_UNKNOWN": "fills a fact the posting does not state",
+    "MATCHES_POSTING": "agrees with the posting",
+    "CONFLICTS_WITH_POSTING": "conflicts with the posting, not applied",
+}
+POSTING_SOURCE_LABELS = {
+    "STRUCTURED_FIELD": "structured field",
+    "EXTRACTED_REQUIREMENT": "extracted requirement",
+    "DESCRIPTION": "description",
+    "SOURCE_EVIDENCE": "source evidence",
+}
+
+
+def conflict_line(conflict: Mapping[str, object]) -> str:
+    """Both sides of a confirmation that contradicts the posting, as plain text."""
+    fact_type = conflict.get("fact_type")
+    label = FACT_TYPE_LABELS.get(str(fact_type), str(fact_type))
+    source = SOURCE_TYPE_LABELS.get(str(conflict.get("confirmed_source_type")), "Other")
+    posting = conflict.get("posting_evidence")
+    posting = posting if isinstance(posting, Mapping) else {}
+    posting_source = POSTING_SOURCE_LABELS.get(str(posting.get("source")), "posting")
+    line = (
+        f"Conflict - {label}: you recorded "
+        f"{describe_fact_value(fact_type, conflict.get('confirmed_value'))} (source: {source}); "
+        f"the posting states {' '.join(str(posting.get('summary') or 'something else').split())} "
+        f"(posting {posting_source})"
+    )
+    evidence = " ".join(str(posting.get("evidence") or "").split())
+    if evidence:
+        line += f': "{evidence[:200]}"'
+    return line + ". The posting wins; the confirmation is not applied."
 
 
 def open_check_labels(checks: Mapping[str, object] | None) -> list[str]:
@@ -219,7 +255,7 @@ def checks_from_response(response: Mapping[str, object]) -> Mapping[str, object]
         raise TypeError(
             "The confirmed-facts response has no verification checks object."
         )
-    for field in ("open_checks", "confirmed_facts"):
+    for field in ("open_checks", "confirmed_facts", "conflicts"):
         if not isinstance(checks.get(field), list):
             raise TypeError(f"The verification checks are missing '{field}'.")
     return checks
@@ -321,7 +357,8 @@ def render_employer_confirmation(
     try:
         checks = _load_checks(api_request, job, key_prefix)
     except (RuntimeError, TypeError, ValueError) as error:
-        st.error(f"Could not load this job's verification checks: {error}")
+        st.error("Could not load this job's verification checks.")
+        st.text(str(error))
         return
 
     if checks is None:
@@ -346,6 +383,9 @@ def render_employer_confirmation(
         st.text("Employer-confirmed facts:")
         for fact in facts:
             st.text(f"- {confirmed_fact_line(fact)}")
+    conflicts = [c for c in checks.get("conflicts", []) or [] if isinstance(c, Mapping)]
+    for conflict in conflicts:
+        st.text(conflict_line(conflict))
     if checks.get("rerun_pending"):
         st.caption("A confirmation is waiting for the pipeline to re-check this job.")
 
@@ -381,6 +421,9 @@ def render_employer_confirmation(
         )
         submitted = st.form_submit_button("Save confirmation")
 
+    if facts:
+        _render_withdrawal(job, api_request, key_prefix, facts)
+
     if not submitted:
         return
     body, error = build_confirmed_fact_request(
@@ -399,12 +442,77 @@ def render_employer_confirmation(
             "POST", confirmed_facts_path(job.get("canonical_job_id")), body=body
         )
     except RuntimeError as failure:
-        st.error(f"The confirmation was not saved: {failure}")
+        st.error("The confirmation was not saved.")
+        st.text(str(failure))
         return
     st.session_state.pop(_state_key(key_prefix, "checks"), None)
     superseded = isinstance(response, Mapping) and response.get("superseded_fact_id")
+    fact = response.get("fact") if isinstance(response, Mapping) else None
+    assessment = fact.get("posting_assessment") if isinstance(fact, Mapping) else None
+    if assessment == "CONFLICTS_WITH_POSTING":
+        st.warning(
+            "Saved, but the posting states a different value, so the pipeline keeps the "
+            "posting's value. The conflict is listed above after a reload."
+        )
+        return
     st.success(
         "Confirmation saved"
         + (" (it replaces the earlier one)" if superseded else "")
         + ". The pipeline will re-check this job on its next run."
+    )
+
+
+def withdraw_path(canonical_job_id: object, confirmed_fact_id: object) -> str:
+    return f"{confirmed_facts_path(canonical_job_id)}/{confirmed_fact_id}/withdraw"
+
+
+def _render_withdrawal(job, api_request, key_prefix, facts) -> None:
+    """Withdraw a recorded confirmation; the fact returns to "no confirmation"."""
+    options = [
+        str(fact.get("confirmed_fact_id"))
+        for fact in facts
+        if fact.get("confirmed_fact_id")
+    ]
+    if not options:
+        return
+    labels = {
+        str(fact.get("confirmed_fact_id")): confirmed_fact_line(fact) for fact in facts
+    }
+    with st.form(key=_state_key(key_prefix, "withdraw_form"), clear_on_submit=False):
+        chosen = st.selectbox(
+            "Withdraw a confirmation",
+            options,
+            format_func=lambda fact_id: labels.get(fact_id, fact_id)[:120],
+            key=_state_key(key_prefix, "withdraw_choice"),
+        )
+        reason = st.text_input(
+            "Reason (optional)",
+            max_chars=MAX_NOTE_LENGTH,
+            key=_state_key(key_prefix, "withdraw_reason"),
+        )
+        withdraw = st.form_submit_button("Withdraw confirmation")
+    if not withdraw:
+        return
+    reason = str(reason or "").strip()
+    if len(reason) > MAX_NOTE_LENGTH or _has_control_characters(reason):
+        st.error(
+            f"The reason must be plain text of at most {MAX_NOTE_LENGTH} characters."
+        )
+        return
+    try:
+        api_request(
+            "POST",
+            withdraw_path(job.get("canonical_job_id"), chosen),
+            body={
+                "job_version_id": str(job.get("job_version_id")),
+                "reason": reason or None,
+            },
+        )
+    except RuntimeError as failure:
+        st.error("The confirmation was not withdrawn.")
+        st.text(str(failure))
+        return
+    st.session_state.pop(_state_key(key_prefix, "checks"), None)
+    st.success(
+        "Confirmation withdrawn. The pipeline will re-check this job on its next run."
     )

@@ -3,17 +3,21 @@
  *
  * The user records what the employer told them about one exact job version (migration 110,
  * `job_confirmed_facts`). This module reads the current fact per type for that version and merges it
- * into the inputs of the deterministic hard gate and the readiness assessment:
+ * into the inputs of the deterministic hard gate:
  *
- * - A confirmed fact fills a fact the posting leaves unknown. It never replaces a fact the posting
- *   states (structured field, extracted requirement or description), and it is never inferred.
- * - Every applied fact adds an evidence line "User-confirmed (source: <source>): <fact>", so a pass or
- *   a rejection that rests on it is explained by it.
- * - A confirmed fact can lead to a rejection (for example a confirmed on-site role without an
- *   exception); the gate rules decide, exactly as for posting evidence.
+ * - A confirmed fact is applied only when the posting leaves that fact unknown in every kind of
+ *   posting evidence (`assessPostingFacts`: structured fields, extracted requirements, the
+ *   description through the gate's own extractors) AND the assessment stored when the fact was
+ *   recorded (which also saw the normalized source evidence) says it fills an unknown. A fact the
+ *   posting states always wins; a contradicting confirmation is reported as a conflict, not applied.
+ * - Every applied fact adds "User-confirmed (source: <source>): <fact>" to the gate evidence; every
+ *   conflict adds "User confirmation not applied ...: the posting states ...". The gate rules decide,
+ *   so a confirmed on-site role without an exception is a deterministic rejection.
+ * - The gate records the ids it applied in `workability_facts.confirmed_fact_ids`; readiness uses
+ *   exactly those facts, and still defers to SUPPORTED or CONFLICTING source evidence.
  *
- * The gate integration is one provider call (`applyConfirmedFactsToGateInput`) and one evidence merge
- * (`withConfirmedFactEvidence`) in `runHardGates`, so gate rule changes stay independent of it.
+ * The gate integration is one provider call (`applyConfirmedFactsToGateInput`) and one result merge
+ * (`withConfirmedFactEvidence`), so gate rule changes stay independent of it.
  */
 import crypto from "node:crypto";
 import type pg from "pg";
@@ -24,10 +28,17 @@ import {
   type ConfirmedFactSourceType,
   type ConfirmedFactType,
 } from "../contracts/jobConfirmedFacts.js";
-import { extractHybridAttendance, extractTravelRequirement, type GateResult } from "../services/criteria.js";
+import type { GateResult } from "../services/criteria.js";
 import type { WorkabilityReadinessResult } from "../eligibility/workabilityReadiness.js";
-import { normalizeWorkMode } from "./workModeNormalizer.js";
-import { extractTerritories } from "./workabilityPolicy.js";
+import { extractTerritories, type WorkabilityPolicy } from "./workabilityPolicy.js";
+import {
+  assessConfirmedValue,
+  assessPostingFacts,
+  describePostingValue,
+  type ConfirmedFactAssessmentOutcome,
+  type PostingFactEvidence,
+  type PostingRequirementRow,
+} from "./postingStatedFacts.js";
 
 type QueryClient = Pick<pg.PoolClient, "query">;
 
@@ -47,6 +58,8 @@ interface ConfirmedFactBase<T extends ConfirmedFactType, V> {
   readonly factType: T;
   readonly value: V;
   readonly sourceType: ConfirmedFactSourceType;
+  /** The comparison with the posting stored when the fact was recorded. */
+  readonly postingAssessment: ConfirmedFactAssessmentOutcome;
   readonly recordedAt: string;
 }
 
@@ -54,9 +67,12 @@ interface ConfirmedFactRow {
   confirmed_fact_id: string;
   fact_type: string;
   fact_value: unknown;
-  source_type: string;
+  source_type: string | null;
+  posting_assessment: string | null;
   recorded_at: Date | string;
 }
+
+const ASSESSMENTS = new Set<string>(["FILLS_UNKNOWN", "MATCHES_POSTING", "CONFLICTS_WITH_POSTING"]);
 
 /** Validate a stored row. A row that does not match its type's schema is an error, not a skip. */
 export function parseConfirmedFactRow(row: ConfirmedFactRow): ConfirmedJobFact {
@@ -67,8 +83,11 @@ export function parseConfirmedFactRow(row: ConfirmedFactRow): ConfirmedJobFact {
   if (!parsed.success) {
     throw new Error(`Confirmed fact ${row.confirmed_fact_id} has an invalid ${row.fact_type} value.`);
   }
-  if (!(row.source_type in CONFIRMED_FACT_SOURCE_LABELS)) {
+  if (!row.source_type || !(row.source_type in CONFIRMED_FACT_SOURCE_LABELS)) {
     throw new Error(`Confirmed fact ${row.confirmed_fact_id} has unsupported source_type ${row.source_type}.`);
+  }
+  if (!row.posting_assessment || !ASSESSMENTS.has(row.posting_assessment)) {
+    throw new Error(`Confirmed fact ${row.confirmed_fact_id} has unsupported posting_assessment ${row.posting_assessment}.`);
   }
   const recordedAt = row.recorded_at instanceof Date ? row.recorded_at.toISOString() : String(row.recorded_at);
   return {
@@ -76,18 +95,19 @@ export function parseConfirmedFactRow(row: ConfirmedFactRow): ConfirmedJobFact {
     factType,
     value: parsed.data,
     sourceType: row.source_type as ConfirmedFactSourceType,
+    postingAssessment: row.posting_assessment as ConfirmedFactAssessmentOutcome,
     recordedAt,
   } as ConfirmedJobFact;
 }
 
-/** The current confirmed fact per type for exactly this job version. */
+/** The current confirmed fact per type for exactly this job version (withdrawn facts excluded). */
 export async function loadCurrentConfirmedJobFacts(
   client: QueryClient,
   workspaceId: string,
   jobVersionId: string,
 ): Promise<ConfirmedJobFact[]> {
   const { rows } = await client.query<ConfirmedFactRow>(
-    `SELECT confirmed_fact_id, fact_type, fact_value, source_type, recorded_at
+    `SELECT confirmed_fact_id, fact_type, fact_value, source_type, posting_assessment, recorded_at
      FROM v_job_confirmed_facts_current
      WHERE workspace_id = $1 AND job_version_id = $2
      ORDER BY fact_type ASC`,
@@ -141,12 +161,18 @@ export function confirmedFactEvidenceQuote(fact: ConfirmedJobFact): string {
   return `User-confirmed (source: ${CONFIRMED_FACT_SOURCE_LABELS[fact.sourceType]}): ${describeConfirmedFact(fact)}`;
 }
 
+/** The gate evidence line for a confirmation that contradicts the posting and was not applied. */
+export function confirmedFactConflictQuote(fact: ConfirmedJobFact, posting: PostingFactEvidence): string {
+  const where = posting.source ? posting.source.toLowerCase().replaceAll("_", " ") : "posting";
+  return `User confirmation not applied (source: ${CONFIRMED_FACT_SOURCE_LABELS[fact.sourceType]}): ${describeConfirmedFact(fact)}; the posting states ${describePostingValue(posting)} (${where})`;
+}
+
 export function confirmedFactEvidenceKey(fact: ConfirmedJobFact): string {
   return `user_confirmed:${fact.factType}:${fact.id}`;
 }
 
 /** Same shape as the hard gate's persisted requirement rows. */
-export interface GateRequirementRow {
+export interface GateRequirementRow extends PostingRequirementRow {
   requirement_key: string;
   requirement_type: string;
   importance?: string;
@@ -161,6 +187,12 @@ export interface GateJobInput {
   readonly location: string | null | undefined;
   readonly sourceLocation: string | null | undefined;
   readonly description: string | null | undefined;
+  readonly companyName?: string | null | undefined;
+}
+
+export interface ConfirmedFactConflict {
+  readonly fact: ConfirmedJobFact;
+  readonly posting: PostingFactEvidence;
 }
 
 export interface ConfirmedGateInput {
@@ -169,48 +201,12 @@ export interface ConfirmedGateInput {
   readonly employmentType: string | null | undefined;
   readonly location: string | null | undefined;
   readonly sourceLocation: string | null | undefined;
-  /** Posting requirements with unknown-valued rows of a filled type replaced by the confirmed fact. */
+  /** Posting requirements plus one requirement row per applied office-days, travel, on-call or work-mode fact. */
   readonly requirements: GateRequirementRow[];
   /** Facts that filled an unknown, in fact-type order. */
   readonly applied: ConfirmedJobFact[];
-}
-
-function numeric(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
-  return null;
-}
-
-function requirementText(requirement: GateRequirementRow): string {
-  return requirement.quote_text || requirement.requirement_text || "";
-}
-
-function requirementOfficeDays(requirement: GateRequirementRow): number | null {
-  for (const key of ["office_days_per_week", "max_office_days_per_week", "office_days_max", "office_days_min"]) {
-    const value = numeric(requirement.structured_value?.[key]);
-    if (value !== null) return value;
-  }
-  return extractHybridAttendance(requirementText(requirement))?.office_days_max ?? null;
-}
-
-function requirementTravelPct(requirement: GateRequirementRow): number | null {
-  for (const key of ["max_travel_pct", "travel_pct_max", "travel_percentage", "maximum_travel_pct"]) {
-    const value = numeric(requirement.structured_value?.[key]);
-    if (value !== null) return value;
-  }
-  return extractTravelRequirement(requirementText(requirement))?.max_pct ?? null;
-}
-
-/** The posting states a work mode when a structured field or extracted requirement names one. */
-export function postingStatesWorkMode(
-  workplaceType: string | null | undefined,
-  requirements: readonly GateRequirementRow[],
-): boolean {
-  const raw = String(workplaceType ?? "").trim().toUpperCase();
-  // ASSUMED_HYBRID is a policy assumption, not employer evidence.
-  if (raw !== "ASSUMED_HYBRID" && normalizeWorkMode(workplaceType) !== "UNKNOWN") return true;
-  return requirements.some((requirement) =>
-    requirement.requirement_type === "WORK_MODE" && normalizeWorkMode(requirementText(requirement)) !== "UNKNOWN");
+  /** Confirmations that contradict the posting; never applied. */
+  readonly conflicts: ConfirmedFactConflict[];
 }
 
 function syntheticRequirement(
@@ -230,96 +226,123 @@ function syntheticRequirement(
 }
 
 /**
- * Merge the current confirmed facts into the hard-gate inputs. Facts fill only unknowns; a fact the
- * posting states wins and the confirmed fact is left unapplied.
+ * Merge the current confirmed facts into the hard-gate inputs. A fact is applied only when it fills
+ * a fact the posting leaves unknown, both now and when it was recorded.
  */
 export function applyConfirmedFactsToGateInput(
   job: GateJobInput,
   requirements: readonly GateRequirementRow[],
   facts: readonly ConfirmedJobFact[],
+  policy: WorkabilityPolicy,
 ): ConfirmedGateInput {
   let workplaceType = job.workplaceType;
   let employmentType = job.employmentType;
   let location = job.location;
   let sourceLocation = job.sourceLocation;
-  let merged = [...requirements];
+  const merged = [...requirements];
   const applied: ConfirmedJobFact[] = [];
-  const description = String(job.description ?? "");
-
-  const workMode = factOf(facts, "WORK_MODE");
-  if (workMode && !postingStatesWorkMode(job.workplaceType, requirements)) {
-    workplaceType = workMode.value.work_mode;
-    merged = merged.filter((requirement) => requirement.requirement_type !== "WORK_MODE");
-    merged.push(syntheticRequirement(workMode, "WORK_MODE", { work_mode: workMode.value.work_mode }));
-    applied.push(workMode);
+  const conflicts: ConfirmedFactConflict[] = [];
+  if (facts.length === 0) {
+    return { workplaceType, employmentType, location, sourceLocation, requirements: merged, applied, conflicts };
   }
 
-  const officeDays = factOf(facts, "OFFICE_DAYS");
-  const statedOfficeDays = requirements.some((requirement) =>
-    requirement.requirement_type === "OFFICE_DAYS" && requirementOfficeDays(requirement) !== null)
-    || requirements.some((requirement) =>
-      requirement.requirement_type === "WORK_MODE" && extractHybridAttendance(requirementText(requirement)) !== null)
-    || extractHybridAttendance(description) !== null;
-  if (officeDays && !statedOfficeDays) {
-    merged = merged.filter((requirement) => requirement.requirement_type !== "OFFICE_DAYS");
-    merged.push(syntheticRequirement(officeDays, "OFFICE_DAYS", {
-      office_days_per_week: officeDays.value.office_days_max,
-      office_days_min: officeDays.value.office_days_min,
-      office_days_max: officeDays.value.office_days_max,
-    }));
-    applied.push(officeDays);
+  const posting = assessPostingFacts({
+    workplaceType: job.workplaceType,
+    employmentType: job.employmentType,
+    location: job.location,
+    sourceLocation: job.sourceLocation,
+    description: job.description,
+    companyName: job.companyName,
+    requirements,
+    policy,
+  });
+
+  for (const fact of [...facts].sort((left, right) => left.factType.localeCompare(right.factType))) {
+    const now = assessConfirmedValue(fact.factType, fact.value as Record<string, unknown>, posting[fact.factType]);
+    if (now === "CONFLICTS_WITH_POSTING" || fact.postingAssessment === "CONFLICTS_WITH_POSTING") {
+      conflicts.push({ fact, posting: posting[fact.factType] });
+      continue;
+    }
+    if (now !== "FILLS_UNKNOWN" || fact.postingAssessment !== "FILLS_UNKNOWN") continue;
+
+    switch (fact.factType) {
+      case "WORK_MODE":
+        workplaceType = fact.value.work_mode;
+        merged.push(syntheticRequirement(fact, "WORK_MODE", { work_mode: fact.value.work_mode }));
+        break;
+      case "OFFICE_DAYS":
+        merged.push(syntheticRequirement(fact, "OFFICE_DAYS", {
+          office_days_per_week: fact.value.office_days_max,
+          office_days_min: fact.value.office_days_min,
+          office_days_max: fact.value.office_days_max,
+        }));
+        break;
+      case "TRAVEL_PCT":
+        merged.push(syntheticRequirement(fact, "TRAVEL", { max_travel_pct: fact.value.travel_pct_max }));
+        break;
+      case "ON_CALL":
+        // Only a required on-call is a gate input; "no on-call" is recorded evidence.
+        if (fact.value.on_call_required) merged.push(syntheticRequirement(fact, "ON_CALL", { on_call_required: true }));
+        break;
+      case "EMPLOYMENT_TYPE":
+        employmentType = fact.value.employment_type;
+        break;
+      case "LOCATION":
+        if (fact.value.territories.length === 0) continue;
+        if (extractTerritories(job.location ?? "").length === 0) location = fact.value.location;
+        if (extractTerritories(job.sourceLocation ?? "").length === 0) sourceLocation = fact.value.location;
+        break;
+    }
+    applied.push(fact);
   }
 
-  const travel = factOf(facts, "TRAVEL_PCT");
-  const statedTravel = requirements.some((requirement) =>
-    requirement.requirement_type === "TRAVEL" && requirementTravelPct(requirement) !== null)
-    || extractTravelRequirement(description) !== null;
-  if (travel && !statedTravel) {
-    merged = merged.filter((requirement) => requirement.requirement_type !== "TRAVEL");
-    merged.push(syntheticRequirement(travel, "TRAVEL", { max_travel_pct: travel.value.travel_pct_max }));
-    applied.push(travel);
-  }
-
-  // Only a required on-call is a gate input; "no on-call" leaves the posting as it is.
-  const onCall = factOf(facts, "ON_CALL");
-  if (onCall?.value.on_call_required && !requirements.some((requirement) => requirement.requirement_type === "ON_CALL")) {
-    merged.push(syntheticRequirement(onCall, "ON_CALL", { on_call_required: true }));
-    applied.push(onCall);
-  }
-
-  const employment = factOf(facts, "EMPLOYMENT_TYPE");
-  const statedEmployment = ["PERMANENT", "CONTRACT", "FULL_TIME", "FULL-TIME", "FTE"].some((value) =>
-    String(job.employmentType ?? "").trim().toUpperCase().includes(value))
-    || requirements.some((requirement) => requirement.requirement_type === "EMPLOYMENT_TYPE");
-  if (employment && !statedEmployment) {
-    employmentType = employment.value.employment_type;
-    applied.push(employment);
-  }
-
-  const confirmedLocation = factOf(facts, "LOCATION");
-  if (confirmedLocation && confirmedLocation.value.territories.length > 0) {
-    const fillLocation = extractTerritories(job.location ?? "").length === 0;
-    const fillSourceLocation = extractTerritories(job.sourceLocation ?? "").length === 0;
-    if (fillLocation) location = confirmedLocation.value.location;
-    if (fillSourceLocation) sourceLocation = confirmedLocation.value.location;
-    if (fillLocation || fillSourceLocation) applied.push(confirmedLocation);
-  }
-
-  return { workplaceType, employmentType, location, sourceLocation, requirements: merged, applied };
+  return { workplaceType, employmentType, location, sourceLocation, requirements: merged, applied, conflicts };
 }
 
-/** Add one "User-confirmed (source: …)" evidence line per applied fact to the combined gate result. */
-export function withConfirmedFactEvidence(result: GateResult, applied: readonly ConfirmedJobFact[]): GateResult {
-  if (applied.length === 0) return result;
+export type ConfirmedGateResult = GateResult & {
+  workability_facts: GateResult["workability_facts"] & { confirmed_fact_ids?: string[] };
+};
+
+/**
+ * Add one evidence line per applied fact and per conflict to the combined gate result, and record
+ * the applied ids for readiness. Without confirmed facts the result is returned unchanged.
+ */
+export function withConfirmedFactEvidence(
+  result: GateResult,
+  input: Pick<ConfirmedGateInput, "applied" | "conflicts">,
+): ConfirmedGateResult {
+  if (input.applied.length === 0 && input.conflicts.length === 0) return result;
   const evidence = [...result.evidence_quotes];
-  for (const fact of applied) {
+  for (const fact of input.applied) {
     const quote = confirmedFactEvidenceQuote(fact);
     if (!evidence.includes(quote)) evidence.push(quote);
   }
-  return { ...result, evidence_quotes: evidence };
+  for (const conflict of input.conflicts) {
+    const quote = confirmedFactConflictQuote(conflict.fact, conflict.posting);
+    if (!evidence.includes(quote)) evidence.push(quote);
+  }
+  return {
+    ...result,
+    evidence_quotes: evidence,
+    workability_facts: {
+      ...result.workability_facts,
+      ...(input.applied.length > 0 ? { confirmed_fact_ids: input.applied.map((fact) => fact.id) } : {}),
+    },
+  };
 }
 
 // --- Readiness overlay -------------------------------------------------------------------------
+
+/** The current facts the latest gate decision applied (ids stored in its workability facts). */
+export function gateAppliedConfirmedFacts(
+  facts: readonly ConfirmedJobFact[],
+  workabilityFacts: Record<string, unknown>,
+): ConfirmedJobFact[] {
+  const ids = Array.isArray(workabilityFacts.confirmed_fact_ids)
+    ? new Set(workabilityFacts.confirmed_fact_ids.map(String))
+    : new Set<string>();
+  return facts.filter((fact) => ids.has(fact.id) && fact.postingAssessment === "FILLS_UNKNOWN");
+}
 
 export interface ConfirmedWorkModeEvidence {
   readonly status: string;
@@ -335,19 +358,19 @@ export interface ConfirmedTravelEvidence {
   readonly evidence: readonly { readonly evidence_key: string }[];
 }
 
-/**
- * Work-mode readiness evidence: the source evidence when it is SUPPORTED or the posting states a
- * mode; otherwise the confirmed mode (with confirmed office days when present).
- */
+function sourceStates(status: string | undefined): boolean {
+  return status === "SUPPORTED" || status === "CONFLICTING";
+}
+
+/** Work-mode readiness evidence: SUPPORTED or CONFLICTING source evidence wins; otherwise the applied fact. */
 export function confirmedWorkModeEvidence<T extends ConfirmedWorkModeEvidence>(
   sourceEvidence: T | null,
-  workplaceType: string | null | undefined,
-  facts: readonly ConfirmedJobFact[],
+  applied: readonly ConfirmedJobFact[],
 ): T | ConfirmedWorkModeEvidence | null {
-  if (sourceEvidence?.status === "SUPPORTED") return sourceEvidence;
-  const workMode = factOf(facts, "WORK_MODE");
-  if (!workMode || postingStatesWorkMode(workplaceType, [])) return sourceEvidence;
-  const officeDays = factOf(facts, "OFFICE_DAYS");
+  if (sourceStates(sourceEvidence?.status)) return sourceEvidence;
+  const workMode = factOf(applied, "WORK_MODE");
+  if (!workMode) return sourceEvidence;
+  const officeDays = factOf(applied, "OFFICE_DAYS");
   const mode = workMode.value.work_mode;
   return {
     status: "SUPPORTED",
@@ -357,15 +380,14 @@ export function confirmedWorkModeEvidence<T extends ConfirmedWorkModeEvidence>(
   };
 }
 
-/** Travel readiness evidence: a SUPPORTED source value wins; otherwise the confirmed maximum. */
+/** Travel readiness evidence: SUPPORTED or CONFLICTING source evidence wins; otherwise the applied maximum. */
 export function confirmedTravelEvidence<T extends ConfirmedTravelEvidence>(
   sourceEvidence: T | null,
-  description: string,
-  facts: readonly ConfirmedJobFact[],
+  applied: readonly ConfirmedJobFact[],
 ): T | ConfirmedTravelEvidence | null {
-  if (sourceEvidence?.status === "SUPPORTED") return sourceEvidence;
-  const travel = factOf(facts, "TRAVEL_PCT");
-  if (!travel || extractTravelRequirement(description) !== null) return sourceEvidence;
+  if (sourceStates(sourceEvidence?.status)) return sourceEvidence;
+  const travel = factOf(applied, "TRAVEL_PCT");
+  if (!travel) return sourceEvidence;
   return {
     status: "SUPPORTED",
     minimum: null,
@@ -374,29 +396,32 @@ export function confirmedTravelEvidence<T extends ConfirmedTravelEvidence>(
   };
 }
 
-/** The confirmed employment type when the gate facts leave it unknown. */
+/**
+ * The employment type readiness should assess. Only an empty or UNKNOWN value is filled; a stated
+ * non-standard type (for example INTERNSHIP) stays as it is.
+ */
 export function confirmedEmploymentType(
   current: string,
-  facts: readonly ConfirmedJobFact[],
+  applied: readonly ConfirmedJobFact[],
 ): { readonly employmentType: string; readonly fact: ConfirmedJobFact | null } {
-  if (current === "PERMANENT" || current === "CONTRACT") return { employmentType: current, fact: null };
-  const employment = factOf(facts, "EMPLOYMENT_TYPE");
-  return employment
-    ? { employmentType: employment.value.employment_type, fact: employment }
-    : { employmentType: current, fact: null };
+  const employment = factOf(applied, "EMPLOYMENT_TYPE");
+  if (!employment) return { employmentType: current, fact: null };
+  if (current === employment.value.employment_type) return { employmentType: current, fact: employment };
+  if (current === "" || current === "UNKNOWN") return { employmentType: employment.value.employment_type, fact: employment };
+  return { employmentType: current, fact: null };
 }
 
 /**
- * Work-authorization readiness: an unresolved hiring territory (no posting evidence) is settled by a
- * confirmed location. Territories inside the authorized regions are MET; any other is BLOCKED.
+ * Work-authorization readiness: an unresolved hiring territory (no posting evidence) is settled by an
+ * applied location. Territories inside the authorized regions are MET; any other is BLOCKED.
  */
 export function withConfirmedTerritory(
   result: WorkabilityReadinessResult,
-  facts: readonly ConfirmedJobFact[],
+  applied: readonly ConfirmedJobFact[],
   authorizedRegions: readonly string[],
 ): WorkabilityReadinessResult {
   if (result.status !== "NEEDS_VERIFICATION" || result.reasonCode !== "WORK_AUTHORIZATION_UNKNOWN") return result;
-  const location = factOf(facts, "LOCATION");
+  const location = factOf(applied, "LOCATION");
   if (!location || location.value.territories.length === 0) return result;
   const authorized = new Set(authorizedRegions);
   const outside = location.value.territories.filter((territory) => !authorized.has(territory));
@@ -420,10 +445,8 @@ export function withConfirmedTerritory(
 /** The work mode the decision's evidence-completeness score should see. */
 export function confirmedWorkplaceType(
   workplaceType: string | null | undefined,
-  facts: readonly ConfirmedJobFact[],
+  applied: readonly ConfirmedJobFact[],
 ): string | null | undefined {
-  const workMode = factOf(facts, "WORK_MODE");
-  if (!workMode || postingStatesWorkMode(workplaceType, [])) return workplaceType;
-  return workMode.value.work_mode;
+  const workMode = factOf(applied, "WORK_MODE");
+  return workMode ? workMode.value.work_mode : workplaceType;
 }
-

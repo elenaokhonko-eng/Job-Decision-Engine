@@ -958,9 +958,11 @@ export async function runHardGates(
             location: rawJobAdapter.location,
             sourceLocation: job.source_location_raw ?? null,
             description: rawJobAdapter.raw_description,
+            companyName: rawJobAdapter.company_name,
           },
           requirementRows as PersistedRequirement[],
           await loadCurrentConfirmedJobFacts(client, ctx.workspaceId, job.job_version_id),
+          policyResolution.policy,
         );
         rawJobAdapter.workplace_type = confirmedInput.workplaceType;
         rawJobAdapter.employment_type = confirmedInput.employmentType;
@@ -1054,7 +1056,7 @@ export async function runHardGates(
         }, territoryScope);
         const gateResult = withConfirmedFactEvidence(
           combineGateResults([globalGateResult, persistedGateResult, exactProfileGateResult, remoteTerritoryGateResult]),
-          confirmedInput.applied,
+          confirmedInput,
         );
 
         let processingStatus: string;

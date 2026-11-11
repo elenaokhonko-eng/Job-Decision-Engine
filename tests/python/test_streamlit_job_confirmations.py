@@ -8,6 +8,7 @@ from streamlit.testing.v1 import AppTest
 from streamlit_job_confirmations import (
     build_confirmed_fact_request,
     checks_from_response,
+    conflict_line,
     confirmed_fact_line,
     is_safe_source_url,
     needs_employer_confirmation,
@@ -235,3 +236,58 @@ def test_form_needs_the_api_and_a_matching_job_version():
     _open_form(stale.run(timeout=20))
     assert any("newer version" in warning.value for warning in stale.warning)
     assert not stale.button
+
+
+def test_conflict_line_shows_both_sides_as_plain_text():
+    line = conflict_line(
+        {
+            "fact_type": "WORK_MODE",
+            "confirmed_value": {"work_mode": "ONSITE"},
+            "confirmed_source_type": "HIRING_MANAGER",
+            "posting_evidence": {
+                "state": "STATED",
+                "source": "DESCRIPTION",
+                "summary": "work mode remote",
+                "evidence": "This position is\nfully remote",
+            },
+        }
+    )
+    assert line == (
+        "Conflict - Work mode: you recorded On-site (source: Hiring manager); "
+        "the posting states work mode remote (posting description): "
+        '"This position is fully remote". '
+        "The posting wins; the confirmation is not applied."
+    )
+
+
+def test_form_lists_conflicts_and_assessments_without_markdown():
+    app = _open_form(AppTest.from_file(str(FIXTURE_APP)).run(timeout=20))
+    texts = [element.value for element in app.text]
+    conflicts = [
+        text for text in texts if text.startswith("Conflict - Employment type")
+    ]
+    assert len(conflicts) == 1
+    assert "you recorded Permanent (source: Recruiter email)" in conflicts[0]
+    assert (
+        "the posting states contract employment (posting description)" in conflicts[0]
+    )
+    assert "<b>contract</b>" in conflicts[0]
+    assert not any("<b>" in block.value for block in app.markdown)
+    assert any("[fills a fact the posting does not state]" in text for text in texts)
+
+
+def test_withdrawing_a_confirmation_posts_to_the_withdraw_route():
+    app = _open_form(AppTest.from_file(str(FIXTURE_APP)).run(timeout=20))
+    app.text_input(key="confirm_fixture_withdraw_reason").input("Wrong job")
+    app.button[1].click().run(timeout=20)
+    assert not app.exception, [(e.type, e.message) for e in app.exception]
+    posts = [c for c in app.session_state["api_calls"] if c["method"] == "POST"]
+    assert posts == [
+        {
+            "method": "POST",
+            "path": f"/api/v2/jobs/{JOB_ID}/confirmed-facts/"
+            "c3000000-0000-4000-8000-000000000001/withdraw",
+            "body": {"job_version_id": VERSION_ID, "reason": "Wrong job"},
+        }
+    ]
+    assert any("withdrawn" in success.value for success in app.success)

@@ -10,9 +10,19 @@
 -- when. The hard gate and the readiness assessment read the current fact for the job version and use
 -- it only where the posting itself leaves the fact unknown (src/pipeline/confirmedJobFacts.ts).
 --
--- Rows are append-only. Correcting a fact adds a row whose supersedes_fact_id names the fact it
--- replaces; each fact can be superseded once and each (job version, fact type) chain has one root,
--- so exactly one current fact exists per chain. Nothing is updated or deleted.
+-- A confirmed fact never overrides a fact the posting states. When the fact is recorded, the service
+-- compares it with the posting (structured fields, extracted requirements, description, normalized
+-- source evidence) and stores the result in posting_assessment: FILLS_UNKNOWN (the only outcome the
+-- gate and readiness may apply), MATCHES_POSTING, or CONFLICTS_WITH_POSTING, with the posting's value,
+-- source and evidence in posting_evidence so the user sees both sides of a conflict. The gate
+-- re-checks the posting itself at run time and applies a fact only when both checks say it fills an
+-- unknown.
+--
+-- Rows are append-only (UPDATE, DELETE and TRUNCATE raise). Correcting a fact adds a row whose
+-- supersedes_fact_id names the row it replaces; a WITHDRAWAL row supersedes a confirmation and
+-- returns the fact to "no confirmation" while keeping who withdrew it, when and why. Each row can be
+-- superseded once and each (job version, fact type) chain has one root, so every chain has exactly
+-- one head; the current confirmed fact is a head whose entry_kind is CONFIRMATION.
 --
 -- v_job_confirmed_facts_current lists the current (unsuperseded) fact per job version and type.
 -- v_job_verification_checks_scoped gives Streamlit one row per current job version with the gate's
@@ -22,31 +32,44 @@
 -- Rollback: DROP VIEW v_job_verification_checks_scoped; DROP VIEW v_job_confirmed_facts_current;
 -- then, only with explicit human approval because it removes user-recorded evidence,
 -- DROP TABLE job_confirmed_facts and the functions job_confirmed_facts_validate and
--- job_confirmed_facts_append_only. Gate and readiness code treats a missing current fact as
+-- job_confirmed_facts_append_only (the triggers go with the table). Gate and readiness code treats a missing current fact as
 -- "no confirmation", so dropping the views alone stops new confirmations being applied.
 
 CREATE TABLE IF NOT EXISTS job_confirmed_facts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   schema_version TEXT NOT NULL DEFAULT 'job_confirmed_fact_v1'
     CHECK (schema_version = 'job_confirmed_fact_v1'),
-  workspace_id UUID NOT NULL,
-  canonical_job_id UUID NOT NULL,
-  job_version_id UUID NOT NULL,
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+  canonical_job_id UUID NOT NULL REFERENCES canonical_jobs(id) ON DELETE RESTRICT,
+  job_version_id UUID NOT NULL REFERENCES job_versions(id) ON DELETE RESTRICT,
+  entry_kind TEXT NOT NULL DEFAULT 'CONFIRMATION' CHECK (entry_kind IN ('CONFIRMATION', 'WITHDRAWAL')),
   fact_type TEXT NOT NULL CHECK (fact_type IN (
     'WORK_MODE', 'OFFICE_DAYS', 'TRAVEL_PCT', 'ON_CALL', 'EMPLOYMENT_TYPE', 'LOCATION'
   )),
   fact_value JSONB NOT NULL CHECK (jsonb_typeof(fact_value) = 'object'),
-  source_type TEXT NOT NULL CHECK (source_type IN (
+  source_type TEXT CHECK (source_type IN (
     'RECRUITER_EMAIL', 'RECRUITER_CALL', 'EMPLOYER_CAREERS_PAGE', 'HIRING_MANAGER', 'OTHER'
   )),
   source_note TEXT CHECK (source_note IS NULL OR (BTRIM(source_note) <> '' AND LENGTH(source_note) <= 500)),
-  source_url TEXT CHECK (source_url IS NULL OR (source_url ~ '^https?://[^\s/@]+(/[^\s]*)?$' AND LENGTH(source_url) <= 2048)),
+  -- The service stores URL.href: a lowercase http(s) scheme, a host without credentials, then an
+  -- optional path, query or fragment.
+  source_url TEXT CHECK (source_url IS NULL OR (source_url ~ '^https?://[^\s/?#@]+([/?#][^\s]*)?$' AND LENGTH(source_url) <= 2048)),
+  posting_assessment TEXT CHECK (posting_assessment IN ('FILLS_UNKNOWN', 'MATCHES_POSTING', 'CONFLICTS_WITH_POSTING')),
+  posting_evidence JSONB CHECK (posting_evidence IS NULL OR jsonb_typeof(posting_evidence) = 'object'),
   supersedes_fact_id UUID REFERENCES job_confirmed_facts(id) ON DELETE RESTRICT,
-  recorded_by_user_id UUID NOT NULL,
+  recorded_by_user_id UUID NOT NULL REFERENCES workspace_users(id) ON DELETE RESTRICT,
   recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   CHECK (supersedes_fact_id IS NULL OR supersedes_fact_id <> id),
+  -- A confirmation has a source and an assessment; a withdrawal supersedes a row and carries neither.
+  CHECK (
+    (entry_kind = 'CONFIRMATION' AND source_type IS NOT NULL AND posting_assessment IS NOT NULL
+      AND posting_evidence IS NOT NULL)
+    OR (entry_kind = 'WITHDRAWAL' AND supersedes_fact_id IS NOT NULL AND source_type IS NULL
+      AND source_url IS NULL AND posting_assessment IS NULL AND posting_evidence IS NULL
+      AND fact_value = '{}'::jsonb)
+  ),
   -- Numeric casts sit inside CASE branches so a non-number never reaches a cast.
-  CHECK (CASE fact_type
+  CHECK (entry_kind = 'WITHDRAWAL' OR CASE fact_type
     WHEN 'WORK_MODE' THEN
       COALESCE(fact_value->>'work_mode' IN ('ONSITE', 'HYBRID', 'REMOTE'), FALSE)
     WHEN 'OFFICE_DAYS' THEN
@@ -121,6 +144,12 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'A confirmed fact can only supersede a fact of the same job version and fact type.';
   END IF;
+  IF NEW.entry_kind = 'WITHDRAWAL' AND NOT EXISTS (
+    SELECT 1 FROM job_confirmed_facts prior
+    WHERE prior.id = NEW.supersedes_fact_id AND prior.entry_kind = 'CONFIRMATION'
+  ) THEN
+    RAISE EXCEPTION 'A withdrawal must supersede a confirmation.';
+  END IF;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -142,10 +171,16 @@ CREATE TRIGGER job_confirmed_facts_append_only
   BEFORE UPDATE OR DELETE ON job_confirmed_facts
   FOR EACH ROW EXECUTE FUNCTION job_confirmed_facts_append_only();
 
+DROP TRIGGER IF EXISTS job_confirmed_facts_no_truncate ON job_confirmed_facts;
+CREATE TRIGGER job_confirmed_facts_no_truncate
+  BEFORE TRUNCATE ON job_confirmed_facts
+  FOR EACH STATEMENT EXECUTE FUNCTION job_confirmed_facts_append_only();
+
 CREATE OR REPLACE VIEW v_job_confirmed_facts_current AS
 SELECT
   fact.id AS confirmed_fact_id,
   fact.schema_version,
+  fact.entry_kind,
   fact.workspace_id,
   fact.canonical_job_id,
   fact.job_version_id,
@@ -154,19 +189,24 @@ SELECT
   fact.source_type,
   fact.source_note,
   fact.source_url,
+  fact.posting_assessment,
+  fact.posting_evidence,
   fact.supersedes_fact_id,
   fact.recorded_by_user_id,
   fact.recorded_at
 FROM job_confirmed_facts fact
-WHERE NOT EXISTS (
+WHERE fact.entry_kind = 'CONFIRMATION'
+  AND NOT EXISTS (
   SELECT 1
   FROM job_confirmed_facts successor
   WHERE successor.supersedes_fact_id = fact.id
 );
 
 -- One row per current, non-archived, non-fixture job version. open_checks lists the fact types the
--- current gate decision or readiness assessment still needs and that have no current confirmed fact.
--- rerun_pending is true while a confirmed fact is newer than the job version's latest gate decision.
+-- current gate decision or readiness assessment still needs and that no current confirmed fact fills.
+-- conflicts lists current confirmations that contradict the posting (not applied), with the
+-- posting's value, source and evidence. rerun_pending is true while a confirmation or withdrawal is
+-- newer than the job version's latest gate decision.
 CREATE OR REPLACE VIEW v_job_verification_checks_scoped AS
 WITH current_jobs AS (
   SELECT
@@ -263,6 +303,7 @@ SELECT
         WHERE confirmed.workspace_id = current_job.workspace_id
           AND confirmed.job_version_id = current_job.job_version_id
           AND confirmed.fact_type = needed.fact_type
+          AND confirmed.posting_assessment = 'FILLS_UNKNOWN'
       )
   ), '[]'::jsonb) AS open_checks,
   COALESCE((
@@ -273,6 +314,9 @@ SELECT
       'source_type', confirmed.source_type,
       'source_note', confirmed.source_note,
       'source_url', confirmed.source_url,
+      'entry_kind', confirmed.entry_kind,
+      'posting_assessment', confirmed.posting_assessment,
+      'posting_evidence', confirmed.posting_evidence,
       'supersedes_fact_id', confirmed.supersedes_fact_id,
       'recorded_by_user_id', confirmed.recorded_by_user_id,
       'recorded_at', confirmed.recorded_at
@@ -281,6 +325,19 @@ SELECT
     WHERE confirmed.workspace_id = current_job.workspace_id
       AND confirmed.job_version_id = current_job.job_version_id
   ), '[]'::jsonb) AS confirmed_facts,
+  COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'confirmed_fact_id', confirmed.confirmed_fact_id,
+      'fact_type', confirmed.fact_type,
+      'confirmed_value', confirmed.fact_value,
+      'confirmed_source_type', confirmed.source_type,
+      'posting_evidence', confirmed.posting_evidence
+    ) ORDER BY confirmed.fact_type)
+    FROM v_job_confirmed_facts_current confirmed
+    WHERE confirmed.workspace_id = current_job.workspace_id
+      AND confirmed.job_version_id = current_job.job_version_id
+      AND confirmed.posting_assessment = 'CONFLICTS_WITH_POSTING'
+  ), '[]'::jsonb) AS conflicts,
   (
     SELECT COUNT(*)::int
     FROM job_confirmed_facts history
@@ -289,10 +346,10 @@ SELECT
   ) AS confirmed_fact_history_count,
   EXISTS (
     SELECT 1
-    FROM v_job_confirmed_facts_current confirmed
-    WHERE confirmed.workspace_id = current_job.workspace_id
-      AND confirmed.job_version_id = current_job.job_version_id
-      AND (gate.created_at IS NULL OR confirmed.recorded_at > gate.created_at)
+    FROM job_confirmed_facts entry
+    WHERE entry.workspace_id = current_job.workspace_id
+      AND entry.job_version_id = current_job.job_version_id
+      AND (gate.created_at IS NULL OR entry.recorded_at > gate.created_at)
   ) AS rerun_pending
 FROM current_jobs current_job
 LEFT JOIN latest_gate gate
@@ -300,8 +357,8 @@ LEFT JOIN latest_gate gate
  AND gate.job_version_id = current_job.job_version_id;
 
 COMMENT ON TABLE job_confirmed_facts IS
-  'Append-only, user-recorded employer confirmations of one job version''s workability facts, with source and recorder. Corrections supersede; nothing is updated or deleted.';
+  'Append-only, user-recorded employer confirmations (and withdrawals) of one job version''s workability facts, with source, recorder and the comparison with the posting. Corrections and withdrawals supersede; nothing is updated, deleted or truncated.';
 COMMENT ON VIEW v_job_confirmed_facts_current IS
-  'The current (unsuperseded) employer-confirmed fact per job version and fact type.';
+  'The current (unsuperseded, not withdrawn) employer-confirmed fact per job version and fact type, with its posting assessment.';
 COMMENT ON VIEW v_job_verification_checks_scoped IS
-  'Per current job version: gate workability facts, open verification checks without a confirmed fact, and the confirmed facts. Filter by workspace_id.';
+  'Per current job version: gate workability facts, open verification checks no confirmed fact fills, confirmed facts and conflicts with the posting. Filter by workspace_id.';

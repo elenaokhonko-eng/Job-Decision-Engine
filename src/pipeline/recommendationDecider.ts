@@ -34,6 +34,7 @@ import {
   confirmedTravelEvidence,
   confirmedWorkModeEvidence,
   confirmedWorkplaceType,
+  gateAppliedConfirmedFacts,
   loadCurrentConfirmedJobFacts,
   withConfirmedTerritory,
 } from "./confirmedJobFacts.js";
@@ -464,8 +465,12 @@ export async function runRecommendationDecider(
         : null;
       await client.query("BEGIN");
       try {
-        // Employer-confirmed facts for this exact job version fill readiness facts the posting leaves unknown.
-        const confirmedFacts = await loadCurrentConfirmedJobFacts(client, ctx.workspaceId, job.job_version_id);
+        // Employer-confirmed facts for this exact job version, limited to those the latest gate decision
+        // applied (each filled a fact the posting leaves unknown); conflicting confirmations never apply.
+        const confirmedFacts = gateAppliedConfirmedFacts(
+          await loadCurrentConfirmedJobFacts(client, ctx.workspaceId, job.job_version_id),
+          normalizeWorkabilityFacts(job.workability_facts),
+        );
         const confirmedFactsHash = confirmedJobFactsHash(confirmedFacts);
         const normalizedGateDecision =
           normalizeGateDecision(job.gate_decision) ??
@@ -718,7 +723,7 @@ export async function runRecommendationDecider(
         ));
 
         const workabilityFacts = normalizeWorkabilityFacts(job.workability_facts);
-        const modeEvidence = confirmedWorkModeEvidence(workabilityEvidence?.work_mode ?? null, job.workplace_type, confirmedFacts);
+        const modeEvidence = confirmedWorkModeEvidence(workabilityEvidence?.work_mode ?? null, confirmedFacts);
         const workModeAssessment = assessWorkModeReadiness(
           modeEvidence,
           job.workplace_type,
@@ -743,7 +748,7 @@ export async function runRecommendationDecider(
 
         const travelAssessment = assessTravelReadiness(
           job.description_text ?? "",
-          confirmedTravelEvidence(workabilityEvidence?.travel_pct ?? null, job.description_text ?? "", confirmedFacts),
+          confirmedTravelEvidence(workabilityEvidence?.travel_pct ?? null, confirmedFacts),
           workabilityPolicyResolution.policy,
         );
         readinessChecks.push(readinessCheck(

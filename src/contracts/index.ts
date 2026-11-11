@@ -14,6 +14,7 @@ export {
   JobVerificationChecksSchema,
   JobConfirmedFactResponseSchema,
   JobConfirmedFactsListResponseSchema,
+  JobConfirmedFactWithdrawRequestSchema,
 } from "./jobConfirmedFacts.js";
 export {
   ApplicationReadinessSchema,

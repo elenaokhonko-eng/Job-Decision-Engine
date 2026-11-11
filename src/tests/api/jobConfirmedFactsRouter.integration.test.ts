@@ -24,6 +24,7 @@ let schemaName = "";
 let context: WorkspaceContext | undefined;
 let server: Server | undefined;
 let readerServer: Server | undefined;
+let memberServer: Server | undefined;
 let previousToken: string | undefined;
 let canonicalJobId = "";
 let jobVersionId = "";
@@ -136,6 +137,7 @@ describe.skipIf(skipReal)("confirmed-fact API (PostgreSQL)", () => {
 
     server = await startServer(getContext);
     readerServer = await startServer(() => ({ ...getContext(), role: "READER" }));
+    memberServer = await startServer(() => ({ ...getContext(), role: "MEMBER" }));
   }, 120_000);
 
   afterAll(async () => {
@@ -143,6 +145,7 @@ describe.skipIf(skipReal)("confirmed-fact API (PostgreSQL)", () => {
     else process.env.JDEC_API_TOKEN = previousToken;
     await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
     await new Promise<void>((resolve) => (readerServer ? readerServer.close(() => resolve()) : resolve()));
+    await new Promise<void>((resolve) => (memberServer ? memberServer.close(() => resolve()) : resolve()));
     if (pool) {
       if (schemaName) await pool.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`);
       await pool.end();
@@ -244,5 +247,62 @@ describe.skipIf(skipReal)("confirmed-fact API (PostgreSQL)", () => {
       corrected.body.fact.confirmed_fact_id,
       parsed.fact.confirmed_fact_id,
     ]);
+  });
+
+  it("lets a MEMBER record a fact and normalizes source URLs the database would otherwise reject", async () => {
+    const path = `/jobs/${canonicalJobId}/confirmed-facts`;
+    const upper = await call("POST", path, factBody({
+      fact_type: "TRAVEL_PCT",
+      value: { travel_pct_max: 10 },
+      source_url: "HTTPS://Careers.Example.test/Role",
+    }), { target: memberServer });
+    expect(upper.status).toBe(201);
+    expect(upper.body.fact.source_url).toBe("https://careers.example.test/Role");
+    expect(upper.body.fact.posting_assessment).toBe("FILLS_UNKNOWN");
+    const query = await call("POST", path, factBody({
+      fact_type: "TRAVEL_PCT",
+      value: { travel_pct_max: 5 },
+      source_url: "https://careers.example.test?ref=a@b",
+    }), { target: memberServer });
+    expect(query.status).toBe(201);
+    expect(query.body.fact.source_url).toBe("https://careers.example.test/?ref=a@b");
+  });
+
+  it("keeps a confirmation that contradicts the posting as a visible conflict", async () => {
+    const path = `/jobs/${canonicalJobId}/confirmed-facts`;
+    const conflict = await call("POST", path, factBody({ fact_type: "WORK_MODE", value: { work_mode: "ONSITE" } }));
+    expect(conflict.status).toBe(201);
+    expect(conflict.body.fact).toMatchObject({
+      posting_assessment: "CONFLICTS_WITH_POSTING",
+      posting_evidence: { state: "STATED", source: "STRUCTURED_FIELD", value: { work_mode: "HYBRID" }, summary: "work mode hybrid" },
+    });
+    const listed = JobConfirmedFactsListResponseSchema.parse((await call("GET", path)).body);
+    expect(listed.checks?.conflicts).toEqual([
+      expect.objectContaining({
+        confirmed_fact_id: conflict.body.fact.confirmed_fact_id,
+        fact_type: "WORK_MODE",
+        confirmed_value: { work_mode: "ONSITE" },
+      }),
+    ]);
+  });
+
+  it("withdraws a confirmation through the API with an audited WITHDRAWAL entry", async () => {
+    const path = `/jobs/${canonicalJobId}/confirmed-facts`;
+    const before = JobConfirmedFactsListResponseSchema.parse((await call("GET", path)).body);
+    const travel = before.checks?.confirmed_facts.find((fact) => fact.fact_type === "TRAVEL_PCT");
+    expect(travel).toBeDefined();
+    const withdrawPath = `${path}/${travel!.confirmed_fact_id}/withdraw`;
+    expect((await call("POST", withdrawPath, { job_version_id: jobVersionId }, { target: readerServer })).status).toBe(403);
+    expect((await call("POST", withdrawPath, { job_version_id: "nope" })).status).toBe(400);
+    const withdrawn = await call("POST", withdrawPath, { job_version_id: jobVersionId, reason: "Wrong job" });
+    expect(withdrawn.status).toBe(201);
+    expect(withdrawn.body.fact).toMatchObject({ entry_kind: "WITHDRAWAL", source_note: "Wrong job", supersedes_fact_id: travel!.confirmed_fact_id });
+    expect(withdrawn.body.rerun.task_type).toBe("APPLY_HARD_GATES");
+    const again = await call("POST", withdrawPath, { job_version_id: jobVersionId });
+    expect(again.status).toBe(409);
+    expect(again.body.error).toBe("FACT_NOT_CURRENT");
+    const after = JobConfirmedFactsListResponseSchema.parse((await call("GET", path)).body);
+    expect(after.checks?.confirmed_facts.some((fact) => fact.fact_type === "TRAVEL_PCT")).toBe(false);
+    expect(after.history[0]).toMatchObject({ entry_kind: "WITHDRAWAL" });
   });
 });

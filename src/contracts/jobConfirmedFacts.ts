@@ -77,6 +77,20 @@ export const LocationFactValueSchema = LocationFactRequestValueSchema.extend({
  * A source URL is an absolute http(s) URL without credentials. It is shown to the user as a link, so
  * anything else (javascript:, data:, user:password@host) is rejected here.
  */
+export function normalizeSourceUrl(value: string): string | null {
+  if (value.length > 2048 || /\s/.test(value)) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if ((url.protocol !== "https:" && url.protocol !== "http:") || url.hostname.length === 0) return null;
+  if (url.username !== "" || url.password !== "") return null;
+  // URL.href lowercases the scheme and host and adds the root path, matching the database CHECK.
+  return url.href.length <= 2048 ? url.href : null;
+}
+
 export function isSafeSourceUrl(value: string): boolean {
   if (value.length > 2048 || /\s/.test(value)) return false;
   let url: URL;
@@ -96,8 +110,8 @@ const SourceNoteSchema = z.string().trim().max(500)
   .transform((value) => (value === "" ? null : value));
 
 const SourceUrlSchema = z.string().trim()
-  .transform((value) => (value === "" ? null : value))
-  .refine((value) => value === null || isSafeSourceUrl(value), "source_url must be an http(s) URL without credentials.");
+  .refine((value) => value === "" || normalizeSourceUrl(value) !== null, "source_url must be an http(s) URL without credentials.")
+  .transform((value) => (value === "" ? null : normalizeSourceUrl(value)));
 
 const requestBase = {
   job_version_id: z.string().uuid(),
@@ -128,13 +142,29 @@ export const ConfirmedFactValueSchemas = {
 
 const TimestampSchema = z.string().datetime({ offset: true });
 
+export const ConfirmedFactEntryKindSchema = z.enum(["CONFIRMATION", "WITHDRAWAL"]);
+export const ConfirmedFactPostingAssessmentSchema = z.enum(["FILLS_UNKNOWN", "MATCHES_POSTING", "CONFLICTS_WITH_POSTING"]);
+
+/** The posting's side of a fact when the confirmation was recorded. */
+export const PostingFactEvidenceSchema = z.object({
+  state: z.enum(["UNKNOWN", "STATED", "CONFLICTING"]),
+  value: z.record(z.string(), z.unknown()).nullable(),
+  source: z.enum(["STRUCTURED_FIELD", "EXTRACTED_REQUIREMENT", "DESCRIPTION", "SOURCE_EVIDENCE"]).nullable(),
+  evidence: z.string().nullable(),
+  summary: z.string(),
+}).strict();
+export type PostingFactEvidenceRecord = z.infer<typeof PostingFactEvidenceSchema>;
+
 export const ConfirmedJobFactSchema = z.object({
   confirmed_fact_id: z.string().uuid(),
+  entry_kind: ConfirmedFactEntryKindSchema,
   fact_type: ConfirmedFactTypeSchema,
   fact_value: z.record(z.string(), z.unknown()),
-  source_type: ConfirmedFactSourceTypeSchema,
+  source_type: ConfirmedFactSourceTypeSchema.nullable(),
   source_note: z.string().nullable(),
   source_url: z.string().nullable(),
+  posting_assessment: ConfirmedFactPostingAssessmentSchema.nullable(),
+  posting_evidence: PostingFactEvidenceSchema.nullable(),
   supersedes_fact_id: z.string().uuid().nullable(),
   recorded_by_user_id: z.string().uuid(),
   recorded_at: TimestampSchema,
@@ -153,6 +183,14 @@ export const JobVerificationChecksSchema = z.object({
   gate_decided_at: TimestampSchema.nullable(),
   open_checks: z.array(ConfirmedFactTypeSchema),
   confirmed_facts: z.array(ConfirmedJobFactSchema),
+  /** Current confirmations that contradict the posting; they are not applied. */
+  conflicts: z.array(z.object({
+    confirmed_fact_id: z.string().uuid(),
+    fact_type: ConfirmedFactTypeSchema,
+    confirmed_value: z.record(z.string(), z.unknown()),
+    confirmed_source_type: ConfirmedFactSourceTypeSchema,
+    posting_evidence: PostingFactEvidenceSchema,
+  }).strict()),
   confirmed_fact_history_count: z.number().int().min(0),
   rerun_pending: z.boolean(),
 }).strict();
@@ -171,6 +209,12 @@ export const JobConfirmedFactResponseSchema = z.object({
   }).strict(),
 }).strict();
 export type JobConfirmedFactResponse = z.infer<typeof JobConfirmedFactResponseSchema>;
+
+export const JobConfirmedFactWithdrawRequestSchema = z.object({
+  job_version_id: z.string().uuid(),
+  reason: SourceNoteSchema.nullish().transform((value) => value ?? null),
+}).strict();
+export type JobConfirmedFactWithdrawRequest = z.infer<typeof JobConfirmedFactWithdrawRequestSchema>;
 
 export const JobConfirmedFactsListResponseSchema = z.object({
   ok: z.literal(true),
