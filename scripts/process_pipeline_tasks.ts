@@ -20,6 +20,7 @@ import {
   reconcileStaleSupersededEmbeddingDeadLetters,
 } from "../src/tasks/deadLetterPolicy.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
+import { pipelineTaskPayloadUuidSql, pipelineTaskTargetsArchivedJobSql } from "../src/tasks/jobArchiveGuard.js";
 import { inspectProfileEmbeddingReadiness } from "../src/embeddings/profileEmbeddingRepair.js";
 import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 
@@ -392,8 +393,43 @@ export async function readOldestPendingTask(
 }
 
 /**
+ * TRUE when a pipeline task row counts as operational work, using the same exclusions as the
+ * operational_tasks CTE of v_pipeline_task_queue_health / v_pipeline_task_status_age /
+ * v_pipeline_task_due_age (migrations 097, 099, 107): tasks of test-fixture jobs are excluded, and
+ * tasks of archived jobs are excluded except NORMALIZE_OBSERVATION.
+ */
+function operationalTaskSql(taskAlias: string): string {
+  return `(
+    NOT (
+      EXISTS (
+        SELECT 1
+        FROM canonical_jobs fixture_job
+        WHERE fixture_job.workspace_id = ${taskAlias}.workspace_id
+          AND fixture_job.id = ${pipelineTaskPayloadUuidSql(taskAlias, "canonical_job_id")}
+          AND fixture_job.is_test_fixture = TRUE
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM job_versions fixture_version
+        JOIN canonical_jobs fixture_job
+          ON fixture_job.workspace_id = fixture_version.workspace_id
+         AND fixture_job.id = fixture_version.canonical_job_id
+        WHERE fixture_version.workspace_id = ${taskAlias}.workspace_id
+          AND fixture_version.id = ${pipelineTaskPayloadUuidSql(taskAlias, "job_version_id")}
+          AND fixture_job.is_test_fixture = TRUE
+      )
+    )
+    AND (
+      ${taskAlias}.task_type = 'NORMALIZE_OBSERVATION'
+      OR NOT ${pipelineTaskTargetsArchivedJobSql(taskAlias)}
+    )
+  )`;
+}
+
+/**
  * When the furthest-out scheduled PENDING task becomes due. Reporting only: scheduled work is excluded
  * from the pending SLO, so this keeps a task scheduled far ahead (by mistake or a bug) visible.
+ * Applies the queue-health views' fixture and archive exclusions, so it agrees with scheduled_pending.
  */
 export async function readLatestScheduledPendingAvailableAt(
   pool: pg.Pool,
@@ -414,6 +450,7 @@ export async function readLatestScheduledPendingAvailableAt(
        AND task.status = 'PENDING'
        AND task.available_at > NOW()
        AND task.task_type = ANY($2::text[])
+       AND ${operationalTaskSql("task")}
        ${targetClause}`,
     params,
   );

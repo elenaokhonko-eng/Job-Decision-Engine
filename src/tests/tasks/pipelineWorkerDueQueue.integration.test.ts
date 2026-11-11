@@ -283,4 +283,43 @@ describe.skipIf(skipReal)("pipeline worker due-queue reads (PostgreSQL)", () => 
     expect(routing!.oldest_age_seconds).toBeLessThanOrEqual(3.1 * HOUR);
     expect(stages.find((stage) => stage.stage === "PROFILE_MATCH")).toMatchObject({ pending: 0, oldest_age_seconds: 0 });
   });
+
+  it("excludes archived and fixture tasks from the latest scheduled time, as the views exclude them from scheduled_pending", async () => {
+    const { client: db, pool, workspaceId } = ready();
+    const taskType = "APPLY_HARD_GATES";
+    await insertPendingTask({ taskType, payload: {}, createdAt: "-1 day", availableAt: "1 day" });
+
+    const { rows: archiveRun } = await db.query<{ id: string }>(
+      `INSERT INTO job_archive_runs (run_started_at, cutoff_at, mode, status)
+       VALUES (NOW(), NOW() - INTERVAL '90 days', 'APPLY', 'SUCCEEDED') RETURNING id::text AS id`,
+    );
+    for (const [archived, fixture] of [[true, false], [false, true]]) {
+      const canonicalJobId = randomUUID();
+      await db.query(
+        `INSERT INTO canonical_jobs (id, workspace_id, company_name, normalized_title, canonical_url,
+                                     processing_state, processing_status, is_test_fixture,
+                                     archived_at, archive_reason, archive_age_basis, archive_reference_at, archive_run_id)
+         VALUES ($1, $2, 'Due Queue Test', 'Excluded Scheduled Role', $3, 'PREQUALIFIED', 'PREQUALIFIED', $4,
+                 CASE WHEN $5::boolean THEN NOW() END,
+                 CASE WHEN $5::boolean THEN 'due-queue test archive' END,
+                 CASE WHEN $5::boolean THEN 'OBSERVED_AGE_PUBLICATION_UNKNOWN' END,
+                 CASE WHEN $5::boolean THEN NOW() - INTERVAL '90 days' END,
+                 CASE WHEN $5::boolean THEN $6::uuid END)`,
+        [canonicalJobId, workspaceId, `https://example.test/due-queue/${canonicalJobId}`, fixture, archived, archiveRun[0].id],
+      );
+      // Scheduled much later than the operational task: it would win MAX(available_at) if not excluded.
+      await insertPendingTask({ taskType, payload: { canonical_job_id: canonicalJobId }, createdAt: "-1 day", availableAt: "30 days" });
+    }
+
+    const health = await readQueueHealth(pool, workspaceId);
+    const pendingRow = health.byType.find((row) => row.task_type === taskType && row.status === "PENDING");
+    expect(Number(pendingRow?.task_count)).toBe(1);
+    expect(pendingRow?.due_task_count ?? 0).toBe(0);
+
+    const latestScheduled = await readLatestScheduledPendingAvailableAt(pool, workspaceId, [taskType]);
+    expect(latestScheduled).not.toBeNull();
+    const untilDueSeconds = (Date.parse(latestScheduled!) - Date.now()) / 1000;
+    expect(untilDueSeconds).toBeGreaterThan(23.9 * HOUR);
+    expect(untilDueSeconds).toBeLessThan(24.1 * HOUR);
+  });
 });
