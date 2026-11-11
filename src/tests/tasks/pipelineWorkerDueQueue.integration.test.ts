@@ -284,7 +284,7 @@ describe.skipIf(skipReal)("pipeline worker due-queue reads (PostgreSQL)", () => 
     expect(stages.find((stage) => stage.stage === "PROFILE_MATCH")).toMatchObject({ pending: 0, oldest_age_seconds: 0 });
   });
 
-  it("excludes archived and fixture tasks from the latest scheduled time, as the views exclude them from scheduled_pending", async () => {
+  it("excludes archived and fixture tasks from the latest scheduled time and the tracked oldest task, as the views do", async () => {
     const { client: db, pool, workspaceId } = ready();
     const taskType = "APPLY_HARD_GATES";
     await insertPendingTask({ taskType, payload: {}, createdAt: "-1 day", availableAt: "1 day" });
@@ -321,5 +321,37 @@ describe.skipIf(skipReal)("pipeline worker due-queue reads (PostgreSQL)", () => 
     const untilDueSeconds = (Date.parse(latestScheduled!) - Date.now()) / 1000;
     expect(untilDueSeconds).toBeGreaterThan(23.9 * HOUR);
     expect(untilDueSeconds).toBeLessThan(24.1 * HOUR);
+
+    // Due since 20 days for an archived and a fixture job: older than the operational due task, but excluded.
+    const excludedDueIds: string[] = [];
+    for (const [archived, fixture] of [[true, false], [false, true]]) {
+      const canonicalJobId = randomUUID();
+      await db.query(
+        `INSERT INTO canonical_jobs (id, workspace_id, company_name, normalized_title, canonical_url,
+                                     processing_state, processing_status, is_test_fixture,
+                                     archived_at, archive_reason, archive_age_basis, archive_reference_at, archive_run_id)
+         VALUES ($1, $2, 'Due Queue Test', 'Excluded Due Role', $3, 'PREQUALIFIED', 'PREQUALIFIED', $4,
+                 CASE WHEN $5::boolean THEN NOW() END,
+                 CASE WHEN $5::boolean THEN 'due-queue test archive' END,
+                 CASE WHEN $5::boolean THEN 'OBSERVED_AGE_PUBLICATION_UNKNOWN' END,
+                 CASE WHEN $5::boolean THEN NOW() - INTERVAL '90 days' END,
+                 CASE WHEN $5::boolean THEN $6::uuid END)`,
+        [canonicalJobId, workspaceId, `https://example.test/due-queue/${canonicalJobId}`, fixture, archived, archiveRun[0].id],
+      );
+      excludedDueIds.push(await insertPendingTask({ taskType, payload: { canonical_job_id: canonicalJobId }, createdAt: "-20 days", availableAt: "-20 days" }));
+    }
+    const operationalDueId = await insertPendingTask({ taskType, payload: {}, createdAt: "-2 hours", availableAt: "-2 hours" });
+
+    // The tracker follows the same task set as the due-age view and the SLO age.
+    const oldest = await readOldestPendingTask(pool, workspaceId, [taskType]);
+    expect(oldest?.id).toBe(operationalDueId);
+    expect(excludedDueIds).not.toContain(oldest?.id);
+    const withDue = await readQueueHealth(pool, workspaceId);
+    const dueRow = withDue.byType.find((row) => row.task_type === taskType && row.status === "PENDING");
+    expect(Number(dueRow?.due_task_count)).toBe(1);
+    expect(Number(dueRow?.oldest_due_age_seconds)).toBeGreaterThanOrEqual(1.9 * HOUR);
+    expect(Number(dueRow?.oldest_due_age_seconds)).toBeLessThanOrEqual(2.1 * HOUR);
+    expect(oldest?.ageSeconds).toBeGreaterThanOrEqual(1.9 * HOUR);
+    expect(oldest?.ageSeconds).toBeLessThanOrEqual(2.1 * HOUR);
   });
 });

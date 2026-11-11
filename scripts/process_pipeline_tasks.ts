@@ -374,6 +374,7 @@ export async function readOldestPendingTask(
          AND task.status = 'PENDING'
          AND task.available_at <= NOW()
          AND task.task_type = ANY($2::text[])
+         AND ${operationalTaskSql("task")}
          ${targetClause}
        ORDER BY GREATEST(task.created_at, task.available_at) ASC, task.id ASC
        LIMIT 1`,
