@@ -53,6 +53,11 @@ import {
   type RemoteTerritoryScope,
 } from "../eligibility/remoteHiringTerritory.js";
 import { buildDiscoveryLocationScope, loadLocationScopeConfig } from "../ingestion/discoveryLocationScope.js";
+import {
+  applyConfirmedFactsToGateInput,
+  loadCurrentConfirmedJobFacts,
+  withConfirmedFactEvidence,
+} from "./confirmedJobFacts.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -945,7 +950,22 @@ export async function runHardGates(
           [ctx.workspaceId, job.job_version_id]
         );
 
-        const deterministicRequirements = requirementRows as PersistedRequirement[];
+        // Employer-confirmed facts for this exact job version fill facts the posting leaves unknown.
+        const confirmedInput = applyConfirmedFactsToGateInput(
+          {
+            workplaceType: rawJobAdapter.workplace_type,
+            employmentType: rawJobAdapter.employment_type,
+            location: rawJobAdapter.location,
+            sourceLocation: job.source_location_raw ?? null,
+            description: rawJobAdapter.raw_description,
+          },
+          requirementRows as PersistedRequirement[],
+          await loadCurrentConfirmedJobFacts(client, ctx.workspaceId, job.job_version_id),
+        );
+        rawJobAdapter.workplace_type = confirmedInput.workplaceType;
+        rawJobAdapter.employment_type = confirmedInput.employmentType;
+        rawJobAdapter.location = confirmedInput.location;
+        const deterministicRequirements = confirmedInput.requirements;
         let profileFacts: ComparableFact[] = [];
         if (deterministicRequirements.some((requirement) =>
           ["WORK_AUTH"].includes(requirement.requirement_type)
@@ -970,7 +990,7 @@ export async function runHardGates(
           );
           profileFacts = profileFactRows as ComparableFact[];
         }
-        const requirementHints = deterministicRequirements
+        const requirementHints = (requirementRows as PersistedRequirement[])
           .map((r) => r.quote_text || r.requirement_text)
           .filter(Boolean)
           .slice(0, 60)
@@ -1028,11 +1048,14 @@ export async function runHardGates(
         );
         const remoteTerritoryGateResult = applyRemoteTerritoryGate({
           sourceName: job.source_observation_name ?? null,
-          location: job.source_location_raw ?? rawJobAdapter.location ?? null,
+          location: confirmedInput.sourceLocation ?? rawJobAdapter.location ?? null,
           workplaceType: rawJobAdapter.workplace_type ?? null,
           description: rawJobAdapter.raw_description ?? null,
         }, territoryScope);
-        const gateResult = combineGateResults([globalGateResult, persistedGateResult, exactProfileGateResult, remoteTerritoryGateResult]);
+        const gateResult = withConfirmedFactEvidence(
+          combineGateResults([globalGateResult, persistedGateResult, exactProfileGateResult, remoteTerritoryGateResult]),
+          confirmedInput.applied,
+        );
 
         let processingStatus: string;
         switch (gateResult.status) {

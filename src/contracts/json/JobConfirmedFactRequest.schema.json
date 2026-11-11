@@ -1,0 +1,294 @@
+{
+  "$ref": "#/definitions/JobConfirmedFactRequest",
+  "definitions": {
+    "JobConfirmedFactRequest": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "job_version_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "source_type": {
+              "type": "string",
+              "enum": [
+                "RECRUITER_EMAIL",
+                "RECRUITER_CALL",
+                "EMPLOYER_CAREERS_PAGE",
+                "HIRING_MANAGER",
+                "OTHER"
+              ]
+            },
+            "source_note": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_url": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "WORK_MODE"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "work_mode": {
+                  "type": "string",
+                  "enum": [
+                    "ONSITE",
+                    "HYBRID",
+                    "REMOTE"
+                  ]
+                }
+              },
+              "required": [
+                "work_mode"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "job_version_id",
+            "source_type",
+            "fact_type",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_version_id": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/job_version_id"
+            },
+            "source_type": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_type"
+            },
+            "source_note": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_note"
+            },
+            "source_url": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_url"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "OFFICE_DAYS"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "office_days_min": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 7
+                },
+                "office_days_max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 7
+                }
+              },
+              "required": [
+                "office_days_min",
+                "office_days_max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "job_version_id",
+            "source_type",
+            "fact_type",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_version_id": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/job_version_id"
+            },
+            "source_type": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_type"
+            },
+            "source_note": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_note"
+            },
+            "source_url": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_url"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "TRAVEL_PCT"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "travel_pct_max": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                }
+              },
+              "required": [
+                "travel_pct_max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "job_version_id",
+            "source_type",
+            "fact_type",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_version_id": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/job_version_id"
+            },
+            "source_type": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_type"
+            },
+            "source_note": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_note"
+            },
+            "source_url": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_url"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "ON_CALL"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "on_call_required": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "on_call_required"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "job_version_id",
+            "source_type",
+            "fact_type",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_version_id": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/job_version_id"
+            },
+            "source_type": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_type"
+            },
+            "source_note": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_note"
+            },
+            "source_url": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_url"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "EMPLOYMENT_TYPE"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "employment_type": {
+                  "type": "string",
+                  "enum": [
+                    "PERMANENT",
+                    "CONTRACT"
+                  ]
+                }
+              },
+              "required": [
+                "employment_type"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "job_version_id",
+            "source_type",
+            "fact_type",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_version_id": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/job_version_id"
+            },
+            "source_type": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_type"
+            },
+            "source_note": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_note"
+            },
+            "source_url": {
+              "$ref": "#/definitions/JobConfirmedFactRequest/anyOf/0/properties/source_url"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "LOCATION"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "location": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "location"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "job_version_id",
+            "source_type",
+            "fact_type",
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -41,6 +41,7 @@ from streamlit_manual_application import (
     render_selected_documents,
 )
 from streamlit_saved_jobs import render_saved_jobs_tab
+from streamlit_job_confirmations import render_employer_confirmation
 from streamlit_runtime import code_version, database_outage, ensure_hosted_api_ready, open_api_json
 
 
@@ -2386,6 +2387,12 @@ with tab_dashboard:
                         st.markdown(f"**Decision:** `{outcome}` ({eligibility}) | **Gate:** `{gate_status}`")
                         if workspace_category == "Verify, then apply":
                             st.text(f"Open question: {verification_question_for_job(job)}")
+                        render_employer_confirmation(
+                            job,
+                            api_request,
+                            f"employer_confirmation_{job.get('job_version_id')}",
+                            api_configured=bool(get_api_base_url()),
+                        )
                         artifact_status = job.get("current_artifact_status") or "CURRENTNESS_UNKNOWN"
                         artifact_reason = job.get("current_artifact_reason")
                         blocked_count = job.get("blocked_task_count") or 0
