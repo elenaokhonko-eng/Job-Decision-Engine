@@ -144,11 +144,11 @@ def verification_action_applies(job: Mapping[str, object], category: str) -> boo
 
 
 def apply_now_exclusion_reasons(job: Mapping[str, object]) -> list[str]:
-    """Plain-language reasons a REVIEW job is not in Apply Now.
+    """Plain-language explanation of the conditions a REVIEW job does not meet.
 
-    Mirrors the Apply Now read model: a passing gate, ELIGIBLE eligibility, a
-    PRIORITY/REVIEW outcome, current deterministic artifacts and a current
-    READY assessment. An empty list means the job meets those conditions.
+    This only explains; it never decides membership. Whether a job is in Apply
+    Now comes from the read model's ``in_apply_now`` flag (an EXISTS against
+    ``v_apply_now_jobs_stage3_scoped``), see ``apply_now_exclusion_summary``.
     """
     reasons = []
     gate = job.get("gate_status")
@@ -188,9 +188,24 @@ def apply_now_exclusion_reasons(job: Mapping[str, object]) -> list[str]:
 
 
 def apply_now_exclusion_summary(job: Mapping[str, object]) -> str:
+    """Say whether a REVIEW job is in Apply Now and, if not, why.
+
+    Membership is read only from ``in_apply_now`` (the Apply Now read model).
+    A missing flag is never treated as membership.
+    """
+    if job.get("in_apply_now") is True:
+        return "Listed in Apply Now."
     reasons = apply_now_exclusion_reasons(job)
+    if job.get("in_apply_now") is not False:
+        prefix = "Apply Now membership is unknown for this row."
+        return prefix + (" Open conditions: " + " ".join(reasons) if reasons else "")
     if not reasons:
-        return "Meets the Apply Now conditions, so it is also listed under Apply Now."
+        reasons = [
+            (
+                "It has no current Apply Now ranking yet (for example, its ranking "
+                "snapshot is missing or needs a policy recheck)."
+            )
+        ]
     return "Not in Apply Now: " + " ".join(reasons)
 
 

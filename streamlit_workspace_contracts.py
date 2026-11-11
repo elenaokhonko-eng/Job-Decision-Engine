@@ -388,6 +388,7 @@ def validate_review_row(row: Mapping[str, object], workspace_id: object) -> None
             "current_artifact_status",
             "readiness_status",
             "readiness_reason_codes",
+            "in_apply_now",
         ),
     )
     _require_scope(row, workspace_id)
@@ -395,6 +396,8 @@ def validate_review_row(row: Mapping[str, object], workspace_id: object) -> None
         _require_string(row, field)
     if row.get("recommendation_outcome") != "REVIEW":
         raise ValueError("Review rows must carry a current REVIEW decision.")
+    if not isinstance(row.get("in_apply_now"), bool):
+        raise TypeError("Review row in_apply_now must be a boolean.")
     for field in ("rejection_codes", "gate_evidence_quotes", "readiness_reason_codes"):
         value = row.get(field)
         if value is None:

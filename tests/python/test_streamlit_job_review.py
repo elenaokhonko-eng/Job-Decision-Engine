@@ -93,6 +93,7 @@ def job(**overrides):
         "readiness_reason_codes": [],
         "availability_status": "OPEN",
         "availability_recheck_at": "2099-01-01T00:00:00+00:00",
+        "in_apply_now": False,
     }
     row.update(overrides)
     return row
@@ -112,11 +113,12 @@ def test_review_queries_select_every_field_the_detail_panel_shows(name):
 )
 def test_review_queries_read_only_scoped_read_models(name):
     query = read_query_constant(name)
-    tables = set(re.findall(r"\b(?:FROM|JOIN)\s+([a-z_]+)", query))
+    tables = set(re.findall(r"\b(?:FROM|JOIN)\s+([a-z0-9_]+)", query))
     assert tables <= {
         "v_track_jobs_scoped",
         "v_canonical_shortlist_scoped",
         "v_application_readiness_current",
+        "v_apply_now_jobs_stage3_scoped",
     }, tables
     assert "WHERE jobs.workspace_id = %s" in query
 
@@ -286,9 +288,41 @@ def test_review_rows_explain_why_they_are_not_in_apply_now(overrides, expected):
     assert apply_now_exclusion_summary(job(**overrides)).startswith("Not in Apply Now:")
 
 
-def test_review_row_meeting_apply_now_conditions_says_so():
+def test_apply_now_membership_comes_from_the_read_model_not_the_python_rules():
+    # Meets every condition the helper can check, but the Stage 3 Apply Now
+    # view does not list it (e.g. no ranking snapshot): never claim membership.
     assert apply_now_exclusion_reasons(job()) == []
-    assert "also listed under Apply Now" in apply_now_exclusion_summary(job())
+    summary = apply_now_exclusion_summary(job(in_apply_now=False))
+    assert summary.startswith("Not in Apply Now:")
+    assert "ranking" in summary
+    assert apply_now_exclusion_summary(job(in_apply_now=True)) == "Listed in Apply Now."
+    unknown = apply_now_exclusion_summary(job(in_apply_now=None))
+    assert "unknown" in unknown and "Listed in Apply Now" not in unknown
+
+
+def test_review_query_reads_apply_now_membership_from_the_stage3_view():
+    query = read_query_constant("REVIEW_JOBS_QUERY")
+    assert "FROM v_apply_now_jobs_stage3_scoped AS apply_now" in query
+    assert ") AS in_apply_now" in query
+    assert "apply_now.job_version_id::text = jobs.job_version_id::text" in query
+
+
+def test_review_rows_require_a_boolean_apply_now_flag():
+    row = job()
+    del row["in_apply_now"]
+    with pytest.raises(ValueError, match="in_apply_now"):
+        validate_review_row(row, WORKSPACE_ID)
+    with pytest.raises(TypeError, match="in_apply_now"):
+        validate_review_row(job(in_apply_now=None), WORKSPACE_ID)
+
+
+def test_listing_decision_line_is_plain_text_not_markdown():
+    source = app_source()
+    assert (
+        'st.text(f"Decision: {outcome} ({eligibility}) | Gate: {gate_status}")'
+        in source
+    )
+    assert "**Decision:** `{outcome}`" not in source
 
 
 def test_sidebar_filters_apply_to_self_sourced_categories():

@@ -19,7 +19,7 @@ from streamlit_application_workflow import (
 from streamlit_archive import render_archive_hold_form, render_archive_jobs
 from streamlit_database import read_only_database_ssl_options
 from streamlit_formatters import as_number, format_percent, format_score, format_signal
-from streamlit_formatters import format_career_track
+from streamlit_formatters import format_career_track, safe_http_url
 from streamlit_job_review import (
     CATEGORY_OPTIONS,
     DEFAULT_CATEGORY_INDEX,
@@ -515,7 +515,14 @@ REVIEW_JOBS_QUERY = """
            current_readiness.readiness_status,
            current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
            current_readiness.readiness_reason_codes, current_readiness.availability_status,
-           current_readiness.availability_recheck_at
+           current_readiness.availability_recheck_at,
+           EXISTS (
+             SELECT 1
+             FROM v_apply_now_jobs_stage3_scoped AS apply_now
+             WHERE apply_now.workspace_id = jobs.workspace_id
+               AND apply_now.canonical_job_id = jobs.canonical_job_id
+               AND apply_now.job_version_id::text = jobs.job_version_id::text
+           ) AS in_apply_now
     FROM v_canonical_shortlist_scoped AS jobs
     LEFT JOIN LATERAL (
       SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
@@ -1084,12 +1091,6 @@ def activate_preference_mode(mode_key):
 
 def escape_text(value):
     return html.escape(str(value if value is not None else ""))
-
-def safe_http_url(value):
-    url = str(value or "").strip()
-    if url.startswith("http://") or url.startswith("https://"):
-        return url
-    return None
 
 def normalize_workability_facts(raw):
     if not isinstance(raw, dict):
@@ -2471,7 +2472,7 @@ with tab_dashboard:
                         badge_style = "📌"
                     
                     with st.expander(f"{badge_style} {escape_markdown(title)} — {escape_markdown(company)} ({escape_markdown(status)})"):
-                        st.markdown(f"**Decision:** `{outcome}` ({eligibility}) | **Gate:** `{gate_status}`")
+                        st.text(f"Decision: {outcome} ({eligibility}) | Gate: {gate_status}")
                         if workspace_category == REVIEW_CATEGORY:
                             st.text(apply_now_exclusion_summary(job))
                         verification_action = verification_action_applies(job, workspace_category)
@@ -2660,7 +2661,7 @@ with tab_dashboard:
             st.markdown("---")
             outcome = job_outcome(job_to_show) or "NO_DECISION"
             eligibility = job_eligibility(job_to_show) or "UNKNOWN"
-            st.markdown(f"### Deterministic Decision: `{escape_markdown(outcome)}` ({escape_markdown(eligibility)})")
+            st.markdown(f"### Deterministic Decision: {escape_markdown(outcome)} ({escape_markdown(eligibility)})")
             st.text(
                 f"Lane: {job_to_show.get('primary_lane') or 'UNCLASSIFIED'} | "
                 f"Pipeline state: {job_to_show.get('processing_state') or 'UNKNOWN'} | "
