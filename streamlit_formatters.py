@@ -8,6 +8,7 @@ Usage:
 
 from decimal import Decimal
 from numbers import Real
+from urllib.parse import urlsplit
 
 MISSING_VALUE = "N/A"
 
@@ -151,3 +152,43 @@ def format_career_track(track: object, level: object, tags: object) -> str | Non
             if isinstance(tag, str) and tag in CAREER_TRACK_TAG_LABELS
         )
     return " · ".join(parts)
+
+
+_URL_FORBIDDEN_CHARACTERS = frozenset("()<>[]{}\"'`\\^|")
+
+
+def safe_http_url(value: object) -> str | None:
+    """Return ``value`` when it is a well-formed http(s) link, otherwise None.
+
+    The URL must parse, use the http or https scheme, name a host, and contain
+    no whitespace, control characters or characters that could break out of a
+    markdown link. Other schemes (javascript:, data:, file:, ...) are refused.
+    """
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if not url or len(url) > 2048:
+        return None
+    if any(
+        character.isspace()
+        or ord(character) < 0x20
+        or 0x7F <= ord(character) <= 0x9F
+        or character in _URL_FORBIDDEN_CHARACTERS
+        for character in url
+    ):
+        return None
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+        parts.port  # noqa: B018 - raises ValueError for an invalid port
+    except ValueError:
+        return None
+    if (
+        parts.scheme.lower() not in {"http", "https"}
+        or not parts.netloc
+        or not hostname
+    ):
+        return None
+    if parts.username is not None or parts.password is not None:
+        return None
+    return url

@@ -30,6 +30,7 @@ def test_streamlit_entrypoint_and_all_direct_helpers_import_together():
         "streamlit_workspace_contracts",
         "streamlit_manual_application",
         "streamlit_saved_jobs",
+        "streamlit_job_review",
     ):
         importlib.import_module(module_name)
 
