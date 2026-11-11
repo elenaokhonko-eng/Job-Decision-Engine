@@ -3,6 +3,7 @@ import {
   extractExplicitWorkerTerritoryRequirements,
   splitWorkabilityClauses,
 } from "../pipeline/workabilityPolicy.js";
+import type { OnsiteException } from "../pipeline/onsiteExceptions.js";
 
 export type WorkabilityReadinessStatus = "MET" | "BLOCKED" | "NEEDS_VERIFICATION" | "NOT_APPLICABLE";
 
@@ -278,18 +279,28 @@ export function assessWorkModeReadiness(
   attendanceBasis: unknown,
   gateDecision: string | null,
   policy: Pick<WorkabilityReadinessPolicy, "allowedWorkModes" | "maxOfficeDaysPerWeek" | "hardFailOfficeDaysPerWeek" | "hybridWithoutOfficeDaysAllowed">,
+  /**
+   * The on-site exception the hard gate applied (same `findOnsiteException` and the
+   * same effective policy). It lifts only the on-site / office-day conflict; an
+   * unknown work mode still needs verification.
+   */
+  onsiteException: OnsiteException | null = null,
 ): WorkabilityReadinessResult {
   const mode = evidence?.value ?? (workplaceType === "ASSUMED_HYBRID" ? "HYBRID" : "UNKNOWN");
+  const exceptionKeys = onsiteException ? [`onsite_exception:${onsiteException.kind}`] : [];
   const assumedHybrid = mode === "HYBRID"
     && evidence?.status !== "SUPPORTED"
     && (workplaceType === "ASSUMED_HYBRID" || attendanceBasis === "POLICY_HYBRID_3_2");
   const officeDays = evidence?.office_days_max
     ?? (typeof officeDaysFact === "number" && Number.isFinite(officeDaysFact) ? officeDaysFact : null)
     ?? (assumedHybrid && policy.hybridWithoutOfficeDaysAllowed ? policy.maxOfficeDaysPerWeek : null);
-  const modeAllowed = mode !== "UNKNOWN" && policy.allowedWorkModes.includes(mode);
-  const officeDaysAllowed = officeDays === null
-    ? mode === "REMOTE"
-    : officeDays <= policy.maxOfficeDaysPerWeek && officeDays < policy.hardFailOfficeDaysPerWeek;
+  const exceptionLiftsOnsite = onsiteException !== null && mode !== "UNKNOWN";
+  const modeAllowed = mode !== "UNKNOWN" && (policy.allowedWorkModes.includes(mode) || (exceptionLiftsOnsite && mode === "ONSITE"));
+  const officeDaysAllowed = exceptionLiftsOnsite
+    ? true
+    : officeDays === null
+      ? mode === "REMOTE"
+      : officeDays <= policy.maxOfficeDaysPerWeek && officeDays < policy.hardFailOfficeDaysPerWeek;
   const assumedHybridAllowed = assumedHybrid
     && policy.hybridWithoutOfficeDaysAllowed
     && modeAllowed
@@ -323,13 +334,21 @@ export function assessWorkModeReadiness(
     };
   }
   if (evidence?.status === "SUPPORTED" && modeAllowed && officeDaysAllowed) {
-    return {
-      status: "MET",
-      reasonCode: null,
-      rationale: `Employer-confirmed ${mode.toLowerCase()} work mode fits the active office-day policy.`,
-      evidenceKeys: evidence.evidence.map((item) => item.evidence_key),
-      policyReferenceRequired: false,
-    };
+    return exceptionLiftsOnsite
+      ? {
+          status: "MET",
+          reasonCode: null,
+          rationale: `Employer-confirmed ${mode.toLowerCase()} work mode is accepted by the ${onsiteException!.kind} on-site exception.`,
+          evidenceKeys: [...evidence.evidence.map((item) => item.evidence_key), ...exceptionKeys],
+          policyReferenceRequired: true,
+        }
+      : {
+          status: "MET",
+          reasonCode: null,
+          rationale: `Employer-confirmed ${mode.toLowerCase()} work mode fits the active office-day policy.`,
+          evidenceKeys: evidence.evidence.map((item) => item.evidence_key),
+          policyReferenceRequired: false,
+        };
   }
   if (evidence?.status === "SUPPORTED" && (!modeAllowed || !officeDaysAllowed)) {
     return {

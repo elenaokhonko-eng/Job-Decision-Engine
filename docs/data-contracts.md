@@ -26,6 +26,42 @@ CI runs `npm run contracts:check`, which regenerates schemas and fails when comm
 
 Canonical source names use uppercase values from `SourceNameSchema`. Schema tests require every exported boundary schema to contain object properties and required fields.
 
+## Hard-gate reason codes and on-site exceptions
+
+Gate reason codes are free strings in `gate_decisions.rejection_codes` (JSONB) and `canonical_jobs.rejection_reason` (text), so new codes are additive. `src/pipeline/gateReasonCodes.ts` holds the labels, including the legacy codes. Gate logic is versioned by `GATE_VERSION` (`src/contracts/version.ts`, now `gate-2026-11.1`). Since the 2026-11 policy it is independent of `SCHEMA_VERSION`.
+
+| Code | Meaning | Status |
+|---|---|---|
+| `GATE_TRAVEL_ABOVE_LIMIT` | Travel above the configured `max_travel_pct` (20% today), or frequent travel with no percentage. The evidence names the configured limit. | New |
+| `GATE_ON_CALL_REQUIRED` | Regular on-call is required while `regular_on_call_allowed` is false | New |
+| `GATE_SHIFT_WORK_REQUIRED` | Shift work is required while `shift_work_allowed` is false | New |
+| `GATE_JOB_LOCATION_MISMATCH` | The job is located only outside the authorized regions | New. Before, a job location was reported as `WORK_AUTHORIZATION_INCOMPATIBLE`, which now means only an explicit worker restriction. |
+| `GATE_LIFESTYLE_INCOMPATIBLE` | Legacy umbrella code for travel, on-call and shift work | No longer emitted. Stored rows stay valid. |
+| `NON_TECHNICAL_FUNCTION`, `GATE_NOT_AI_DATA` | Axis 1 (generic technical-function check) and Axis 2 (AI/data domain) | No longer emitted. A non-technical PM, programme, transformation, product-policy or investigator role is acceptable when it fits a lane and the candidate's experience, and lane routing decides. |
+| `NON_TARGET_ROLE_FAMILY` + `GATE_OUT_OF_SCOPE_DOMAIN` | Explicit non-target title families: `GLOBAL_TITLE_EXCLUSIONS` (HR, sales, customer success, legal practice and counsel) and `NON_TECHNICAL_FUNCTION_TITLES` (accountant, payroll, support specialist, graphic/UX designer) | Still hard rejects. The second list emitted `NON_TECHNICAL_FUNCTION` before 2026-11 and now uses this role-family code. Legal-technology titles ("Legal Engineer", "Legal Innovation Technologist") and agency names such as "Attorney-General's Office" do not match. |
+
+### On-site exceptions
+
+The global rule still rejects a full-time on-site role. Two exceptions lift only the on-site and office-day conflicts (`UNWORKABLE_LOCATION_MODEL`, `GATE_HIGH_OFFICE_DAYS`, and readiness `WORK_MODE_INCOMPATIBLE`). Each lifted gate conflict is stored as an evidence quote of the form `ON-SITE EXCEPTION (<KIND>): <reason>; ... Lifted conflict: <original conflict>`. Readiness records the evidence key `onsite_exception:<KIND>`. An unknown work mode still goes to `NEEDS_VERIFICATION`.
+
+- `RESEARCH_ROLE` comes from the public list `global_workability_gates.work_mode.onsite_exceptions` in `config/policies/workability.yml`. It covers universities and research institutes, hospital research units, and research titles such as "research fellow" and "research scientist". Rules for the list:
+  - A bare "scientist" title counts only at a research employer (`bare_scientist_title_counts: false`).
+  - Abbreviations of four characters or fewer ("NUS", "SIT") match only the whole employer name.
+  - Public-list entries never prefix-match.
+- `PREFERRED_EMPLOYER` comes from the optional stage3 preference field `mobility.onsite_exception_employers`.
+
+```json
+{ "mobility": { "onsite_exception_employers": ["Employer Name", "Another Employer"] } }
+```
+
+The field is an optional array of 1–200 strings, each 2–120 characters. If it is absent or empty, no employer exception applies. A name matches the employer as whole words ("Example Bank" matches "Example Bank Singapore"). It also matches as a name prefix of at least five letters on the employer's first word, provided the rest of that word is empty or at least three letters ("ExampleBank" matches "ExampleBankGroup", but "Northwind" does not match "Northwinds").
+
+One shared resolver, `resolveEffectiveWorkabilityPolicy` (`src/pipeline/effectiveWorkabilityPolicy.ts`), builds the workspace policy plus this list. The hard gate, the recommendation decider (readiness) and the HN pre-filter all use it, and they all call `findOnsiteException`. Gate, decision and readiness rows therefore carry the same `workability_policy_hash`.
+
+**Seeding.** Add the field to the private `work_preferences.json` under `mobility` and run `scripts/seed_workspace_preferences.ts --apply`. That script writes only to `STAGE3_STAGING_DATABASE_URL`. Activate it in production with `scripts/activate_workspace_preferences.ts` (see "Activating workspace preferences in production" below), then re-gate.
+
+**Policy hash on merge.** `workability_policy_hash` changes for every workspace when this policy ships, because the hashed policy now contains the on-site exception config. Every gate, decision and readiness row written afterwards carries the new hash, with or without the stage3 field. A non-empty employer list changes the hash again. Stored decisions are not re-gated automatically, so a scoped re-gate is expected. Run `scripts/replay_hard_gate_policy_2026_11.ts`: its default is a read-only dry run that previews work-mode enrichment without fetching pages. `--apply` refuses any new HARD_REJECT unless `--allow-new-rejections=<n>` equals the dry-run count (always required with `--include-non-rejected` or `--ids-file`), reports re-gated, skipped (with reasons) and unchanged counts, compares applied outcomes with the dry run, and exits non-zero when processed differs from eligible. For rollback, `scripts/regate_job_ids.ts --ids-file=<path>` (dry run by default) re-gates an explicit id list; it uses only APIs that predate this change, so it can be restored after a revert and run under the reverted gate code. Bumping `GATE_VERSION` also makes queued `APPLY_HARD_GATES` tasks re-run instead of being treated as already satisfied.
+
 ## Activating workspace preferences in production
 
 `scripts/seed_workspace_preferences.ts` stays the staging-only seeder: it writes only to `STAGE3_STAGING_DATABASE_URL` and refuses `DATABASE_URL`. A production change to the active `stage3` or `lane_intent` revision goes through `scripts/activate_workspace_preferences.ts` (logic in `src/policy/preferenceActivation.ts`), with these guards:
@@ -89,7 +125,7 @@ PREFERENCES_PROD_ACTIVATION_ALLOWED=true npx tsx scripts/activate_workspace_pref
 
 In PowerShell, set `$env:PREFERENCES_PROD_ACTIVATION_ALLOWED = 'true'` before step 2 and remove it afterwards with `Remove-Item Env:PREFERENCES_PROD_ACTIVATION_ALLOWED`.
 
-**After activation.** New gate, routing and decision runs read the new revision at once. Stored rows are not re-processed automatically, so run the dry run's `followUps`, each from its own reviewed dry run. The re-gate step needs PR #173's scripts, `scripts/replay_hard_gate_policy_2026_11.ts` and `scripts/regate_job_ids.ts`. Until #173 is merged, main has no scoped re-gate for these changes, so do not activate a stage3 change that needs one before #173 is deployed.
+**After activation.** New gate, routing and decision runs read the new revision at once. Stored rows are not re-processed automatically, so run the dry run's `followUps`, each from its own reviewed dry run. The re-gate step needs PR #173's scripts, `scripts/replay_hard_gate_policy_2026_11.ts` and `scripts/regate_job_ids.ts`.
 
 | Changed path | Follow-up |
 |---|---|

@@ -212,12 +212,23 @@ export function evaluateMobilityMatch(
     : false;
   const requiredResidency = text.match(/\b(?:must reside in|residents? of|based in)\s+(?:the\s+)?([a-z][a-z -]{1,40})/i);
   const residencyTerritory = requiredResidency?.[1]?.trim().replace(/\s+(?:only|and|with|for|to|who).*$/i, '') || null;
+  // "Based in Australia/Singapore/Japan" is a list of alternatives: the whole clause
+  // counts, not only its first place name. A job whose own location is the home
+  // base is not blocked by a "based in" mention elsewhere in its description.
+  const residencyClause = text.match(/\b(?:must reside in|residents? of|based in)\s+(?:the\s+)?([^.;!?\n]{1,160})/i)?.[1] ?? '';
+  const clauseNamesHomeBase = homeBaseLower !== ''
+    && new RegExp(`\\b${escapeRegExp(homeBaseLower)}\\b`, 'i').test(residencyClause);
+  const isBasedInMention = /\bbased in\b/i.test(requiredResidency?.[0] ?? '');
+  const jobLocatedInHomeBase = homeBaseLower !== ''
+    && new RegExp(`\\b${escapeRegExp(homeBaseLower)}\\b`, 'i').test(String(input.location || ''));
   const residencyMismatch = Boolean(
     policy.requires_residency_in_home_base === true &&
     homeBaseLower &&
     residencyTerritory &&
     !residencyTerritory.includes(homeBaseLower) &&
-    !homeBaseLower.includes(residencyTerritory)
+    !homeBaseLower.includes(residencyTerritory) &&
+    !clauseNamesHomeBase &&
+    !(isBasedInMention && jobLocatedInHomeBase)
   );
 
   if (explicitlyIneligibleForHomeBase || residencyMismatch) {

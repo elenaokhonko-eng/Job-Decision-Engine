@@ -440,9 +440,12 @@ describe("fetchJobContent employer-board fallback for LinkedIn URLs", () => {
     expect(calls).toBe(0);
   });
 
-  it("refuses to look up a card without a usable employer name", async () => {
+  it.each([
+    "Unknown Company",
+    "logo_100_100/company-logo_100_100/0/1631425624819/example_logo?e=2147483647&v=beta&t=abc",
+  ])("refuses to look up a card without a usable employer name (%s)", async (companyName) => {
     const { deps, requests } = transport(linkedInAuthWall);
-    const result = await fetchJobContent(LINKEDIN_URL, { ...EXPECTED, companyName: "Unknown Company" }, {
+    const result = await fetchJobContent(LINKEDIN_URL, { ...EXPECTED, companyName }, {
       ...deps,
       ...fallback(),
     });

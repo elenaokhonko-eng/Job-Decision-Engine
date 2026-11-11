@@ -1,5 +1,5 @@
 import type { DiscoveryLocationScope } from "../ingestion/discoveryLocationScope.js";
-import { extractTerritories, normalizeTerritories } from "../pipeline/workabilityPolicy.js";
+import { extractTerritories, isTerritoryAuthorized, normalizeTerritories } from "../pipeline/workabilityPolicy.js";
 
 /**
  * Hiring territory of remote postings.
@@ -124,7 +124,7 @@ function inScopeTermIn(text: string, scope: RemoteTerritoryScope): string | null
 }
 
 function isForeign(territory: string, scope: RemoteTerritoryScope): boolean {
-  return !scope.authorizedRegions.includes(territory);
+  return !isTerritoryAuthorized(territory, scope.authorizedRegions);
 }
 
 /** Classify a board's candidate-region field. Returns null when it names no territory. */
@@ -166,7 +166,21 @@ function sentenceAround(text: string, index: number, length: number): string {
   return text.slice(start, end).replace(/\s+/g, " ").trim().slice(0, 300);
 }
 
-function descriptionSignals(description: string): { signals: TerritorySignal[]; counter: string[] } {
+/**
+ * "Remote - US, Canada, UK, Southeast Asia, and broader APAC" is one list. The label
+ * pattern stops at the first comma, so read the rest of the line and treat an
+ * in-scope region anywhere in that list as an authorized hiring territory.
+ */
+function remoteLabelListIncludesScope(text: string, match: RegExpExecArray, scope: RemoteTerritoryScope | null): boolean {
+  if (!scope) return false;
+  const stops = [text.indexOf("\n", match.index), text.indexOf(". ", match.index), text.indexOf(";", match.index)]
+    .filter((value) => value >= 0);
+  const line = text.slice(match.index, stops.length > 0 ? Math.min(...stops) : text.length);
+  const list = line.replace(/^\s*remote\s*(?:\(|[-–—:,])/i, "");
+  return inScopeTermIn(list, scope) !== null;
+}
+
+function descriptionSignals(description: string, scope: RemoteTerritoryScope | null = null): { signals: TerritorySignal[]; counter: string[] } {
   const text = plainText(description);
   const signals: TerritorySignal[] = [];
   const counter: string[] = [];
@@ -190,6 +204,15 @@ function descriptionSignals(description: string): { signals: TerritorySignal[]; 
 
   for (const match of text.matchAll(STRONG_REMOTE_LABEL)) {
     if (insideHeadquarters(match.index)) continue;
+    if (scope && remoteLabelListIncludesScope(text, match as RegExpExecArray, scope)) {
+      signals.push({
+        source: "DESCRIPTION",
+        strength: "STRONG",
+        territories: [...scope.authorizedRegions],
+        evidence: sentenceAround(text, match.index, match[0].length),
+      });
+      continue;
+    }
     add("STRONG", match[1] ?? "", match as RegExpExecArray, true);
   }
   for (const match of text.matchAll(STRONG_REMOTE_WITHIN)) {
@@ -233,7 +256,7 @@ export function assessRemoteHiringTerritory(input: RemoteTerritoryInput, scope: 
     }
   }
 
-  const fromDescription = descriptionSignals(input.description ?? "");
+  const fromDescription = descriptionSignals(input.description ?? "", scope);
   signals.push(...fromDescription.signals);
   counterEvidence.push(...fromDescription.counter);
 
