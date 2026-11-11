@@ -361,6 +361,59 @@ def validate_verify_then_apply_row(
     _optional_score(row, "deterministic_match_score")
 
 
+def validate_review_row(row: Mapping[str, object], workspace_id: object) -> None:
+    """Validate a current REVIEW decision row from the scoped shortlist.
+
+    Review rows may have any gate, eligibility, pipeline artifact or readiness
+    state; the UI explains which of them keeps the job out of Apply Now.
+
+    Raises:
+        ValueError: If scope or the REVIEW outcome is invalid.
+        TypeError: If an evidence array has an invalid type.
+    """
+    _require_fields(
+        row,
+        (
+            "workspace_id",
+            "canonical_job_id",
+            "job_version_id",
+            "title",
+            "company",
+            "gate_status",
+            "rejection_codes",
+            "gate_evidence_quotes",
+            "processing_state",
+            "recommendation_eligibility",
+            "recommendation_outcome",
+            "current_artifact_status",
+            "readiness_status",
+            "readiness_reason_codes",
+        ),
+    )
+    _require_scope(row, workspace_id)
+    for field in ("canonical_job_id", "job_version_id", "title", "company"):
+        _require_string(row, field)
+    if row.get("recommendation_outcome") != "REVIEW":
+        raise ValueError("Review rows must carry a current REVIEW decision.")
+    for field in ("rejection_codes", "gate_evidence_quotes", "readiness_reason_codes"):
+        value = row.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, (list, tuple)) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise TypeError(f"Read-model field {field} must be a string array.")
+    for field in (
+        "deterministic_match_score",
+        "deterministic_match_coverage",
+        "recommendation_requirement_score",
+        "recommendation_coverage_score",
+        "recommendation_evidence_completeness",
+    ):
+        if field in row:
+            _optional_score(row, field)
+
+
 def validate_track_row(row: Mapping[str, object], workspace_id: object) -> None:
     """Validate a current deterministic Track row and its decision trace.
 
