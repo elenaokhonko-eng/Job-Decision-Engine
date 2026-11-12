@@ -7,6 +7,13 @@ import { htmlToPlainText } from "./emailAlertExtractor.js";
 import { isUnknownEmployerName } from "./postingIdentity.js";
 import { classifyDescriptionQuality } from "../pipeline/descriptionQuality.js";
 import { stripHtmlToText } from "../security/sanitize.js";
+import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
+import {
+  findExplicitOnsiteStatement,
+  hasOnsiteWorkModeValue,
+  isSingaporeLocatedJob,
+  withoutNonOfferedWorkModes,
+} from "../pipeline/onsiteStatements.js";
 import { parseAbsoluteSourceDate, parseRelativePostedText, type PostingDateDerivation } from "./postingFacts.js";
 import {
   linkedInJobIdFromUrl,
@@ -1330,16 +1337,23 @@ function parseEmployerHtml(
     return { kind: "IDENTITY_CONFLICT", reason: "Employer page requisition ID did not match the discovered posting identity." };
   }
 
-  const workText = description.toLowerCase();
+  // Workplace perks ("Perks: on-site gym") are neutral, never work-mode evidence.
+  const workText = neutralizeWorkplacePerkPhrases(description.toLowerCase());
+  // Negated modes, equal-opportunity lines and company history do not offer hybrid/remote work.
+  const offeredText = withoutNonOfferedWorkModes(workText);
   const structuredWorkplace = stringValue(matchedJsonLd?.posting.jobLocationType);
   const workplaceType = structuredWorkplace?.toUpperCase() === "TELECOMMUTE"
     ? "REMOTE"
     : structuredWorkplace
       ? normalizeWorkplaceType(structuredWorkplace)
-      : /\bfully remote|remote-first|work from anywhere\b/.test(workText)
+      : /\bfully remote|remote-first|work from anywhere\b/.test(offeredText)
         ? "REMOTE"
-        : /\bhybrid\b/.test(workText) ? "HYBRID"
-          : /\bon[- ]site\b/.test(workText) ? "ONSITE" : "UNKNOWN";
+        : /\bhybrid\b/.test(offeredText) ? "HYBRID"
+          // Only an explicit on-site statement, never a noun modifier ("on-site training").
+          : findExplicitOnsiteStatement(workText, workText, { singapore: isSingaporeLocatedJob(location, workText), location }) !== null
+            || hasOnsiteWorkModeValue(workText)
+            ? "ONSITE"
+            : "UNKNOWN";
   const jsonLdEmploymentType = matchedJsonLd?.posting.employmentType;
   const employmentType = Array.isArray(jsonLdEmploymentType)
     ? jsonLdEmploymentType.map(stringValue).filter((item): item is string => Boolean(item)).join(", ") || null

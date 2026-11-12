@@ -541,7 +541,9 @@ describe("end to end through the hard gate", () => {
   });
 
   it("bumps the gate version so stored decisions are re-gated", () => {
-    expect(GATE_VERSION).toBe("gate-2026-11.2");
+    // 11.2 introduced these rules; 11.3 (#177, neutral workplace perks and the
+    // Singapore on-site rule) followed, so the current version is later than 11.2.
+    expect(GATE_VERSION).toBe("gate-2026-11.3");
   });
 });
 

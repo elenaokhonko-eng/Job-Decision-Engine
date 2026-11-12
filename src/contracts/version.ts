@@ -15,6 +15,8 @@ export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
 // precise travel/on-call/shift/location codes.
 // 2026-11.2: foreign citizenship and government security-clearance requirements are
 // WORK_AUTHORIZATION_INCOMPATIBLE with quoted evidence.
-export const GATE_VERSION = "gate-2026-11.2" as const;
+// 2026-11.3: workplace perk phrases are neutral work-mode evidence; for a
+// Singapore-located job an explicit on-site statement overrides the assumed-hybrid default.
+export const GATE_VERSION = "gate-2026-11.3" as const;
 export const PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;
 

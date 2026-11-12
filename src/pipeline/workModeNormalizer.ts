@@ -1,7 +1,9 @@
+import { neutralizeWorkplacePerkPhrases } from "./workplacePerkPhrases.js";
+
 export type NormalizedWorkMode = "REMOTE" | "HYBRID" | "ONSITE" | "UNKNOWN";
 
 export function normalizeWorkMode(raw: unknown): NormalizedWorkMode {
-  const value = String(raw ?? "").trim().toLowerCase();
+  const value = neutralizeWorkplacePerkPhrases(String(raw ?? "").trim().toLowerCase());
   if (!value) {
     return "UNKNOWN";
   }

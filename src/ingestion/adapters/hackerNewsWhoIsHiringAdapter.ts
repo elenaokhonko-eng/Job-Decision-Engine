@@ -27,6 +27,7 @@ import {
   extractExplicitWorkerTerritoryRequirements,
   type WorkabilityPolicy,
 } from "../../pipeline/workabilityPolicy.js";
+import { neutralizeWorkplacePerkPhrases } from "../../pipeline/workplacePerkPhrases.js";
 import {
   BaseSourceAdapter,
   type AdapterFetchOptions,
@@ -315,7 +316,11 @@ function workModeFrom(text: string): ParsedHiringPost["workMode"] {
   const remote = REMOTE_PATTERN.test(text) && !REMOTE_NEGATED_PATTERN.test(text);
   if (remote) return "REMOTE";
   if (HYBRID_PATTERN.test(text)) return "HYBRID";
-  if (ONSITE_PATTERN.test(text)) return "ONSITE";
+  // A workplace perk ("Onsite gym") is neutral, never on-site evidence. Each
+  // header segment is read on its own, so a "|" separator does not make a perk
+  // segment look like a work-mode statement.
+  const perkNeutral = text.split("|").map(neutralizeWorkplacePerkPhrases).join("|");
+  if (ONSITE_PATTERN.test(perkNeutral)) return "ONSITE";
   return "UNKNOWN";
 }
 
@@ -369,7 +374,10 @@ export function parseWhoIsHiringComment(item: HnItem, threadId: number): ParsedC
         salaries.push(segment);
         continue;
       }
-      if (!hasRole && WORK_MODE_PATTERN.test(segment)) {
+      const perkNeutralSegment = neutralizeWorkplacePerkPhrases(segment);
+      // A workplace perk segment ("Onsite gym") is neither a work mode nor a location.
+      if (!hasRole && perkNeutralSegment !== segment && !WORK_MODE_PATTERN.test(perkNeutralSegment)) continue;
+      if (!hasRole && WORK_MODE_PATTERN.test(perkNeutralSegment)) {
         // A bare "REMOTE"/"ONSITE" sets the work mode only; a qualified one ("Remote (EU)") is also location text.
         if (!isBareWorkModeSegment(segment)) locations.push(segment);
         continue;

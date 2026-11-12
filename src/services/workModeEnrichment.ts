@@ -3,6 +3,14 @@ import pg from "pg";
 import { stripHtmlToText } from "../security/sanitize.js";
 import { type WorkspaceContext } from "../workspace/context.js";
 import { extractHybridAttendance, type HybridAttendanceFacts } from "./criteria.js";
+import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
+import {
+  findExplicitOnsiteStatement,
+  findOnsiteDayCount,
+  hasOnsiteWorkModeValue,
+  isSingaporeLocatedJob,
+  withoutNonOfferedWorkModes,
+} from "../pipeline/onsiteStatements.js";
 
 const EXTRACTOR_VERSION = "work_mode_enrichment_v1";
 const FETCH_TIMEOUT_MS = 15_000;
@@ -10,10 +18,15 @@ const FETCH_TIMEOUT_MS = 15_000;
 function isSingaporeUnknownWorkModeEligible(location: string | null | undefined, description: string | null | undefined): boolean {
   const loc = String(location || "").toLowerCase();
   const desc = String(description || "").toLowerCase();
-  const isSingapore = /\b(?:singapore|sg)\b/i.test(loc)
-    || /\b(?:based\s+in\s+singapore|location\s*:\s*singapore|office\s+in\s+singapore)\b/i.test(desc);
-  const explicitOnsite = /\b(?:100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(desc)
-    || /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i.test(desc);
+  const isSingapore = isSingaporeLocatedJob(loc, desc);
+  // Owner rule (2026-11): any explicit on-site statement in a Singapore job
+  // means on-site, so the assumed-hybrid default never overrides it. The hard
+  // gate reads the same statements on the same perk-neutral text; a workplace
+  // perk ("onsite gym") alone is neutral and keeps the default.
+  const workModeText = neutralizeWorkplacePerkPhrases(desc);
+  const explicitOnsite = /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i.test(workModeText)
+    || findExplicitOnsiteStatement(workModeText, desc, { singapore: isSingapore, location: loc }) !== null
+    || extractWorkModeFromText(desc).workplace_type === "ONSITE";
   return isSingapore && !explicitOnsite;
 }
 
@@ -106,29 +119,40 @@ export function extractWorkModeFromText(text: string): {
   attendance_basis: string;
   evidence_quote: string | null;
 } {
-  const d = (text || "").toLowerCase();
+  // Workplace perks ("onsite gym", "on-site cafe") are neutral, never work-mode evidence.
+  const d = neutralizeWorkplacePerkPhrases((text || "").toLowerCase());
 
   // 1. Check explicit on-site presence or office days >= 4
   const officeDaysMatch = d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)
     || d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
+  // An affirmative on-site statement followed by a day count: 4-5 is on-site
+  // with those days ("On-site 4 days a week, 1 day WFH"), 1-3 is hybrid (below).
+  const onsiteDays = findOnsiteDayCount(d);
   const isExplicitOnsite = /\b(100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d)
-    || /(?:^|[|·•:,])\s*(?:on-?site|onsite)\b/i.test(d)
-    || /\b(?:workplace|work\s+model|workplace\s+type|work\s+type)\s*:\s*(?:on-?site|onsite)\b/i.test(d)
-    || (officeDaysMatch !== null && Number(officeDaysMatch[1]) >= 4);
+    // Header, label and listed values ("Work model: On-site"), with the shared
+    // noun exclusion, clause and 1-3 day partial-attendance rules.
+    || hasOnsiteWorkModeValue(d)
+    || (officeDaysMatch !== null && Number(officeDaysMatch[1]) >= 4)
+    || (onsiteDays !== null && onsiteDays.officeDaysMin >= 4);
 
   if (isExplicitOnsite) {
-    const days = officeDaysMatch ? Number(officeDaysMatch[1]) : 5;
+    const officeDays = officeDaysMatch ? Number(officeDaysMatch[1]) : null;
+    const days = officeDays ?? (onsiteDays && onsiteDays.officeDaysMin >= 4 ? onsiteDays : null);
     return {
       workplace_type: "ONSITE",
-      office_days_min: days,
-      office_days_max: days,
+      office_days_min: typeof days === "number" ? days : days?.officeDaysMin ?? 5,
+      office_days_max: typeof days === "number" ? days : days?.officeDaysMax ?? 5,
       attendance_basis: "EMPLOYER_STATED",
-      evidence_quote: officeDaysMatch?.[0] || "On-site requirement detected",
+      evidence_quote: officeDaysMatch?.[0] || onsiteDays?.quote || "On-site requirement detected",
     };
   }
 
+  // Hybrid/remote are read on text without negated or not-offered modes,
+  // equal-opportunity lines and company history ("founded as a remote-first startup").
+  const offered = withoutNonOfferedWorkModes(d);
+
   // 2. Check hybrid
-  if (/\bhybrid\b/i.test(d)) {
+  if (/\bhybrid\b/i.test(offered)) {
     const attendance = extractHybridAttendance(d);
     return {
       workplace_type: "HYBRID",
@@ -139,10 +163,21 @@ export function extractWorkModeFromText(text: string): {
     };
   }
 
+  // 2b. Partial on-site attendance ("Location: On-site, two days a week") is hybrid.
+  if (onsiteDays && onsiteDays.officeDaysMax <= 3) {
+    return {
+      workplace_type: "HYBRID",
+      office_days_min: onsiteDays.officeDaysMin,
+      office_days_max: onsiteDays.officeDaysMax,
+      attendance_basis: "EMPLOYER_STATED",
+      evidence_quote: onsiteDays.quote,
+    };
+  }
+
   // 3. Check remote
-  const remoteMatch = d.match(/\b(fully\s+remote|100%\s+remote|remote[- ]first|work\s+from\s+home|work\s+remotely|telecommute)\b/i)
-    || d.match(/(?:^|[|·•:,])\s*remote\b/i)
-    || d.match(/\b(?:workplace|work\s+model|workplace\s+type|work\s+type|location)\s*:\s*remote\b/i);
+  const remoteMatch = offered.match(/\b(fully\s+remote|100%\s+remote|remote[- ]first|work\s+from\s+home|work\s+remotely|telecommute)\b/i)
+    || offered.match(/(?:^|[|·•:,])\s*remote\b/i)
+    || offered.match(/\b(?:workplace|work\s+model|workplace\s+type|work\s+type|location)\s*:\s*remote\b/i);
 
   if (remoteMatch) {
     return {
