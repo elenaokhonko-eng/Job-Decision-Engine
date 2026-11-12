@@ -54,6 +54,9 @@ const PERK_NOUNS = [
   String.raw`perks?`,
 ].join("|");
 
+/** A workplace perk phrase ("free parking", "gym", "perks") as a regex source fragment. */
+export const WORKPLACE_PERK_PHRASE_SOURCE = String.raw`${PERK_MODIFIERS}(?:${PERK_NOUNS})\b(?!-)`;
+
 /**
  * A token that already forms a work-mode statement is never blanked, even when
  * a perk follows on the same line ("5 days on-site meals provided",

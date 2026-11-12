@@ -124,8 +124,9 @@ export function extractWorkModeFromText(text: string): {
   const officeDaysMatch = d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)
     || d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
   const isExplicitOnsite = /\b(100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d)
+    // Header, label and listed values ("Work model: On-site"), with the shared
+    // noun exclusion and 1-3 day partial-attendance rule.
     || hasOnsiteWorkModeValue(d)
-    || /\b(?:workplace|work\s+model|workplace\s+type|work\s+type)\s*:\s*(?:on-?site|onsite)\b/i.test(d)
     || (officeDaysMatch !== null && Number(officeDaysMatch[1]) >= 4);
 
   if (isExplicitOnsite) {

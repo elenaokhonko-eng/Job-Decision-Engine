@@ -400,3 +400,125 @@ describe("Singapore explicit on-site statements override the assumed-hybrid defa
     expect(london.reasonCode).not.toBe("GATE_HIGH_OFFICE_DAYS");
   });
 });
+
+// Review of b2ce10d.
+describe("separator and label on-site values (review of b2ce10d)", () => {
+  it("B1: a noun after a header separator or label is not an on-site value", async () => {
+    for (const line of [
+      "Full-time · On-site training provided",
+      "Engineering | On-site training",
+      "Location: On-site training provided",
+      "Work model: On-site client support",
+    ]) {
+      const description = `${TECH}\n${line}`;
+      const enriched = await enrichSingapore(description);
+      expect(enriched.workplace_type).toBe("ASSUMED_HYBRID");
+      expect(gate(description, "ASSUMED_HYBRID").status).toBe("NEEDS_VERIFICATION");
+      expect(gate(description, "UNKNOWN").status).toBe("NEEDS_VERIFICATION");
+      expect(postingWorkplaceType(await employerPage(line))).toBe("UNKNOWN");
+    }
+  });
+
+  it("B1: a header or label value with a trailing perk stays on-site", async () => {
+    for (const line of ["Full-time · On-site Free parking", "Location: On-site Parking available", "Engineering | Onsite"]) {
+      const description = `${TECH}\n${line}`;
+      expect(extractWorkModeFromText(description).workplace_type).toBe("ONSITE");
+      expect(gate(description, "ASSUMED_HYBRID").status).toBe("HARD_REJECT");
+    }
+  });
+
+  it("B2: enrichment does not store 'Work model: On-site, 2 days a week' as 5-day on-site", async () => {
+    for (const line of ["Work model: On-site, 2 days a week", "Workplace: On-site, 2 days a week", "Workplace type: Onsite, 3 days per week"]) {
+      const description = `${TECH}\n${line}`;
+      expect(extractWorkModeFromText(description).workplace_type).not.toBe("ONSITE");
+      const enriched = await enrichSingapore(description);
+      expect(enriched.workplace_type).not.toBe("ONSITE");
+      expect(gate(description, enriched.workplace_type).status).not.toBe("HARD_REJECT");
+    }
+  });
+
+  it("4 or more days on-site rejects even with a noun between", async () => {
+    for (const line of ["You'll be on-site with clients 4 days a week.", "You will be on-site at client premises 5 days a week.", "Expect to be on-site with the team daily."]) {
+      const description = `${TECH}\n${line}`;
+      const enriched = await enrichSingapore(description);
+      expect(enriched.workplace_type).not.toBe("ASSUMED_HYBRID");
+      expect(gate(description, enriched.workplace_type).status).toBe("HARD_REJECT");
+      expect(evaluateWorkability("London, United Kingdom", "UNKNOWN", description, "PERMANENT").reasonCode).toBe("GATE_HIGH_OFFICE_DAYS");
+    }
+  });
+});
+
+// Property-style sweep: every on-site form x every excluded noun x each day
+// count, through the gate (enrich-then-gate and stored ASSUMED_HYBRID),
+// work-mode enrichment and the employer-page fetcher.
+describe("on-site statement property sweep", () => {
+  const FORMS = [
+    (x: string) => `Full-time · On-site${x}`,
+    (x: string) => `Engineering | On-site${x}`,
+    (x: string) => `Location: On-site${x}`,
+    (x: string) => `Work model: On-site${x}`,
+    (x: string) => `• On-site${x}`,
+    (x: string) => `On-site${x}`,
+    (x: string) => `This role is on-site${x}`,
+    (x: string) => `You must be on-site${x}`,
+    (x: string) => `This is an on-site role${x}`,
+    (x: string) => `This is an office-based role${x}`,
+  ];
+  const NOUN_FORMS = FORMS.slice(0, 8);
+  const NOUNS = [
+    "training", "support", "client support", "visits", "meetings", "events", "interviews",
+    "orientation", "induction", "onboarding", "services", "assistance", "installations",
+    "inspections", "audits", "assessments", "deployments", "maintenance", "troubleshooting",
+    "demos", "workshops", "sessions", "activities",
+  ];
+  const PARTIAL = ["1 day a week", "2 days", "3 days a week", "1-3 days per week"];
+  const FULL = ["4 days a week", "5 days a week", "daily"];
+
+  async function outcomes(line: string) {
+    const description = `${TECH}\n${line}.`;
+    const enriched = await enrichSingapore(description);
+    return {
+      enriched: enriched.workplace_type,
+      gateEnriched: gate(description, enriched.workplace_type).status,
+      gateAssumed: gate(description, "ASSUMED_HYBRID").status,
+      fetched: postingWorkplaceType(await employerPage(`${line}.`)),
+    };
+  }
+
+  it("a noun-modifier use never rejects, with or without a day count", async () => {
+    const failures: string[] = [];
+    for (const form of NOUN_FORMS) {
+      for (const noun of NOUNS) {
+        for (const days of ["", ", 2 days", ", 5 days a week"]) {
+          const line = form(` ${noun} provided${days}`);
+          const result = await outcomes(line);
+          if (result.gateEnriched === "HARD_REJECT" || result.gateAssumed === "HARD_REJECT" || result.enriched === "ONSITE" || result.fetched === "ONSITE") {
+            failures.push(`${line} => ${JSON.stringify(result)}`);
+          }
+        }
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  it("1-3 days is partial attendance and 4-5 days or daily is on-site, for every form", async () => {
+    const failures: string[] = [];
+    for (const form of FORMS) {
+      for (const days of PARTIAL) {
+        const line = form(`, ${days}`);
+        const result = await outcomes(line);
+        if (result.gateEnriched === "HARD_REJECT" || result.gateAssumed === "HARD_REJECT" || result.enriched === "ONSITE" || result.fetched === "ONSITE") {
+          failures.push(`partial ${line} => ${JSON.stringify(result)}`);
+        }
+      }
+      for (const days of ["", ...FULL.map((d) => `, ${d}`)]) {
+        const line = form(days);
+        const result = await outcomes(line);
+        if (result.gateEnriched !== "HARD_REJECT" || result.gateAssumed !== "HARD_REJECT" || result.enriched === "ASSUMED_HYBRID") {
+          failures.push(`full ${line} => ${JSON.stringify(result)}`);
+        }
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+});
