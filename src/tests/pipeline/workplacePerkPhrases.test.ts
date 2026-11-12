@@ -14,6 +14,8 @@ import {
   ROUND_4_NOT_ONSITE,
   ROUND_4_OFFICE_DAYS,
   ROUND_4_ONSITE,
+  ROUND_5_NOT_ONSITE,
+  ROUND_5_ONSITE,
   SEPARATOR_OR_LABEL_PERKS,
   SWEEP_FORMS,
   SWEEP_FULL_DAYS,
@@ -679,6 +681,30 @@ describe("known false accepts (non-blocking)", () => {
     it(`${JSON.stringify(line)} is not hard-rejected (stays PASS or NEEDS_VERIFICATION)`, async () => {
       const result = await allPaths(line, location);
       expect(result.unknown, JSON.stringify(result)).not.toBe("HARD_REJECT");
+    });
+  }
+});
+
+// Review round 5: negated attendance phrases, participles about other people,
+// hedged or partial verb forms, and gate/enrichment agreement.
+describe("review round 5: attendance negation, participles, hedges and path agreement", () => {
+  for (const { line, location } of ROUND_5_NOT_ONSITE) {
+    it(`${JSON.stringify(line)} (${location}) never hard-rejects and never enriches as on-site`, async () => {
+      const result = await allPaths(line, location);
+      for (const path of ["enrichThenGate", "hybrid", "assumed", "unknown", "remote"] as const) {
+        expect(result[path], `${path}: ${JSON.stringify(result)}`).not.toBe("HARD_REJECT");
+      }
+      expect(result.enriched, JSON.stringify(result)).not.toBe("ONSITE");
+      expect(result.fetched, JSON.stringify(result)).not.toBe("ONSITE");
+    });
+  }
+
+  for (const line of ROUND_5_ONSITE) {
+    it(`${JSON.stringify(line)} is still an affirmative on-site statement`, async () => {
+      const result = await allPaths(line);
+      expect(result.enrichThenGate, JSON.stringify(result)).toBe("HARD_REJECT");
+      expect(result.unknown, JSON.stringify(result)).toBe("HARD_REJECT");
+      expect(result.assumed, JSON.stringify(result)).toBe("HARD_REJECT");
     });
   }
 });

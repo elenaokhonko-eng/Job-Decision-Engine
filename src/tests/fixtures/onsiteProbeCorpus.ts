@@ -256,3 +256,50 @@ export const KNOWN_FALSE_ACCEPTS: readonly OnsiteProbe[] = [
   sg("On-site Monday to Friday."),
   sg("The role will be office-based in Singapore."),
 ];
+
+/**
+ * Review round 5 (M1-M3, path agreement): never on-site in any path. M1 is a
+ * negated attendance phrase, M2 a participle about other people, M3 a
+ * hedged or partial verb form; the company-wide lines must read the same in
+ * the gate and in enrichment.
+ */
+export const ROUND_5_NOT_ONSITE: readonly OnsiteProbe[] = [
+  // M1
+  sg("On-site attendance is not required."),
+  sg("On-site attendance is optional."),
+  sg("On-site attendance: not required"),
+  sg("On-site presence isn't mandatory."),
+  sg("Onsite attendance is not expected."),
+  sg("On-site attendance is not required; you can work from anywhere in Singapore."),
+  // M2
+  sg("This role supports field engineers working on-site at customer plants."),
+  sg("You will support technicians working on-site at client facilities."),
+  sg("You will coordinate contractors working onsite at our data centres."),
+  sg("This role manages vendors based on-site at our warehouses."),
+  sg("This role works closely with engineers based onsite in our plants."),
+  // M3
+  sg("This role is on-site but not every day."),
+  sg("This role is on-site, but only twice a week."),
+  sg("This role is on-site some days."),
+  sg("This role is on-site part of the week."),
+  sg("This role is on-site on an as-needed basis."),
+  sg("You will work on-site for client meetings only."),
+  // Path agreement: company-wide or other-office attendance is third-party
+  sg("Employees in our Singapore office are expected to work onsite four days per week."),
+  sg("All employees are expected to work onsite four days per week."),
+  sg("Staff are expected to work on-site 5 days a week."),
+  sg("We work on-site four days a week."),
+  sg("Our team works onsite four days a week."),
+  { line: "Employees in our Sydney office are expected to work onsite four days per week.", location: "Remote" },
+  // Optional: "your team" is not the applicant
+  sg("Your team works on-site at the plant."),
+];
+
+/** Review round 5: affirmative statements that still reject (enrich-then-gate, UNKNOWN, ASSUMED_HYBRID). */
+export const ROUND_5_ONSITE: readonly string[] = [
+  "Plan to be on-site at client offices daily.",
+  "• Work on-site with clients to gather requirements.",
+  "Your role will be based onsite in Singapore.",
+  "You will be working on-site at our Singapore office.",
+  "This is a full-time individual contributor role based onsite at our Singapore office.",
+];

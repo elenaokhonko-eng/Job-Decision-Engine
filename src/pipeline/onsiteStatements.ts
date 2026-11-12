@@ -129,12 +129,17 @@ const NOT_OFFERED_MODE: readonly RegExp[] = [
 const NOT_ABOUT_THIS_JOB = /equal\s+opportunit|regardless\s+of|whether\s+(?:they|you)\s+(?:are\s+)?(?:work|working)|all\s+qualified\s+applicants|\b(?:founded|started(?:\s+out)?|began|launched)\s+as\b/i;
 
 const MODAL_HEDGE = /\b(?:may|might|can|could)\b/i;
-const FREQUENCY_HEDGE = /\b(?:occasionally|sometimes|periodically|from\s+time\s+to\s+time|at\s+times|on\s+occasion|ad[- ]hoc|as\s+and\s+when|(?:when|as|if)\s+(?:needed|required|necessary|requested))\b/i;
+const FREQUENCY_HEDGE = /\b(?:occasionally|sometimes|periodically|from\s+time\s+to\s+time|at\s+times|on\s+occasion|ad[- ]hoc|as\s+and\s+when|(?:when|as|if)\s+(?:needed|required|necessary|requested)|as[- ]needed|some\s+days|part\s+of\s+the\s+(?:week|time)|not\s+(?:every\s+day|daily|full[- ]?time|always)|but\s+only|(?:once|twice)\s+(?:a|per)\s+(?:week|month)|for\s+(?:[\w-]+\s+){1,4}only)\b/i;
 const TEMPORARY = /\b(?:during\s+(?:the\s+|your\s+)?(?:onboarding|induction|training|probation|first|initial|go[- ]live|cutover|launch|implementation|audit|project|deployment|roll-?out|migration|hypercare|transition)|(?:first|initial)\s+(?:week|weeks|month|months|few|\d+|days?)|for\s+onboarding|(?:onboarding|training|probation(?:ary)?|implementation|project|transition)\s+(?:period|phase)|initially|at\s+the\s+start|go[- ]live|cutover|hypercare|launch\s+(?:period|phase|week)|for\s+the\s+duration\s+of)\b/i;
 const NEGATION_BEFORE = /\b(?:not|never|without|no\s+need|need\s+not|no|optional)\b|n['’]t\b/i;
-const NEGATION_AFTER = /^\s*(?:(?:is|are)\s+)?(?:not\b|n['’]t\b|optional\b|n\/a\b|none\b)|^\s*(?:required|presence|requirement|work|working)?\s*:\s*(?:no|not|n\/a|none|optional|false)\b/i;
+/**
+ * A negation right after the statement, optionally after a short attendance
+ * noun: "is not required", "On-site attendance is optional", "On-site
+ * presence isn't mandatory", "On-site attendance: not required", "On-site: No".
+ */
+const NEGATION_AFTER = /^\s*(?:(?:attendance|presence|work(?:ing)?|requirements?)\s+)?(?:(?:is|are)\s+)?(?:not\b|n['’]t\b|optional\b|n\/a\b|none\b)|^\s*(?:(?:attendance|presence|work(?:ing)?|requirements?)\s+)?(?:isn['’]t|aren['’]t)\b|^\s*(?:attendance|presence|requirements?|required|work|working)?\s*:\s*(?:no|not|n\/a|none|optional|false)\b/i;
 const OTHER_WORK_MODE = /\bhybrid\b|\bremote(?:ly)?\b|\bwfh\b|\bwork(?:ing)?\s+from\s+home\b/i;
-const ROLE_OR_APPLICANT = /\byou(?:['’](?:ll|re|d|ve))?\b|\byour\b|\b(?:this|the)\s+(?:[\w-]+\s+){0,6}?(?:role|position|job|opportunity|candidate|incumbent|hire|post)\b|\b(?:successful|ideal|selected)\s+(?:candidate|applicant)s?\b|\bcandidates?\b|\bapplicants?\b|\bnew\s+hires?\b/i;
+const ROLE_OR_APPLICANT = /\byou(?:['’](?:ll|re|d|ve))?\b|\byour\s+(?:[\w-]+\s+){0,3}?(?:role|position|job)\b|\b(?:this|the)\s+(?:[\w-]+\s+){0,6}?(?:role|position|job|opportunity|candidate|incumbent|hire|post)\b|\b(?:successful|ideal|selected)\s+(?:candidate|applicant)s?\b|\bcandidates?\b|\bapplicants?\b|\bnew\s+hires?\b/i;
 const RELATIVE_CLAUSE = /\b(?:who|which|that|whose)\b/i;
 const IMPERATIVE_START = /^(?:expect|plan|be\s+(?:prepared|ready|willing|able)|must|will|need)\b/i;
 
@@ -195,17 +200,38 @@ function isAffirmativeStatement(text: string, start: number, end: number, subjec
   if (OTHER_WORK_MODE.test(clause) || NOT_ABOUT_THIS_JOB.test(clause)) return false;
   // A question ("Is this role on-site?") is a statement only when answered yes.
   if (text[to] === "?" && !/^\?\s*(?:yes|required|mandatory)\b/i.test(text.slice(to, to + 20))) return false;
-  if (subject === "role-or-applicant") {
-    const matched = text.slice(start, end);
-    if (/^(?:role|position|job)\b/i.test(matched)) return true;
-    const subjectText = text.slice(from, start).replace(/^[\s•·|:,\-–—*]+/, "").replace(/^(?:and|then)\s+/i, "");
-    // No subject: a bullet or an imperative addressed to the applicant ("Work on-site daily", "Expect to be on-site daily").
-    if (subjectText.trim() === "" || IMPERATIVE_START.test(subjectText)) return true;
-    if (RELATIVE_CLAUSE.test(text.slice(Math.max(from, start - 40), start))) return false;
-    return ROLE_OR_APPLICANT.test(subjectText);
-  }
+  if (subject === "role-or-applicant") return subjectOwnsVerb(text, from, start, text.slice(start, end));
   return true;
 }
+
+/** Words that may stand right before a participle verb that the subject still owns ("you will be working on-site", "role based onsite"). */
+// A gerund after a verb or an adjective still belongs to the subject ("this
+// role requires working onsite", "you're happy working onsite"); only a
+// participle after another noun ("engineers working on-site") does not.
+const PARTICIPLE_OWNER = /^(?:be|been|being|is|are|am|was|were|will|to|and|or|then|currently|also|primarily|mainly|fully|usually|you|role|position|job|we|i|candidate|applicant|hire|requires?|required|involves?|includes?|means|entails?|enjoys?|loves?|likes?|prefers?|starts?|begins?|happy|comfortable|willing|open|keen|able|available|ready|prepared|eager|used|accustomed|fine|ok|okay|interested)$/i;
+
+/**
+ * The subject before a verb at `verbStart` is the role or the applicant, the
+ * verb is role/position/job itself, or there is no subject (a bullet or an
+ * imperative). A relative clause ("clinicians who work on-site") or a
+ * participle after another noun ("supports field engineers working on-site",
+ * "manages vendors based on-site") belongs to someone else.
+ */
+function subjectOwnsVerb(text: string, from: number, verbStart: number, verbText: string): boolean {
+  if (/^(?:role|position|job)\b/i.test(verbText)) return true;
+  const subjectText = text.slice(from, verbStart).replace(/^[\s•·|:,\-–—*]+/, "").replace(/^(?:and|then)\s+/i, "");
+  // No subject: a bullet or an imperative addressed to the applicant ("Work on-site daily", "Expect to be on-site daily").
+  if (subjectText.trim() === "" || IMPERATIVE_START.test(subjectText)) return true;
+  if (RELATIVE_CLAUSE.test(text.slice(Math.max(from, verbStart - 40), verbStart))) return false;
+  if (/^(?:working|based|located)\b/i.test(verbText)) {
+    const previousWord = /([\w'’-]+)\s*$/.exec(text.slice(from, verbStart))?.[1] ?? "";
+    if (previousWord && !PARTICIPLE_OWNER.test(previousWord)) return false;
+  }
+  return ROLE_OR_APPLICANT.test(subjectText);
+}
+
+/** The work/be/based verb right before an on-site token ("work onsite 4 days"), if any. */
+const VERB_BEFORE_TOKEN = /\b(?:be|work|working|works|based|located)\s+(?:(?:is|are)\s+)?$/i;
 
 function firstStatement(pattern: RegExp, text: string, subject: Subject): RegExpExecArray | null {
   pattern.lastIndex = 0;
@@ -247,22 +273,27 @@ export function findOnsiteDayCount(workModeText: string): { officeDaysMin: numbe
   const text = checkText(workModeText);
   for (const match of text.matchAll(pattern)) {
     const start = match.index ?? 0;
-    if (!isAffirmativeDayCount(text, start, start + match[0].length)) continue;
     const first = toNumber(match[1]);
     const second = toNumber(match[2]) ?? first;
     if (first === null || second === null) continue;
+    // A 4-5 day count makes the row ONSITE, so it needs the gate's subject rule too.
+    if (!isAffirmativeDayCount(text, start, start + match[0].length, Math.max(first, second) >= 4)) continue;
     return { officeDaysMin: Math.min(first, second), officeDaysMax: Math.max(first, second), quote: workModeText.slice(start, start + match[0].length).trim() };
   }
   return null;
 }
 
 /** A day count after on-site: the same negation, hedge and temporary checks; a WFH/remote day may follow. */
-function isAffirmativeDayCount(text: string, start: number, end: number): boolean {
+function isAffirmativeDayCount(text: string, start: number, end: number, onsiteCount: boolean): boolean {
   const [from, to] = clauseBounds(text, start, end);
   const clause = text.slice(from, to);
   const before = text.slice(Math.max(from, start - 45), start);
   if (NEGATION_BEFORE.test(before) || MODAL_HEDGE.test(before)) return false;
   if (FREQUENCY_HEDGE.test(clause) || TEMPORARY.test(clause) || NOT_ABOUT_THIS_JOB.test(clause)) return false;
+  // The same subject rule as the gate's verb forms, so enrichment and the gate
+  // agree ("Employees are expected to work onsite four days" is third-party).
+  const verb = onsiteCount ? VERB_BEFORE_TOKEN.exec(text.slice(from, start)) : null;
+  if (verb) return subjectOwnsVerb(text, from, from + verb.index, verb[0]);
   return !RELATIVE_CLAUSE.test(text.slice(Math.max(from, start - 40), start));
 }
 
