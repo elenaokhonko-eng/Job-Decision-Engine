@@ -513,6 +513,9 @@ function evaluateWorkabilityRules(
     || workModeText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
   const onsiteStatement = findExplicitOnsiteStatement(workModeText, d, {
     singapore: isSingaporeLocatedJob(loc, d),
+    location: loc,
+    // An assumed hybrid is not employer evidence, so it never suppresses a statement.
+    structuredWorkMode: String(workplaceType || "").toUpperCase() === "ASSUMED_HYBRID" ? null : wpRaw,
   });
   const isExplicitOnsiteText = onsiteStatement !== null
     || (officeDaysMatch !== null && Number(officeDaysMatch[1]) >= effectivePolicy.hardFailOfficeDaysPerWeek);

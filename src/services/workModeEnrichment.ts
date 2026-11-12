@@ -6,6 +6,7 @@ import { extractHybridAttendance, type HybridAttendanceFacts } from "./criteria.
 import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
 import {
   findExplicitOnsiteStatement,
+  findPartialOnsiteAttendance,
   hasOnsiteWorkModeValue,
   isSingaporeLocatedJob,
 } from "../pipeline/onsiteStatements.js";
@@ -23,7 +24,7 @@ function isSingaporeUnknownWorkModeEligible(location: string | null | undefined,
   // perk ("onsite gym") alone is neutral and keeps the default.
   const workModeText = neutralizeWorkplacePerkPhrases(desc);
   const explicitOnsite = /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i.test(workModeText)
-    || findExplicitOnsiteStatement(workModeText, desc, { singapore: isSingapore }) !== null
+    || findExplicitOnsiteStatement(workModeText, desc, { singapore: isSingapore, location: loc }) !== null
     || extractWorkModeFromText(desc).workplace_type === "ONSITE";
   return isSingapore && !explicitOnsite;
 }
@@ -149,6 +150,18 @@ export function extractWorkModeFromText(text: string): {
       office_days_max: attendance?.office_days_max ?? 3,
       attendance_basis: attendance?.basis ?? "POLICY_HYBRID_3_2",
       evidence_quote: attendance?.evidence?.[0] || "Hybrid model specified",
+    };
+  }
+
+  // 2b. Partial on-site attendance ("Location: On-site, two days a week") is hybrid.
+  const partialOnsite = findPartialOnsiteAttendance(d);
+  if (partialOnsite) {
+    return {
+      workplace_type: "HYBRID",
+      office_days_min: partialOnsite.officeDaysMin,
+      office_days_max: partialOnsite.officeDaysMax,
+      attendance_basis: "EMPLOYER_STATED",
+      evidence_quote: partialOnsite.quote,
     };
   }
 

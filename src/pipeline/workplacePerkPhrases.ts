@@ -54,14 +54,13 @@ const PERK_NOUNS = [
   String.raw`perks?`,
 ].join("|");
 
-/** A workplace perk phrase ("free parking", "gym", "perks") as a regex source fragment. */
-export const WORKPLACE_PERK_PHRASE_SOURCE = String.raw`${PERK_MODIFIERS}(?:${PERK_NOUNS})\b(?!-)`;
-
 /**
- * A token that already forms a work-mode statement is never blanked, even when
- * a perk follows on the same line ("5 days on-site meals provided",
- * "Location: On-site Parking available", "Full-time · On-site Free parking",
- * "This role is on-site facilities based", "Work on-site facilities daily").
+ * A token that is already a work-mode statement by the words before it is
+ * never blanked, even when a perk follows on the same line ("5 days on-site
+ * meals provided", "fully on-site cafe", "This role is on-site facilities
+ * based", "Work on-site facilities daily"). After a separator or a label the
+ * perk wins: "· On-site gym", "Perks | On-site gym", "Location: On-site gym
+ * available" and "• On-site cafeteria" are all neutral.
  */
 const STATEMENT_BEFORE_TOKEN = [
   // "fully on-site", "100% onsite", "strictly onsite"
@@ -69,10 +68,6 @@ const STATEMENT_BEFORE_TOKEN = [
   String.raw`\b100[ \t]*%[ \t]*`,
   // "5 days on-site", "4-5 days per week in office", "3 days a week at the on-site"
   String.raw`\b\d+(?:\s*(?:-|–|to)\s*\d+)?\s*(?:days?|d|x)\b\s*(?:(?:per|a)\s+week\s*|\/\s*week\s*)?(?:(?:in|at)\s+(?:the\s+)?)?`,
-  // Header separators: "Full-time · On-site", "Remote | On-site"
-  String.raw`[|·][ \t]*`,
-  // Work-mode labels: "Location: On-site", "Workplace type: Onsite"
-  String.raw`\b(?:location|workplace|position|role|work[ \t]*mode|work(?:place)?[ \t]+(?:type|model|mode|location|arrangement|setting|style)|working[ \t]+(?:model|arrangement|pattern)|job[ \t]+type|employment[ \t]+type)[ \t]*:[ \t]*`,
   // "role is on-site", "work on-site", "working onsite", "based onsite"
   String.raw`\b(?:role|position|job|work|works|working|presence|based)[ \t]+(?:(?:is|are|will[ \t]+be|must[ \t]+be|required)[ \t]+)?`,
 ].join("|");

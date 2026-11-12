@@ -1343,7 +1343,7 @@ function parseEmployerHtml(
         ? "REMOTE"
         : /\bhybrid\b/.test(workText) ? "HYBRID"
           // Only an explicit on-site statement, never a noun modifier ("on-site training").
-          : findExplicitOnsiteStatement(workText, workText, { singapore: isSingaporeLocatedJob(location, workText) }) !== null
+          : findExplicitOnsiteStatement(workText, workText, { singapore: isSingaporeLocatedJob(location, workText), location }) !== null
             || hasOnsiteWorkModeValue(workText)
             ? "ONSITE"
             : "UNKNOWN";
