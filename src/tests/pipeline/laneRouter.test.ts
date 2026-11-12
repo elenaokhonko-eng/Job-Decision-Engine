@@ -393,7 +393,7 @@ describe('Pipeline Stage: Lane Routing', () => {
 
     const selectCall = (mPool.query as any).mock.calls[0];
     expect(selectCall[0]).toContain("ROUTING_DEFERRED");
-    expect(selectCall[1][1]).toBe("lane_router_v2.4.0|no-match-diagnostics-test|");
+    expect(selectCall[1][1]).toBe("lane_router_v2.5.0|no-match-diagnostics-test|");
 
     const updateCall = (mPool.query as any).mock.calls.find(
       (call: any) => typeof call[0] === 'string' && call[0].includes('UPDATE canonical_jobs')

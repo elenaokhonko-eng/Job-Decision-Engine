@@ -22,6 +22,37 @@ scope:
       - TECHNICAL_DELIVERY
       - TECHNICAL_LEADERSHIP
 
+  # A job at an employer in a sector no lane covers (logistics, freight, retail, hospitality,
+  # gaming, travel, fashion) does not route here unless a covered sector is also present or the
+  # role itself is AI/data work (same rule as CORE_AI_DATA; see core_ai_data.yml).
+  excluded_sector_concepts:
+    any:
+      - UNCOVERED_SECTOR
+
+  excluded_sector_override_concepts:
+    any:
+      - LEGAL_REGULATORY_SECTOR
+      - HEALTH_LIFE_SCIENCES_SECTOR
+      - FINANCIAL_SERVICES_SECTOR
+      - RESEARCH_ACADEMIC_SECTOR
+      - PUBLIC_SOCIAL_SECTOR
+      - ENFORCEMENT_SECTOR
+
+  sector_exempt_domain_concepts:
+    any:
+      - AI
+      - MACHINE_LEARNING
+      - DEEP_LEARNING
+      - LLM
+      - NLP
+      - COMPUTER_VISION
+      - DATA_PLATFORM
+      - DATA_ENGINEERING
+      - DATA_INTELLIGENCE
+      - DATA_SCIENCE
+      - MLOPS
+      - AI_INFRASTRUCTURE
+
   included_domain_concepts:
     any:
       - INVESTMENT_MANAGEMENT
@@ -70,6 +101,7 @@ routing:
   minimum_domain_score: 0.60
   minimum_function_score: 0.60
   minimum_semantic_score: 0.35
+  sector_exempt_minimum_signals: 3
   secondary_lane_threshold: 0.30
 
 sourcing:
