@@ -4,14 +4,16 @@
  * page fetching, so a Gmail MCF alert card is otherwise parked; when the user
  * has exported the same job (same MCF job UUID) from their own browser, that
  * export is the posting content. It is persisted without an HTTP fetch receipt,
- * so it completes the content fetch but never establishes that the job is still
- * open (the exported expiry date is kept as evidence only).
+ * so content completeness alone never establishes that the job is still open;
+ * only the posting facts the export read from MCF's job details (posting and
+ * expiry dates, open/closed status with its check time) are carried over.
  */
 import { createHash } from "node:crypto";
 import type pg from "pg";
 import type { RawJobObservation } from "./types.js";
 import { classifyDescriptionQuality } from "../pipeline/descriptionQuality.js";
 import { savedPostingMatchesDiscovery } from "./linkedInSavedExport.js";
+import { pickPostingFactPayload } from "./postingFacts.js";
 import type { SavedPostingObservationInput } from "./linkedInSavedContent.js";
 import {
   MCF_SAVED_CONTENT_PROVENANCE,
@@ -39,6 +41,8 @@ export interface StoredMcfSavedPosting {
   readonly employmentType: string | null;
   readonly postedAt: string | null;
   readonly expiresAt: string | null;
+  /** Root posting-fact fields of the saved export (postingFacts.ts); empty when the export had none. */
+  readonly postingFacts?: Record<string, unknown>;
   readonly importedAt: string;
   readonly exportPayloadHash: string;
 }
@@ -70,12 +74,13 @@ export async function findStoredMcfSavedPosting(
     expires_at: string | null;
     retrieved_at: Date | string;
     raw_payload_hash: string;
+    raw_payload: unknown;
   }>(
     `SELECT id::text AS id, source_url, title, company_name, description_raw, location_raw, compensation_raw,
             raw_payload#>>'{exported_item,employmentType}' AS employment_type,
             raw_payload#>>'{exported_item,postedAt}' AS posted_at,
             raw_payload#>>'{exported_item,expiresAt}' AS expires_at,
-            retrieved_at, raw_payload_hash
+            retrieved_at, raw_payload_hash, raw_payload
      FROM raw_job_observations
      WHERE workspace_id = $1
        AND source_name = $2
@@ -106,6 +111,7 @@ export async function findStoredMcfSavedPosting(
       employmentType: row.employment_type,
       postedAt: row.posted_at,
       expiresAt: row.expires_at,
+      postingFacts: pickPostingFactPayload(row.raw_payload),
       importedAt: new Date(row.retrieved_at).toISOString(),
       exportPayloadHash: row.raw_payload_hash,
     },
@@ -134,6 +140,8 @@ export function mcfSavedPostingDerivedObservation(
   };
   const contentHash = createHash("sha256").update(JSON.stringify(postingRecord), "utf8").digest("hex");
   const rawPayload = {
+    // Present only when the export read them, so earlier attaches keep their payload hash.
+    ...(posting.postingFacts ?? {}),
     source_content_status: "COMPLETE",
     content_provenance: MCF_SAVED_CONTENT_PROVENANCE,
     discovery_observation_id: discoveryObservationId,

@@ -12,6 +12,12 @@ export const LaneScopeSchema = z
     included_domain_concepts: LaneConceptSetSchema.optional(),
     excluded_domain_concepts: LaneConceptSetSchema.optional(),
     required_sector_concepts: LaneConceptSetSchema.optional(),
+    /** Domain concepts that waive the excluded-sector rule (a genuine AI/data role in any sector). */
+    sector_exempt_domain_concepts: LaneConceptSetSchema.optional(),
+    /** Sectors no lane covers: a job there does not route to this lane unless sector-exempt. */
+    excluded_sector_concepts: LaneConceptSetSchema.optional(),
+    /** Covered sectors that cancel an excluded-sector match (a bank's retail banking unit). */
+    excluded_sector_override_concepts: LaneConceptSetSchema.optional(),
   })
   .passthrough();
 
@@ -29,6 +35,17 @@ export const LaneRoutingSchema = z
     minimum_function_score: z.number().min(0).max(1).optional(),
     minimum_semantic_score: z.number().min(0).max(1).optional(),
     minimum_domain_signals: z.number().int().min(1).max(10).optional(),
+    /**
+     * Where the required sector may be found. JOB_SCOPE (default): the job's own scope, plus the
+     * employer context only when the title names technology work. JOB_SCOPE_OR_EMPLOYER: the
+     * job's own scope or the employer's self-description (company name, opening, About Us).
+     */
+    sector_evidence: z.enum(['JOB_SCOPE', 'JOB_SCOPE_OR_EMPLOYER']).optional(),
+    /**
+     * Distinct sector-exempt domain phrases in the job's scope needed to waive the excluded-sector rule
+     * (default 1); one sector-exempt phrase in the title always waives it.
+     */
+    sector_exempt_minimum_signals: z.number().int().min(1).max(10).optional(),
     secondary_lane_threshold: z.number().min(0).max(1).optional(),
   })
   .passthrough();

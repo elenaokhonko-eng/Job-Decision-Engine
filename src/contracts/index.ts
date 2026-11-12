@@ -9,6 +9,14 @@ import { JobSourceEvidenceSchema } from "./jobSourceEvidence.js";
 export { SCHEMA_VERSION } from "./version.js";
 export { SourcePluginSchema, type SourcePlugin } from "./sourcePlugin.js";
 export {
+  JobConfirmedFactRequestSchema,
+  ConfirmedJobFactSchema,
+  JobVerificationChecksSchema,
+  JobConfirmedFactResponseSchema,
+  JobConfirmedFactsListResponseSchema,
+  JobConfirmedFactWithdrawRequestSchema,
+} from "./jobConfirmedFacts.js";
+export {
   ApplicationReadinessSchema,
   ApplicationReadinessStatusSchema,
   type ApplicationReadiness,
@@ -19,6 +27,13 @@ export {
   type JobSourceEvidence,
   type JobEvidenceSpan,
 } from "./jobSourceEvidence.js";
+export {
+  POSTING_FACTS_SCHEMA_VERSION,
+  PostingDateDerivationSchema,
+  PostingFactsPayloadSchema,
+  type PostingDateDerivation,
+  type PostingFactsPayload,
+} from "./postingFacts.js";
 export {
   ExperienceRequirementScopeSchema,
   ProfileExperienceEvidenceSchema,

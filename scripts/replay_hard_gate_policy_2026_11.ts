@@ -4,6 +4,9 @@
  * Default is a DRY RUN inside `BEGIN READ ONLY`. It recomputes each job's gate with:
  * - the same pure evaluation that runHardGates uses (`evaluateHardGatesForJob`);
  * - the same effective workability policy (`resolveEffectiveWorkabilityPolicy`);
+ * - the same employer-confirmed facts (`v_job_confirmed_facts_current`) and latest normalized
+ *   source evidence of the version, so a gate result that rests on a confirmed fact replays
+ *   identically and a conflicting confirmation stays unapplied;
  * - the same work-mode enrichment, in read-only preview mode (no writes, no page
  *   fetch). Jobs whose enrichment would fetch a page are counted as
  *   `enrichment fetch skipped`; their applied result can differ.
@@ -53,6 +56,8 @@ import { loadActiveStage3Preferences, resolveEffectiveWorkabilityPolicy } from "
 import { normalizeWorkMode } from "../src/pipeline/workModeNormalizer.js";
 import { enrichWorkModeIfNeeded } from "../src/services/workModeEnrichment.js";
 import type { ComparableFact } from "../src/pipeline/requirementComparators.js";
+import { loadCurrentConfirmedJobFacts } from "../src/pipeline/confirmedJobFacts.js";
+import { postingSourceEvidence } from "../src/pipeline/postingStatedFacts.js";
 import { parseJobIds, printRegateOutcome, regateJobIds } from "./regate_job_ids.js";
 
 dotenv.config();
@@ -214,7 +219,7 @@ const LATEST_VERSION_SQL = `COALESCE(c.latest_job_version_id, (
   WHERE jv2.workspace_id = c.workspace_id AND jv2.canonical_job_id = c.id
   ORDER BY jv2.observed_at DESC LIMIT 1))`;
 
-async function computeReplayRows(client: pg.PoolClient, ctx: WorkspaceContext, options: ReplayOptions, ids: readonly string[] | null): Promise<ReplayRow[]> {
+export async function computeReplayRows(client: pg.PoolClient, ctx: WorkspaceContext, options: ReplayOptions, ids: readonly string[] | null): Promise<ReplayRow[]> {
   const stage3 = (await loadActiveStage3Preferences(client, ctx)) ?? {};
   const resolution = await resolveEffectiveWorkabilityPolicy(client, { context: ctx, stage3 });
   const territoryScope = remoteTerritoryScopeForPolicy(resolution.policy);
@@ -239,7 +244,8 @@ async function computeReplayRows(client: pg.PoolClient, ctx: WorkspaceContext, o
             jv.description_text, jv.id AS job_version_id, jv.active_requirement_set_id,
             jv.source_published_at AS posted_at, jv.reposted_at, jv.source_updated_at, jv.freshness_basis,
             g.decision AS old_decision, g.rejection_codes AS old_codes,
-            so.compensation_raw, so.source_name AS source_observation_name, so.location_raw AS source_location_raw
+            so.compensation_raw, so.source_name AS source_observation_name, so.location_raw AS source_location_raw,
+            se.normalized_evidence AS source_normalized_evidence
      FROM canonical_jobs c
      JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = ${LATEST_VERSION_SQL}
      LEFT JOIN LATERAL (
@@ -251,6 +257,10 @@ async function computeReplayRows(client: pg.PoolClient, ctx: WorkspaceContext, o
        SELECT o.compensation_raw, o.source_name, o.location_raw FROM raw_job_observations o
        WHERE o.workspace_id = jv.workspace_id AND o.job_version_id = jv.id
        ORDER BY o.retrieved_at DESC, o.id DESC LIMIT 1) so ON TRUE
+     LEFT JOIN LATERAL (
+       SELECT o.normalized_evidence FROM raw_job_observations o
+       WHERE o.workspace_id = jv.workspace_id AND o.job_version_id = jv.id AND o.normalized_evidence IS NOT NULL
+       ORDER BY o.retrieved_at DESC, o.id DESC LIMIT 1) se ON TRUE
      WHERE c.workspace_id = $1 AND c.archived_at IS NULL
        ${filters.map((filter) => `AND ${filter}`).join("\n       ")}
      ORDER BY c.created_at ASC, c.id ASC
@@ -311,6 +321,8 @@ async function computeReplayRows(client: pg.PoolClient, ctx: WorkspaceContext, o
       policy: resolution.policy,
       stage3Preferences: stage3,
       territoryScope,
+      confirmedFacts: await loadCurrentConfirmedJobFacts(client, ctx.workspaceId, job.job_version_id),
+      sourceEvidence: postingSourceEvidence(job.source_normalized_evidence),
     });
     out.push({
       canonicalJobId: job.id,

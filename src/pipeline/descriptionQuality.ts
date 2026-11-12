@@ -37,7 +37,8 @@ export function completeRetrievedPostingPredicate(observationAlias: string): str
   }
   // A LinkedIn or MyCareersFuture saved-jobs export attached to its Gmail discovery
   // card is persisted content without an HTTP fetch receipt: it completes the content
-  // fetch but never establishes availability (see jobSourceEvidence).
+  // fetch; the content itself never establishes availability (only a status the export
+  // checked, with its check time, does; see jobSourceEvidence and postingFacts).
   return `
     (
       (

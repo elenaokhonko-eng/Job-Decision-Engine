@@ -42,6 +42,45 @@ scope:
       - DEVOPS
       - SOFTWARE_PLATFORM
 
+  # A job in a sector no lane covers (logistics, freight, retail, hospitality, gaming, travel,
+  # fashion) routes here only when the role itself is AI/data work: an AI/data phrase in the
+  # title, or routing.sector_exempt_minimum_signals distinct AI/data phrases in the role text.
+  # Generic software, cloud, DevOps or security work there ends UNCLASSIFIED. The sector is
+  # read from the job's scope and the employer's own description (company name, opening,
+  # About Us); an industry list ("serves finance, retail and healthcare") is not the
+  # employer's sector.
+  # A positive technology-sector requirement is not used: most software employers never call
+  # themselves a "technology company", so it would push good engineering roles out.
+  excluded_sector_concepts:
+    any:
+      - UNCOVERED_SECTOR
+
+  # A covered sector cancels an uncovered match (a bank's retail banking unit, a hospital's
+  # restaurant operations, a public agency's logistics systems).
+  excluded_sector_override_concepts:
+    any:
+      - LEGAL_REGULATORY_SECTOR
+      - HEALTH_LIFE_SCIENCES_SECTOR
+      - FINANCIAL_SERVICES_SECTOR
+      - RESEARCH_ACADEMIC_SECTOR
+      - PUBLIC_SOCIAL_SECTOR
+      - ENFORCEMENT_SECTOR
+
+  sector_exempt_domain_concepts:
+    any:
+      - AI
+      - MACHINE_LEARNING
+      - DEEP_LEARNING
+      - LLM
+      - NLP
+      - COMPUTER_VISION
+      - DATA_PLATFORM
+      - DATA_ENGINEERING
+      - DATA_INTELLIGENCE
+      - DATA_SCIENCE
+      - MLOPS
+      - AI_INFRASTRUCTURE
+
   excluded_domain_concepts:
     any:
       - "ios developer"
@@ -65,6 +104,7 @@ routing:
   minimum_domain_score: 0.60
   minimum_function_score: 0.60
   minimum_semantic_score: 0.35
+  sector_exempt_minimum_signals: 3
   secondary_lane_threshold: 0.30
 
 sourcing:

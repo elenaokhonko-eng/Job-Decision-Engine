@@ -29,6 +29,16 @@ export interface LaneDefinition {
   required_function_concepts?: string[];
   /** scope.required_sector_concepts: industry sectors one of which must appear (title, employer, description). */
   required_sector_concepts?: string[];
+  /** routing.sector_evidence: JOB_SCOPE (default) or JOB_SCOPE_OR_EMPLOYER. */
+  sector_evidence?: "JOB_SCOPE" | "JOB_SCOPE_OR_EMPLOYER";
+  /** scope.sector_exempt_domain_concepts: domain phrases that waive the excluded-sector rule. */
+  sector_exempt_domain_concepts?: string[];
+  /** Distinct sector-exempt phrases in the scope required to waive the excluded-sector rule (default 1). */
+  sector_exempt_minimum_signals?: number;
+  /** scope.excluded_sector_concepts: uncovered sectors (employer context or job scope). */
+  excluded_sector_concepts?: string[];
+  /** scope.excluded_sector_override_concepts: covered sectors that cancel an excluded match. */
+  excluded_sector_override_concepts?: string[];
   minimum_domain_score?: number;
   minimum_function_score?: number;
   /** Distinct domain phrases required before the domain score counts (default 1). */
@@ -79,6 +89,9 @@ function laneConfigToDefinition(laneConfig: LaneFileConfig): LaneDefinition {
   const requiredFunctions = laneConfig.scope?.required_function_concepts?.any || [];
   const excludedConcepts = laneConfig.scope?.excluded_domain_concepts?.any || [];
   const sectorConcepts = laneConfig.scope?.required_sector_concepts?.any || [];
+  const sectorExemptConcepts = laneConfig.scope?.sector_exempt_domain_concepts?.any || [];
+  const excludedSectorConcepts = laneConfig.scope?.excluded_sector_concepts?.any || [];
+  const excludedSectorOverrides = laneConfig.scope?.excluded_sector_override_concepts?.any || [];
 
   const prototypeTexts = (laneConfig.prototypes || [])
     .map((p) => p.text.trim())
@@ -110,6 +123,13 @@ function laneConfigToDefinition(laneConfig: LaneFileConfig): LaneDefinition {
     excluded_domain_concepts: [...excludedConcepts],
     required_function_concepts: requiredFunctions.map(normalizeConcept),
     required_sector_concepts: sectorConcepts.length ? sectorConcepts.map(normalizeConcept) : undefined,
+    sector_evidence: laneConfig.routing?.sector_evidence,
+    sector_exempt_domain_concepts: sectorExemptConcepts.length ? sectorExemptConcepts.map(normalizeConcept) : undefined,
+    sector_exempt_minimum_signals: laneConfig.routing?.sector_exempt_minimum_signals,
+    excluded_sector_concepts: excludedSectorConcepts.length ? excludedSectorConcepts.map(normalizeConcept) : undefined,
+    excluded_sector_override_concepts: excludedSectorOverrides.length
+      ? excludedSectorOverrides.map(normalizeConcept)
+      : undefined,
     minimum_domain_score: laneConfig.routing?.minimum_domain_score,
     minimum_function_score: laneConfig.routing?.minimum_function_score,
     minimum_domain_signals: laneConfig.routing?.minimum_domain_signals,

@@ -26,7 +26,20 @@ import { resolveEffectiveWorkabilityPolicy } from "./effectiveWorkabilityPolicy.
 import { findOnsiteException } from "./onsiteExceptions.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
+import { APPROXIMATE_DATE_UNIT_MS, isRepostFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
 import { assessCareerTrack, capOutcome, CAREER_TRACK_POLICY_VERSION, parseTrackExperience, type TrackRequirement } from "./careerTrack.js";
+import {
+  confirmedEmploymentType,
+  confirmedFactEvidenceKey,
+  confirmedFactEvidenceQuote,
+  confirmedJobFactsHash,
+  confirmedTravelEvidence,
+  confirmedWorkModeEvidence,
+  confirmedWorkplaceType,
+  gateAppliedConfirmedFacts,
+  loadCurrentConfirmedJobFacts,
+  withConfirmedTerritory,
+} from "./confirmedJobFacts.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -459,6 +472,13 @@ export async function runRecommendationDecider(
         : null;
       await client.query("BEGIN");
       try {
+        // Employer-confirmed facts for this exact job version, limited to those the latest gate decision
+        // applied (each filled a fact the posting leaves unknown); conflicting confirmations never apply.
+        const confirmedFacts = gateAppliedConfirmedFacts(
+          await loadCurrentConfirmedJobFacts(client, ctx.workspaceId, job.job_version_id),
+          normalizeWorkabilityFacts(job.workability_facts),
+        );
+        const confirmedFactsHash = confirmedJobFactsHash(confirmedFacts);
         const normalizedGateDecision =
           normalizeGateDecision(job.gate_decision) ??
           inferGateDecisionFromProcessingState(job.processing_state);
@@ -487,7 +507,7 @@ export async function runRecommendationDecider(
         const coverageScore =
           coverageScorePct == null ? null : Number((coverageScorePct / 100).toFixed(3));
         const evidenceCompleteness = computeEvidenceCompleteness(
-          job.workplace_type,
+          confirmedWorkplaceType(job.workplace_type, confirmedFacts),
           job.workability_facts
         );
 
@@ -654,21 +674,36 @@ export async function runRecommendationDecider(
         ));
 
         const freshnessPolicy = preferenceContext.stage3?.freshness;
+        // The latest source evidence says whether the stored date is an estimate; that
+        // applies whatever identity basis the version carries.
+        const usesRepost = isRepostFreshnessBasis(job.freshness_basis) && job.reposted_at !== null;
+        const evidenceDate = usesRepost ? sourceEvidence?.dates.reposted_at : sourceEvidence?.dates.published_at;
+        const columnDate = asIso(usesRepost ? job.reposted_at : job.source_published_at);
+        const evidenceApproximateUnit = evidenceDate?.approximation && columnDate !== null
+          && evidenceDate.value !== null && new Date(evidenceDate.value).getTime() === new Date(columnDate).getTime()
+          ? evidenceDate.approximation.precision
+          : null;
         const freshness = evaluateJobFreshness({
           posted_at: job.source_published_at,
           reposted_at: job.reposted_at,
           source_updated_at: job.source_updated_at,
           freshness_basis: job.freshness_basis,
-          is_repost: job.freshness_basis === "REPOSTED_AT",
+          is_repost: isRepostFreshnessBasis(job.freshness_basis),
+          approximate_unit: evidenceApproximateUnit,
         }, freshnessPolicy);
         const freshnessStatus = !freshnessPolicy?.max_posting_age_days
           ? "NEEDS_VERIFICATION"
           : freshness.status === "STALE"
             ? freshness.is_hard_reject ? "BLOCKED" : "NEEDS_VERIFICATION"
             : freshness.status === "UNKNOWN" ? "NEEDS_VERIFICATION" : "MET";
-        const freshnessExpiry = asIso(job.source_published_at ?? job.reposted_at)
+        // An approximate (relative-text) date expires from its oldest possible value.
+        const approximateUnit = evidenceApproximateUnit ?? parseFreshnessBasis(job.freshness_basis).approximateUnit;
+        const freshnessReference = asIso(job.reposted_at ?? job.source_published_at);
+        const freshnessExpiry = freshnessReference && asIso(job.source_published_at ?? job.reposted_at)
           && freshnessPolicy?.max_posting_age_days
-          ? new Date(new Date(asIso(job.reposted_at ?? job.source_published_at) as string).getTime() + freshnessPolicy.max_posting_age_days * 24 * 60 * 60 * 1000).toISOString()
+          ? new Date(new Date(freshnessReference).getTime()
+            - (approximateUnit ? APPROXIMATE_DATE_UNIT_MS[approximateUnit] - 1 : 0)
+            + freshnessPolicy.max_posting_age_days * 24 * 60 * 60 * 1000).toISOString()
           : null;
         readinessChecks.push(readinessCheck(
           "FRESHNESS",
@@ -685,11 +720,15 @@ export async function runRecommendationDecider(
 
         const workabilityEvidence = sourceEvidence?.workability;
         const territoryEvidence = workabilityEvidence?.hiring_territories ?? null;
-        const workAuthorization = assessHiringTerritoryReadiness(
-          sourceEvidence?.description.normalized_text ?? job.description_text ?? "",
-          territoryEvidence,
-          workabilityEvidence?.work_mode.value ?? null,
-          workabilityPolicyResolution.policy,
+        const workAuthorization = withConfirmedTerritory(
+          assessHiringTerritoryReadiness(
+            sourceEvidence?.description.normalized_text ?? job.description_text ?? "",
+            territoryEvidence,
+            workabilityEvidence?.work_mode.value ?? null,
+            workabilityPolicyResolution.policy,
+          ),
+          confirmedFacts,
+          workabilityPolicyResolution.policy.authorizedRegions,
         );
         readinessChecks.push(readinessCheck(
           "WORK_AUTHORIZATION",
@@ -706,7 +745,7 @@ export async function runRecommendationDecider(
         ));
 
         const workabilityFacts = normalizeWorkabilityFacts(job.workability_facts);
-        const modeEvidence = workabilityEvidence?.work_mode ?? null;
+        const modeEvidence = confirmedWorkModeEvidence(workabilityEvidence?.work_mode ?? null, confirmedFacts);
         // The same on-site exception evaluation the hard gate used.
         const onsiteException = findOnsiteException(
           { title: job.normalized_title, company_name: job.company_name, description: job.description_text },
@@ -737,7 +776,7 @@ export async function runRecommendationDecider(
 
         const travelAssessment = assessTravelReadiness(
           job.description_text ?? "",
-          workabilityEvidence?.travel_pct ?? null,
+          confirmedTravelEvidence(workabilityEvidence?.travel_pct ?? null, confirmedFacts),
           workabilityPolicyResolution.policy,
         );
         readinessChecks.push(readinessCheck(
@@ -754,16 +793,25 @@ export async function runRecommendationDecider(
           },
         ));
 
-        const employmentType = String(workabilityFacts["employment_type"] ?? job.employment_type ?? "UNKNOWN").toUpperCase();
+        const employment = confirmedEmploymentType(
+          String(workabilityFacts["employment_type"] ?? job.employment_type ?? "UNKNOWN").toUpperCase(),
+          confirmedFacts,
+        );
+        const employmentType = employment.employmentType;
         const employmentStatus = employmentType === "PERMANENT" || employmentType === "CONTRACT"
           ? "MET"
           : "NEEDS_VERIFICATION";
         readinessChecks.push(readinessCheck(
           "EMPLOYMENT_ROUTE",
           employmentStatus,
-          employmentStatus === "MET" ? `Employment type ${employmentType} is permitted under the direct-employer fixed-term policy.` : "Employment type or hiring route is unknown.",
+          employmentStatus === "MET"
+            ? `${employment.fact ? `${confirmedFactEvidenceQuote(employment.fact)}. ` : ""}Employment type ${employmentType} is permitted under the direct-employer fixed-term policy.`
+            : "Employment type or hiring route is unknown.",
           readinessAssessedAt,
-          { reasonCode: employmentStatus === "NEEDS_VERIFICATION" ? "EMPLOYMENT_ROUTE_UNKNOWN" : null },
+          {
+            reasonCode: employmentStatus === "NEEDS_VERIFICATION" ? "EMPLOYMENT_ROUTE_UNKNOWN" : null,
+            evidenceKeys: employment.fact ? [confirmedFactEvidenceKey(employment.fact)] : [],
+          },
         ));
 
         let mandatoryQualificationCheck: MaterialReadinessCheck;
@@ -886,6 +934,7 @@ export async function runRecommendationDecider(
           evidence_schema_version: sourceEvidence?.schema_version ?? "legacy_unknown",
           availability_evidence_hash: availabilityEvidenceHash,
           availability_verification_revision: availabilityVerificationRevision,
+          confirmed_job_facts_hash: confirmedFactsHash,
         });
         const readiness = assessApplicationReadiness({
           canonicalJobId: job.canonical_job_id,
@@ -969,6 +1018,7 @@ export async function runRecommendationDecider(
             workability_policy_hash: workabilityPolicyResolution.policyHash,
             career_track_policy_version: CAREER_TRACK_POLICY_VERSION,
             career_track_assessment_hash: sha256Json(careerTrack),
+            ...(confirmedFactsHash ? { confirmed_job_facts_hash: confirmedFactsHash } : {}),
           },
         });
 

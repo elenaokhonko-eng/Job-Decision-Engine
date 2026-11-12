@@ -59,6 +59,15 @@ import {
   type RemoteTerritoryScope,
 } from "../eligibility/remoteHiringTerritory.js";
 import { buildDiscoveryLocationScope, loadLocationScopeConfig } from "../ingestion/discoveryLocationScope.js";
+import {
+  applyConfirmedFactsToGateInput,
+  loadCurrentConfirmedJobFacts,
+  withConfirmedFactEvidence,
+  type ConfirmedGateResult,
+  type ConfirmedJobFact,
+} from "./confirmedJobFacts.js";
+import { postingSourceEvidence, type PostingSourceEvidence } from "./postingStatedFacts.js";
+import { isRepostFreshnessBasis } from "../contracts/postingFacts.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -254,7 +263,7 @@ export function applyPersistedRequirementGates(
     reposted_at: job.reposted_at,
     source_updated_at: job.source_updated_at,
     freshness_basis: job.freshness_basis,
-    is_repost: job.freshness_basis === 'REPOSTED_AT',
+    is_repost: isRepostFreshnessBasis(job.freshness_basis),
     posting_identity_is_new: job.freshness_basis === 'NEW_POSTING_ID',
   }, stage3Preferences?.freshness);
   if (freshness.is_hard_reject) {
@@ -794,10 +803,33 @@ export function evaluateHardGatesForJob(input: {
   readonly stage3Preferences: Stage3PolicyPreferences;
   readonly territoryScope: RemoteTerritoryScope | null;
   readonly answerContext?: VerificationAnswerContext | null;
-}): GateResult {
-  const { job, requirements, profileFacts, policy, stage3Preferences, territoryScope } = input;
+  /** Current employer-confirmed facts of the job version (src/pipeline/confirmedJobFacts.ts). */
+  readonly confirmedFacts?: readonly ConfirmedJobFact[];
+  /** Latest normalized source evidence of the version, read by the confirmed-fact check. */
+  readonly sourceEvidence?: PostingSourceEvidence | null;
+}): ConfirmedGateResult {
+  const { profileFacts, policy, stage3Preferences, territoryScope } = input;
   const answerContext = input.answerContext ?? null;
-  const requirementHints = requirements
+  // A confirmed fact fills only a fact the posting leaves unknown; without facts nothing changes.
+  const confirmed = applyConfirmedFactsToGateInput({
+    workplaceType: input.job.workplace_type,
+    employmentType: input.job.employment_type,
+    location: input.job.location,
+    sourceLocation: input.job.source_location_raw ?? null,
+    description: input.job.description,
+    companyName: input.job.company_name,
+    sourceEvidence: input.sourceEvidence ?? null,
+  }, input.requirements, input.confirmedFacts ?? [], policy);
+  const job: HardGateJobInput = {
+    ...input.job,
+    workplace_type: confirmed.workplaceType ?? null,
+    employment_type: confirmed.employmentType ?? null,
+    location: confirmed.location ?? null,
+    source_location_raw: confirmed.sourceLocation ?? null,
+  };
+  const requirements = confirmed.requirements;
+  // Hints are the posting's own requirement text, never the confirmed facts.
+  const requirementHints = input.requirements
     .map((r) => r.quote_text || r.requirement_text)
     .filter(Boolean)
     .slice(0, 60)
@@ -842,7 +874,10 @@ export function evaluateHardGatesForJob(input: {
     workplaceType: job.workplace_type ?? null,
     description,
   }, territoryScope);
-  return combineGateResults([globalGateResult, persistedGateResult, exactProfileGateResult, remoteTerritoryGateResult]);
+  return withConfirmedFactEvidence(
+    combineGateResults([globalGateResult, persistedGateResult, exactProfileGateResult, remoteTerritoryGateResult]),
+    confirmed,
+  );
 }
 
 export async function runHardGates(
@@ -938,7 +973,8 @@ export async function runHardGates(
              jv.last_seen_at,
              source_observation.compensation_raw,
              source_observation.source_name AS source_observation_name,
-             source_observation.location_raw AS source_location_raw
+             source_observation.location_raw AS source_location_raw,
+             source_evidence.normalized_evidence AS source_normalized_evidence
       FROM canonical_jobs c
       JOIN job_versions jv ON jv.id = COALESCE(
         c.latest_job_version_id,
@@ -959,6 +995,16 @@ export async function runHardGates(
         ORDER BY observation.retrieved_at DESC, observation.id DESC
         LIMIT 1
       ) AS source_observation ON TRUE
+      -- Latest normalized source evidence of the version, read only by the confirmed-fact check.
+      LEFT JOIN LATERAL (
+        SELECT observation.normalized_evidence
+        FROM raw_job_observations AS observation
+        WHERE observation.workspace_id = jv.workspace_id
+          AND observation.job_version_id = jv.id
+          AND observation.normalized_evidence IS NOT NULL
+        ORDER BY observation.retrieved_at DESC, observation.id DESC
+        LIMIT 1
+      ) AS source_evidence ON TRUE
       WHERE c.workspace_id = $1
         AND c.archived_at IS NULL
         AND jv.workspace_id = $1
@@ -1007,7 +1053,7 @@ export async function runHardGates(
           source_updated_at: job.source_updated_at,
           first_seen_at: job.first_seen_at,
           freshness_basis: job.freshness_basis,
-          is_repost: job.freshness_basis === 'REPOSTED_AT',
+          is_repost: isRepostFreshnessBasis(job.freshness_basis),
           posting_identity_is_new: job.freshness_basis === 'NEW_POSTING_ID',
         }, stage3Preferences.freshness);
         await client.query(
@@ -1044,6 +1090,9 @@ export async function runHardGates(
         );
 
         const deterministicRequirements = requirementRows as PersistedRequirement[];
+        // Employer-confirmed facts for this exact job version; evaluateHardGatesForJob applies them
+        // only where the posting leaves the fact unknown.
+        const confirmedFacts = await loadCurrentConfirmedJobFacts(client, ctx.workspaceId, job.job_version_id);
         let profileFacts: ComparableFact[] = [];
         if (deterministicRequirements.some((requirement) =>
           ["WORK_AUTH"].includes(requirement.requirement_type)
@@ -1111,6 +1160,8 @@ export async function runHardGates(
           stage3Preferences,
           territoryScope,
           answerContext: jobAnswerContext,
+          confirmedFacts,
+          sourceEvidence: postingSourceEvidence(job.source_normalized_evidence),
         });
 
         let processingStatus: string;
