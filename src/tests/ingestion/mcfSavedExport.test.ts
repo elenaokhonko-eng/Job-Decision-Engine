@@ -115,7 +115,9 @@ describe("MCF saved-jobs export parsing", () => {
     expect(valid(result, 1)).toMatchObject({
       mcfJobUuid: UUID_B,
       canonicalUrl: jobUrl(UUID_B, null),
-      location: null,
+      // MCF lists only jobs in Singapore: a hidden address is recorded as the country.
+      location: "Singapore",
+      locationBasis: "MCF_SINGAPORE_ONLY_PORTAL",
       salary: null,
       compensation: null,
       employmentType: null,
@@ -131,6 +133,11 @@ describe("MCF saved-jobs export parsing", () => {
       mcf_job_uuid: UUID_A,
       canonical_url: jobUrl(UUID_A),
     });
+    // An exported address keeps its earlier payload; only a hidden one records the basis.
+    expect(valid(result, 0)).toMatchObject({ location: "1 Example Street, Singapore 000001", locationBasis: "EXPORTED" });
+    expect(valid(result, 0).rawPayload).not.toHaveProperty("location_basis");
+    expect(valid(result, 1).rawPayload).toMatchObject({ location_basis: "MCF_SINGAPORE_ONLY_PORTAL", location: "Singapore" });
+    expect((valid(result, 1).rawPayload.exported_item as { location: unknown }).location).toBeNull();
   });
 
   it("rejects recruiter contact data, raw API fields and other unknown keys", () => {
@@ -245,7 +252,8 @@ describe("MCF saved-jobs export parsing", () => {
       compensationRaw: "SGD 6,500 - 9,000 per month",
       workplaceTypeRaw: "UNKNOWN",
     });
-    expect(derived).not.toHaveProperty("locationRaw");
+    // The stored export hid the address; MCF lists only jobs in Singapore.
+    expect(derived.locationRaw).toBe("Singapore");
     expect(derived.rawPayload).toMatchObject({
       source_content_status: "COMPLETE",
       content_provenance: "MCF_SAVED_EXPORT",
