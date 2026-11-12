@@ -20,6 +20,7 @@ export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
 // 2026-11.4: a "Job Location:" / "Location:" header line fills an unknown structured location;
 // "Work Type: Office Working" is full on-site; each gate verification names its own open fact;
 // pre-sales / post-sales / customer-engagement role duties are GATE_HIGH_INTERACTION for any title.
-export const GATE_VERSION = "gate-2026-11.4" as const;
+// 2026-11.5: a pre-sales title ("Presales", "Pre-Sales", "Pre Sales") is GATE_HIGH_INTERACTION.
+export const GATE_VERSION = "gate-2026-11.5" as const;
 export const PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;
 
