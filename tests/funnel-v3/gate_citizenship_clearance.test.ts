@@ -158,6 +158,58 @@ describe("review probes (#178): wording that is not a U.S. clearance or placemen
   });
 });
 
+describe("review probes (#178 re-check): alternatives and non-U.S. military wording", () => {
+  function singaporeRemoteGate(description: string) {
+    return applyGlobalGates({
+      id: "probe-2",
+      title: "Machine Learning Engineer",
+      company_name: "Synthetic Defence Analytics",
+      location: "Singapore (Remote)",
+      workplace_type: "REMOTE",
+      employment_type: "PERMANENT",
+      raw_description: description,
+    } as any, policy);
+  }
+
+  it.each([
+    "This role is open to US-based candidates or candidates in Singapore.",
+    "This role is open to US-based candidates as well as those in APAC.",
+    "We welcome US-based or Singapore-based applicants for this role.",
+    "We are hiring US-based candidates and candidates across Southeast Asia for this position.",
+    "This role is open to US-based candidates and talent anywhere in Asia.",
+    "We consider US-based candidates as well as candidates worldwide.",
+  ])("does not reject a US-based clause that also opens the role to Singapore/APAC/Asia/worldwide: %s", (text) => {
+    expect(status(text.toLowerCase())).toBe("ALLOWED");
+    const result = singaporeRemoteGate(`Build ML pipelines in Python. ${text}`);
+    expect(result.status, JSON.stringify(result.rejection_codes)).not.toBe("HARD_REJECT");
+  });
+
+  it("keeps a US-based clause whose alternatives exclude Singapore a restriction", () => {
+    expect(status("we are hiring us-based or canada-based candidates for this role.")).toBe("INCOMPATIBLE");
+    expect(status("this is a remote, us-based role.")).toBe("INCOMPATIBLE");
+  });
+
+  it.each([
+    "Must hold an active security clearance.\nYou will support Navy programmes.",
+    "Must hold an active security clearance.\nYou will support Army and Air Force logistics programmes.",
+    "Must hold an active security clearance.\nExperience with VA systems is an advantage.",
+  ])("does not read bare military or VA words as a U.S. clearance: %s", (text) => {
+    expect(status(text.toLowerCase())).toBe("ALLOWED");
+    const result = singaporeRemoteGate(`Build ML pipelines in Python. ${text}`);
+    expect(result.rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+  });
+
+  it.each([
+    "Must hold an active security clearance.\nYou will support U.S. Navy programmes.",
+    "Must hold an active security clearance.\nYou will support Department of the Navy programmes.",
+    "Must hold an active security clearance.\nThis role supports the Department of Veterans Affairs.",
+    "Must hold an active security clearance.\nThis role supports United States defence customers.",
+    "Must hold an active VA clearance.",
+  ])("still reads a clearance as U.S. with an explicit U.S. marker: %s", (text) => {
+    expect(status(text.toLowerCase())).toBe("INCOMPATIBLE");
+  });
+});
+
 describe("US-based remote roles", () => {
   it("treats a remote, US-based role as a worker-territory restriction", () => {
     expect(status("this is a remote, us-based role.")).toBe("INCOMPATIBLE");

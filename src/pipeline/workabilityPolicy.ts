@@ -697,20 +697,27 @@ const US_FEDERAL_NEARBY = /\b(?:federal|va|veterans\s+affairs|dod|department\s+o
  * U.S. federal or defence work named in the posting's own section, never a bare country
  * name: "federal agency", DoD, VA, "government contract". Read after boilerplate is removed.
  */
-const US_FEDERAL_CONTEXT = /\b(?:federal\s+(?:agency|agencies|government|client|clients|contract|contracts|contractor|customer|customers|health(?:care)?|civilian|program|programs|mission|environment|background\s+investigation)|government\s+(?:contract|contracts|contractor|client|clients|customer|customers|agency|agencies|program|programs)|us\s+(?:government|federal)|va|veterans\s+affairs|dod|department\s+of\s+(?:defense|war|the\s+navy|the\s+army|the\s+air\s+force|veterans\s+affairs|homeland\s+security|health\s+and\s+human\s+services)|dhs|army|navy|air\s+force|ts\s*\/\s*sci|polygraph|public\s+trust\s+(?:clearance|position)|e-?qip|sf-?86)\b/i;
+const US_FEDERAL_CONTEXT = /\b(?:federal\s+(?:agency|agencies|government|client|clients|contract|contracts|contractor|customer|customers|health(?:care)?|civilian|program|programs|mission|environment|background\s+investigation)|government\s+(?:contract|contracts|contractor|client|clients|customer|customers|agency|agencies|program|programs)|us\s+(?:government|federal|navy|army|air\s+force|marine\s+corps|military|department)|va\s+clearance|dod|department\s+of\s+(?:defense|war|the\s+navy|the\s+army|the\s+air\s+force|veterans\s+affairs|homeland\s+security|health\s+and\s+human\s+services)|dhs|ts\s*\/\s*sci|polygraph|public\s+trust\s+(?:clearance|position)|e-?qip|sf-?86)\b/i;
+/**
+ * An explicit United States mention in the raw section text. "us" alone is never read as
+ * the country here (it is usually the pronoun); "U.S.", "USA" and "United States" are.
+ * Bare "army", "navy", "air force" or "VA" are not U.S. markers: many countries have them.
+ */
+const US_EXPLICIT_MENTION = /\b(?:united\s+states|usa)\b|\bu\s*\.\s*s\b\.?|\bus[- ](?:based|citizens?|citizenship|persons?|government|federal|navy|army|air\s+force|marine\s+corps|military|department)\b/i;
 /** EEO, benefits, pay and legal boilerplate; it names the USA or "federal" law without describing the work. */
 const BOILERPLATE_SENTENCE = /\b(?:equal\s+(?:employment\s+)?opportunity|eeo|affirmative\s+action|protected\s+veteran|veteran\s+status|race|religion|national\s+origin|sexual\s+orientation|gender\s+identity|disabilit(?:y|ies)|federal,?\s+state,?\s+(?:and|or)\s+local|e-?verify|reasonable\s+accommodations?|benefits?|401\s*\(?k\)?|insurance|paid\s+(?:time\s+off|leave)|salar(?:y|ies)|compensation|pay\s+(?:range|transparency)|privacy\s+(?:policy|notice)|applicable\s+laws?)\b/i;
 /** "Public Trust" alone is a value ("officers must maintain public trust"); only U.S. federal context makes it a clearance. */
 const BARE_PUBLIC_TRUST = /\b(?:obtain|maintain|hold|pass|eligib\w*\s+for)\s+(?:an?\s+)?(?:active\s+)?public\s+trust\b/i;
 const US_BASED_PLACEMENT = new RegExp(
-  `\\b(?:us|usa|united\\s+states|${US_STATE_NAMES.map(escapeRegExp).join("|")})-based\\s+(?:remote\\s+|full[- ]time\\s+|part[- ]time\\s+)?(?:role|position|job|opportunity|candidates?|applicants?|hires?|contractors?|consultants?|talent)\\b`,
+  `\\b(?:us|usa|united\\s+states|${US_STATE_NAMES.map(escapeRegExp).join("|")})-based(?:\\s*(?:,|\\/|or|and)\\s*[a-z][a-z ]{0,30}?-based)*\\s+(?:remote\\s+|full[- ]time\\s+|part[- ]time\\s+)?(?:role|position|job|opportunity|candidates?|applicants?|hires?|contractors?|consultants?|talent)\\b`,
   "i",
 );
 
 /** The non-boilerplate text within 1,500 characters of a position: the clause's own section. */
 function sectionAround(text: string, index: number, length: number): string {
-  return text.slice(Math.max(0, index - 1500), index + length + 1500)
+  return protectTerritoryAbbreviationPeriods(text.slice(Math.max(0, index - 1500), index + length + 1500))
     .split(/[.!?;\n]+/)
+    .map((sentence) => sentence.replaceAll(PROTECTED_ABBREVIATION_PERIOD, "."))
     .filter((sentence) => !BOILERPLATE_SENTENCE.test(sentence))
     .join("\n");
 }
@@ -743,7 +750,19 @@ function clearanceGovernment(sentence: string, section: string): string | null {
 function sectionIsUsFederal(section: string): boolean {
   const normalized = normalizeTerritorySearchText(section);
   const otherCountries = extractTerritories(normalized).filter((territory) => territory !== "UNITED_STATES");
-  return otherCountries.length === 0 && US_FEDERAL_CONTEXT.test(normalized);
+  return otherCountries.length === 0 && (US_FEDERAL_CONTEXT.test(normalized) || US_EXPLICIT_MENTION.test(section));
+}
+
+/**
+ * The territories of a "US-based" placement clause. A sentence that also names other
+ * regions ("US-based candidates or candidates in Singapore", "... as well as those in APAC")
+ * lists alternatives; a worldwide/Asia opening removes the restriction (null).
+ */
+function usBasedPlacementTerritories(sentence: string): string[] | null {
+  const normalized = normalizeTerritorySearchText(sentence);
+  if (GLOBAL_REMOTE_PHRASE.test(normalized) || /\basia\b/i.test(normalized)) return null;
+  const others = extractTerritories(normalized).filter((territory) => territory !== "UNITED_STATES");
+  return ["UNITED_STATES", ...others];
 }
 
 /**
@@ -781,8 +800,11 @@ export function extractGovernmentEligibilityRequirements(value: unknown): Explic
 
     // "A remote, US-based role", "California-based candidates": the role is placed in the US.
     // A non-country prefix ("cloud-based role") is not a placement.
+    // The whole sentence is one clause: any other region it names is an alternative (ANY),
+    // so "US-based or Singapore-based" is allowed for a Singapore user.
     if (US_BASED_PLACEMENT.test(normalizeTerritorySearchText(sentence))) {
-      requirements.push({ territories: ["UNITED_STATES"], operator: "ANY", evidenceText: sentence });
+      const territories = usBasedPlacementTerritories(sentence);
+      if (territories) requirements.push({ territories, operator: "ANY", evidenceText: sentence });
       continue;
     }
 
