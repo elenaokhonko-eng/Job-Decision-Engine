@@ -96,8 +96,113 @@ function firstEnvValue(names: string[]): string {
   return "";
 }
 
+/**
+ * Trim trailing slashes without a regex.
+ *
+ * `value.replace(/\/+$/, "")` is polynomial-time on attacker-controlled input,
+ * because a failing run of slashes backtracks across every starting position.
+ * A reverse scan is linear and does the same thing.
+ */
 function stripTrailingSlashes(value: string): string {
-  return value.replace(/\/+$/, "");
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47 /* "/" */) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
+export class ProviderBaseUrlError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderBaseUrlError";
+  }
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".localhost");
+}
+
+/**
+ * Validate a base URL that came from a request rather than from configuration.
+ *
+ * A caller-supplied base URL decides where an API key is sent, so it must not be
+ * able to point at an arbitrary host over plain HTTP. HTTPS anywhere, or HTTP on
+ * loopback only (Ollama and LM Studio listen on 127.0.0.1).
+ *
+ * Base URLs from the environment are deliberately *not* passed through this
+ * check: the operator set those, and a self-hosted endpoint on a LAN address
+ * over plain HTTP is a legitimate configuration.
+ */
+export function assertAllowedProviderBaseUrl(raw: string): string {
+  const trimmed = String(raw ?? "").trim();
+  if (!trimmed) return "";
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new ProviderBaseUrlError(`baseUrl is not a valid URL: ${trimmed}`);
+  }
+
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol === "https:") return stripTrailingSlashes(trimmed);
+  if (protocol === "http:" && isLoopbackHost(parsed.hostname)) return stripTrailingSlashes(trimmed);
+
+  throw new ProviderBaseUrlError(
+    `baseUrl must use https, or http on localhost only. Received: ${protocol}//${parsed.hostname}`
+  );
+}
+
+export interface ProviderCallAuthorization {
+  ok: boolean;
+  apiKey: string;
+  baseUrl?: string;
+  error?: string;
+}
+
+/**
+ * Decide which key may be used for a request that also supplies a base URL.
+ *
+ * The dangerous combination is a *server-held* key paired with a *caller-chosen*
+ * URL: any authenticated caller could then have the stored key sent to a host
+ * they control. So a caller-supplied `baseUrl` is only honoured together with a
+ * caller-supplied `apiKey`. Without one, the request is refused before any
+ * outbound call is made.
+ */
+export function authorizeProviderCall(options: {
+  bodyApiKey?: string;
+  bodyBaseUrl?: string;
+  serverApiKey: string;
+}): ProviderCallAuthorization {
+  const bodyApiKey = String(options.bodyApiKey ?? "").trim();
+  const bodyBaseUrl = String(options.bodyBaseUrl ?? "").trim();
+
+  if (bodyBaseUrl && !bodyApiKey) {
+    return {
+      ok: false,
+      apiKey: "",
+      error:
+        "A custom baseUrl requires the apiKey to be supplied in the same request. " +
+        "A stored key is never sent to a caller-supplied URL.",
+    };
+  }
+
+  let baseUrl: string | undefined;
+  if (bodyBaseUrl) {
+    try {
+      baseUrl = assertAllowedProviderBaseUrl(bodyBaseUrl);
+    } catch (err) {
+      return {
+        ok: false,
+        apiKey: "",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  const apiKey = bodyApiKey || options.serverApiKey;
+  return { ok: true, apiKey, baseUrl };
 }
 
 /** Base URL for a provider, honouring env overrides then its default. */
@@ -177,7 +282,12 @@ export async function listProviderModels(options: ListProviderModelsOptions): Pr
   const definition = AI_PROVIDERS[provider];
   const timeoutMs = options.timeoutMs ?? 10000;
   const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = resolveProviderBaseUrl(provider, options.baseUrl);
+    // Defence in depth: an explicit baseUrl is caller-supplied, so it is checked
+    // here as well as at the route. This runs before any network access.
+    const explicitBaseUrl = String(options.baseUrl ?? "").trim()
+      ? assertAllowedProviderBaseUrl(String(options.baseUrl))
+      : undefined;
+    const baseUrl = explicitBaseUrl ?? resolveProviderBaseUrl(provider);
 
   const url = definition.protocol === "gemini"
     ? `${baseUrl}/models?key=${encodeURIComponent(apiKey)}`

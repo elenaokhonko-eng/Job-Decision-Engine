@@ -166,7 +166,24 @@ at the first evaluation. Anthropic's native API is not OpenAI-shaped; reach it
 through a gateway (OpenRouter, LiteLLM) using the compatible provider.
 
 
-See [Quickstart Guide](docs/quickstart.md) for complete instructions.
+### The results dashboard (Streamlit)
+
+Electron is the app: it runs setup, the pipeline and the ranking. Streamlit is the
+optional **results dashboard** for reading the shortlist in depth, and it reuses the
+same `.env.local` that `npm run setup` wrote, so there is nothing to configure twice.
+
+```bash
+python -m pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+Open it after the app has produced results, not during setup — a new user should
+meet one surface at a time. See [The Streamlit dashboard](docs/streamlit-dashboard.md)
+for the reading/writing split, the API port, and troubleshooting.
+
+See [Quickstart Guide](docs/quickstart.md) for complete instructions, or the
+[Fork guide](docs/fork-guide.md) for the full fork → database → setup → launch
+walkthrough including the GitHub Actions secrets and variables.
 
 
 ---
@@ -182,7 +199,7 @@ npx tsc --noEmit
 # Unit & integration test suite (275+ tests)
 npm test
 
-# Desktop packaging & security checks (56 checks)
+# Desktop packaging & security checks (68 checks)
 npm run desktop:verify
 
 # Standalone desktop E2E gate check

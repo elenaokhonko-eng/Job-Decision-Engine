@@ -1,0 +1,93 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Setup",
+      "detail": "One-command install: database, migrations, embedding spaces, lanes, provider key",
+      "type": "shell",
+      "command": "npm run setup",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "Tests",
+      "detail": "Full vitest suite",
+      "type": "shell",
+      "command": "npm test",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Lint (typecheck)",
+      "detail": "tsc --noEmit",
+      "type": "shell",
+      "command": "npm run lint",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$tsc"
+      ]
+    },
+    {
+      "label": "dev:api",
+      "detail": "Companion API + web UI on http://127.0.0.1:3000",
+      "type": "shell",
+      "command": "npm run dev",
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "dev:streamlit",
+      "detail": "Streamlit results dashboard (needs the Python requirements installed)",
+      "type": "shell",
+      "command": "streamlit run streamlit_app.py",
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "API + Streamlit",
+      "detail": "Start the API and the Streamlit dashboard together",
+      "dependsOn": [
+        "dev:api",
+        "dev:streamlit"
+      ],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
+      "label": "Desktop app",
+      "detail": "Build and launch the Electron app in development",
+      "type": "shell",
+      "command": "npm run desktop:dev",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Desktop packaging check",
+      "detail": "Verify the installer would ship config, migrations and the backend bundles",
+      "type": "shell",
+      "command": "npm run desktop:verify",
+      "problemMatcher": []
+    }
+  ]
+}
