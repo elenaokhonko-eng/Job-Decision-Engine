@@ -27,7 +27,43 @@ const ALPHA3_COUNTRIES: Readonly<Record<string, string>> = {
   BRA: "Brazil", ARG: "Argentina", CHL: "Chile", COL: "Colombia",
 };
 
-const LABEL = /(?:^|[\n|·•;]|\s)((?:job|work|primary|office)[ \t]+location|location)[ \t]*:[ \t]*/gi;
+/**
+ * Only the job's own location labels: "Location:", "Job Location:", "Job Location(s):" and
+ * "Work Location:". They count at the start of a line or segment (after a newline, |, ·, •, ;).
+ * A compound label ("Headquarters Location:", "Interview location:", "Client Location:",
+ * "Office location:") and a "location:" inside a sentence never count.
+ */
+const LINE_LABEL = /(?:^|[\n|·•;])[ \t]*((?:job|work)[ \t]+locations?|job[ \t]+location\(s\)|locations?)[ \t]*:[ \t]*/gi;
+/**
+ * In a one-line employer template ("Requisition Number: 123 Job Location: Singapore, SGP
+ * Global Grade: D"), the title-case "Job Location:" / "Work Location:" label also counts after
+ * an earlier "Label: value" on the same line.
+ */
+const INLINE_LABEL = /[ \t]((?:Job|Work)[ \t]+Locations?|Job[ \t]+Location\(s\))[ \t]*:[ \t]*/g;
+const EARLIER_LABEL = /(?:^|[ \t])[A-Z][A-Za-z]*(?:[ \t]+[A-Z][A-Za-z]*){0,3}[ \t]*:[ \t]*\S/;
+
+interface LabelMatch {
+  readonly index: number;
+  readonly label: string;
+  readonly valueStart: number;
+}
+
+function locationLabels(text: string): LabelMatch[] {
+  const labels: LabelMatch[] = [];
+  for (const match of text.matchAll(LINE_LABEL)) {
+    const index = match.index ?? 0;
+    labels.push({ index, label: match[1] ?? "Location", valueStart: index + match[0].length });
+  }
+  for (const match of text.matchAll(INLINE_LABEL)) {
+    const index = match.index ?? 0;
+    const valueStart = index + match[0].length;
+    const lineStart = text.lastIndexOf("\n", index) + 1;
+    if (!EARLIER_LABEL.test(text.slice(lineStart, index))) continue;
+    if (labels.some((label) => label.valueStart === valueStart)) continue;
+    labels.push({ index, label: match[1] ?? "Job Location", valueStart });
+  }
+  return labels.sort((left, right) => left.index - right.index);
+}
 /** End of a header value: newline, separator or a sentence end. */
 const VALUE_STOP = /[\n|·•;]|\.(?:\s|$)/;
 /** Title-case label words right before the next colon ("Global Grade", "Work Type"). */
@@ -74,16 +110,15 @@ export function findPostingLocationLine(description: string | null | undefined):
   const text = String(description ?? "");
   const values: string[] = [];
   const quotes: string[] = [];
-  LABEL.lastIndex = 0;
-  for (const match of text.matchAll(LABEL)) {
-    const valueStart = (match.index ?? 0) + match[0].length;
+  for (const match of locationLabels(text)) {
+    const valueStart = match.valueStart;
     const raw = readValue(text, valueStart);
     if (!raw) continue;
     const location = spellAlpha3(raw);
     if (extractTerritories(location).length === 0) continue;
     if (values.some((existing) => existing.toLowerCase() === location.toLowerCase())) continue;
     values.push(location);
-    quotes.push(`${match[1]}: ${raw}`.replace(/\s+/g, " ").trim());
+    quotes.push(`${match.label}: ${raw}`.replace(/\s+/g, " ").trim());
     if (values.length >= 3) break;
   }
   if (values.length === 0) return null;

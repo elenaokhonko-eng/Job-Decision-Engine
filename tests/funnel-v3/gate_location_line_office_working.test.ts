@@ -27,7 +27,7 @@ const stage3WithExceptions = { mobility: { onsite_exception_employers: EXCEPTION
 const DUTIES = "Build machine learning data pipelines in Python and Spark for portfolio analytics.";
 /** The employer header on one line, then the duties. */
 const header = (location: string, workType: string) =>
-  `<p>Requisition Number: 240117 Job Location: ${location} Global Grade: D Work Type: ${workType}</p><p>${DUTIES}</p>`;
+  `<p>Requisition Number: 240117 Job Location: ${location} Global Grade: D Work Type: ${workType} Employment Type: Permanent</p><p>${DUTIES}</p>`;
 
 const STORED_MODES = ["UNKNOWN", "ASSUMED_HYBRID", "HYBRID"] as const;
 
@@ -93,6 +93,21 @@ describe("findPostingLocationLine", () => {
     expect(findPostingLocationLine("We have offices in Singapore and London.")).toBeNull();
   });
 
+  it("never reads a compound label or a mid-sentence 'location:' (PR #181 review)", () => {
+    for (const line of [
+      "Headquarters Location: San Francisco, CA",
+      "Interview location: Kuala Lumpur office",
+      "Client Location: London.",
+      "Our office location: right next to the MRT in Tokyo is great.",
+      "Office location: Tokyo",
+      "Requisition Number: 1 Headquarters Location: London",
+    ]) {
+      expect(findPostingLocationLine(`${line}\nBuild data pipelines.`), line).toBeNull();
+    }
+    expect(findPostingLocationLine("Job location(s): Singapore")?.location).toBe("Singapore");
+    expect(findPostingLocationLine("Work Location: Singapore")?.location).toBe("Singapore");
+  });
+
   it("joins several location lines as alternatives", () => {
     expect(findPostingLocationLine("Location: Singapore\nLocation: London, GBR")?.location).toBe("Singapore / London, United Kingdom");
   });
@@ -123,6 +138,19 @@ describe("Bug B: the location header line establishes the job location", () => {
     expect(result.evidence_quotes).toContain('Job location from the posting: "Job Location: Guangzhou, CHN"');
   });
 
+  it.each([
+    "Headquarters Location: San Francisco, CA",
+    "Interview location: Kuala Lumpur office",
+    "Client Location: London.",
+    "Our office location: right next to the MRT in Tokyo is great.",
+  ])("a non-job location line never rejects an unknown-location job: %s", (line) => {
+    for (const mode of STORED_MODES) {
+      const result = fullGate({ workplaceType: mode, description: `<p>${line}</p><p>Hybrid working, 3 days in office.</p><p>${DUTIES}</p>` });
+      expect(result.status, mode).not.toBe("HARD_REJECT");
+      expect(result.evidence_quotes.join(" "), mode).not.toContain("Job location from the posting");
+    }
+  });
+
   it("never overrides a structured location", () => {
     const result = fullGate({ location: "Singapore", workplaceType: "HYBRID", description: header("Guangzhou, CHN", "Hybrid Working") });
     expect(result.status).toBe("PASS");
@@ -140,7 +168,7 @@ describe("Bug B: the location header line establishes the job location", () => {
   it("reads a stored ASSUMED_HYBRID as hybrid only when the posting offers hybrid work", () => {
     const offered = fullGate({ location: "Singapore", workplaceType: "ASSUMED_HYBRID", description: `<p>Flexible working arrangements (hybrid).</p><p>${DUTIES}</p>` });
     expect(offered.status).toBe("PASS");
-    for (const technical of ["Build hybrid RAG retrieval with knowledge graphs.", "Run hybrid cloud workloads.", "Train a hybrid model for ranking."]) {
+    for (const technical of ["Build hybrid RAG retrieval with knowledge graphs.", "Run hybrid cloud workloads.", "Train a hybrid model for ranking.", "Build tools for a hybrid workforce of humans and AI agents."]) {
       const result = fullGate({ location: "Singapore", workplaceType: "ASSUMED_HYBRID", description: `<p>${technical}</p><p>${DUTIES}</p>` });
       expect(result.status, technical).toBe("NEEDS_VERIFICATION");
       expect(result.rejection_codes, technical).toContain("GATE_UNKNOWN_WORK_MODE");
@@ -211,6 +239,7 @@ describe("Bug C: Work Type: Office Working is full on-site", () => {
       "Work model: In-office",
       "Workplace type: Office-based.",
       "Work arrangement: In-office working",
+      "Requisition Number: 9 Work Type: Office Working Employment Type: Permanent",
     ];
     for (const line of onsite) {
       const text = `${line}\n${DUTIES}`.toLowerCase();
@@ -224,6 +253,8 @@ describe("Bug C: Work Type: Office Working is full on-site", () => {
       "Work type: office-based working is optional",
       "Our office-based teams collaborate daily.",
       "Work Type: Hybrid Working",
+      "Work Type: Office Working (flexible arrangements available)",
+      "Work setting: office working environment with flexible hours.",
     ];
     for (const line of notOnsite) {
       const text = `${line}\n${DUTIES}`.toLowerCase();

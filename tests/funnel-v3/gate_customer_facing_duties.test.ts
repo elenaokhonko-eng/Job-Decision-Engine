@@ -65,7 +65,12 @@ describe("findCustomerFacingRoleDuty", () => {
     ["You will be part of the pre-sales team for APAC.", "pre-sales team"],
     ["You will join the Customer Success team.", "customer success team"],
     ["• Responsible for the entire customer journey.", "entire customer journey"],
-    ["Set proof-of-value timelines and success criteria.", "proof-of-value"],
+    ["Set proof-of-value timelines and success criteria with prospective customers.", "proof-of-value"],
+    ["Deliver the first working proof of concept to a customer within 60 days.", "to a customer"],
+    ["Respond to RFPs from enterprise buyers.", "respond to rfps"],
+    ["Reporting to the VP of Customer Success, you will lead the renewals organization.", "vp of customer success"],
+    ["You will serve as the face of the company to customers.", "face of the company"],
+    ["Run technical demos with prospects.", "demos with prospects"],
     ["You will serve as the face of Brightquay in Japan.", "face of"],
     ["Regular customer engagements to unblock adoption.", "regular customer engagements"],
     ["Partner with Account Executives to drive expansion and renewal.", "account executives"],
@@ -126,4 +131,46 @@ describe("GATE_HIGH_INTERACTION for pre-sales and post-sales roles", () => {
     expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
     expect(result.status).toBe("PASS");
   });
+});
+
+/**
+ * PR #181 review rows 1-18: engineering, data, AI and legal-tech wording that must never be
+ * read as a pre-sales or customer-engagement role. Each must pass the full gate under every
+ * stored work mode, as it does on main.
+ */
+const HYB = "<p>Hybrid working, 3 days in office.</p>";
+const REVIEW_MUST_PASS: ReadonlyArray<readonly [string, string]> = [
+  ["AI Engineer", "<ul><li>Run POCs of new GenAI models to improve customer experience.</li></ul>"],
+  ["Machine Learning Engineer", "<ul><li>Lead proofs of concept for new recommendation models that improve customer retention.</li></ul>"],
+  ["AI Engineer", "<ul><li>Deliver proof of value for internal GenAI use cases.</li></ul>"],
+  ["AI Strategy Lead", "<ul><li>Drive a clear POV on responsible AI adoption across the bank.</li></ul>"],
+  ["Data Analyst", "<p>You will partner with leaders in our Customer Success organization to model churn.</p>"],
+  ["Analytics Engineer", "<p>You'll build dashboards used by managers in the customer success team.</p>"],
+  ["Data Engineer", "<p>You will build data pipelines for teams in the post-sales organisation.</p>"],
+  ["Data Analyst", "<p>You will report to the Head of Customer Success Analytics.</p>"],
+  ["Marketing Data Scientist", "<ul><li>Own customer journey analytics and attribution modelling.</li></ul>"],
+  ["Data Analyst", "<ul><li>Lead the customer journey data model across web and app.</li></ul>"],
+  ["Data Scientist", "<ul><li>Drive upsell and cross-sell through propensity models.</li></ul>"],
+  ["Data Scientist", "<ul><li>Own renewal propensity models for the subscription business.</li></ul>"],
+  ["Legal Technology Manager", "<ul><li>Lead RFPs to select contract lifecycle management vendors.</li></ul>"],
+  ["Data Platform Lead", "<ul><li>Own RFPs for data platform tooling and vendor evaluation.</li></ul>"],
+  ["Head of Data", "<ul><li>Serve as the face of the data team to business stakeholders.</li></ul>"],
+  ["ML Engineer", "<ul><li>Give demos to internal customers of new model features.</li></ul>"],
+  ["Senior Data Engineer", "<p>You will join the customer engagement platform team, building ML that powers messaging.</p>"],
+  ["ML Engineer", "<p>You will partner with account managers to understand needs and improve adoption of ML features.</p>"],
+];
+
+describe("PR #181 review: data, ML and legal-tech wording is not a customer-facing role", () => {
+  for (const [index, [title, body]] of REVIEW_MUST_PASS.entries()) {
+    it.each(["UNKNOWN", "HYBRID"])(`row ${index + 1}: ${title} passes (stored %s)`, (mode) => {
+      const result = fullGate(title, "Zentrolabs", `${HYB}${body}`, mode);
+      expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+      expect(result.status).toBe("PASS");
+    });
+    it(`row ${index + 1}: ${title} is not hard-rejected (stored ASSUMED_HYBRID)`, () => {
+      const result = fullGate(title, "Zentrolabs", `${HYB}${body}`, "ASSUMED_HYBRID");
+      expect(result.status).not.toBe("HARD_REJECT");
+      expect(findCustomerFacingRoleDuty(body.replace(/<[^>]+>/g, "\n").toLowerCase())).toBeNull();
+    });
+  }
 });

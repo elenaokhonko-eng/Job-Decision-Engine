@@ -402,8 +402,16 @@ export type WorkabilityVerificationCode =
   | "NEEDS_VERIFICATION_OFFICE_DAYS"
   | "NEEDS_VERIFICATION_TRAVEL";
 
+/**
+ * A work-arrangement hybrid only: hybrid work/working/role/position/job/arrangement/schedule/
+ * days/model (not "hybrid model for ranking"), a work-mode label value ("Work Type: Hybrid"),
+ * "arrangements (hybrid)", "hybrid, 3 days" or "is/a hybrid role". "A hybrid workforce of
+ * humans and AI agents" or "hybrid RAG" is not.
+ */
+const OFFERED_HYBRID = /\bhybrid[ \t-]+(?:work(?:ing)?|roles?|positions?|jobs?|arrangements?|schedules?|set-?up|basis|policy|pattern|days?|work[ \t-]+model|working[ \t-]+model)\b|\bhybrid[ \t]+model\b(?![ \t]+(?:for|to|that|which|of|trained|using|with)\b)|\b(?:work(?:ing)?[ \t]+(?:type|model|mode|arrangements?|setting|style|pattern)|workplace(?:[ \t]+type)?|location)[ \t]*:[ \t]*(?:\w+[ \t]+)?hybrid\b|\barrangements?[ \t]*\([ \t]*hybrid[ \t]*\)|\bhybrid\b[ \t]*[,(–-]?[ \t]*(?:[1-4]|one|two|three|four)[ \t]*(?:days?|x)\b|\b(?:is|a)[ \t]+hybrid[ \t]+(?:role|position|job|opportunity)\b|(?:^|[\n|·•])[ \t]*hybrid[ \t]*(?:$|[\n|·•,.;])/im;
+
 /** "Hybrid" naming a technique or a thing rather than this job's work mode. */
-const TECHNICAL_HYBRID = /\bhybrid[ \t-]+(?:cloud|multi-?cloud|rag|search|retrieval|models?|modell?ing|architectures?|approach(?:es)?|systems?|infrastructure|ai|ml|deployments?|environments?|integrations?|solutions?|methods?|algorithms?|quantum|networks?|vehicles?|events?|meetings?|apps?|applications?|it|workloads?|data|storage|ranking|recommenders?|pipelines?|frameworks?|reasoning|agents?)\b/gi;
+const TECHNICAL_HYBRID =/\bhybrid[ \t-]+(?:cloud|multi-?cloud|rag|search|retrieval|models?|modell?ing|architectures?|approach(?:es)?|systems?|infrastructure|ai|ml|deployments?|environments?|integrations?|solutions?|methods?|algorithms?|quantum|networks?|vehicles?|events?|meetings?|apps?|applications?|it|workloads?|data|storage|ranking|recommenders?|pipelines?|frameworks?|reasoning|agents?)\b/gi;
 
 // 3. Workability Requirements (Zero tolerance for on-premises-only lab/clinic)
 export function evaluateWorkability(
@@ -549,7 +557,7 @@ function evaluateWorkabilityRules(
   // so it is read as hybrid below rather than as the assumed default (gate-2026-11.4).
   // A technical "hybrid" ("hybrid RAG", "hybrid cloud", "hybrid model") is not a work mode,
   // so a posting silent on its work mode keeps the assumed default and stays NEEDS_VERIFICATION.
-  const postingOffersHybrid = /\bhybrid\b/i.test(
+  const postingOffersHybrid = OFFERED_HYBRID.test(
     withoutNonOfferedWorkModes(workModeText).replace(TECHNICAL_HYBRID, (match) => " ".repeat(match.length)),
   );
   if (isAssumedHybrid && !isExplicitOnsiteText && !postingOffersHybrid) {

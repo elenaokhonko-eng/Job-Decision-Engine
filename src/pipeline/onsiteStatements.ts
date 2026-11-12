@@ -48,11 +48,13 @@ const WORK_MODE_LABELS = String.raw`(?:workplace(?:[ \t]+type)?|work[ \t]*(?:mod
 
 /**
  * An office value of a work-mode label is full on-site (gate-2026-11.4): "Work Type: Office
- * Working", "Work type: Office-based working", "Work model: In-office". Office or in-office with
- * a working/work suffix ends at a word boundary; a bare "office-based" or "in-office" value must
- * end the value (VALUE_END). Partial attendance after it ("Office Working, 3 days a week") is not.
+ * Working", "Work type: Office-based working", "Work model: In-office". The value must end the
+ * label's value (VALUE_END, or the next "Label:" of a one-line template such as "Work Type:
+ * Office Working Employment Type: Permanent"), so "office working environment" is not one; partial attendance after
+ * it ("Office Working, 3 days a week") or a flexibility note ("Office Working (flexible
+ * arrangements available)") is not full on-site.
  */
-const OFFICE_WORK_MODE_VALUE = String.raw`(?:(?:office(?:[- ]based)?|in[- ]office)[ \t]+work(?:ing)?\b|(?:office[- ]based|in[- ]office)${VALUE_END})`;
+const OFFICE_WORK_MODE_VALUE = String.raw`(?:(?:office(?:[- ]based)?|in[- ]office)[ \t]+work(?:ing)?|office[- ]based|in[- ]office)(?:${VALUE_END}|(?=[ \t]+(?:[a-z][\w-]*[ \t]+){0,3}[a-z][\w-]*[ \t]*:))(?![^\n.]{0,40}\bflexib)`;
 
 const FOUR_PLUS = String.raw`${FOUR_PLUS_COUNT}|\bdaily\b|\bevery[ \t]+(?:work[ \t]*)?day\b`;
 
