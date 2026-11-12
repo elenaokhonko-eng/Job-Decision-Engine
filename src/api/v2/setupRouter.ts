@@ -10,6 +10,15 @@ import {
 } from "../../modelRoutes/registry.js";
 import { DEFAULT_USER_KEY, DEFAULT_WORKSPACE_KEY, resolveWorkspaceContext } from "../../workspace/context.js";
 import { isGeminiConfigured } from "../../services/geminiConfig.js";
+import {
+  AI_PROVIDERS,
+  configuredAiProviderIds,
+  listAiProviderIds,
+  listProviderModels,
+  normalizeAiProviderId,
+  resolveProviderApiKey,
+  resolveProviderBaseUrl,
+} from "../../services/aiProviders.js";
 
 function asyncHandler(
   handler: (req: express.Request, res: express.Response, next: express.NextFunction) => Promise<void> | void
@@ -88,6 +97,10 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         }
       }
 
+      // Provider availability comes from the registry, so configuring an
+      // OpenAI-compatible endpoint counts without editing this route.
+      const configuredProviders = configuredAiProviderIds();
+      const anyProviderConfigured = configuredProviders.length > 0;
       const geminiConfigured = isGeminiConfigured();
       const openaiConfigured = Boolean(process.env.OPENAI_API_KEY);
 
@@ -134,7 +147,7 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         dbConnected &&
         Boolean(migrationStatus?.isInitialized) &&
         (migrationStatus?.pendingCount ?? 1) === 0 &&
-        (geminiConfigured || openaiConfigured) &&
+        anyProviderConfigured &&
         modelRoutesConfigured;
 
       res.json({
@@ -153,10 +166,13 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         aiProviders: {
           gemini: geminiConfigured,
           openai: openaiConfigured,
+          compatible: configuredProviders.includes("openai-compatible"),
+          configured: configuredProviders,
         },
         ai: {
           geminiConfigured,
           openaiConfigured,
+          configuredProviders,
         },
         modelRoutes: {
           configured: modelRoutesConfigured,
@@ -302,69 +318,42 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
   router.post(
     "/ai/test",
     asyncHandler(async (req, res) => {
-      const provider = String(req.body?.provider || "").trim().toLowerCase();
-      const apiKey = String(req.body?.apiKey || "").trim();
+      const requested = req.body?.provider;
+      const provider = normalizeAiProviderId(requested);
 
-      if (!apiKey) {
-        res.status(400).json({ ok: false, error: "API key is required." });
+      if (!provider) {
+        res.status(400).json({
+          ok: false,
+          error: `Unsupported AI provider: ${String(requested ?? "")}`,
+          supportedProviders: listAiProviderIds(),
+        });
         return;
       }
 
-      if (provider === "gemini") {
-        try {
-          const resp = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
-            { signal: AbortSignal.timeout(10000) }
-          );
-          if (!resp.ok) {
-            const body = await resp.json().catch(() => ({}));
-            const msg = (body as any)?.error?.message || `HTTP ${resp.status}`;
-            res.status(400).json({
-              ok: false,
-              error: `Google Gemini verification failed: ${msg}`,
-            });
-            return;
-          }
-          const data: any = await resp.json();
-          const models = Array.isArray(data.models)
-            ? data.models.map((m: any) => m.name.replace(/^models\//, ""))
-            : [];
-          res.json({ ok: true, provider: "gemini", models });
-        } catch (err: any) {
-          res.status(400).json({
-            ok: false,
-            error: `Failed to connect to Google Gemini API: ${sanitizeErrorMessage(err)}`,
-          });
-        }
-      } else if (provider === "openai") {
-        try {
-          const resp = await fetch("https://api.openai.com/v1/models", {
-            headers: { Authorization: `Bearer ${apiKey}` },
-            signal: AbortSignal.timeout(10000),
-          });
-          if (!resp.ok) {
-            const body = await resp.json().catch(() => ({}));
-            const msg = (body as any)?.error?.message || `HTTP ${resp.status}`;
-            res.status(400).json({
-              ok: false,
-              error: `OpenAI verification failed: ${msg}`,
-            });
-            return;
-          }
-          const data: any = await resp.json();
-          const models = Array.isArray(data.data) ? data.data.map((m: any) => m.id) : [];
-          res.json({ ok: true, provider: "openai", models });
-        } catch (err: any) {
-          res.status(400).json({
-            ok: false,
-            error: `Failed to connect to OpenAI API: ${sanitizeErrorMessage(err)}`,
-          });
-        }
-      } else {
-        res.status(400).json({ ok: false, error: `Unsupported AI provider: ${provider}` });
+      const definition = AI_PROVIDERS[provider];
+      // Fall back to the environment so the wizard can re-test a saved key.
+      const apiKey = String(req.body?.apiKey || "").trim() || resolveProviderApiKey(provider);
+      if (!apiKey && definition.requiresApiKey) {
+        res.status(400).json({ ok: false, error: `${definition.apiKeyEnv} is required for ${definition.label}.` });
+        return;
+      }
+
+      const baseUrl = String(req.body?.baseUrl || "").trim() || undefined;
+      try {
+        const models = await listProviderModels({ provider, apiKey, baseUrl });
+        res.json({
+          ok: true,
+          provider,
+          label: definition.label,
+          baseUrl: resolveProviderBaseUrl(provider, baseUrl),
+          models,
+        });
+      } catch (err: any) {
+        res.status(400).json({ ok: false, error: sanitizeErrorMessage(err) });
       }
     })
   );
+
 
   // POST /api/v2/setup/routes
   router.post(
@@ -422,10 +411,59 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
           { key: "requirements_extraction", purpose: "EXTRACTION", conf: routes.extraction || routes.evaluation },
         ];
 
+        const baseUrl = String(req.body?.baseUrl || "").trim() || undefined;
+        const validationWarnings: string[] = [];
+        const unknownModels: Array<{ route: string; provider: string; model: string; available: string[] }> = [];
+
+        // Reject a model id the provider does not actually serve, instead of
+        // writing it and failing later at the first evaluation.
+        if (req.body?.validateModels !== false) {
+          const modelCache = new Map<string, Set<string> | null>();
+          for (const def of routeDefs) {
+            if (!def.conf || !def.conf.model) continue;
+            const provider = normalizeAiProviderId(def.conf.provider || "gemini");
+            if (!provider) continue;
+            if (!modelCache.has(provider)) {
+              const key = resolveProviderApiKey(provider);
+              if (!key && AI_PROVIDERS[provider].requiresApiKey) {
+                validationWarnings.push(`Skipped model validation for ${provider}: no API key available.`);
+                modelCache.set(provider, null);
+              } else {
+                try {
+                  const models = await listProviderModels({ provider, apiKey: key, baseUrl });
+                  modelCache.set(provider, new Set(models));
+                } catch (err) {
+                  validationWarnings.push(`Could not list ${provider} models: ${sanitizeErrorMessage(err)}`);
+                  modelCache.set(provider, null);
+                }
+              }
+            }
+            const available = modelCache.get(provider);
+            if (available && available.size > 0 && !available.has(def.conf.model)) {
+              unknownModels.push({
+                route: def.key,
+                provider,
+                model: def.conf.model,
+                available: [...available].slice(0, 25),
+              });
+            }
+          }
+        }
+
+        if (unknownModels.length > 0) {
+          res.status(400).json({
+            ok: false,
+            error: "Unknown model id for the configured provider.",
+            unknownModels,
+            hint: "Call POST /api/v2/setup/ai/test to list the models this key can actually use.",
+          });
+          return;
+        }
+
         for (const def of routeDefs) {
           if (!def.conf || !def.conf.model) continue;
-          const provider = (def.conf.provider || "gemini").toLowerCase() as "gemini" | "openai";
-          const fallbackProvider = (def.conf.fallbackProvider || provider) as "gemini" | "openai";
+          const provider = normalizeAiProviderId(def.conf.provider || "gemini") ?? "gemini";
+          const fallbackProvider = normalizeAiProviderId(def.conf.fallbackProvider || provider) ?? provider;
           const fallbackModel = def.conf.fallbackModel || def.conf.model;
 
           const revision = await ensureModelRouteActiveRevision(
@@ -445,7 +483,7 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
           configured.push(revision);
         }
 
-        res.json({ ok: true, routes: configured });
+        res.json({ ok: true, routes: configured, warnings: validationWarnings });
       } catch (err: any) {
         res.status(500).json({ ok: false, error: `Failed to configure routes: ${sanitizeErrorMessage(err)}` });
       } finally {

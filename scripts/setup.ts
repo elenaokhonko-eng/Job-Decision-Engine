@@ -10,6 +10,13 @@ import { runMigrations } from "../src/db/migrate.js";
 import { seedEmbeddingSpaces } from "../src/embeddings/spaceRegistry.js";
 import { loadWorkspaceLanesConfig } from "../src/pipeline/laneConfigLoader.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import {
+  AI_PROVIDERS,
+  listAiProviderIds,
+  listProviderModels,
+  normalizeAiProviderId,
+  type AiProviderId,
+} from "../src/services/aiProviders.js";
 
 /**
  * One-command setup for the forkable repository.
@@ -39,7 +46,7 @@ const DEFAULT_DOCKER_URL =
   `postgresql://${process.env.POSTGRES_USER || "jdec"}:${process.env.POSTGRES_PASSWORD || "jdec"}` +
   `@127.0.0.1:${process.env.POSTGRES_PORT || "5432"}/${process.env.POSTGRES_DB || "jdec"}`;
 
-type ProviderId = "gemini" | "openai" | "openai-compatible";
+type ProviderId = AiProviderId;
 
 interface CliOptions {
   databaseUrl?: string;
@@ -53,21 +60,21 @@ interface CliOptions {
   help: boolean;
 }
 
-const PROVIDER_LABELS: Record<ProviderId, string> = {
-  gemini: "Google Gemini (AI Studio API key)",
-  openai: "OpenAI",
-  "openai-compatible": "Any OpenAI-compatible endpoint (Ollama, Groq, Together, OpenRouter, vLLM, LM Studio, ...)",
-};
+// Derived from the provider registry so there is exactly one source of truth
+// for what a provider is called and which env var holds its key.
+const PROVIDER_LABELS: Record<ProviderId, string> = Object.fromEntries(
+  listAiProviderIds().map((id) => [id, AI_PROVIDERS[id].label])
+) as Record<ProviderId, string>;
 
-const PROVIDER_ENV_KEY: Record<ProviderId, string> = {
-  gemini: "GEMINI_API_KEY",
-  openai: "OPENAI_API_KEY",
-  "openai-compatible": "OPENAI_COMPATIBLE_API_KEY",
-};
+const PROVIDER_ENV_KEY: Record<ProviderId, string> = Object.fromEntries(
+  listAiProviderIds().map((id) => [id, AI_PROVIDERS[id].apiKeyEnv])
+) as Record<ProviderId, string>;
 
-const PROVIDER_DEFAULT_BASE_URL: Partial<Record<ProviderId, string>> = {
-  "openai-compatible": "http://127.0.0.1:11434/v1",
-};
+const PROVIDER_DEFAULT_BASE_URL = Object.fromEntries(
+  listAiProviderIds()
+    .filter((id) => Boolean(AI_PROVIDERS[id].defaultBaseUrl))
+    .map((id) => [id, AI_PROVIDERS[id].defaultBaseUrl as string])
+) as Partial<Record<ProviderId, string>>;
 
 function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
@@ -94,9 +101,10 @@ function parseArgs(argv: string[]): CliOptions {
         options.directUrl = next();
         break;
       case "--provider": {
-        const value = next().toLowerCase() as ProviderId;
-        if (!(value in PROVIDER_LABELS)) {
-          throw new Error(`Unknown provider "${value}". Use one of: ${Object.keys(PROVIDER_LABELS).join(", ")}.`);
+        const raw = next();
+        const value = normalizeAiProviderId(raw);
+        if (!value) {
+          throw new Error(`Unknown provider "${raw}". Use one of: ${listAiProviderIds().join(", ")}.`);
         }
         options.provider = value;
         break;
@@ -135,7 +143,8 @@ function printHelp(): void {
   npm run setup                         Interactive setup (recommended)
   npm run setup -- --docker             Start local Postgres in Docker, then set up
   npm run setup -- --database-url <url> Skip the database prompt
-  npm run setup -- --provider <id>      gemini | openai | openai-compatible
+  npm run setup -- --provider <id>      gemini | openai | openai-compatible (aliases: ollama, groq,
+                                        together, openrouter, kimi, deepseek, vllm, lmstudio, google)
   npm run setup -- --api-key <key>      Skip the API key prompt
   npm run setup -- --base-url <url>     Base URL for an OpenAI-compatible provider
   npm run setup -- --yes                Accept defaults without confirming
@@ -250,24 +259,11 @@ async function startDockerPostgres(): Promise<string> {
 }
 
 async function verifyProvider(provider: ProviderId, apiKey: string, baseUrl?: string): Promise<string[]> {
-  if (provider === "gemini") {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`);
-    if (!response.ok) {
-      fail(`Gemini rejected the API key (HTTP ${response.status}).`);
-    }
-    const body = (await response.json()) as { models?: Array<{ name?: string }> };
-    return (body.models ?? []).map((model) => (model.name ?? "").replace(/^models\//, "")).filter(Boolean);
+  try {
+    return await listProviderModels({ provider, apiKey, baseUrl });
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
   }
-
-  const root = (baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
-  const response = await fetch(`${root}/models`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
-  if (!response.ok) {
-    fail(`${provider} rejected the API key at ${root} (HTTP ${response.status}).`);
-  }
-  const body = (await response.json()) as { data?: Array<{ id?: string }> };
-  return (body.data ?? []).map((model) => model.id ?? "").filter(Boolean);
 }
 
 function printNextSteps(provider: ProviderId, modelCount: number): void {

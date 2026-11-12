@@ -9,6 +9,7 @@ import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION } from "../con
 import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { readJsonResponseBounded, readResponseTextBounded } from "../security/boundedResponse.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
+import { resolveOpenAiApiKey, resolveOpenAiBaseUrl } from "./aiProviders.js";
 import {
   CULTURE_SCORE_DERIVATION_VERSION,
   scoreCultureEvidenceFromQuote,
@@ -81,7 +82,9 @@ type TextProvider = "gemini" | "openai";
 
 function resolveProviderOrder(primaryProviderRaw: string | undefined): TextProvider[] {
   const normalized = (primaryProviderRaw || "").trim().toLowerCase();
-  if (normalized === "openai") return ["openai", "gemini"];
+  // `openai-compatible` speaks the OpenAI protocol, so it takes the OpenAI slot
+  // in the order; only the base URL differs, and that is resolved at call time.
+  if (normalized === "openai" || normalized === "openai-compatible") return ["openai", "gemini"];
   if (normalized === "gemini") return ["gemini", "openai"];
   // Backward compatibility with existing env behavior.
   if (process.env.FORCE_OPENAI === "true") return ["openai", "gemini"];
@@ -401,7 +404,7 @@ function isRetryableModelRequestError(error: any): boolean {
 export function checkModelRegistryPreflight(
   scope: GeminiCredentialScope = "default",
 ): { ok: boolean; warnings: string[]; primaryAvailable: boolean; fallbackAvailable: boolean } {
-  const openaiKey = process.env.OPENAI_API_KEY;
+  const openaiKey = resolveOpenAiApiKey();
   const evalOrder = resolveProviderOrder(process.env.EVALUATION_PRIMARY_PROVIDER);
   const primaryProvider = evalOrder[0];
   const fallbackProvider = evalOrder[1];
@@ -1086,7 +1089,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
 }
 
 async function tryOpenAI(openaiKey: string, options: any): Promise<string> {
-  const baseUrl = "https://api.openai.com/v1";
+  const baseUrl = resolveOpenAiBaseUrl();
   const requestedModel = typeof options.model === "string" ? options.model : "";
   const model = requestedModel && !requestedModel.toLowerCase().startsWith("gemini")
     ? requestedModel
@@ -1150,7 +1153,7 @@ export async function callLLM(
       return JSON.stringify(result.result);
     }
     case "openai": {
-      const openaiKey = process.env.OPENAI_API_KEY || "";
+      const openaiKey = resolveOpenAiApiKey();
       return await tryOpenAI(openaiKey, {
         contents: prompt,
         model: documentOpenAiModel(),
@@ -1173,7 +1176,7 @@ export async function generateContent(options: {
   return (await generateContentAudited({ ...options })).text;
 
   const geminiKey = isGeminiConfigured();
-  const openaiKey = process.env.OPENAI_API_KEY;
+  const openaiKey = resolveOpenAiApiKey();
   const isDocumentRoute =
     options.model === MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL ||
     options.model === documentOpenAiModel();
@@ -1431,7 +1434,7 @@ export async function generateContentAudited(options: {
   const startedAt = Date.now();
   const geminiScope: GeminiCredentialScope = options.geminiCredentialScope === "document" ? "document" : "default";
   const geminiProblem = geminiConfigProblem(process.env, geminiScope);
-  const openaiKey = process.env.OPENAI_API_KEY;
+  const openaiKey = resolveOpenAiApiKey();
   const flexEligible = geminiFlexEligible(options);
   // Validate the Flex settings before any request: a malformed value is a configuration error.
   const flexRequestTimeoutMs = flexEligible ? geminiFlexRequestTimeoutMs() : null;
@@ -2131,7 +2134,7 @@ async function embedWithOpenAIModel(text: string, model: string): Promise<number
 
 /** One OpenAI embeddings request for `texts`; returns one vector per input (in order) or throws. */
 async function embedOpenAIRequest(texts: readonly string[], model: string): Promise<number[][]> {
-  const openaiKey = process.env.OPENAI_API_KEY;
+  const openaiKey = resolveOpenAiApiKey();
   if (!openaiKey) {
     throw new Error("OpenAI embedding requested but OPENAI_API_KEY is not configured.");
   }
@@ -2152,7 +2155,7 @@ async function embedOpenAIRequest(texts: readonly string[], model: string): Prom
   }
 
   const timeoutMs = embeddingRequestTimeoutMs();
-  const oResponse = await fetch("https://api.openai.com/v1/embeddings", {
+  const oResponse = await fetch(`${resolveOpenAiBaseUrl()}/embeddings`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -2221,7 +2224,7 @@ export async function generateEmbeddingWithProviderAndModel(
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
   const geminiKey = isGeminiConfigured();
-  const openaiKey = process.env.OPENAI_API_KEY;
+  const openaiKey = resolveOpenAiApiKey();
 
   const providerOrder = resolveProviderOrder(process.env.EMBEDDING_PRIMARY_PROVIDER);
 
@@ -2285,7 +2288,7 @@ export interface ModelRoutePreflight {
 /** Perform minimal live calls so invalid configured model IDs fail before ingestion. */
 export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
   const geminiKey = isGeminiConfigured();
-  const openaiKey = process.env.OPENAI_API_KEY;
+  const openaiKey = resolveOpenAiApiKey();
   const errors: string[] = [];
   const checks: ModelRoutePreflight["checks"] = [];
   const degradedRoutes: string[] = [];
@@ -2640,7 +2643,7 @@ export async function runAgent(
   options: LegacyAgentContext
 ): Promise<AgentExecutionResult> {
   const geminiKey = isGeminiConfigured();
-  const openaiKey = process.env.OPENAI_API_KEY;
+  const openaiKey = resolveOpenAiApiKey();
 
   if (!geminiKey && !openaiKey) {
     throw new Error(
@@ -3189,7 +3192,7 @@ export async function evaluateSingleCanonicalJob(
     );
   }
   const geminiKey = isGeminiConfigured();
-  const openaiKey = process.env.OPENAI_API_KEY;
+  const openaiKey = resolveOpenAiApiKey();
 
   if (!geminiKey && !openaiKey) {
     throw new Error(

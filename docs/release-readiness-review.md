@@ -99,21 +99,26 @@ Profile is CLI-only (`npm run profile:import` → `scripts/import_profile.ts`). 
 
 **Build:** ship the app's own OAuth client and a "Sign in with Google" button (`gmail.readonly` or `gmail.modify`). The user clicks consent; the app stores the refresh token in `safeStorage`. Keep the manual refresh-token path as a fallback for Track A only.
 
-### 7. No provider abstraction — "any LLM API" is impossible
+### 7. Provider abstraction — FIXED
 
-`src/api/v2/setupRouter.ts` accepts exactly two providers: `gemini` and `openai`, and returns `Unsupported AI provider` otherwise. Model routes are typed `"gemini" | "openai"` (`setupRouter.ts:426-427`). There is no base-URL override anywhere in the codebase.
+`src/api/v2/setupRouter.ts` used to accept exactly two providers behind an `if/else if/else throw` ladder, with model routes typed `"gemini" | "openai"` and no base-URL override anywhere.
 
-So Ollama, LM Studio, vLLM, Groq, Together, OpenRouter, or any OpenAI-compatible endpoint cannot be configured without code changes.
+Replaced with `src/services/aiProviders.ts`, where a provider is a **wire protocol, not a vendor**:
 
-**Build:** add an OpenAI-compatible provider with a configurable `base_url` + `api_key` + `model`, and treat Gemini as one more adapter. This is what "any open source or closed LLM model API" requires.
+- `gemini` — native Google Generative Language API
+- `openai` — native OpenAI, optional `OPENAI_BASE_URL`
+- `openai-compatible` — any endpoint implementing the OpenAI API shape, via `OPENAI_COMPATIBLE_BASE_URL` + `OPENAI_COMPATIBLE_API_KEY`
 
-### 8. Model routing accepts models that do not exist
+That third one covers Ollama, LM Studio, vLLM, Groq, Together, OpenRouter, Moonshot/Kimi, DeepSeek and self-hosted gateways without code changes. `resolveOpenAiBaseUrl()` / `resolveOpenAiApiKey()` are now used by every OpenAI-protocol call site (chat, embeddings, model listing, the `openai` SDK client), and `resolveProviderOrder()` maps `openai-compatible` into the OpenAI slot so route selection works too.
 
-`POST /api/v2/setup/ai/test` returns the provider's model list, but `POST /api/v2/setup/routes` writes whatever string the client sends without checking it against that list. A typo'd or retired model ID configures cleanly and fails later, at first evaluation — which is exactly the "setup said OK, app does nothing" experience to avoid.
+Anthropic's native API is not OpenAI-shaped; it is reachable through a gateway (OpenRouter, LiteLLM) via the compatible provider. That is a documented limitation, not a code gap.
 
-The wizard also hardcodes defaults (`gemini-3.6-flash`, `gpt-5.6-luna`, `gemini-3.5-flash-lite`) that must be verified against the live model list before release.
+### 8. Model routing validated — FIXED
 
-**Fix:** populate the model dropdowns from `/setup/ai/test` and reject unknown IDs at `/setup/routes`.
+`POST /api/v2/setup/ai/test` now lists the models a key can actually call for any provider (via `listProviderModels`), and `POST /api/v2/setup/routes` rejects a model id the provider does not serve, returning `unknownModels` plus a sample of valid ids. Validation is skipped with an explicit warning when no key is available to check against, so it never blocks a legitimate offline setup.
+
+Still open: the wizard's hardcoded default model ids (`gemini-3.6-flash`, `gpt-5.6-luna`) should be replaced by the live list, and `npm run models:check` should be run against the release defaults.
+
 
 ### 9. No lane screen
 

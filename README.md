@@ -141,7 +141,30 @@ Job Decision Engine supports two distribution modes:
    npm run desktop:dev
    ```
 
-**AI providers:** Gemini and OpenAI are supported directly. Any OpenAI-compatible endpoint (Ollama, Groq, Together, OpenRouter, vLLM, LM Studio) works through `--provider openai-compatible --base-url <url>`.
+**AI providers.** A provider is a wire protocol, not a vendor, so three cover the field:
+
+| Provider | Covers | Configuration |
+| --- | --- | --- |
+| `gemini` | Google Gemini | `GEMINI_API_KEY` |
+| `openai` | OpenAI | `OPENAI_API_KEY` |
+| `openai-compatible` | Ollama, LM Studio, vLLM, Groq, Together, OpenRouter, Moonshot/Kimi, DeepSeek, any gateway | `OPENAI_COMPATIBLE_BASE_URL` + `OPENAI_COMPATIBLE_API_KEY` |
+
+```bash
+# Local Ollama
+npm run setup -- --provider openai-compatible \
+  --base-url http://127.0.0.1:11434/v1 --api-key local
+
+# Groq / OpenRouter / Together / Kimi: same shape, different base URL and key
+npm run setup -- --provider openai-compatible \
+  --base-url https://openrouter.ai/api/v1 --api-key "$OPENROUTER_KEY"
+```
+
+The model dropdown is populated from the provider itself (`POST /api/v2/setup/ai/test`
+returns the models your key can actually call), and `POST /api/v2/setup/routes`
+rejects a model id the provider does not serve instead of saving it and failing
+at the first evaluation. Anthropic's native API is not OpenAI-shaped; reach it
+through a gateway (OpenRouter, LiteLLM) using the compatible provider.
+
 
 See [Quickstart Guide](docs/quickstart.md) for complete instructions.
 
