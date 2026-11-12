@@ -20,6 +20,7 @@ import {
   MCF_SAVED_PLUGIN_KEY,
   MCF_SAVED_SOURCE_NAME,
   mcfEmploymentTypeRaw,
+  MCF_SINGAPORE_ONLY_LOCATION,
   mcfJobUuidFromUrl,
 } from "./mcfSavedExport.js";
 
@@ -163,7 +164,8 @@ export function mcfSavedPostingDerivedObservation(
     companyName: posting.companyName,
     title: posting.title,
     descriptionRaw: posting.description,
-    ...(posting.location ? { locationRaw: posting.location } : {}),
+    // MCF lists only jobs in Singapore; a hidden address still places the job there.
+    locationRaw: posting.location ?? MCF_SINGAPORE_ONLY_LOCATION,
     workplaceTypeRaw: "UNKNOWN",
     employmentTypeRaw: mcfEmploymentTypeRaw(posting.employmentType),
     ...(posting.compensation ? { compensationRaw: posting.compensation } : {}),

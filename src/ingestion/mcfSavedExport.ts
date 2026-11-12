@@ -6,7 +6,9 @@
  * in to MCF, holds an MCF session, or fetches MCF pages or APIs. This module
  * only validates the exported file and derives the posting identity (the
  * trailing 32-hex job UUID of the MCF job URL). Missing facts stay missing: no
- * location, salary, employment type or date is invented.
+ * salary, employment type or date is invented. The one exception is the country:
+ * MCF lists only jobs in Singapore, so a hidden address is recorded as "Singapore"
+ * with `location_basis: MCF_SINGAPORE_ONLY_PORTAL` in the payload.
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -123,6 +125,10 @@ export type McfSavedSalary = z.infer<typeof McfSavedSalarySchema>;
 
 export type McfEmploymentTypeRaw = "PERMANENT" | "CONTRACT" | "UNKNOWN";
 
+/** MyCareersFuture lists only jobs in Singapore: the country recorded when MCF hides the address. */
+export const MCF_SINGAPORE_ONLY_LOCATION = "Singapore" as const;
+export type McfLocationBasis = "EXPORTED" | "MCF_SINGAPORE_ONLY_PORTAL";
+
 export interface McfSavedJob {
   /** Zero-based position in the exported array. */
   readonly index: number;
@@ -131,7 +137,10 @@ export interface McfSavedJob {
   readonly title: string;
   readonly company: string;
   readonly description: string;
-  readonly location: string | null;
+  /** The exported address, or "Singapore" when MCF hid it (see MCF_SINGAPORE_ONLY_LOCATION). */
+  readonly location: string;
+  /** EXPORTED when MCF showed an address; MCF_SINGAPORE_ONLY_PORTAL when the country was recorded instead. */
+  readonly locationBasis: McfLocationBasis;
   readonly salary: McfSavedSalary | null;
   /** The salary as one display string for `compensation_raw`, only when MCF showed one. */
   readonly compensation: string | null;
@@ -348,12 +357,18 @@ export function parseMcfSavedJobItem(value: unknown, index: number): McfSavedJob
   // later deduplicates; the observation's retrieved_at records the import time.
   // The exported dates are root facts (posted_at, source_expires_at), which the
   // source-evidence builder reads; a posting check time is kept as new evidence.
+  // Owner rule 2026-11: MyCareersFuture lists only jobs in Singapore, so a hidden street address
+  // still places the job in Singapore. The exported item keeps the null address; the basis is
+  // recorded (and changes the payload hash) only for those items.
+  const locationBasis: McfLocationBasis = item.location ? "EXPORTED" : "MCF_SINGAPORE_ONLY_PORTAL";
+  const location = item.location ?? MCF_SINGAPORE_ONLY_LOCATION;
   const rawPayload: Record<string, unknown> = {
     ...postingFacts.payload,
     export_schema: MCF_SAVED_EXPORT_SCHEMA,
     content_provenance: MCF_SAVED_CONTENT_PROVENANCE,
     mcf_job_uuid: item.mcfJobUuid,
     canonical_url: canonicalUrl,
+    ...(locationBasis === "MCF_SINGAPORE_ONLY_PORTAL" ? { location_basis: locationBasis, location } : {}),
     exported_item: {
       title: item.title,
       company: item.company,
@@ -377,7 +392,8 @@ export function parseMcfSavedJobItem(value: unknown, index: number): McfSavedJob
     title,
     company,
     description: item.description,
-    location: item.location,
+    location,
+    locationBasis,
     salary: item.salary,
     compensation,
     employmentType: item.employmentType,

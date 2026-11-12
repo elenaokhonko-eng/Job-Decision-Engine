@@ -333,6 +333,21 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
 
     expect((await version(expired.jobVersionId)).source_expires_at?.toISOString()).toBe(`${isoDate(-2 * DAY)}T00:00:00.000Z`);
     expect(await readiness(expired.canonicalJobId)).toEqual({ AVAILABILITY: "BLOCKED", FRESHNESS: "MET" });
+
+    // MCF lists only jobs in Singapore: a hidden address is stored as the country.
+    const location = async (canonicalJobId: string) => (await db().query<{ location: string | null }>(
+      "SELECT location FROM canonical_jobs WHERE id = $1::uuid", [canonicalJobId],
+    )).rows[0]?.location;
+    expect(await location(open.canonicalJobId)).toBe("Singapore");
+
+    // A job stored before that rule (no location) is filled by the next same-content observation.
+    await db().query("UPDATE canonical_jobs SET location = 'Unknown' WHERE id = $1::uuid", [open.canonicalJobId]);
+    const again = await importMcfSavedJobs(db(), ctx(), parseMcfSavedExport([
+      mcfItem(UUID_OPEN, { postedAt: isoDate(-5 * DAY), expiresAt: isoDate(25 * DAY), availabilityStatus: "OPEN", availabilityEvidence: "MyCareersFuture job status: Open", postingCheckedAt: iso(-HOUR / 2) }),
+    ]), { dryRun: false, plugin: mcfPlugin as SourcePlugin });
+    const reMapped = await normalizeAndDecide([again.items[0]?.observationId as string]);
+    expect([...reMapped.values()][0]).toEqual(open);
+    expect(await location(open.canonicalJobId)).toBe("Singapore");
   });
 
   // Runs last: it switches the workspace's posting-age limit to 30 days.
