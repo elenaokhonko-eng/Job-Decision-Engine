@@ -78,6 +78,18 @@ function normalizeWorkabilityFacts(value: unknown): Record<string, unknown> {
   return {};
 }
 
+/**
+ * The canonical job's employment type as an employment route, mapped like the gate's
+ * structured-value rule (applyGlobalGates): CONTRACT, else PERMANENT for PERMANENT /
+ * FULL_TIME / FTE; anything else (PART_TIME, TEMPORARY, UNKNOWN) is returned unchanged.
+ */
+export function employmentRouteFromJob(value: unknown): string {
+  const raw = String(value ?? "UNKNOWN").trim().toUpperCase();
+  if (raw.includes("CONTRACT")) return "CONTRACT";
+  if (raw.includes("PERMANENT") || raw.includes("FULL_TIME") || raw === "FTE") return "PERMANENT";
+  return raw === "" ? "UNKNOWN" : raw;
+}
+
 function normalizeGateDecision(raw: unknown): GateDecision | null {
   if (raw == null) return null;
   const normalized = String(raw).trim().toUpperCase();
@@ -793,8 +805,13 @@ export async function runRecommendationDecider(
           },
         ));
 
+        // The gate's normalized fact wins; when it is UNKNOWN (e.g. gated before a re-export added
+        // the posting's own label), the job's employment type is read the same way the gate does.
+        const gateEmploymentType = String(workabilityFacts["employment_type"] ?? "UNKNOWN").toUpperCase();
         const employment = confirmedEmploymentType(
-          String(workabilityFacts["employment_type"] ?? job.employment_type ?? "UNKNOWN").toUpperCase(),
+          gateEmploymentType !== "" && gateEmploymentType !== "UNKNOWN"
+            ? gateEmploymentType
+            : employmentRouteFromJob(job.employment_type),
           confirmedFacts,
         );
         const employmentType = employment.employmentType;

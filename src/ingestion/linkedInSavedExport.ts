@@ -81,6 +81,8 @@ export const LinkedInSavedJobItemSchema = z.object({
   }).nullable().optional().transform((value) => value ?? null),
   /** The page text the status was read from, e.g. "No longer accepting applications". */
   availabilityEvidence: optionalText("availabilityEvidence", 300),
+  /** The posting's own employment-type label ("Full-time", "Contract", or JSON-LD "FULL_TIME"). */
+  employmentType: optionalText("employmentType", 100),
   /** When the guest posting page was read (ISO timestamp). */
   postingCheckedAt: optionalText("postingCheckedAt", 100),
   /**
@@ -117,6 +119,8 @@ export interface LinkedInSavedJob {
   readonly postingFacts: PostingFactsResult;
   /** Work mode only from an explicit LinkedIn location label such as "Singapore (Hybrid)". */
   readonly workplaceType: "REMOTE" | "HYBRID" | "ONSITE" | "UNKNOWN";
+  /** Employment type only from the posting's own label; UNKNOWN when absent or unrecognised. */
+  readonly employmentType: LinkedInEmploymentTypeRaw;
   /** Legacy-shape repairs applied while reading the item (never added content). */
   readonly notes: LinkedInSavedImportNote[];
   /** Deterministic observation payload; its hash is the re-import idempotency key. */
@@ -149,6 +153,33 @@ export function linkedInWorkplaceTypeFromLocation(location: string | null): Link
   if (label === "hybrid") return "HYBRID";
   if (label === "onsite" || label === "on-site") return "ONSITE";
   return "UNKNOWN";
+}
+
+export type LinkedInEmploymentTypeRaw = "FULL_TIME" | "PART_TIME" | "CONTRACT" | "TEMPORARY" | "INTERNSHIP" | "UNKNOWN";
+
+/**
+ * The posting's employment-type label as an employment_type_raw. LinkedIn shows one of
+ * "Full-time", "Part-time", "Contract", "Temporary", "Internship" (JSON-LD uses FULL_TIME,
+ * CONTRACTOR, ...). FULL_TIME is read as PERMANENT downstream, like the ATS adapters. Several
+ * labels, "Other", "Volunteer" or no label stay UNKNOWN, so readiness still asks.
+ */
+export function linkedInEmploymentTypeRaw(label: string | null | undefined): LinkedInEmploymentTypeRaw {
+  switch ((label ?? "").trim().toUpperCase().replace(/[\s-]+/g, "_")) {
+    case "FULL_TIME":
+      return "FULL_TIME";
+    case "PART_TIME":
+      return "PART_TIME";
+    case "CONTRACT":
+    case "CONTRACTOR":
+      return "CONTRACT";
+    case "TEMPORARY":
+      return "TEMPORARY";
+    case "INTERNSHIP":
+    case "INTERN":
+      return "INTERNSHIP";
+    default:
+      return "UNKNOWN";
+  }
 }
 
 export function isLegacyPlaceholderDescription(value: string | null): boolean {
@@ -257,7 +288,7 @@ export function parseLinkedInSavedJobItem(value: unknown, index: number): Linked
   // The posting-fact fields are added only when the item has them, so an older
   // export (without them) keeps exactly its earlier payload and hash.
   const postingFactItemFields: Record<string, unknown> = {};
-  for (const key of ["postedAtText", "validThrough", "availabilityStatus", "availabilityEvidence", "postingCheckedAt", "postingRecheckFailedAt", "postingRecheckFailure"] as const) {
+  for (const key of ["postedAtText", "validThrough", "availabilityStatus", "availabilityEvidence", "employmentType", "postingCheckedAt", "postingRecheckFailedAt", "postingRecheckFailure"] as const) {
     if (item[key] !== null && item[key] !== undefined) postingFactItemFields[key] = item[key];
   }
   // exportedAt is left out of the hashed payload so re-exporting unchanged jobs
@@ -297,6 +328,7 @@ export function parseLinkedInSavedJobItem(value: unknown, index: number): Linked
     postedAt: item.postedAt,
     postingFacts,
     workplaceType: linkedInWorkplaceTypeFromLocation(location),
+    employmentType: linkedInEmploymentTypeRaw(item.employmentType),
     notes,
     rawPayload,
   };

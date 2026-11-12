@@ -51,8 +51,11 @@
  * OUTPUT (validated by LinkedInSavedJobItemSchema in src/ingestion/linkedInSavedExport.ts)
  *   [{ "title", "company", "url", "location", "description", "descriptionStatus",
  *      "linkedinJobId", "exportedAt", "sourcePage", "postedAt", "postedAtText",
- *      "validThrough", "availabilityStatus", "availabilityEvidence", "postingCheckedAt",
- *      "postingRecheckFailedAt", "postingRecheckFailure" }]
+ *      "validThrough", "availabilityStatus", "availabilityEvidence", "employmentType",
+ *      "postingCheckedAt", "postingRecheckFailedAt", "postingRecheckFailure" }]
+ *   - employmentType is the posting's own label exactly as shown ("Full-time",
+ *     "Contract") or JSON-LD employmentType; null when the page shows none. The
+ *     importer reads "Full-time" as FULL_TIME (permanent) and "Contract" as CONTRACT.
  *   - postedAtText is the page's age text exactly as shown ("2 weeks ago",
  *     "Reposted 3 days ago"); the importer converts it against postingCheckedAt
  *     and records that the date is approximate. postedAt / validThrough are set
@@ -354,6 +357,7 @@
         validThrough: null,
         availabilityStatus: null,
         availabilityEvidence: null,
+        employmentType: null,
         postingCheckedAt: null,
         postingRecheckFailedAt: null,
         postingRecheckFailure: null,
@@ -496,6 +500,39 @@
     return postings;
   }
 
+  const EMPLOYMENT_TYPE_MAX_CHARS = 100;
+
+  /**
+   * The posting's own employment-type label: JSON-LD employmentType, else the value of the
+   * "Employment type" row in the job-criteria list (after the description, before any list of
+   * other jobs). Scanned with indexOf from a moving position, so hostile markup stays linear.
+   */
+  function postingEmploymentType(html, posting) {
+    const structured = posting ? posting.employmentType : null;
+    if (typeof structured === "string" && clean(structured)) return clean(structured).slice(0, EMPLOYMENT_TYPE_MAX_CHARS);
+    const otherJobs = html.indexOf("similar-jobs");
+    const end = otherJobs < 0 ? html.length : otherJobs;
+    const list = html.indexOf("description__job-criteria-list");
+    if (list < 0 || list >= end) return null;
+    const leadTextFrom = (className, from) => {
+      const at = html.indexOf(className, from);
+      if (at < 0 || at >= end) return null;
+      const open = html.indexOf(">", at);
+      if (open < 0 || open >= end) return null;
+      const close = html.indexOf("<", open + 1);
+      return { at, text: htmlText(html.slice(open + 1, close < 0 || close > end ? end : close)) };
+    };
+    for (let from = list; ;) {
+      const label = leadTextFrom("description__job-criteria-subheader", from);
+      if (!label) return null;
+      from = label.at + 1;
+      if (/^employment type$/i.test(label.text)) {
+        const value = leadTextFrom("description__job-criteria-text", label.at);
+        return value && value.text ? value.text.slice(0, EMPLOYMENT_TYPE_MAX_CHARS) : null;
+      }
+    }
+  }
+
   /**
    * Posting facts from the guest posting page's HTML, read as text so the same function runs in
    * the browser and in the repository's tests. Only the posting's own top card counts: the page
@@ -504,12 +541,13 @@
    * top card. Anything not found stays null / UNKNOWN.
    */
   function postingFactsFromHtml(html) {
-    const facts = { postedAt: null, postedAtText: null, validThrough: null, availabilityStatus: "UNKNOWN", availabilityEvidence: null };
+    const facts = { postedAt: null, postedAtText: null, validThrough: null, availabilityStatus: "UNKNOWN", availabilityEvidence: null, employmentType: null };
     const postings = jsonLdJobPostings(html);
     if (postings.length === 1) {
       facts.postedAt = isoDateText(postings[0].datePosted);
       facts.validThrough = isoDateText(postings[0].validThrough);
     }
+    facts.employmentType = postingEmploymentType(html, postings.length === 1 ? postings[0] : null);
     const card = topCardRegion(html);
     if (!card) return facts;
     const postedText = elementLeadText(card, "posted-time-ago__text");

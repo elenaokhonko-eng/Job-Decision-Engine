@@ -10,9 +10,32 @@ const SIMILAR_JOBS = `
     <li><div class="base-card job-search-card">
       <h3 class="base-search-card__title">Synthetic Other Role</h3>
       <time class="job-search-card__listdate" datetime="2026-01-02">10 months ago</time>
+      <ul class="description__job-criteria-list">
+        <li class="description__job-criteria-item">
+          <h3 class="description__job-criteria-subheader">Employment type</h3>
+          <span class="description__job-criteria-text description__job-criteria-text--criteria">Internship</span>
+        </li>
+      </ul>
     </div></li>
   </ul>
 </section>`;
+
+/** The posting's own job-criteria list, which follows its description. */
+const CRITERIA = (employmentType: string) => `
+<ul class="description__job-criteria-list">
+  <li class="description__job-criteria-item">
+    <h3 class="description__job-criteria-subheader">Seniority level</h3>
+    <span class="description__job-criteria-text description__job-criteria-text--criteria">Mid-Senior level</span>
+  </li>
+  <li class="description__job-criteria-item">
+    <h3 class="description__job-criteria-subheader">
+      Employment type
+    </h3>
+    <span class="description__job-criteria-text description__job-criteria-text--criteria">
+      ${employmentType}
+    </span>
+  </li>
+</ul>`;
 
 const DESCRIPTION = `
 <div class="description__text description__text--rich">
@@ -43,26 +66,28 @@ const APPLY_BUTTON = `<button class="sign-up-modal__outlet top-card-layout__cta 
 
 /** Open posting with JSON-LD datePosted / validThrough and the relative age text. */
 export const GUEST_PAGE_OPEN_ABSOLUTE = `<!DOCTYPE html><html><head>
-<script type="application/ld+json">{"@context":"http://schema.org","@type":"JobPosting","title":"Synthetic Data Engineer","datePosted":"2026-10-28T09:12:00.000Z","validThrough":"2026-12-27T09:12:00.000Z","hiringOrganization":{"@type":"Organization","name":"Example Synthetic Analytics"}}</script>
+<script type="application/ld+json">{"@context":"http://schema.org","@type":"JobPosting","title":"Synthetic Data Engineer","datePosted":"2026-10-28T09:12:00.000Z","validThrough":"2026-12-27T09:12:00.000Z","employmentType":"FULL_TIME","hiringOrganization":{"@type":"Organization","name":"Example Synthetic Analytics"}}</script>
 </head><body>
 ${TOP_CARD("2 weeks ago", APPLY_BUTTON)}
 ${DESCRIPTION}
 ${SIMILAR_JOBS}
 </body></html>`;
 
-/** Open posting with only the relative age text (the usual guest fragment). */
+/** Open posting with only the relative age text (the usual guest fragment) and a Full-time label. */
 export const GUEST_PAGE_OPEN_RELATIVE = `<section class="core-rail">
 ${TOP_CARD("Reposted 3 days ago", APPLY_BUTTON)}
 ${DESCRIPTION}
+${CRITERIA("Full-time")}
 ${SIMILAR_JOBS}
 </section>`;
 
-/** Closed posting: the "No longer accepting applications" banner, no apply button. */
+/** Closed posting: the "No longer accepting applications" banner, no apply button; a Contract label. */
 export const GUEST_PAGE_CLOSED = `<section class="core-rail">
 ${TOP_CARD("1 month ago", `<figure class="closed-job">
   <figcaption class="closed-job__flavor--closed">No longer accepting applications</figcaption>
 </figure>`)}
 ${DESCRIPTION}
+${CRITERIA("Contract")}
 ${SIMILAR_JOBS}
 </section>`;
 

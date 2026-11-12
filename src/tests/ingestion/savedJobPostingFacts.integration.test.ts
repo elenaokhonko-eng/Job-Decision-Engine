@@ -108,6 +108,17 @@ async function readiness(canonicalJobId: string): Promise<{ AVAILABILITY: string
   return { AVAILABILITY: status("AVAILABILITY"), FRESHNESS: status("FRESHNESS") };
 }
 
+async function employmentRoute(canonicalJobId: string): Promise<{ status: string; reasonCode: string | null }> {
+  const { rows } = await db().query<{ readiness_json: { checks: Array<{ key: string; status: string; reason_code?: string | null }> } }>(
+    `SELECT readiness_json FROM deterministic_decisions
+     WHERE workspace_id = $1 AND canonical_job_id = $2::uuid
+     ORDER BY created_at DESC, id DESC LIMIT 1`,
+    [ctx().workspaceId, canonicalJobId],
+  );
+  const check = rows[0]?.readiness_json.checks.find((item) => item.key === "EMPLOYMENT_ROUTE");
+  return { status: check?.status ?? "MISSING", reasonCode: check?.reason_code ?? null };
+}
+
 async function version(jobVersionId: string) {
   const { rows } = await db().query<{
     source_published_at: Date | null;
@@ -225,6 +236,24 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
     const again = await runLinkedInSavedEnrichment(db(), ctx(), await planLinkedInSavedEnrichment(db(), ctx(), reExport), { dryRun: false, plugin: linkedInPlugin as SourcePlugin });
     expect(again.items[0]?.outcome).toBe("ALREADY_ENRICHED");
     expect(await observationCount()).toBe(before + 1);
+  });
+
+  it("meets the employment route once a re-export carries the posting's Full-time label", async () => {
+    const [observationId] = await importLinkedIn([linkedInItem("4300000207", {
+      postedAtText: "3 days ago",
+      availabilityStatus: "OPEN",
+      postingCheckedAt: iso(-2 * HOUR),
+    })]);
+    const target = (await normalizeAndDecide([observationId as string])).get(observationId as string);
+    if (!target) throw new Error("saved job was not normalized");
+    expect(await employmentRoute(target.canonicalJobId)).toEqual({ status: "NEEDS_VERIFICATION", reasonCode: "EMPLOYMENT_ROUTE_UNKNOWN" });
+
+    const reExport = [{ ...linkedInItem("4300000207"), postedAtText: "3 days ago", availabilityStatus: "OPEN", employmentType: "Full-time", postingCheckedAt: iso(-HOUR) }];
+    const applied = await runLinkedInSavedEnrichment(db(), ctx(), await planLinkedInSavedEnrichment(db(), ctx(), reExport), { dryRun: false, plugin: linkedInPlugin as SourcePlugin });
+    expect(applied.items[0]).toMatchObject({ outcome: "STAGED", canonicalJobId: target.canonicalJobId });
+    const stored = await db().query<{ employment_type: string | null }>("SELECT employment_type FROM canonical_jobs WHERE id = $1::uuid", [target.canonicalJobId]);
+    expect(stored.rows[0]?.employment_type).toBe("FULL_TIME");
+    expect(await employmentRoute(target.canonicalJobId)).toEqual({ status: "MET", reasonCode: null });
   });
 
   it("blocks availability for a saved job whose posting page showed the closed banner", async () => {
