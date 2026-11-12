@@ -607,10 +607,24 @@ export interface ExplicitWorkerTerritoryRequirement {
 export interface WorkerTerritoryEvaluation {
   readonly status: "ALLOWED" | "INCOMPATIBLE" | "NEEDS_VERIFICATION";
   readonly incompatibleTerritories: readonly string[];
+  /** The conditions that exclude the authorized regions; their text is the gate's evidence. */
+  readonly incompatibleRequirements: readonly ExplicitWorkerTerritoryRequirement[];
   readonly unresolvedRequirements: readonly ExplicitWorkerTerritoryRequirement[];
 }
 
-export function extractExplicitWorkerTerritoryRequirements(value: unknown): ExplicitWorkerTerritoryRequirement[] {
+/**
+ * The job facts some worker conditions depend on. Without it (readiness, source evidence,
+ * persisted requirement quotes) the location-dependent rules stay off: no "US-based"
+ * placement and no U.S. reading of a clearance that names no government.
+ */
+export interface WorkerTerritoryContext {
+  /** The job's own location field. */
+  readonly jobLocation?: string | null;
+  /** Regions the user may work in; an applicant-addressed opening to one cancels a US placement. */
+  readonly authorizedRegions?: readonly string[];
+}
+
+export function extractExplicitWorkerTerritoryRequirements(value: unknown, context?: WorkerTerritoryContext): ExplicitWorkerTerritoryRequirement[] {
   const protectedText = protectTerritoryAbbreviationPeriods(String(value ?? ""));
   const requirements: ExplicitWorkerTerritoryRequirement[] = [];
   for (const part of protectedText.split(/[.!?;\n]+/)) {
@@ -624,6 +638,276 @@ export function extractExplicitWorkerTerritoryRequirements(value: unknown): Expl
       evidenceText: sentence,
     });
   }
+  const seen = new Set(requirements.map((requirement) => requirement.evidenceText.toLowerCase()));
+  for (const requirement of extractGovernmentEligibilityRequirements(String(value ?? ""), context)) {
+    if (seen.has(requirement.evidenceText.toLowerCase())) continue;
+    seen.add(requirement.evidenceText.toLowerCase());
+    requirements.push(requirement);
+  }
+  return requirements;
+}
+
+// ── Remote jobs located in the United States ──
+// A remote posting whose location field is only the United States, a US state or a
+// US city hires there unless the posting opens the role wider. "Georgia" is left out
+// because it is also a country; ", GA" still matches.
+const US_STATE_NAMES = [
+  "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware", "florida",
+  "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine", "maryland",
+  "massachusetts", "michigan", "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada",
+  "new hampshire", "new jersey", "new mexico", "new york", "north carolina", "north dakota", "ohio", "oklahoma",
+  "oregon", "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee", "texas", "utah",
+  "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming", "district of columbia", "puerto rico",
+];
+const US_STATE_CODES = new Set([
+  "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga", "hi", "id", "il", "in", "ia", "ks", "ky", "la", "me",
+  "md", "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj", "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa",
+  "ri", "sc", "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv", "wi", "wy", "dc", "pr",
+]);
+const US_STATE_NAME_PATTERN = new RegExp(`\\b(?:${US_STATE_NAMES.map(escapeRegExp).join("|")})\\b`, "i");
+
+/**
+ * True when a location field names the United States (country, state, state code
+ * after a comma, or a listed US city) and no other territory.
+ */
+export function isUnitedStatesOnlyLocation(location: unknown): boolean {
+  const text = normalizeTerritorySearchText(location).replace(/\s+/g, " ").trim();
+  if (!text) return false;
+  const territories = extractTerritories(text);
+  if (territories.some((territory) => territory !== "UNITED_STATES")) return false;
+  if (territories.includes("UNITED_STATES")) return true;
+  if (US_STATE_NAME_PATTERN.test(text)) return true;
+  return [...text.matchAll(/,\s*([a-z]{2})\b/g)].some((match) => US_STATE_CODES.has(match[1] ?? ""));
+}
+
+// ── Is the role opened beyond the United States? ──
+// Only wording addressed to applicants opens a role: "candidates in Singapore are welcome",
+// "open to applicants worldwide", "Location: Remote - APAC". Employer facts ("a worldwide
+// leader", "clients in Asia", "our APAC team is based in Tokyo") do not, and "anywhere in
+// the continental US / in America / the lower 48" is US-only.
+
+const US_LIMITED_SCOPE = /\b(?:(?:continental|contiguous)\s+(?:us|usa|united\s+states)|lower\s+(?:48|forty[- ]eight)|(?:48|50)\s+states|(?:in|within|across|throughout)\s+(?:the\s+)?(?:us|usa|united\s+states|america|americas|north\s+america)|(?:in|within|across|throughout)\s+(?:the\s+)?[a-z]+\s+(?:or|and|\/)\s+(?:the\s+)?(?:us|usa|united\s+states))\b/i;
+/** "We are not limited to the US": an opening, and not a negated one. */
+const NOT_LIMITED_TO_US = /\bnot\s+(?:limited|restricted)\s+to\s+(?:the\s+)?(?:us|usa|united\s+states)\b/i;
+const GLOBAL_OPENING = /\b(?:(?:candidates?|applicants?|talent|people|engineers?)\s+(?:from\s+|based\s+|located\s+)?(?:worldwide|globally|anywhere(?:\s+in\s+the\s+world)?|around\s+the\s+world|(?:from|in)\s+any\s+country)|(?:hire|hires|hiring|recruit|recruiting)\s+(?:\w+\s+){0,2}(?:globally|worldwide|internationally|anywhere(?:\s+in\s+the\s+world)?)|open\s+(?:to\s+(?:\w+\s+){0,3})?(?:worldwide|globally|internationally|anywhere\s+in\s+the\s+world)|(?:work|working|remote|remotely)\s+from\s+anywhere(?:\s+in\s+the\s+world)?|anywhere\s+in\s+the\s+world|global(?:ly)?[\s-]+remote|remote[\s,(-]+(?:global|worldwide)|fully\s+global|from\s+any\s+country)\b/i;
+const ASIA_REGION = /\b(?:asian?(?!\s+americans?\b)|south[\s-]?east\s+asian?|apac|asia[\s-]pacific)\b/i;
+/** Wording addressed to the applicant. */
+const APPLICANT_FRAME = /\b(?:candidates?|applicants?|talent|hir(?:e|es|ed|ing)|recruit(?:ing)?|open\s+to|eligible|welcome[ds]?|considered|consider(?:ing)?|accept(?:ing|ed)?)\b|\blocation\s*:|\bremote\s*[-–—:(]|\byou\s+(?:can|may|could|are|'re|will\s+be)\s+(?:\w+\s+){0,3}(?:based|located|work|working|live|living|reside|residing|remote)\b/i;
+/** Where-you-work wording that counts only when the subject is not the employer's own team or office. */
+const PLACE_FRAME = /\b(?:based|located|living|residing|reside|work(?:ing)?\s+(?:remotely\s+)?from|remote(?:ly)?\s+(?:from|in|within|across))\b/i;
+const EMPLOYER_SUBJECT = /\b(?:our|the|we|company|firm)\s+(?:\w+\s+){0,2}(?:team|teams|office|offices|headquarters|hq|clients?|customers?|partners?|company|business|operations)\b|\bheadquartered\b/i;
+const NEGATION = /\b(?:not|no|never|cannot|can['’]t|unable|isn['’]t|aren['’]t|don['’]t|doesn['’]t|won['’]t|wouldn['’]t|ineligible|excluding|except)\b/i;
+/** A staff-benefit line: a region with "eligible for" or "hires receive/get" and a benefit noun. */
+const STAFF_BENEFIT_FRAME = /\beligible\s+for\b|\bhires?\s+(?:\w+\s+){0,2}(?:receive|get)\b/i;
+const BENEFIT_NOUN = /\b(?:benefits?|stipends?|allowances?|plans?|insurance|perks?)\b/i;
+const STAFF_SUBJECT = /\b(?:employees|staff|team\s+members|hires)\b/i;
+const APPLICANT_WORDING = /\b(?:candidates?|applicants?|you|your|open\s+to|welcome[ds]?|this\s+role)\b/i;
+
+function plainClauses(value: unknown): string[] {
+  const text = String(value ?? "").replace(/<[^>]+>/g, "\n");
+  return protectTerritoryAbbreviationPeriods(text)
+    .split(/[.!?;\n]+/)
+    .map((part) => normalizeTerritorySearchText(part.replaceAll(PROTECTED_ABBREVIATION_PERIOD, ".")).trim())
+    .filter(Boolean);
+}
+
+/**
+ * True when the description, anywhere in it, opens the role to applicants worldwide or in
+ * an authorized region (Singapore, Southeast Asia, APAC) or Asia. Each sentence or list item
+ * is read on its own, so an opening in the next sentence still counts.
+ */
+export function postingOpensRemoteBeyondUnitedStates(description: unknown, authorizedRegions: readonly string[]): boolean {
+  const namesRegion = (text: string) => ASIA_REGION.test(text)
+    || (authorizedRegions.length > 0 && extractTerritories(text).some((territory) => isTerritoryAuthorized(territory, authorizedRegions)));
+  return plainClauses(description).some((clause) => {
+    // A negation cancels the opening only in the part of the clause that names the region or
+    // the global scope ("not open to candidates in Singapore", "we cannot hire in APAC");
+    // "no relocation needed" or "no visa sponsorship required" beside it does not.
+    if (negationGoverns(clause, (part) => namesRegion(part) || GLOBAL_OPENING.test(part))) return false;
+    if (NOT_LIMITED_TO_US.test(clause)) return true;
+    if (GLOBAL_OPENING.test(clause) && !US_LIMITED_SCOPE.test(clause)) return true;
+    if (!namesRegion(clause)) return false;
+    // A staff-benefit line ("employees in APAC are eligible for ...", "our APAC hires receive a
+    // stipend") describes staff, not applicants; a line that also addresses applicants does not.
+    if (STAFF_BENEFIT_FRAME.test(clause) && BENEFIT_NOUN.test(clause)
+      && STAFF_SUBJECT.test(clause) && !APPLICANT_WORDING.test(clause)) return false;
+    return APPLICANT_FRAME.test(clause) || (PLACE_FRAME.test(clause) && !EMPLOYER_SUBJECT.test(clause));
+  });
+}
+
+/** The parts of one clause that a negation can govern: split at commas, colons, dashes and conjunctions. */
+/**
+ * True when a negation governs a part of the clause that `governs` accepts. A negation in a
+ * head clause also governs its relative clause ("We are not able to hire candidates who are
+ * based in Singapore"); a negation inside a relative clause governs only that relative clause
+ * ("Candidates in APAC who cannot relocate are welcome" is still an opening).
+ */
+function negationGoverns(clause: string, governs: (part: string) => boolean): boolean {
+  return clause.split(/\s*[,:–—()]\s*|\s+-\s+|\s+(?:and|but|while|with|so)\s+/i).some((coarse) => {
+    const [head = "", ...rest] = coarse.split(/\s+(?:who|which|that)\s+/i);
+    const relative = rest.join(" ");
+    if (NEGATION.test(head.replace(NOT_LIMITED_TO_US, " ")) && governs(coarse)) return true;
+    return relative !== "" && NEGATION.test(relative) && governs(relative);
+  });
+}
+
+function subClauses(clause: string): string[] {
+  // Relative clauses ("who aren't able to relocate") and parentheses ("(no relocation)") are their own parts.
+  return clause.split(/\s*[,:–—()]\s*|\s+-\s+|\s+(?:and|but|while|with|so|who|which|that)\s+/i).map((part) => part.trim()).filter(Boolean);
+}
+
+// ── Government citizenship and security-clearance requirements ──
+// A national security clearance or a citizenship condition restricts who may be hired.
+// Its government comes from the requirement clause itself (the sentence or list item):
+// "U.S. Government security clearance", "DoD Secret", "Public Trust clearance", "TS/SCI",
+// "VA clearance". Nearby text never makes a clearance U.S.: "U.S. GAAP", "USA equities",
+// "government agencies" or "federal agencies" in another sentence are not U.S. clearances.
+// A clause that names no government is U.S. only when the job itself is located in the US.
+
+/** U.S. government markers read inside the requirement clause. */
+const US_GOVERNMENT_MARKER = /\b(?:(?:united\s+states|usa|u\s*\.\s*s\b\.?|us|american)\s+(?:government|federal|citizens?|citizenship|nationals?|persons?|department|army|navy|air\s+force|marine\s+corps|military|security\s+clearance|secret|top\s+secret|clearance|dod|defen[cs]e)|federal\s+(?:background\s+investigation|security\s+clearance)|va\s+clearance|department\s+of\s+(?:defense|war|veterans\s+affairs|homeland\s+security|health\s+and\s+human\s+services|energy|the\s+navy|the\s+army|the\s+air\s+force)|veterans\s+affairs|dod|dow\s+(?:secret|top\s+secret|security|clearance)|dhs|doe\s+[ql]\b|public\s+trust\s+(?:clearance|position|background\s+investigation|suitability|eligibility|level)|ts\s*\/\s*sci|polygraph|e-?qip|sf-?86)\b|\((?:u\s*\.\s*s\.?|us|usa|united\s+states)\)/i;
+/** Context that makes a truncated "S. Citizenship" read as U.S.; "federal" or "VA" near it is enough. */
+const US_FEDERAL_NEARBY = /\b(?:federal|va|veterans\s+affairs|dod|department\s+of\s+defense|public\s+trust\s+(?:clearance|position)|ts\s*\/\s*sci|polygraph|u\s*\.\s*s\b|united\s+states)\b/i;
+/** EEO, benefits, pay and legal boilerplate; it names the USA or "federal" law without describing the work. */
+const BOILERPLATE_SENTENCE = /\b(?:equal\s+(?:employment\s+)?opportunity|eeo|affirmative\s+action|protected\s+veteran|veteran\s+status|race|religion|national\s+origin|sexual\s+orientation|gender\s+identity|disabilit(?:y|ies)|federal,?\s+state,?\s+(?:and|or)\s+local|e-?verify|reasonable\s+accommodations?|benefits?|401\s*\(?k\)?|insurance|paid\s+(?:time\s+off|leave)|salar(?:y|ies)|compensation|pay\s+(?:range|transparency)|privacy\s+(?:policy|notice)|applicable\s+laws?)\b/i;
+const UK_GOVERNMENT_MARKER = /\b(?:(?:sc|dv|bpss|ctc|nppv\d?)\s*(?:\(|level\b|clearance|cleared|vetting)|security\s+check\s*\(sc\)|developed\s+vetting|uk\s+(?:government|security\s+clearance)|hmg)\b/i;
+const AU_GOVERNMENT_MARKER = /\b(?:baseline\s+(?:security\s+)?clearance|nv[12]|negative\s+vetting|positive\s+vetting|agsva)\b/i;
+const CA_GOVERNMENT_MARKER = /\b(?:(?:enhanced\s+)?reliability\s+status|government\s+of\s+canada)\b/i;
+
+/** A government security clearance or investigation, never "customs clearance" or a generic background check. */
+const GOVERNMENT_CLEARANCE = /\b(?:(?:security|government|federal|secret|top\s+secret|ts\s*\/\s*sci|public\s+trust|va|dod|dow|sc|dv|baseline|nv[12])\s+clearances?|ts\s*\/\s*sci|top\s+secret|public\s+trust\s+(?:position|background\s+investigation|suitability|eligibility|level)|(?:federal|government|suitability)\s+background\s+investigations?|(?:active|current)\s+clearance|developed\s+vetting|negative\s+vetting|(?:enhanced\s+)?reliability\s+status)\b|\bclearance(?:\s+level)?\s*:/i;
+const NON_SECURITY_CLEARANCE = /\b(?:customs|medical|trade|import|export|regulatory|tax|financial)\s+clearance\b/i;
+const MANDATORY_CUE = /\b(?:requir(?:e|ed|es|ement|ements)|must|mandatory|ability\s+to\s+(?:obtain|maintain|hold|pass)|able\s+to\s+(?:obtain|maintain|hold|pass)|eligib\w*|obtain|maintain|hold|possess|active|current)\b|\bclearance(?:\s+level)?\s*:/i;
+const OPTIONAL_CUE = /\b(?:preferred|a\s+plus|nice\s+to\s+have|bonus|desirable|advantageous|not\s+required|no\s+(?:security\s+)?clearance|does\s+not\s+require|not\s+needed|optional)\b/i;
+/** Pay-range, pay-factor and benefits boilerplate mentions clearances or locations without requiring them. */
+const PAY_OR_BENEFITS_SENTENCE = /\b(?:salar(?:y|ies)|pay\s+(?:range|scale|rate|band)|base\s+pay|compensation|benefits?)\b/i;
+/** A conditional licence or approval check ("may be required ... whether any export license, security clearance ... is required"). */
+const CONDITIONAL_APPROVAL_SENTENCE = /\b(?:may|might|could)\s+be\s+required\b|\bwhether\b|\bexport\s+(?:licen[cs]e|control|controls|laws?|regulations?)\b/i;
+
+/** The clause's own government, or null when it names none. */
+/** A "Clearance:" / "Security clearance:" header field; group 1 is its value. */
+const CLEARANCE_HEADER = /\bclearance(?:\s+(?:level|required|requirements?))?\s*:\s*(.*)$/i;
+/**
+ * A header value that starts by saying there is no clearance is neutral, whatever it names
+ * later: "None required (non-government role)", "N/A (commercial, not federal)", "No active
+ * clearance needed", "Background check only, no government clearance".
+ */
+const NEUTRAL_HEADER_VALUE = /^\s*(?:none|n\s*\/\s*a|na|no|not|nil|tbd|unknown|background\s+check\s+only)\b/i;
+/** A header value that names a clearance level or type. Anything else (none, n/a, tbd, not specified, ...) is no requirement. */
+const CLEARANCE_HEADER_VALUE = /\b(?:top\s+secret|secret|ts(?:\s*\/\s*sci)?|sci|polygraph|public\s+trust|confidential|active|current|eligib\w*\s+(?:to\s+obtain|for)|ability\s+to\s+obtain|able\s+to\s+obtain|[lq](?:\s+clearance)?|dod|dow|doe|dhs|va|government|federal|mindef|sc|dv|bpss|baseline|nv[12]|reliability)\b/i;
+/** Singapore government references that are not territory aliases. */
+const SG_GOVERNMENT_MARKER = /\b(?:mindef|ministry\s+of\s+defence\s+singapore)\b/i;
+
+function clauseGovernment(clause: string): string | null {
+  const own = extractTerritories(clause).filter((territory) => territory !== "UNITED_STATES");
+  if (own.length > 0) return own[0] ?? null;
+  if (SG_GOVERNMENT_MARKER.test(clause)) return "SINGAPORE";
+  if (US_GOVERNMENT_MARKER.test(clause)) return "UNITED_STATES";
+  if (UK_GOVERNMENT_MARKER.test(clause)) return "UNITED_KINGDOM";
+  if (AU_GOVERNMENT_MARKER.test(clause)) return "AUSTRALIA";
+  if (CA_GOVERNMENT_MARKER.test(clause)) return "CANADA";
+  return null;
+}
+
+/** True when the job's own location names a territory other than the United States (e.g. Singapore). */
+function locationNamesNonUsTerritory(location: unknown): boolean {
+  return extractTerritories(location).some((territory) => territory !== "UNITED_STATES");
+}
+
+// ── "US-based" placements ──
+const US_PLACE = `(?:us|usa|united\\s+states|${US_STATE_NAMES.map(escapeRegExp).join("|")})[- ]based(?!\\s+on\\b)`;
+const BASED_LIST = `(?:\\s*(?:,|\\/|or|and)\\s*[a-z][a-z ]{0,30}?[- ]based)*`;
+/** The role itself is placed in the US: "a remote, US-based role", "This role is US-based". */
+const US_BASED_ROLE = new RegExp(
+  `\\b${US_PLACE}${BASED_LIST}\\s+(?:remote\\s+|full[- ]time\\s+|part[- ]time\\s+|hybrid\\s+)?(?:role|position|job|opportunity)\\b|\\b(?:role|position|job|opportunity)\\s+is\\s+(?:a\\s+)?(?:remote\\s+|fully\\s+)?${US_PLACE}`,
+  "i",
+);
+/** The applicant must be in the US: "open to US-based candidates", "hiring a U.S.-based data engineer". */
+const US_BASED_PEOPLE = new RegExp(
+  `\\b${US_PLACE}${BASED_LIST}\\s+(?:\\w+\\s+){0,2}?(?:candidates?|applicants?|talent|hires?|contractors?|consultants?|engineers?|professionals?|developers?|scientists?|analysts?)\\b`,
+  "i",
+);
+const PLACEMENT_FRAME = /\b(?:open\s+to|only|must|hiring|hire|looking\s+for|seeking|accept(?:ing)?|consider(?:ing)?|eligible|restricted\s+to|limited\s+to|welcome)\b/i;
+/** "coordinate / onboard / source US-based X": US workers are the object of the work, not the applicant. */
+const US_BASED_AS_OBJECT = new RegExp(
+  `\\b(?:coordinat\\w*|manag\\w*|onboard\\w*|sourc\\w*|support\\w*|partner\\w*\\s+with|work\\w*\\s+with|lead\\w*|mentor\\w*|train\\w*|serv\\w*|recruit\\w*|engag\\w*|supervis\\w*|oversee\\w*|collaborat\\w*\\s+with)\\s+(?:\\w+\\s+){0,3}${US_PLACE}`,
+  "i",
+);
+
+/** "You will be hiring / looking for US-based ...": the applicant does the hiring; US workers are not the applicant. */
+const APPLICANT_DOES_HIRING = /\byou(?:'ll|\s+will|\s+would)?\s+(?:be\s+)?(?:hiring|looking\s+for|recruiting|sourcing|staffing|interviewing)\b/i;
+const US_PLACE_PATTERN = new RegExp(`\\b${US_PLACE}`, "i");
+
+function usBasedPlacement(clause: string): boolean {
+  if (OPTIONAL_CUE.test(clause) || PAY_OR_BENEFITS_SENTENCE.test(clause)) return false;
+  if (US_BASED_AS_OBJECT.test(clause) || APPLICANT_DOES_HIRING.test(clause)) return false;
+  // A negation cancels the placement only in the part of the clause that holds "US-based":
+  // "not open to US-based candidates" is no placement, while "This is a US-based role and
+  // we are not able to sponsor visas" still is.
+  const placed = subClauses(clause).filter((part) => US_PLACE_PATTERN.test(part));
+  if (placed.length === 0 || placed.every((part) => NEGATION.test(part))) return false;
+  if (US_BASED_ROLE.test(clause)) return true;
+  return US_BASED_PEOPLE.test(clause) && PLACEMENT_FRAME.test(clause);
+}
+
+/**
+ * Citizenship, government-clearance and "US-based" placement conditions that the
+ * territory pass cannot see. Each is an ANY requirement with the posting's own words.
+ */
+export function extractGovernmentEligibilityRequirements(value: unknown, context?: WorkerTerritoryContext): ExplicitWorkerTerritoryRequirement[] {
+  const text = String(value ?? "");
+  const requirements: ExplicitWorkerTerritoryRequirement[] = [];
+  const nonUsLocation = context !== undefined && locationNamesNonUsTerritory(context.jobLocation);
+  const usLocation = context !== undefined && isUnitedStatesOnlyLocation(context.jobLocation);
+
+  // "S. Citizenship required": a list or markdown parser dropped "U.". Only U.S. federal
+  // context near it makes it a U.S. condition, and never on a job located outside the US.
+  if (!nonUsLocation) {
+    for (const match of text.matchAll(/(?:^|[^a-z.])(s\s*\.\s*citizen(?:s|ship)?\b[^\n]*)/gi)) {
+      const start = (match.index ?? 0) + match[0].length - (match[1] ?? "").length;
+      if (/u\s*\.\s*$/i.test(text.slice(Math.max(0, start - 4), start))) continue;
+      const line = (match[1] ?? "").trim();
+      if (OPTIONAL_CUE.test(line)) continue;
+      const window = text.slice(Math.max(0, start - 600), start + line.length + 600);
+      const nearby = window.split(/\n+/).find((candidate) => candidate !== line && US_FEDERAL_NEARBY.test(candidate) && !BOILERPLATE_SENTENCE.test(candidate) && !/(?:^|[^a-z.])s\s*\.\s*citizen/i.test(candidate));
+      if (!nearby) continue;
+      requirements.push({
+        territories: ["UNITED_STATES"],
+        operator: "ANY",
+        evidenceText: `${line} (U.S. federal context: "${nearby.trim().slice(0, 200)}")`,
+      });
+    }
+  }
+
+  // A US placement applies only to a job not located in another territory, and any
+  // applicant-addressed opening elsewhere in the posting cancels it.
+  const placementApplies = context !== undefined && !nonUsLocation
+    && !postingOpensRemoteBeyondUnitedStates(text, context.authorizedRegions ?? []);
+
+  const protectedText = protectTerritoryAbbreviationPeriods(text.replace(/<[^>]+>/g, "\n"));
+  for (const part of protectedText.split(/[.!?;\n]+/)) {
+    const sentence = part.replaceAll(PROTECTED_ABBREVIATION_PERIOD, ".").trim();
+    if (!sentence) continue;
+    const clause = normalizeTerritorySearchText(sentence);
+
+    if (placementApplies && usBasedPlacement(clause)) {
+      const others = extractTerritories(clause).filter((territory) => territory !== "UNITED_STATES");
+      requirements.push({ territories: ["UNITED_STATES", ...others], operator: "ANY", evidenceText: sentence });
+      continue;
+    }
+
+    if (PAY_OR_BENEFITS_SENTENCE.test(sentence) || NON_SECURITY_CLEARANCE.test(sentence)) continue;
+    if (!GOVERNMENT_CLEARANCE.test(sentence) || !MANDATORY_CUE.test(sentence) || OPTIONAL_CUE.test(sentence)) continue;
+    // A header field counts only when its value names a clearance ("Clearance: Secret",
+    // "Clearance: TS/SCI"); "None at this time", "N/A - remote role", "TBD", "Not specified" do not.
+    const header = sentence.match(CLEARANCE_HEADER);
+    if (header && (NEUTRAL_HEADER_VALUE.test(header[1] ?? "") || !CLEARANCE_HEADER_VALUE.test(header[1] ?? ""))) continue;
+    if (CONDITIONAL_APPROVAL_SENTENCE.test(sentence)) continue;
+    // The clause's own government; a clause naming none is U.S. only on a US-located job.
+    const government = clauseGovernment(sentence) ?? (usLocation ? "UNITED_STATES" : null);
+    if (!government) continue;
+    requirements.push({ territories: [government], operator: "ANY", evidenceText: sentence });
+  }
   return requirements;
 }
 
@@ -634,6 +918,7 @@ export function evaluateWorkerTerritoryRequirements(
 ): WorkerTerritoryEvaluation {
   const allowed = new Set(normalizeTerritories([...authorizedRegions]));
   const incompatibleTerritories: string[] = [];
+  const incompatibleRequirements: ExplicitWorkerTerritoryRequirement[] = [];
   const unresolvedRequirements: ExplicitWorkerTerritoryRequirement[] = [];
   for (const requirement of requirements) {
     const territories = normalizeTerritories([...requirement.territories]);
@@ -648,6 +933,7 @@ export function evaluateWorkerTerritoryRequirements(
       : permittedCount === territories.length;
     if (!satisfied && rejectExplicitForeignTerritory && allowed.size > 0) {
       incompatibleTerritories.push(...territories.filter((territory) => !permitted(territory)));
+      incompatibleRequirements.push(requirement);
     }
   }
   const uniqueIncompatible = [...new Set(incompatibleTerritories)];
@@ -656,6 +942,7 @@ export function evaluateWorkerTerritoryRequirements(
       ? "INCOMPATIBLE"
       : unresolvedRequirements.length > 0 ? "NEEDS_VERIFICATION" : "ALLOWED",
     incompatibleTerritories: uniqueIncompatible,
+    incompatibleRequirements,
     unresolvedRequirements,
   };
 }
