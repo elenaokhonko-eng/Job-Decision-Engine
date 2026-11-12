@@ -95,6 +95,16 @@ export function nonTechnicalFunctionTitle(title: string): string | null {
   return null;
 }
 
+// 1c. Owner policy (gate-2026-11.5): a pre-sales title ("Presales Solutions Architect",
+// "Solutions Engineer (Pre-Sales)") is GATE_HIGH_INTERACTION for any title, whatever the
+// description says and whatever the external-client policy allows.
+const PRESALES_TITLE = /\bpre[\s‐‑-]?sales?\b/i;
+
+/** The matched pre-sales title phrase, or null. */
+export function presalesTitle(title: string): string | null {
+  return String(title || "").match(PRESALES_TITLE)?.[0] ?? null;
+}
+
 // 2. Axis 1: Target Technical Functions (Must pass)
 export const TECHNICAL_FUNCTION_KEYWORDS: RegExp[] = [
   /\b(software engineer|data engineer|ml engineer|machine learning engineer|ai engineer)\b/i,
@@ -1042,6 +1052,10 @@ function evaluateGlobalGates(
   const nonTargetFunctionTitle = nonTechnicalFunctionTitle(job.title || "");
   if (nonTargetFunctionTitle) {
     return makeReject(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-target title family "${nonTargetFunctionTitle}" in "${job.title}"`]);
+  }
+  const presalesTitlePhrase = presalesTitle(job.title || "");
+  if (presalesTitlePhrase) {
+    return makeReject(["GATE_HIGH_INTERACTION"], [`Pre-sales title "${presalesTitlePhrase}" in "${job.title}"`]);
   }
 
   // FDE is a global exclusion when the role itself is an FDE-family role.

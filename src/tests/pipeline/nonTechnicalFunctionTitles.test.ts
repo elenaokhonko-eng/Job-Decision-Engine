@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyGlobalGates, nonTechnicalFunctionTitle } from "../../services/criteria.js";
+import { applyGlobalGates, nonTechnicalFunctionTitle, presalesTitle } from "../../services/criteria.js";
 import { applyPersistedRequirementGates } from "../../pipeline/hardGate.js";
 
 // Synthetic postings: each description mentions SQL/Python so the old keyword check passed them.
@@ -80,5 +80,34 @@ describe("non-target title families in the hard gates", () => {
     "Specialist, Machine Learning Engineering",
   ])("does not match %j", (title) => {
     expect(nonTechnicalFunctionTitle(title)).toBeNull();
+  });
+});
+
+// Owner policy (gate-2026-11.5): a pre-sales title is a high-interaction reject for any title,
+// even when the description reads like an engineering role.
+describe("pre-sales titles in the hard gates", () => {
+  it.each([
+    ["Presales Solutions Architect", "Presales"],
+    ["Solutions Engineer (Pre-Sales), APAC", "Pre-Sales"],
+    ["Pre Sales Consultant - AI Platform", "Pre Sales"],
+    ["Senior Pre‑Sales Engineer", "Pre‑Sales"],
+    ["AI Presale Architect", "Presale"],
+  ])("rejects %j as GATE_HIGH_INTERACTION with the matched title as evidence", (title, matched) => {
+    expect(presalesTitle(title)).toBe(matched);
+    const { persisted, global } = gates(title, "Design and build data pipelines in Python and SQL for the analytics platform.");
+    for (const result of [persisted, global]) {
+      expect(result.status).toBe("HARD_REJECT");
+      expect(result.rejection_codes).toEqual(["GATE_HIGH_INTERACTION"]);
+      expect(result.evidence_quotes[0]).toBe(`Pre-sales title "${matched}" in "${title}"`);
+    }
+  });
+
+  it.each([
+    "Pressure Systems Engineer",
+    "Sales Operations Data Engineer",
+    "Pre-trade Risk Engineer",
+    "Senior Solutions Architect",
+  ])("does not match %j", (title) => {
+    expect(presalesTitle(title)).toBeNull();
   });
 });

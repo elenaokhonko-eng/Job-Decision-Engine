@@ -311,7 +311,7 @@ describe("Bug A: each gate verification names its own open fact", () => {
     expect(isRoutableWorkabilityVerification("NEEDS_VERIFICATION", result.rejection_codes)).toBe(true);
   });
 
-  it("pins the gate version for these semantics", () => {
-    expect(GATE_VERSION).toBe("gate-2026-11.4");
+  it("keeps these semantics in the current gate version", () => {
+    expect(GATE_VERSION).toBe("gate-2026-11.5");
   });
 });
