@@ -301,6 +301,110 @@ describe("remote jobs located only in the United States", () => {
   });
 });
 
+describe("round-5 blocking 1: a negation cancels only the opening or placement it governs", () => {
+  it.each([
+    ["Remote", "This is a remote, US-based role. Candidates in Singapore are also welcome, no relocation needed."],
+    ["Remote", "This is a remote, US-based role. Open to applicants in APAC with no visa sponsorship required."],
+    ["Remote", "This is a remote, US-based role. We are not limited to the US: candidates in Singapore are welcome."],
+    ["Remote, United States", "Open to applicants worldwide, no relocation required."],
+    ["Remote, United States", "Candidates across APAC are welcome, no visa sponsorship needed."],
+    ["Remote, United States", "You can work from Singapore, no need to relocate."],
+    ["Remote, United States", "We hire globally and never require office attendance."],
+  ])("%s: %s opens the role", (location, text) => {
+    const result = fullGate(location, "REMOTE", `${BODY} ${text}`);
+    expect(result.status, JSON.stringify({ codes: result.rejection_codes, evidence: result.evidence_quotes })).not.toBe("HARD_REJECT");
+    expect(result.rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+    expect(result.rejection_codes).not.toContain("GATE_JOB_LOCATION_MISMATCH");
+  });
+
+  it.each([
+    "This role is not open to candidates in Singapore.",
+    "We cannot hire in APAC.",
+    "No candidates outside the US will be considered.",
+    "Candidates are welcome from anywhere except Singapore.",
+    "This role is not open to applicants worldwide.",
+  ])("a negated opening still does not open a US-located remote role: %s", (text) => {
+    const result = fullGate("Remote, United States", "REMOTE", `${BODY} ${text}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_JOB_LOCATION_MISMATCH");
+  });
+
+  it.each([
+    "This is a US-based role and we are not able to sponsor visas.",
+    "This role is US-based and is not open to international candidates.",
+    "This position is US-based with no international hiring.",
+  ])("a negation beside a US-based placement does not cancel it: %s", (text) => {
+    expectWorkAuthReject("Remote", "REMOTE", `${BODY} ${text}`);
+  });
+
+  it("a negation of the placement itself still cancels it", () => {
+    expectNoWorkAuthReject("Remote", "REMOTE", `${BODY} This role is not open to US-based candidates.`);
+    expectNoWorkAuthReject("Remote", "REMOTE", `${BODY} This is not a US-based role, and you can work from any time zone.`);
+  });
+});
+
+describe("round-5 blocking 2: empty clearance headers are not requirements", () => {
+  it.each([
+    "Open to candidates worldwide. Clearance: None.",
+    "Open to candidates worldwide. Security clearance: N/A.",
+    "Open to candidates worldwide. Security Clearance: Not Applicable.",
+    "Open to candidates worldwide. Clearance: Not required.",
+    "Open to candidates worldwide. Clearance Required: No.",
+  ])("United States / REMOTE: %s", (text) => {
+    const result = fullGate("United States", "REMOTE", `${BODY} ${text}`);
+    expect(result.status, JSON.stringify({ codes: result.rejection_codes, evidence: result.evidence_quotes })).toBe("PASS");
+  });
+
+  it("still reads a header that names a clearance as a requirement", () => {
+    expectWorkAuthReject("Remote", "REMOTE", `${BODY} Clearance: TS/SCI with Polygraph`);
+    expectWorkAuthReject("United States", "REMOTE", `${BODY} Open to candidates worldwide. Clearance: Secret.`);
+  });
+});
+
+describe("round-5 non-blocking fixes", () => {
+  it.each([
+    "You will be hiring US-based engineers for the platform team.",
+    "You will be looking for US-based consultants to staff client projects.",
+  ])("the applicant hiring US-based staff is not a placement: %s", (text) => {
+    expectNoWorkAuthReject("Remote", "REMOTE", `${BODY} ${text}`);
+  });
+
+  it.each([
+    "Employees based in APAC are eligible for our regional benefits plan.",
+    "Our APAC hires receive a home-office stipend.",
+    "Work from anywhere in the Americas.",
+    "Work from anywhere in North America.",
+    "Work from anywhere in Canada or the US.",
+    "Work from anywhere in the EU or US.",
+    "We welcome candidates from the Asian American and Pacific Islander communities.",
+  ])("does not open a US-located remote role: %s", (text) => {
+    const result = fullGate("Remote, United States", "REMOTE", `${BODY} ${text}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_JOB_LOCATION_MISMATCH");
+  });
+
+  it.each([
+    "Work from anywhere in Asia.",
+    "Location: Remote - APAC.",
+    "We are open to hiring in Singapore.",
+    "This role can be performed remotely from Singapore.",
+    "Applicants from Southeast Asia will be considered.",
+    "<ul><li>Location: United States or Singapore</li></ul>",
+    "Work from anywhere in the US or Asia.",
+    "We hire worldwide. No relocation needed.",
+    "Candidates outside the US, including Singapore, are also welcome.",
+    // A global opening inside a pay line still counts; only region + "eligible"/"hires" there does not.
+    "We use geo ranges as part of our global compensation strategy while we are hiring globally.",
+  ])("genuine openings still open a US-located remote role: %s", (text) => {
+    const result = fullGate("Remote, United States", "REMOTE", `${BODY} ${text}`);
+    expect(result.rejection_codes).not.toContain("GATE_JOB_LOCATION_MISMATCH");
+  });
+
+  it("reads MINDEF as a Singapore government reference", () => {
+    expectNoWorkAuthReject("Singapore", "HYBRID", "Build data pipelines. Hybrid, 2 days a week in the office. Must hold an active clearance from the Department of the Navy or MINDEF.");
+  });
+});
+
 describe("genuine US-only wordings stay rejected (review positives)", () => {
   it.each([
     "US Citizens only.",
