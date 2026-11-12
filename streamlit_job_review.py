@@ -48,7 +48,7 @@ _WORKABILITY_QUESTIONS = (
     ),
     (
         "NEEDS_VERIFICATION_HIRING_TERRITORY",
-        "Ask whether this remote role can hire someone based in Singapore.",
+        "Ask whether this role can hire someone based in Singapore.",
     ),
     (
         "NEEDS_VERIFICATION_OFFICE_DAYS",

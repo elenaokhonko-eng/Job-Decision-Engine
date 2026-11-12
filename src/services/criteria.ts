@@ -2,7 +2,9 @@ import crypto from "crypto";
 import { RawJob } from "../db/db.ts";
 import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
 import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
-import { findExplicitOnsiteStatement, isSingaporeLocatedJob } from "../pipeline/onsiteStatements.js";
+import { findExplicitOnsiteStatement, isSingaporeLocatedJob, withoutNonOfferedWorkModes } from "../pipeline/onsiteStatements.js";
+import { findPostingLocationLine, isUnknownJobLocation } from "../pipeline/postingLocationLine.js";
+import { findCustomerFacingRoleDuty } from "../pipeline/customerFacingDuties.js";
 import { isOccurrenceNegated } from "../requirements/clauseAnalysis.js";
 
 export { normalizeWorkMode };
@@ -377,6 +379,11 @@ export interface WorkabilityEvaluation {
   needsVerify: boolean;
   reason?: string;
   reasonCode?: string;
+  /**
+   * The open-fact code of a needs-verification outcome other than an unknown work mode:
+   * which fact the employer must confirm (hiring territory, office days or travel).
+   */
+  verificationCode?: WorkabilityVerificationCode;
   facts?: Partial<GateResult["workability_facts"]>;
   /** Set when an on-site exception lifted an on-site / office-day rejection. */
   onsiteExceptionApplied?: OnsiteException;
@@ -385,6 +392,18 @@ export interface WorkabilityEvaluation {
 }
 
 export { findExplicitOnsiteStatement, isSingaporeLocatedJob };
+
+/**
+ * Open-fact codes a gate verification can carry (src/pipeline/verificationRouting.ts routes
+ * them; migration 110's v_job_verification_checks_scoped maps them to confirmable facts).
+ */
+export type WorkabilityVerificationCode =
+  | "NEEDS_VERIFICATION_HIRING_TERRITORY"
+  | "NEEDS_VERIFICATION_OFFICE_DAYS"
+  | "NEEDS_VERIFICATION_TRAVEL";
+
+/** "Hybrid" naming a technique or a thing rather than this job's work mode. */
+const TECHNICAL_HYBRID = /\bhybrid[ \t-]+(?:cloud|multi-?cloud|rag|search|retrieval|models?|modell?ing|architectures?|approach(?:es)?|systems?|infrastructure|ai|ml|deployments?|environments?|integrations?|solutions?|methods?|algorithms?|quantum|networks?|vehicles?|events?|meetings?|apps?|applications?|it|workloads?|data|storage|ranking|recommenders?|pipelines?|frameworks?|reasoning|agents?)\b/gi;
 
 // 3. Workability Requirements (Zero tolerance for on-premises-only lab/clinic)
 export function evaluateWorkability(
@@ -526,7 +545,14 @@ function evaluateWorkabilityRules(
   // never overrides an explicit on-site statement (owner rule 2026-11): such a
   // job is read as on-site below, with no work-mode field.
   const isAssumedHybrid = String(workplaceType || "").toUpperCase() === "ASSUMED_HYBRID";
-  if (isAssumedHybrid && !isExplicitOnsiteText) {
+  // The posting's own offered hybrid ("Work Type: Hybrid Working") is employer evidence,
+  // so it is read as hybrid below rather than as the assumed default (gate-2026-11.4).
+  // A technical "hybrid" ("hybrid RAG", "hybrid cloud", "hybrid model") is not a work mode,
+  // so a posting silent on its work mode keeps the assumed default and stays NEEDS_VERIFICATION.
+  const postingOffersHybrid = /\bhybrid\b/i.test(
+    withoutNonOfferedWorkModes(workModeText).replace(TECHNICAL_HYBRID, (match) => " ".repeat(match.length)),
+  );
+  if (isAssumedHybrid && !isExplicitOnsiteText && !postingOffersHybrid) {
     return unknownWorkModeOutcome(true);
   }
   const wp = isAssumedHybrid ? "UNKNOWN" : wpRaw;
@@ -625,6 +651,7 @@ function evaluateWorkabilityRules(
       needsVerify: true,
       reason: "Worker-territory conditions are recognized but their alternatives remain unresolved",
       reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
+      verificationCode: "NEEDS_VERIFICATION_HIRING_TERRITORY",
       facts: { ...baseFacts, location_restriction: null },
     };
   }
@@ -638,6 +665,7 @@ function evaluateWorkabilityRules(
       needsVerify: true,
       reason: "Worker hiring territory is not established by employer or source evidence",
       reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
+      verificationCode: "NEEDS_VERIFICATION_HIRING_TERRITORY",
       facts: { ...baseFacts, location_restriction: null },
     };
   }
@@ -649,6 +677,7 @@ function evaluateWorkabilityRules(
         workable: true,
         needsVerify: true,
         reason: "Remote worker territory is not stated and this preference mode requires it",
+        verificationCode: "NEEDS_VERIFICATION_HIRING_TERRITORY",
         facts: { ...baseFacts, office_days_min: 0, office_days_max: 0, attendance_basis: "REMOTE" }
       };
     }
@@ -680,6 +709,7 @@ function evaluateWorkabilityRules(
           workable: true,
           needsVerify: true,
           reason: "Office-day cap answer is unknown; needs manual verification",
+          verificationCode: "NEEDS_VERIFICATION_OFFICE_DAYS",
           facts: { ...baseFacts, office_days_min: attendance.office_days_min, office_days_max: attendance.office_days_max, attendance_basis: "EMPLOYER_STATED" },
         };
       }
@@ -704,6 +734,7 @@ function evaluateWorkabilityRules(
         workable: true,
         needsVerify: true,
         reason: "Office-day cap answer is unknown; needs manual verification",
+        verificationCode: "NEEDS_VERIFICATION_OFFICE_DAYS",
         facts: { ...baseFacts, office_days_min: 3, office_days_max: 3, attendance_basis: "POLICY_HYBRID_3_2" },
       };
     }
@@ -719,6 +750,7 @@ function evaluateWorkabilityRules(
       workable: true,
       needsVerify: true,
       reason: "Hybrid arrangement listed without explicit office-day count",
+      verificationCode: "NEEDS_VERIFICATION_OFFICE_DAYS",
       facts: { ...baseFacts, office_days_min: null, office_days_max: null, attendance_basis: "UNKNOWN" }
     };
   }
@@ -730,7 +762,10 @@ function evaluateWorkabilityRules(
     "office expectations", "workplace arrangement", "workplace expectations",
     "office to be evaluated", "partner discussions", "location flexible", "location tbd"
   ];
-  if (ambiguousClues.some(c => workModeText.includes(c) || loc.includes(c))) {
+  // An on-site job accepted by an on-site exception has a known work mode, so its
+  // "office-based" wording ("Work Type: Office-based Working") is not ambiguous.
+  const exceptedOnsite = onsiteAccepted && wp === "ONSITE";
+  if (!exceptedOnsite && ambiguousClues.some(c => workModeText.includes(c) || loc.includes(c))) {
     return unknownWorkModeOutcome();
   }
 
@@ -862,6 +897,11 @@ function quotedRestrictionEvidence(evaluation: { readonly incompatibleRequiremen
 }
 
 export function extractDescriptionText(job: RawJob): string {
+  return descriptionCorpus(job).toLowerCase();
+}
+
+/** The description text as written (case kept), before the gate lower-cases it. */
+function descriptionCorpus(job: RawJob): string {
   if (!job.raw_description) return "";
   if (typeof job.raw_description === "object") {
     const d = job.raw_description as any;
@@ -872,7 +912,7 @@ export function extractDescriptionText(job: RawJob): string {
       ...(d.qualifications_education || []),
       ...(d.nice_to_haves || [])
     ].join("\n");
-    return stripHtmlToText(merged).toLowerCase();
+    return stripHtmlToText(merged);
   }
   if (typeof job.raw_description === "string") {
     if (job.raw_description.trim().startsWith("{")) {
@@ -885,12 +925,12 @@ export function extractDescriptionText(job: RawJob): string {
           ...(parsed.qualifications_education || []),
           ...(parsed.nice_to_haves || [])
         ].join("\n");
-        return stripHtmlToText(merged).toLowerCase();
+        return stripHtmlToText(merged);
       } catch {
-        return stripHtmlToText(job.raw_description).toLowerCase();
+        return stripHtmlToText(job.raw_description);
       }
     }
-    return stripHtmlToText(job.raw_description).toLowerCase();
+    return stripHtmlToText(job.raw_description);
   }
   return "";
 }
@@ -952,6 +992,23 @@ export function applyGlobalGates(
   policy: WorkabilityPolicy = loadWorkabilityPolicy(),
   answerContext?: VerificationAnswerContext | null,
 ): GateResult {
+  // A structured location of "Unknown" or empty is filled from the posting's own
+  // "Job Location:" / "Location:" header line when that line names a known territory
+  // (gate-2026-11.4). The quote is stored as evidence of the location the gate used.
+  const postingLocation = isUnknownJobLocation(job.location) ? findPostingLocationLine(descriptionCorpus(job)) : null;
+  if (!postingLocation) return evaluateGlobalGates(job, policy, answerContext);
+  const result = evaluateGlobalGates({ ...job, location: postingLocation.location }, policy, answerContext);
+  const evidence = `Job location from the posting: "${postingLocation.quote}"`;
+  return result.evidence_quotes.includes(evidence)
+    ? result
+    : { ...result, evidence_quotes: [...result.evidence_quotes, evidence] };
+}
+
+function evaluateGlobalGates(
+  job: RawJob & { location?: string; workplace_type?: string; employment_type?: string },
+  policy: WorkabilityPolicy,
+  answerContext?: VerificationAnswerContext | null,
+): GateResult {
   const effectivePolicy = applyVerificationAnswerOverrides(policy, answerContext);
   const travelAnswerProvided = isVerificationAnswerProvided(
     answerContext,
@@ -964,7 +1021,9 @@ export function applyGlobalGates(
   const loc = (job.location || "").toLowerCase();
   const wp = (job.workplace_type || "").toUpperCase();
   const emp = (job.employment_type || "").toUpperCase();
-  let pendingVerification: { reason: string; reasonCode?: string; facts?: Partial<GateResult["workability_facts"]> } | null = null;
+  // Every pending verification names the open fact it needs (getPendingVerificationCodes);
+  // each open fact is kept, so an unknown territory and an unresolved travel are both asked.
+  const pendingVerifications: PendingVerification[] = [];
 
   // ── 0. Global Title Exclusions ──
   for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
@@ -1018,11 +1077,11 @@ export function applyGlobalGates(
   if (workability.onsiteExceptionApplied) recordOnsiteException(workability.suppressedOnsiteReason);
   if (!workability.workable) {
     if (workability.reasonCode === "GATE_UNKNOWN_WORK_MODE") {
-      pendingVerification = {
+      pendingVerifications.push({
         reason: workability.reason || "Workplace model is unspecified; needs manual verification",
         reasonCode: workability.reasonCode,
         facts: workability.facts,
-      };
+      });
     } else {
       if (workability.reasonCode === "GATE_CONTRACT_ROLE") {
         return makeReject(["GATE_CONTRACT_ROLE"], [workability.reason || "Contract role is not eligible"], workability.facts);
@@ -1048,11 +1107,12 @@ export function applyGlobalGates(
   const techCheck = isTechnicalRole(job.title || "", d);
 
   if (workability.needsVerify) {
-    pendingVerification = {
+    pendingVerifications.push({
       reason: workability.reason || "Workplace model unspecified; needs manual verification",
       reasonCode: workability.reasonCode,
+      verificationCode: workability.verificationCode,
       facts: workability.facts,
-    };
+    });
   }
 
   if (effectivePolicy.blacklistedCompanies.some((company) => c === company || c.includes(company))) {
@@ -1091,10 +1151,11 @@ export function applyGlobalGates(
   const travelRequirement = extractTravelRequirement(d);
   const frequentTravelEvidence = findNonNegatedEvidence(d, ["frequent travel", "travel extensively"]);
   if (travelRequirement && travelAnswerUnknown) {
-    pendingVerification = {
+    pendingVerifications.push({
       reason: "Travel cap answer is unknown; needs manual verification",
+      verificationCode: "NEEDS_VERIFICATION_TRAVEL",
       facts: { travel_pct_max: travelRequirement.max_pct },
-    };
+    });
   } else if (travelRequirement && travelRequirement.max_pct > effectivePolicy.maxTravelPct) {
     return makeReject(
       [GATE_TRAVEL_ABOVE_LIMIT],
@@ -1108,10 +1169,11 @@ export function applyGlobalGates(
       { travel_pct_max: null }
     );
   } else if (!effectivePolicy.minimalTravelAllowed && /\bminimal\s+(?:business\s+)?travel\b/i.test(d)) {
-    pendingVerification = {
+    pendingVerifications.push({
       reason: "The policy does not accept qualitative minimal travel without an explicit percentage",
+      verificationCode: "NEEDS_VERIFICATION_TRAVEL",
       facts: { travel_pct_max: null },
-    };
+    });
   }
 
   // ── 1. Deterministic Non-Technical Title-Family Exclusions ──
@@ -1222,11 +1284,14 @@ export function applyGlobalGates(
     || /\b(remote|remote-first|fully remote|work from home)\b/i.test(d)
     || wp === "REMOTE"
     || wp === "HYBRID";
-  if (!hasExplicitDays && ambiguousOfficeKw.some(k => workModeText.includes(k)) && !pendingVerification && !hasAcceptedFlexibleWorkMode) {
-    pendingVerification = {
+  // An on-site exception already proved explicit on-site evidence, so "office-based"
+  // wording ("Work Type: Office-based Working") is not ambiguous for that job.
+  if (!hasExplicitDays && ambiguousOfficeKw.some(k => workModeText.includes(k)) && pendingVerifications.length === 0 && !hasAcceptedFlexibleWorkMode && !workability.onsiteExceptionApplied) {
+    pendingVerifications.push({
       reason: "Workplace model ambiguous/unspecified; needs manual verification",
+      verificationCode: "NEEDS_VERIFICATION_OFFICE_DAYS",
       facts: { office_days_min: null, office_days_max: null },
-    };
+    });
   }
 
   // ── 4. Geographic restrictions ──
@@ -1272,20 +1337,22 @@ export function applyGlobalGates(
     });
   }
   if (workerTerritoryEvaluation.status === "NEEDS_VERIFICATION") {
-    pendingVerification = {
+    pendingVerifications.push({
       reason: "The posting lists worker-territory conditions whose alternatives are ambiguous",
+      verificationCode: "NEEDS_VERIFICATION_HIRING_TERRITORY",
       facts: { location_restriction: null },
-    };
+    });
   }
   // A hybrid or on-site role needs an office in a known country; without one, verify it.
   const officeTerritoryUnknown = !explicitlyRemote && (wp === "HYBRID" || wp === "ONSITE");
   if ((effectivePolicy.unknownWorkAuthorizationNeedsVerification || officeTerritoryUnknown)
     && relevantLocationTerritories.length === 0
     && workerTerritoryRequirements.length === 0) {
-    pendingVerification = {
+    pendingVerifications.push({
       reason: "Worker hiring territory is not established by employer or source evidence",
+      verificationCode: "NEEDS_VERIFICATION_HIRING_TERRITORY",
       facts: { location_restriction: null },
-    };
+    });
   }
 
   // ── 5. Lifestyle incompatibilities ──
@@ -1317,10 +1384,11 @@ export function applyGlobalGates(
         && answerContext?.overrides.travelPercentageCap !== undefined
         || isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.travelPercentage);
       if (hasTravelAnswer && travelPct === null) {
-        pendingVerification = {
+        pendingVerifications.push({
           reason: "Travel expectation is stated without a deterministic percentage; needs manual verification",
+          verificationCode: "NEEDS_VERIFICATION_TRAVEL",
           facts: { travel_pct_max: null },
-        };
+        });
         continue;
       }
       // A numeric travel requirement has already been checked against the
@@ -1342,6 +1410,14 @@ export function applyGlobalGates(
   }
 
   // ── 6. Sales / Client-facing ──
+  // Owner policy (gate-2026-11.4): a role placed in a pre-sales, post-sales, customer success
+  // or customer engagement organisation, or whose own duties are the customer journey, proof
+  // of value, representing the company or sales-cycle revenue, is a hard reject for any
+  // title (no architect exception). Company boilerplate and "our customers" never count.
+  const customerFacingDuty = effectivePolicy.externalClientPrimaryAllowed ? null : findCustomerFacingRoleDuty(d);
+  if (customerFacingDuty) {
+    return makeReject(["GATE_HIGH_INTERACTION"], [`Pre-sales / customer-engagement role duty: "${customerFacingDuty}"`]);
+  }
   const highInteractionKw = ["sales engineering", "presales", "pre-sales", "client relationship management", "manage large teams", "escalations manager"];
   const targetTechnicalClientRole = isTechnicalRole(job.title || "", d).isTechnical
     && /\barchitect\b/i.test(t)
@@ -1463,22 +1539,37 @@ export function applyGlobalGates(
   void hasDomainRelevance;
 
   // ── All deterministic gates passed ──
-  if (pendingVerification) {
-    return makeVerification(
-      getPendingVerificationCodes(pendingVerification.reasonCode),
-      [pendingVerification.reason, ...exceptionEvidence],
-      pendingVerification.facts
-    );
+  if (pendingVerifications.length > 0) {
+    const codes = [...new Set(pendingVerifications.flatMap(getPendingVerificationCodes))];
+    const reasons = [...new Set(pendingVerifications.map((pending) => pending.reason))];
+    const facts = Object.assign({}, ...pendingVerifications.map((pending) => pending.facts ?? {}));
+    return makeVerification(codes, [...reasons, ...exceptionEvidence], facts);
   }
 
   const passed = makePass(workability.facts);
   return exceptionEvidence.length > 0 ? { ...passed, evidence_quotes: exceptionEvidence } : passed;
 }
 
-function getPendingVerificationCodes(reasonCode?: string): string[] {
-  if (reasonCode === "GATE_UNKNOWN_WORK_MODE") return ["GATE_UNKNOWN_WORK_MODE", "NEEDS_VERIFICATION"];
-  if (reasonCode === "GATE_HIGH_INTERACTION") return ["GATE_HIGH_INTERACTION", "NEEDS_VERIFICATION"];
-  return ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"];
+/**
+ * The stored codes of a pending verification. Each verification names its own open fact
+ * (gate-2026-11.4); before, every reason other than an unknown work mode was labelled
+ * NEEDS_VERIFICATION_OFFICE_DAYS, so a hiring-territory or travel check showed as an
+ * office-days check. Every code here is routable (src/pipeline/verificationRouting.ts).
+ */
+interface PendingVerification {
+  readonly reason: string;
+  readonly reasonCode?: string;
+  readonly verificationCode?: WorkabilityVerificationCode;
+  readonly facts?: Partial<GateResult["workability_facts"]>;
+}
+
+function getPendingVerificationCodes(pending: PendingVerification): string[] {
+  if (pending.reasonCode === "GATE_UNKNOWN_WORK_MODE") return ["GATE_UNKNOWN_WORK_MODE", "NEEDS_VERIFICATION"];
+  if (pending.reasonCode === "GATE_HIGH_INTERACTION") return ["GATE_HIGH_INTERACTION", "NEEDS_VERIFICATION"];
+  if (!pending.verificationCode) {
+    throw new Error(`Gate verification without an open-fact code (reason code ${pending.reasonCode ?? "none"})`);
+  }
+  return ["NEEDS_VERIFICATION", pending.verificationCode];
 }
 
 // One entry per lane in config/lanes/registry.yml; the AI evaluation prompts list every lane from here.

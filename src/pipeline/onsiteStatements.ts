@@ -43,6 +43,17 @@ const NOUN_MODIFIER = String.raw`(?![ \t]+(?:training|trainings|support|client|c
 
 const LABELS = String.raw`(?:location|workplace(?:[ \t]+type)?|work[ \t]*(?:mode|model|type|location|arrangement|setting|style)s?|working[ \t]+(?:model|arrangement|pattern)s?|job[ \t]+type|employment[ \t]+type|position|role)`;
 
+/** Work-mode labels only (no location, position or role label): "Work Type:", "Work model:", "Workplace type:". */
+const WORK_MODE_LABELS = String.raw`(?:workplace(?:[ \t]+type)?|work[ \t]*(?:mode|model|type|arrangement|setting|style)s?|working[ \t]+(?:model|arrangement|pattern)s?)`;
+
+/**
+ * An office value of a work-mode label is full on-site (gate-2026-11.4): "Work Type: Office
+ * Working", "Work type: Office-based working", "Work model: In-office". Office or in-office with
+ * a working/work suffix ends at a word boundary; a bare "office-based" or "in-office" value must
+ * end the value (VALUE_END). Partial attendance after it ("Office Working, 3 days a week") is not.
+ */
+const OFFICE_WORK_MODE_VALUE = String.raw`(?:(?:office(?:[- ]based)?|in[- ]office)[ \t]+work(?:ing)?\b|(?:office[- ]based|in[- ]office)${VALUE_END})`;
+
 const FOUR_PLUS = String.raw`${FOUR_PLUS_COUNT}|\bdaily\b|\bevery[ \t]+(?:work[ \t]*)?day\b`;
 
 /** How a form decides that it is about this job. */
@@ -81,6 +92,7 @@ const VALUE_SOURCES = {
   label: String.raw`\b${LABELS}\s*:\s*${TOKEN}${VALUE_END}${PARTIAL_ATTENDANCE_AFTER}`,
   listed: String.raw`(?:^|[•:])\s*${TOKEN}${VALUE_END}${PARTIAL_ATTENDANCE_AFTER}`,
   commaListed: String.raw`,\s*${TOKEN}${VALUE_END}${PARTIAL_ATTENDANCE_AFTER}`,
+  officeLabel: String.raw`\b${WORK_MODE_LABELS}\s*:\s*${OFFICE_WORK_MODE_VALUE}${PARTIAL_ATTENDANCE_AFTER}`,
 };
 
 const VERBS = String.raw`(?:role|position|job|work|working|works|presence|based|located)`;
@@ -91,6 +103,8 @@ const STATEMENT_FORMS: readonly StatementForm[] = [
   // "Full-time · On-site", "Location: On-site", "• On-site", "Arrangement: on-site."
   form(VALUE_SOURCES.header),
   form(VALUE_SOURCES.label),
+  // "Work Type: Office Working", "Work type: Office-based working"
+  form(VALUE_SOURCES.officeLabel),
   form(VALUE_SOURCES.listed),
   // "This role is on-site", "you will work on-site at", "be based onsite in", "Work on-site daily"
   form(String.raw`\b${VERBS}\s+(?:(?:is|are)\s+)?${TOKEN}\b${NOUN_MODIFIER}${PARTIAL_ATTENDANCE_AFTER}`, { subject: "role-or-applicant" }),
@@ -242,13 +256,14 @@ function firstStatement(pattern: RegExp, text: string, subject: Subject): RegExp
   return null;
 }
 
-const VALUE_FORMS = [VALUE_SOURCES.header, VALUE_SOURCES.label, VALUE_SOURCES.listed, VALUE_SOURCES.commaListed]
+const VALUE_FORMS = [VALUE_SOURCES.header, VALUE_SOURCES.label, VALUE_SOURCES.officeLabel, VALUE_SOURCES.listed, VALUE_SOURCES.commaListed]
   .map((source) => new RegExp(source, "gi"));
 
 /**
  * "On-site" as an affirmative work-mode value after a header separator, a
  * work-mode label, a bullet, a colon or a comma ("Full-time · On-site",
- * "Location: On-site", "• On-site", "Arrangement: on-site."), for work-mode
+ * "Location: On-site", "• On-site", "Arrangement: on-site."), or an office value of a
+ * work-mode label ("Work Type: Office Working"), for work-mode
  * text extraction and the employer-page fetcher.
  */
 export function hasOnsiteWorkModeValue(workModeText: string): boolean {

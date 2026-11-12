@@ -225,6 +225,16 @@ def test_verification_question_names_the_open_workability_facts():
     )
     assert "remote, hybrid, or on-site" in question
     assert "days per week" in question
+    territory = verification_question_for_job(
+        job(rejection_codes=["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_HIRING_TERRITORY"])
+    )
+    assert "hire someone based in Singapore" in territory
+    assert "days per week" not in territory
+    travel = verification_question_for_job(
+        job(rejection_codes=["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_TRAVEL"])
+    )
+    assert "travel percentage" in travel
+    assert "days per week" not in travel
     assert "gate evidence" in verification_question_for_job(job(rejection_codes=None))
     track_verify = job(
         recommendation_eligibility="VERIFY",

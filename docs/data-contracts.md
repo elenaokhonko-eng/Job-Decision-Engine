@@ -28,7 +28,7 @@ Canonical source names use uppercase values from `SourceNameSchema`. Schema test
 
 ## Hard-gate reason codes and on-site exceptions
 
-Gate reason codes are free strings in `gate_decisions.rejection_codes` (JSONB) and `canonical_jobs.rejection_reason` (text), so new codes are additive. `src/pipeline/gateReasonCodes.ts` holds the labels, including the legacy codes. Gate logic is versioned by `GATE_VERSION` (`src/contracts/version.ts`, now `gate-2026-11.3`). Since the 2026-11 policy it is independent of `SCHEMA_VERSION`.
+Gate reason codes are free strings in `gate_decisions.rejection_codes` (JSONB) and `canonical_jobs.rejection_reason` (text), so new codes are additive. `src/pipeline/gateReasonCodes.ts` holds the labels, including the legacy codes. Gate logic is versioned by `GATE_VERSION` (`src/contracts/version.ts`, now `gate-2026-11.4`). Since the 2026-11 policy it is independent of `SCHEMA_VERSION`.
 
 | Code | Meaning | Status |
 |---|---|---|
@@ -39,6 +39,21 @@ Gate reason codes are free strings in `gate_decisions.rejection_codes` (JSONB) a
 | `GATE_LIFESTYLE_INCOMPATIBLE` | Legacy umbrella code for travel, on-call and shift work | No longer emitted. Stored rows stay valid. |
 | `NON_TECHNICAL_FUNCTION`, `GATE_NOT_AI_DATA` | Axis 1 (generic technical-function check) and Axis 2 (AI/data domain) | No longer emitted. A non-technical PM, programme, transformation, product-policy or investigator role is acceptable when it fits a lane and the candidate's experience, and lane routing decides. |
 | `NON_TARGET_ROLE_FAMILY` + `GATE_OUT_OF_SCOPE_DOMAIN` | Explicit non-target title families: `GLOBAL_TITLE_EXCLUSIONS` (HR, sales, customer success, legal practice and counsel) and `NON_TECHNICAL_FUNCTION_TITLES` (accountant, payroll, support specialist, graphic/UX designer) | Still hard rejects. The second list emitted `NON_TECHNICAL_FUNCTION` before 2026-11 and now uses this role-family code. Legal-technology titles ("Legal Engineer", "Legal Innovation Technologist") and agency names such as "Attorney-General's Office" do not match. |
+
+### Gate verification codes (gate-2026-11.4)
+
+A `NEEDS_VERIFICATION` gate decision stores `NEEDS_VERIFICATION` plus the open fact the employer must confirm, and keeps every open fact when there are several:
+
+| Open fact | Code | Confirmable fact (`v_job_verification_checks_scoped`) |
+|---|---|---|
+| Work mode unknown | `GATE_UNKNOWN_WORK_MODE` | `WORK_MODE` |
+| Hiring territory not established, ambiguous territory alternatives, remote territory not stated | `NEEDS_VERIFICATION_HIRING_TERRITORY` | `LOCATION` |
+| Office-day count (unknown office-day answer, hybrid without a count when required, ambiguous office wording) | `NEEDS_VERIFICATION_OFFICE_DAYS` | `OFFICE_DAYS` |
+| Travel (unknown travel-cap answer, qualitative minimal travel, travel without a percentage) | `NEEDS_VERIFICATION_TRAVEL` | `TRAVEL_PCT` |
+
+Before `gate-2026-11.4` every open fact other than the work mode was stored as `NEEDS_VERIFICATION_OFFICE_DAYS`. All four codes are routable (`src/pipeline/verificationRouting.ts`), so routing is unchanged. When the structured location is unknown, the gate also reads the posting's own `Job Location:` / `Location:` header value (`src/pipeline/postingLocationLine.ts`) and stores the quote as evidence; `Work Type: Office Working` and `Office-based Working` are full on-site.
+
+`GATE_HIGH_INTERACTION` also covers, for any title (including Solutions Architect and Product Specialist), a role that the posting places in a pre-sales, post-sales, customer success or customer engagement organisation, or whose own duties are the customer journey, proofs of value, representing the company, regular customer engagements or partnering with sales on adoption, expansion and renewal (`src/pipeline/customerFacingDuties.ts`). Company boilerplate, "our customers", customer data and stakeholder work never count; the matched clause is stored as evidence.
 
 ### On-site exceptions
 
