@@ -489,6 +489,17 @@ export async function runNormalization(
               evidenceRevisionHash,
             ]
           );
+          // A later observation of the same content (e.g. a saved-job re-export that now carries
+          // the posting's employment-type label) fills a still-unknown employment type; a known
+          // value is never replaced here.
+          await client.query(
+            `UPDATE canonical_jobs
+             SET employment_type = $3
+             WHERE workspace_id = $1 AND id = $2
+               AND NULLIF($3, 'UNKNOWN') IS NOT NULL
+               AND (employment_type IS NULL OR employment_type = 'UNKNOWN')`,
+            [ctx.workspaceId, canonicalJobId, obs.employment_type_raw || "UNKNOWN"]
+          );
         }
 
         if (createdNewVersion) {

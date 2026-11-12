@@ -10,9 +10,11 @@ import { buildJobSourceEvidence } from "../../ingestion/jobSourceEvidence.js";
 import { extractFreshnessEvidence } from "../../ingestion/freshnessEvidence.js";
 import {
   LinkedInSavedJobItemSchema,
+  linkedInEmploymentTypeRaw,
   parseLinkedInSavedJobItem,
   type LinkedInSavedJob,
 } from "../../ingestion/linkedInSavedExport.js";
+import { LINKEDIN_POSTING_FACT_FIELDS } from "../../ingestion/linkedInSavedEnrichment.js";
 import { savedPostingDerivedObservation } from "../../ingestion/linkedInSavedContent.js";
 import { parseMcfSavedJobItem, type McfSavedJob } from "../../ingestion/mcfSavedExport.js";
 import {
@@ -183,11 +185,19 @@ describe("LinkedIn guest posting page (export snippet)", () => {
       validThrough: "2026-12-27T09:12:00.000Z",
       availabilityStatus: "OPEN",
       availabilityEvidence: "Apply button shown; no \"No longer accepting applications\" banner",
+      employmentType: "FULL_TIME",
     });
   });
 
   it("reads relative text only when no absolute date is on the page", () => {
     expect(facts(GUEST_PAGE_OPEN_RELATIVE)).toMatchObject({ postedAt: null, postedAtText: "Reposted 3 days ago", validThrough: null, availabilityStatus: "OPEN" });
+  });
+
+  it("reads the posting's own Employment type row, not a similar job's", () => {
+    expect(facts(GUEST_PAGE_OPEN_RELATIVE).employmentType).toBe("Full-time");
+    expect(facts(GUEST_PAGE_CLOSED).employmentType).toBe("Contract");
+    // GUEST_PAGE_NO_SIGNALS has no criteria list of its own; the similar job's "Internship" is ignored.
+    expect(facts(GUEST_PAGE_NO_SIGNALS).employmentType).toBeNull();
   });
 
   it("reads the closed banner as CLOSED with its text", () => {
@@ -205,6 +215,7 @@ describe("LinkedIn guest posting page (export snippet)", () => {
       validThrough: null,
       availabilityStatus: "UNKNOWN",
       availabilityEvidence: null,
+      employmentType: null,
     });
   });
 
@@ -273,6 +284,45 @@ describe("LinkedIn guest posting page (export snippet)", () => {
       const html = `${"<script type=\"application/ld+json\">{".repeat(Math.floor(size / 37))}<section class="top-card-layout"><div class="closed-job ${"x".repeat(size)}`;
       return () => postingFactsFromHtml(html);
     }, 400_000);
+    expectLinear((size) => {
+      const html = `<ul class="description__job-criteria-list">${"<h3 class=\"description__job-criteria-subheader\">Seniority".repeat(Math.floor(size / 60))}`;
+      return () => postingFactsFromHtml(html);
+    }, 400_000);
+  });
+});
+
+describe("LinkedIn saved export employment type", () => {
+  it("maps the posting's label to an employment_type_raw and keeps unknown labels unknown", () => {
+    const cases: Array<[string | null, string]> = [
+      ["Full-time", "FULL_TIME"],
+      ["FULL_TIME", "FULL_TIME"],
+      ["Contract", "CONTRACT"],
+      ["CONTRACTOR", "CONTRACT"],
+      ["Part-time", "PART_TIME"],
+      ["Temporary", "TEMPORARY"],
+      ["Internship", "INTERNSHIP"],
+      ["Other", "UNKNOWN"],
+      ["Volunteer", "UNKNOWN"],
+      ["FULL_TIME, CONTRACTOR", "UNKNOWN"],
+      [null, "UNKNOWN"],
+    ];
+    for (const [label, raw] of cases) {
+      expect(linkedInEmploymentTypeRaw(label), String(label)).toBe(raw);
+    }
+  });
+
+  it("records the label in the payload and the job only when the export has it", () => {
+    const labelled = parsedLinkedIn({ employmentType: "Full-time", postingCheckedAt: CHECKED_AT });
+    expect(labelled.employmentType).toBe("FULL_TIME");
+    expect(labelled.rawPayload.exported_item).toMatchObject({ employmentType: "Full-time" });
+
+    const older = parsedLinkedIn();
+    expect(older.employmentType).toBe("UNKNOWN");
+    expect(older.rawPayload.exported_item).not.toHaveProperty("employmentType");
+  });
+
+  it("lets a refresh() enrichment carry the label to jobs already imported", () => {
+    expect(LINKEDIN_POSTING_FACT_FIELDS).toContain("employmentType");
   });
 });
 

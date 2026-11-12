@@ -118,7 +118,7 @@ function savedObservation(job: LinkedInSavedJob, retrievedAt: string) {
     descriptionRaw: job.description,
     ...(job.location ? { locationRaw: job.location } : {}),
     workplaceTypeRaw: job.workplaceType,
-    employmentTypeRaw: "UNKNOWN",
+    employmentTypeRaw: job.employmentType,
     ...(job.salary ? { compensationRaw: job.salary } : {}),
     sourceLane: "UNKNOWN",
     searchPlanVersion: LINKEDIN_SAVED_EXPORT_SCHEMA,

@@ -44,6 +44,7 @@ export const LINKEDIN_POSTING_FACT_FIELDS = [
   "validThrough",
   "availabilityStatus",
   "availabilityEvidence",
+  "employmentType",
   "postingCheckedAt",
   "postingRecheckFailedAt",
   "postingRecheckFailure",
