@@ -13,8 +13,10 @@ export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
 // semantics change so stored decisions can be selected by the logic that wrote them.
 // 2026-11: on-site exceptions, Axis 1/2 rejects removed, title families as NON_TARGET_ROLE_FAMILY,
 // precise travel/on-call/shift/location codes.
-// 2026-11.2: workplace perk phrases are neutral work-mode evidence; for a
+// 2026-11.2: foreign citizenship and government security-clearance requirements are
+// WORK_AUTHORIZATION_INCOMPATIBLE with quoted evidence.
+// 2026-11.3: workplace perk phrases are neutral work-mode evidence; for a
 // Singapore-located job an explicit on-site statement overrides the assumed-hybrid default.
-export const GATE_VERSION = "gate-2026-11.2" as const;
+export const GATE_VERSION = "gate-2026-11.3" as const;
 export const PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;
 

@@ -14,7 +14,9 @@ import {
   normalizeTerritories,
   splitWorkabilityClauses,
   isTerritoryAuthorized,
+  isUnitedStatesOnlyLocation,
   isVerificationAnswerProvided,
+  postingOpensRemoteBeyondUnitedStates,
   loadWorkabilityPolicy,
   VERIFICATION_ANSWER_KEYS,
   type VerificationAnswerContext,
@@ -563,11 +565,22 @@ function evaluateWorkabilityRules(
   // clauses remain independent mandatory restrictions.
   const authorizedRegions = new Set(normalizeTerritories(effectivePolicy.authorizedRegions));
   const locationTerritories = normalizeTerritories(extractTerritories(loc));
-  const remoteLocationTerritories = isRemote && /\b(remote|worldwide|global|anywhere)\b/i.test(loc)
-    ? locationTerritories
-    : [];
+  // A remote job located only in the United States (country, state or city, with or
+  // without a "Remote" label) hires there unless the posting opens the role worldwide
+  // or to an authorized region; that is a location mismatch, not a guess.
+  const usOnlyRemoteLocation = isRemote && isUnitedStatesOnlyLocation(loc);
+  const remoteOpenBeyondUs = usOnlyRemoteLocation
+    && postingOpensRemoteBeyondUnitedStates(d, [...authorizedRegions]);
+  const remoteLocationTerritories = usOnlyRemoteLocation
+    ? (remoteOpenBeyondUs ? [] : ["UNITED_STATES"])
+    : isRemote && /\b(remote|worldwide|global|anywhere)\b/i.test(loc)
+      ? locationTerritories
+      : [];
   const relevantLocationTerritories = isRemote ? remoteLocationTerritories : locationTerritories;
-  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d);
+  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d, {
+    jobLocation: loc,
+    authorizedRegions: [...authorizedRegions],
+  });
   const workerTerritoryEvaluation = evaluateWorkerTerritoryRequirements(
     workerTerritoryRequirements,
     [...authorizedRegions],
@@ -584,7 +597,7 @@ function evaluateWorkabilityRules(
     return {
       workable: false,
       needsVerify: false,
-      reason: `Explicit work-authorization restriction conflicts with the active preference: ${territory}`,
+      reason: `Explicit work-authorization restriction conflicts with the active preference: ${territory}${quotedRestrictionEvidence(workerTerritoryEvaluation)}`,
       reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
       facts: { ...baseFacts, location_restriction: territory }
     };
@@ -840,6 +853,14 @@ function makeVerification(codes: string[], evidence: string[], facts?: Partial<G
 /**
  * Extract a readable text corpus from a raw job (handles string, JSON-string, or object descriptions).
  */
+/** The posting's own words for each incompatible worker condition, quoted for the gate evidence. */
+function quotedRestrictionEvidence(evaluation: { readonly incompatibleRequirements: readonly { readonly evidenceText: string }[] }): string {
+  const quotes = [...new Set(evaluation.incompatibleRequirements.map((requirement) => requirement.evidenceText.trim()).filter(Boolean))]
+    .slice(0, 3)
+    .map((quote) => `"${quote.slice(0, 300)}"`);
+  return quotes.length > 0 ? `. Evidence: ${quotes.join("; ")}` : "";
+}
+
 export function extractDescriptionText(job: RawJob): string {
   if (!job.raw_description) return "";
   if (typeof job.raw_description === "object") {
@@ -1212,11 +1233,18 @@ export function applyGlobalGates(
   const authorizedRegions = new Set(normalizeTerritories(effectivePolicy.authorizedRegions));
   const locationTerritories = normalizeTerritories(extractTerritories(String(job.location || "")));
   const explicitlyRemote = wp === "REMOTE" || /\b(fully\s+remote|remote[- ]first|remote\s+(?:position|role|job|work|opportunity)|work\s+from\s+home|work\s+remotely)\b/i.test(d);
-  const remoteLocationTerritories = explicitlyRemote && /\b(remote|worldwide|global|anywhere)\b/i.test(loc)
-    ? locationTerritories
-    : [];
+  // Same remote United States location rule as evaluateWorkability.
+  const usOnlyRemoteLocation = explicitlyRemote && isUnitedStatesOnlyLocation(loc);
+  const remoteLocationTerritories = usOnlyRemoteLocation
+    ? (postingOpensRemoteBeyondUnitedStates(d, [...authorizedRegions]) ? [] : ["UNITED_STATES"])
+    : explicitlyRemote && /\b(remote|worldwide|global|anywhere)\b/i.test(loc)
+      ? locationTerritories
+      : [];
   const relevantLocationTerritories = explicitlyRemote ? remoteLocationTerritories : locationTerritories;
-  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d);
+  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d, {
+    jobLocation: String(job.location || ""),
+    authorizedRegions: [...authorizedRegions],
+  });
   const disallowedLocationTerritories = relevantLocationTerritories.filter((territory) =>
     effectivePolicy.rejectExplicitForeignTerritory
     && authorizedRegions.size > 0
@@ -1230,7 +1258,7 @@ export function applyGlobalGates(
   const disallowedTerritories: string[] = [...workerTerritoryEvaluation.incompatibleTerritories];
   if (disallowedTerritories.length > 0 || workerTerritoryEvaluation.status === "INCOMPATIBLE") {
     const territory = disallowedTerritories[0] ?? workerTerritoryEvaluation.incompatibleTerritories[0] ?? "UNKNOWN";
-    return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [`Explicit worker-territory restriction: ${territory}`], {
+    return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [`Explicit worker-territory restriction: ${territory}${quotedRestrictionEvidence(workerTerritoryEvaluation)}`], {
       location_restriction: territory,
     });
   }
