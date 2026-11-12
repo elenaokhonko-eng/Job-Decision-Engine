@@ -466,6 +466,38 @@ describe("round 6: benefits frame, clearance header values, relative-clause and 
   });
 });
 
+describe("round 7: applicant-addressed benefit lines, negative header values, head-clause negation", () => {
+  it.each([
+    "Candidates in Singapore are welcome and are eligible for our equity plan.",
+    "Open to candidates in Singapore, who will be eligible for local benefits.",
+    "Candidates based in Singapore are eligible for this role and our full benefits.",
+    "Applicants in APAC are eligible for remote work under our flexible work plan.",
+  ])("Remote, US-based role: an applicant-addressed opening that mentions benefits cancels the placement: %s", (text) => {
+    expectNoWorkAuthReject("Remote", "REMOTE", `${BODY} This is a remote, US-based role. ${text}`);
+  });
+
+  it.each([
+    "Clearance: None required (non-government role).",
+    "Clearance: Background check only, no government clearance.",
+    "Clearance: N/A (commercial, not federal).",
+    "Clearance: None - commercial client, no DoD work.",
+    "Clearance: No active clearance needed.",
+    "Clearance: None (VA healthcare data, HIPAA training only).",
+  ])("United States / REMOTE, open worldwide: a header value that starts negative is no requirement: %s", (text) => {
+    const result = fullGate("United States", "REMOTE", `${BODY} Open to candidates worldwide. ${text}`);
+    expect(result.status, JSON.stringify({ codes: result.rejection_codes, evidence: result.evidence_quotes })).toBe("PASS");
+  });
+
+  it.each([
+    "We are not able to hire candidates who are based in Singapore.",
+    "We cannot accept candidates that live in APAC.",
+  ])("Remote, United States: a head-clause negation governs its relative clause: %s", (text) => {
+    const result = fullGate("Remote, United States", "REMOTE", `${BODY} ${text}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_JOB_LOCATION_MISMATCH");
+  });
+});
+
 describe("genuine US-only wordings stay rejected (review positives)", () => {
   it.each([
     "US Citizens only.",

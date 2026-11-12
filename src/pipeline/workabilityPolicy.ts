@@ -700,6 +700,8 @@ const NEGATION = /\b(?:not|no|never|cannot|can['’]t|unable|isn['’]t|aren['�
 /** A staff-benefit line: a region with "eligible for" or "hires receive/get" and a benefit noun. */
 const STAFF_BENEFIT_FRAME = /\beligible\s+for\b|\bhires?\s+(?:\w+\s+){0,2}(?:receive|get)\b/i;
 const BENEFIT_NOUN = /\b(?:benefits?|stipends?|allowances?|plans?|insurance|perks?)\b/i;
+const STAFF_SUBJECT = /\b(?:employees|staff|team\s+members|hires)\b/i;
+const APPLICANT_WORDING = /\b(?:candidates?|applicants?|you|your|open\s+to|welcome[ds]?|this\s+role)\b/i;
 
 function plainClauses(value: unknown): string[] {
   const text = String(value ?? "").replace(/<[^>]+>/g, "\n");
@@ -721,20 +723,34 @@ export function postingOpensRemoteBeyondUnitedStates(description: unknown, autho
     // A negation cancels the opening only in the part of the clause that names the region or
     // the global scope ("not open to candidates in Singapore", "we cannot hire in APAC");
     // "no relocation needed" or "no visa sponsorship required" beside it does not.
-    const negatedOpening = subClauses(clause).some((part) => NEGATION.test(part.replace(NOT_LIMITED_TO_US, " "))
-      && (namesRegion(part) || GLOBAL_OPENING.test(part)));
-    if (negatedOpening) return false;
+    if (negationGoverns(clause, (part) => namesRegion(part) || GLOBAL_OPENING.test(part))) return false;
     if (NOT_LIMITED_TO_US.test(clause)) return true;
     if (GLOBAL_OPENING.test(clause) && !US_LIMITED_SCOPE.test(clause)) return true;
     if (!namesRegion(clause)) return false;
-    // In a benefits or stipend line ("employees in APAC are eligible for ...", "our APAC hires
-    // receive a stipend") a region with "eligible" or "hires" describes staff, not applicants.
-    if (STAFF_BENEFIT_FRAME.test(clause) && BENEFIT_NOUN.test(clause)) return false;
+    // A staff-benefit line ("employees in APAC are eligible for ...", "our APAC hires receive a
+    // stipend") describes staff, not applicants; a line that also addresses applicants does not.
+    if (STAFF_BENEFIT_FRAME.test(clause) && BENEFIT_NOUN.test(clause)
+      && STAFF_SUBJECT.test(clause) && !APPLICANT_WORDING.test(clause)) return false;
     return APPLICANT_FRAME.test(clause) || (PLACE_FRAME.test(clause) && !EMPLOYER_SUBJECT.test(clause));
   });
 }
 
 /** The parts of one clause that a negation can govern: split at commas, colons, dashes and conjunctions. */
+/**
+ * True when a negation governs a part of the clause that `governs` accepts. A negation in a
+ * head clause also governs its relative clause ("We are not able to hire candidates who are
+ * based in Singapore"); a negation inside a relative clause governs only that relative clause
+ * ("Candidates in APAC who cannot relocate are welcome" is still an opening).
+ */
+function negationGoverns(clause: string, governs: (part: string) => boolean): boolean {
+  return clause.split(/\s*[,:–—()]\s*|\s+-\s+|\s+(?:and|but|while|with|so)\s+/i).some((coarse) => {
+    const [head = "", ...rest] = coarse.split(/\s+(?:who|which|that)\s+/i);
+    const relative = rest.join(" ");
+    if (NEGATION.test(head.replace(NOT_LIMITED_TO_US, " ")) && governs(coarse)) return true;
+    return relative !== "" && NEGATION.test(relative) && governs(relative);
+  });
+}
+
 function subClauses(clause: string): string[] {
   // Relative clauses ("who aren't able to relocate") and parentheses ("(no relocation)") are their own parts.
   return clause.split(/\s*[,:–—()]\s*|\s+-\s+|\s+(?:and|but|while|with|so|who|which|that)\s+/i).map((part) => part.trim()).filter(Boolean);
@@ -771,6 +787,12 @@ const CONDITIONAL_APPROVAL_SENTENCE = /\b(?:may|might|could)\s+be\s+required\b|\
 /** The clause's own government, or null when it names none. */
 /** A "Clearance:" / "Security clearance:" header field; group 1 is its value. */
 const CLEARANCE_HEADER = /\bclearance(?:\s+(?:level|required|requirements?))?\s*:\s*(.*)$/i;
+/**
+ * A header value that starts by saying there is no clearance is neutral, whatever it names
+ * later: "None required (non-government role)", "N/A (commercial, not federal)", "No active
+ * clearance needed", "Background check only, no government clearance".
+ */
+const NEUTRAL_HEADER_VALUE = /^\s*(?:none|n\s*\/\s*a|na|no|not|nil|tbd|unknown|background\s+check\s+only)\b/i;
 /** A header value that names a clearance level or type. Anything else (none, n/a, tbd, not specified, ...) is no requirement. */
 const CLEARANCE_HEADER_VALUE = /\b(?:top\s+secret|secret|ts(?:\s*\/\s*sci)?|sci|polygraph|public\s+trust|confidential|active|current|eligib\w*\s+(?:to\s+obtain|for)|ability\s+to\s+obtain|able\s+to\s+obtain|[lq](?:\s+clearance)?|dod|dow|doe|dhs|va|government|federal|mindef|sc|dv|bpss|baseline|nv[12]|reliability)\b/i;
 /** Singapore government references that are not territory aliases. */
@@ -879,7 +901,7 @@ export function extractGovernmentEligibilityRequirements(value: unknown, context
     // A header field counts only when its value names a clearance ("Clearance: Secret",
     // "Clearance: TS/SCI"); "None at this time", "N/A - remote role", "TBD", "Not specified" do not.
     const header = sentence.match(CLEARANCE_HEADER);
-    if (header && !CLEARANCE_HEADER_VALUE.test(header[1] ?? "")) continue;
+    if (header && (NEUTRAL_HEADER_VALUE.test(header[1] ?? "") || !CLEARANCE_HEADER_VALUE.test(header[1] ?? ""))) continue;
     if (CONDITIONAL_APPROVAL_SENTENCE.test(sentence)) continue;
     // The clause's own government; a clause naming none is U.S. only on a US-located job.
     const government = clauseGovernment(sentence) ?? (usLocation ? "UNITED_STATES" : null);
