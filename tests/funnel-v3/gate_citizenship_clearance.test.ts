@@ -405,6 +405,67 @@ describe("round-5 non-blocking fixes", () => {
   });
 });
 
+describe("round 6: benefits frame, clearance header values, relative-clause and parenthetical negation", () => {
+  it.each([
+    "This is a remote, US-based role. Candidates in Singapore are also welcome and receive competitive benefits.",
+    "This is a remote, US-based role. Location: Remote (Singapore), salary range SGD 8,000-10,000.",
+    "This is a remote, US-based role. Also open to applicants based in Singapore who aren't able to relocate.",
+  ])("Remote: a Singapore opening beside pay, benefits or a relative clause cancels the US placement: %s", (text) => {
+    expectNoWorkAuthReject("Remote", "REMOTE", `${BODY} ${text}`);
+  });
+
+  it.each([
+    "We hire in Singapore and offer competitive compensation.",
+    "Open to candidates in Singapore or Malaysia who do not require sponsorship.",
+    "Candidates in APAC who cannot relocate are welcome.",
+    "Open to candidates worldwide (no relocation).",
+    "Open to candidates in Singapore (no visa sponsorship).",
+  ])("Remote, United States: still an opening: %s", (text) => {
+    const result = fullGate("Remote, United States", "REMOTE", `${BODY} ${text}`);
+    expect(result.rejection_codes).not.toContain("GATE_JOB_LOCATION_MISMATCH");
+  });
+
+  it.each([
+    "Employees based in APAC are eligible for our regional benefits plan.",
+    "Our APAC hires receive a home-office stipend.",
+    "New hires in APAC receive a setup allowance.",
+    "Applicants in APAC won't be considered.",
+    "Applicants from Singapore are ineligible.",
+    "We don't hire in Singapore or anywhere in Asia.",
+    "We can't hire outside the US, so Singapore candidates won't be considered.",
+    "Applicants from Singapore will not be considered.",
+  ])("Remote, United States: not an opening: %s", (text) => {
+    const result = fullGate("Remote, United States", "REMOTE", `${BODY} ${text}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_JOB_LOCATION_MISMATCH");
+  });
+
+  it.each([
+    "Clearance: None at this time.",
+    "Clearance: None | Travel: 10%.",
+    "Clearance: N/A - remote role.",
+    "Clearance: TBD.",
+    "Clearance: Not specified.",
+    "Clearance: None.",
+    "Security clearance: N/A.",
+    "Security Clearance: Not Applicable.",
+  ])("United States / REMOTE, open worldwide: a header whose value names no clearance is no requirement: %s", (text) => {
+    const result = fullGate("United States", "REMOTE", `${BODY} Open to candidates worldwide. ${text}`);
+    expect(result.status, JSON.stringify({ codes: result.rejection_codes, evidence: result.evidence_quotes })).toBe("PASS");
+  });
+
+  it.each([
+    "Clearance: Secret.",
+    "Clearance Level: Top Secret.",
+    "Clearance: TS/SCI with Polygraph",
+    "Clearance: Public Trust",
+    "Security clearance: active Confidential",
+    "Clearance: Must be eligible to obtain a Secret clearance",
+  ])("United States / REMOTE, open worldwide: a header that names a clearance is a requirement: %s", (text) => {
+    expectWorkAuthReject("United States", "REMOTE", `${BODY} Open to candidates worldwide. ${text}`);
+  });
+});
+
 describe("genuine US-only wordings stay rejected (review positives)", () => {
   it.each([
     "US Citizens only.",

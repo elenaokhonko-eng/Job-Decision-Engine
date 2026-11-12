@@ -696,7 +696,10 @@ const APPLICANT_FRAME = /\b(?:candidates?|applicants?|talent|hir(?:e|es|ed|ing)|
 /** Where-you-work wording that counts only when the subject is not the employer's own team or office. */
 const PLACE_FRAME = /\b(?:based|located|living|residing|reside|work(?:ing)?\s+(?:remotely\s+)?from|remote(?:ly)?\s+(?:from|in|within|across))\b/i;
 const EMPLOYER_SUBJECT = /\b(?:our|the|we|company|firm)\s+(?:\w+\s+){0,2}(?:team|teams|office|offices|headquarters|hq|clients?|customers?|partners?|company|business|operations)\b|\bheadquartered\b/i;
-const NEGATION = /\b(?:not|no|never|cannot|can['’]t|unable|isn['’]t|aren['’]t|excluding|except)\b/i;
+const NEGATION = /\b(?:not|no|never|cannot|can['’]t|unable|isn['’]t|aren['’]t|don['’]t|doesn['’]t|won['’]t|wouldn['’]t|ineligible|excluding|except)\b/i;
+/** A staff-benefit line: a region with "eligible for" or "hires receive/get" and a benefit noun. */
+const STAFF_BENEFIT_FRAME = /\beligible\s+for\b|\bhires?\s+(?:\w+\s+){0,2}(?:receive|get)\b/i;
+const BENEFIT_NOUN = /\b(?:benefits?|stipends?|allowances?|plans?|insurance|perks?)\b/i;
 
 function plainClauses(value: unknown): string[] {
   const text = String(value ?? "").replace(/<[^>]+>/g, "\n");
@@ -726,14 +729,15 @@ export function postingOpensRemoteBeyondUnitedStates(description: unknown, autho
     if (!namesRegion(clause)) return false;
     // In a benefits or stipend line ("employees in APAC are eligible for ...", "our APAC hires
     // receive a stipend") a region with "eligible" or "hires" describes staff, not applicants.
-    if (PAY_OR_BENEFITS_SENTENCE.test(clause) || /\b(?:stipend|allowance)s?\b/i.test(clause)) return false;
+    if (STAFF_BENEFIT_FRAME.test(clause) && BENEFIT_NOUN.test(clause)) return false;
     return APPLICANT_FRAME.test(clause) || (PLACE_FRAME.test(clause) && !EMPLOYER_SUBJECT.test(clause));
   });
 }
 
 /** The parts of one clause that a negation can govern: split at commas, colons, dashes and conjunctions. */
 function subClauses(clause: string): string[] {
-  return clause.split(/\s*[,:–—]\s*|\s+-\s+|\s+(?:and|but|while|with|so)\s+/i).map((part) => part.trim()).filter(Boolean);
+  // Relative clauses ("who aren't able to relocate") and parentheses ("(no relocation)") are their own parts.
+  return clause.split(/\s*[,:–—()]\s*|\s+-\s+|\s+(?:and|but|while|with|so|who|which|that)\s+/i).map((part) => part.trim()).filter(Boolean);
 }
 
 // ── Government citizenship and security-clearance requirements ──
@@ -765,7 +769,10 @@ const PAY_OR_BENEFITS_SENTENCE = /\b(?:salar(?:y|ies)|pay\s+(?:range|scale|rate|
 const CONDITIONAL_APPROVAL_SENTENCE = /\b(?:may|might|could)\s+be\s+required\b|\bwhether\b|\bexport\s+(?:licen[cs]e|control|controls|laws?|regulations?)\b/i;
 
 /** The clause's own government, or null when it names none. */
-const EMPTY_CLEARANCE_HEADER = /\bclearance(?:\s+(?:level|required|requirements?))?\s*:\s*(?:none|nil|no|n\s*\/\s*a|na|not\s+applicable|not\s+required|-+)(?=\s*$|\s*[.,;)]|\s+(?:required|needed)\b)/i;
+/** A "Clearance:" / "Security clearance:" header field; group 1 is its value. */
+const CLEARANCE_HEADER = /\bclearance(?:\s+(?:level|required|requirements?))?\s*:\s*(.*)$/i;
+/** A header value that names a clearance level or type. Anything else (none, n/a, tbd, not specified, ...) is no requirement. */
+const CLEARANCE_HEADER_VALUE = /\b(?:top\s+secret|secret|ts(?:\s*\/\s*sci)?|sci|polygraph|public\s+trust|confidential|active|current|eligib\w*\s+(?:to\s+obtain|for)|ability\s+to\s+obtain|able\s+to\s+obtain|[lq](?:\s+clearance)?|dod|dow|doe|dhs|va|government|federal|mindef|sc|dv|bpss|baseline|nv[12]|reliability)\b/i;
 /** Singapore government references that are not territory aliases. */
 const SG_GOVERNMENT_MARKER = /\b(?:mindef|ministry\s+of\s+defence\s+singapore)\b/i;
 
@@ -869,8 +876,10 @@ export function extractGovernmentEligibilityRequirements(value: unknown, context
 
     if (PAY_OR_BENEFITS_SENTENCE.test(sentence) || NON_SECURITY_CLEARANCE.test(sentence)) continue;
     if (!GOVERNMENT_CLEARANCE.test(sentence) || !MANDATORY_CUE.test(sentence) || OPTIONAL_CUE.test(sentence)) continue;
-    // A template field with no clearance in it ("Clearance: None", "Security clearance: N/A").
-    if (EMPTY_CLEARANCE_HEADER.test(sentence)) continue;
+    // A header field counts only when its value names a clearance ("Clearance: Secret",
+    // "Clearance: TS/SCI"); "None at this time", "N/A - remote role", "TBD", "Not specified" do not.
+    const header = sentence.match(CLEARANCE_HEADER);
+    if (header && !CLEARANCE_HEADER_VALUE.test(header[1] ?? "")) continue;
     if (CONDITIONAL_APPROVAL_SENTENCE.test(sentence)) continue;
     // The clause's own government; a clause naming none is U.S. only on a US-located job.
     const government = clauseGovernment(sentence) ?? (usLocation ? "UNITED_STATES" : null);
