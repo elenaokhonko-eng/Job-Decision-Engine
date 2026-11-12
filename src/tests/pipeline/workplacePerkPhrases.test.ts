@@ -9,7 +9,11 @@ import { fetchJobContent, type JobContentResult } from "../../ingestion/jobConte
 import { loadWorkabilityPolicy, mergeWorkabilityPreferenceContent } from "../../pipeline/workabilityPolicy.js";
 import { HN_FIXTURE_THREAD_ID, hnComment } from "../fixtures/hackerNewsWhoIsHiring.js";
 import {
+  KNOWN_FALSE_ACCEPTS,
   ROUND_3_NOT_ONSITE,
+  ROUND_4_NOT_ONSITE,
+  ROUND_4_OFFICE_DAYS,
+  ROUND_4_ONSITE,
   SEPARATOR_OR_LABEL_PERKS,
   SWEEP_FORMS,
   SWEEP_FULL_DAYS,
@@ -97,8 +101,13 @@ function postingWorkplaceType(result: JobContentResult): string {
   return String((result.posting as any).workplaceType);
 }
 
-function gateAt(description: string, workplaceType: string, location: string) {
-  return applyGlobalGates({
+/**
+ * The gate status; a HARD_REJECT for a reason other than the on-site work model
+ * (e.g. a London job outside the authorized regions) is reported as
+ * "HARD_REJECT_OTHER", so the probes test only the on-site rules.
+ */
+function gateAt(description: string, workplaceType: string, location: string): string {
+  const result = applyGlobalGates({
     id: "perk-fixture",
     title: "Machine Learning Engineer",
     company_name: "Example Analytics",
@@ -106,7 +115,9 @@ function gateAt(description: string, workplaceType: string, location: string) {
     location,
     workplace_type: workplaceType,
     employment_type: "PERMANENT",
-  } as any, loadWorkabilityPolicy()).status;
+  } as any, loadWorkabilityPolicy());
+  if (result.status === "HARD_REJECT" && !result.rejection_codes.includes("GATE_HIGH_OFFICE_DAYS")) return "HARD_REJECT_OTHER";
+  return result.status;
 }
 
 async function enrichAt(description: string, location: string) {
@@ -131,6 +142,7 @@ async function allPaths(line: string, location = "Singapore") {
     hybrid: gateAt(description, "HYBRID", location),
     assumed: gateAt(description, "ASSUMED_HYBRID", location),
     unknown: gateAt(description, "UNKNOWN", location),
+    remote: gateAt(description, "REMOTE", location),
     fetched: postingWorkplaceType(await employerPage(line)),
   };
 }
@@ -621,4 +633,52 @@ On-site one to three days a week.`)).toMatchObject({ workplace_type: "HYBRID", o
       expect(result.assumed, line).toBe("HARD_REJECT");
     }
   });
+});
+
+// Review round 4: N1-N4 never reject; negation is scoped to the statement it
+// governs; the posting-wide hybrid/remote skip ignores negated modes,
+// equal-opportunity lines and company history.
+describe("review round 4: subject, partial attendance, project phases and negation scope", () => {
+  for (const { line, location } of ROUND_4_NOT_ONSITE) {
+    it(`${JSON.stringify(line)} (${location}) never hard-rejects`, async () => {
+      const result = await allPaths(line, location);
+      for (const path of ["enrichThenGate", "hybrid", "assumed", "unknown", "remote"] as const) {
+        expect(result[path], `${path}: ${JSON.stringify(result)}`).not.toBe("HARD_REJECT");
+      }
+      expect(result.enriched).not.toBe("ONSITE");
+      expect(result.fetched).not.toBe("ONSITE");
+    });
+  }
+
+  it("N4: a third-party sentence with a stored assumed hybrid stays NEEDS_VERIFICATION, as on main", () => {
+    for (const { line } of ROUND_4_NOT_ONSITE.filter((probe) => /nurses|clinicians|operations team|field engineers|manufacturing/i.test(probe.line))) {
+      expect(gateAt(`${TECH}
+${line}`, "ASSUMED_HYBRID", "Singapore"), line).toBe("NEEDS_VERIFICATION");
+    }
+  });
+
+  for (const line of ROUND_4_ONSITE) {
+    it(`${JSON.stringify(line)} is an affirmative on-site statement`, async () => {
+      const result = await allPaths(line);
+      expect(result.enrichThenGate, JSON.stringify(result)).toBe("HARD_REJECT");
+      expect(result.unknown, JSON.stringify(result)).toBe("HARD_REJECT");
+      expect(result.assumed, JSON.stringify(result)).toBe("HARD_REJECT");
+    });
+  }
+
+  it("enrichment of a 4+ day statement with a remote day stores the on-site days", () => {
+    for (const [line, days] of ROUND_4_OFFICE_DAYS) {
+      expect(extractWorkModeFromText(`${TECH}
+${line}`), line).toMatchObject({ workplace_type: "ONSITE", office_days_min: days, office_days_max: days });
+    }
+  });
+});
+
+describe("known false accepts (non-blocking)", () => {
+  for (const { line, location } of KNOWN_FALSE_ACCEPTS) {
+    it(`${JSON.stringify(line)} is not hard-rejected (stays PASS or NEEDS_VERIFICATION)`, async () => {
+      const result = await allPaths(line, location);
+      expect(result.unknown, JSON.stringify(result)).not.toBe("HARD_REJECT");
+    });
+  }
 });

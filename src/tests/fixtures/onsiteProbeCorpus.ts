@@ -162,3 +162,97 @@ export function sweepProbes(): OnsiteProbe[] {
   }
   return lines.map(sg);
 }
+
+const everywhere = (line: string): OnsiteProbe[] =>
+  ["Singapore", "Remote", "London, United Kingdom"].map((location) => ({ line, location }));
+
+/**
+ * Review round 4 (N1-N4): never on-site in any path, including stored REMOTE
+ * and a Remote or London location. N1 lines describe things, N4 lines other
+ * staff; N2 is partial attendance; N3 a temporary project phase.
+ */
+export const ROUND_4_NOT_ONSITE: readonly OnsiteProbe[] = [
+  // N1
+  ...[
+    "Parking is located on-site.",
+    "Our data centre is located onsite.",
+    "The lab equipment is located onsite.",
+    "Backups are stored offsite; the primary database is located on-site.",
+    "Our solution is deployed and located on-site at customer premises.",
+    "Our platform works on-site and in the cloud.",
+    "The software works onsite or in the cloud.",
+    "Our servers are located on-site and backed up daily.",
+  ].flatMap(everywhere),
+  // N2
+  sg("On-site 60% of the time."),
+  sg("On-site 50% of the time."),
+  sg("On-site 3 out of 5 days."),
+  sg("On-site half the week."),
+  // N3
+  sg("Be on-site daily during the go-live period."),
+  sg("You will be on-site daily for the duration of the audit."),
+  sg("Be on-site for go-live support daily during cutover."),
+  sg("You will be on-site daily during the implementation phase."),
+  sg("Expect to be on-site every day during hypercare."),
+  // N4
+  sg("Our nurses work on-site every day, while this analytics role is flexible."),
+  sg("The data team supports clinicians who work on-site 5 days a week."),
+  sg("Members of our operations team work onsite daily."),
+  sg("Field engineers work onsite daily at client sites across the region."),
+  sg("Experience managing work on-site at manufacturing plants."),
+];
+
+/**
+ * Review round 4 (negation scope and the posting-wide skip): affirmative
+ * on-site statements that main rejects. Expected HARD_REJECT through
+ * enrich-then-gate and with stored UNKNOWN / ASSUMED_HYBRID (Singapore).
+ */
+export const ROUND_4_ONSITE: readonly string[] = [
+  "This role is on-site and not eligible for remote work.",
+  "No hybrid, no remote: this role is on-site.",
+  "You will work on-site 5 days a week, no exceptions.",
+  "This role is on-site at our Singapore office, five days a week, with no flexibility.",
+  "Location: On-site (no remote option)",
+  "Full-time · On-site · No visa sponsorship",
+  "This position is onsite in Singapore and is not eligible for visa sponsorship.",
+  "This role is on-site in Singapore with no relocation support.",
+  "This is an on-site role and you will not be eligible for relocation.",
+  "This role is on-site so you can collaborate closely with the team.",
+  "This role is on-site and cannot be done remotely.",
+  "You must be on-site; WFH is not available.",
+  "This is a full-time on-site role in Singapore. We welcome everyone, whether they work on-site, hybrid or remotely.",
+  "You must be on-site.\nOur company was founded as a remote-first startup in 2015.",
+  "Not a remote role. This is an on-site role.",
+  "This is not a remote role. You must be on-site.",
+  "Remote work is not offered. This is an on-site role.",
+  "This is an on-site role.\nExperience building remote patient monitoring systems.",
+  "This is an on-site role; no remote work.",
+  "This is an on-site role. No remote work.",
+  "On-site only, not hybrid.",
+  "No hybrid — fully on-site.",
+  "100% on-site.",
+  "Fully on-site, no remote.",
+  "On-premises only, no remote work.",
+];
+
+/** Enrichment of a 4+ day statement with a remote day stores the on-site days. */
+export const ROUND_4_OFFICE_DAYS: ReadonlyArray<readonly [string, number]> = [
+  ["On-site 4 days a week, 1 day WFH.", 4],
+  ["On-site, 4 days a week with 1 day remote.", 4],
+];
+
+/**
+ * Known false accepts (non-blocking): genuine on-site postings the rules do not
+ * reject; they stay PASS or NEEDS_VERIFICATION, never a wrongful reject. A
+ * company fact naming remote/hybrid teams still counts as the posting offering
+ * those modes, and the remaining forms are not read.
+ */
+export const KNOWN_FALSE_ACCEPTS: readonly OnsiteProbe[] = [
+  sg("This is an on-site role.\nWe are an equal opportunity employer. Our remote and hybrid teams thrive together."),
+  sg("This role is on site in Singapore."),
+  sg("Location: On site"),
+  sg("In-office 5 days a week."),
+  sg("WFO 5 days a week."),
+  sg("On-site Monday to Friday."),
+  sg("The role will be office-based in Singapore."),
+];
