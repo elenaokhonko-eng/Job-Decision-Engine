@@ -70,12 +70,18 @@ describe("configPaths", () => {
     expect(() => resolveConfigRoot()).toThrow(/JDEC_CONFIG_DIR/);
   });
 
-  it("finds config by walking up from the working directory", () => {
-    const root = makeConfigRoot(tempRoot);
+  it("still resolves configuration after the working directory changes", () => {
+    // The packaged app is launched from an arbitrary directory, so resolution
+    // must not depend on the working directory.
     const nested = path.join(tempRoot, "some", "deep", "working", "dir");
     fs.mkdirSync(nested, { recursive: true });
-    process.chdir(nested);
+    const before = resolveConfigRoot();
 
-    expect(resolveConfigRoot()).toBe(path.resolve(root));
+    process.chdir(nested);
+    resetConfigRootCache();
+
+    const after = resolveConfigRoot();
+    expect(fs.existsSync(path.join(after, "lanes", "registry.yml"))).toBe(true);
+    expect(after).toBe(before);
   });
 });

@@ -64,20 +64,34 @@ let cachedRoot: string | null = null;
 export function resolveConfigRoot(): string {
   if (cachedRoot) return cachedRoot;
 
+  // An explicit override is authoritative: if the user pointed us at a
+  // directory that is not a config root, fail instead of quietly loading some
+  // other configuration. Silently ignoring it would mean edits to their own
+  // lanes appear to have no effect.
   const override = (process.env[CONFIG_DIR_ENV] || "").trim();
+  if (override) {
+    const resolved = path.resolve(override);
+    if (!looksLikeConfigRoot(resolved)) {
+      throw new Error(
+        `${CONFIG_DIR_ENV} is set to "${override}" but ${path.join(resolved, PROBE)} was not found.`
+      );
+    }
+    cachedRoot = resolved;
+    return cachedRoot;
+  }
+
   const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
 
-  // Ordered like `resolveMigrationsDir`: an explicit override wins, then the
-  // packaged locations, then running from source. The probe check means a
-  // stray directory named `config` is never mistaken for the real one.
+  // Ordered like `resolveMigrationsDir`: packaged locations first, then running
+  // from source. The probe check means a stray directory named `config` is never
+  // mistaken for the real one.
   const candidates = [
-    override ? path.resolve(override) : null,
     resourcesPath ? path.join(resourcesPath, "config") : null,
     resourcesPath ? path.join(resourcesPath, "app.asar", "config") : null,
-    path.resolve(process.cwd(), "config"),
     path.resolve(__dirname, "../../config"),
     path.resolve(__dirname, "../config"),
     walkUpForConfigRoot(__dirname),
+    path.resolve(process.cwd(), "config"),
     walkUpForConfigRoot(process.cwd()),
   ].filter((p): p is string => typeof p === "string" && p.length > 0);
 
@@ -86,14 +100,6 @@ export function resolveConfigRoot(): string {
       cachedRoot = candidate;
       return cachedRoot;
     }
-  }
-
-  // A set-but-wrong override is a configuration error worth naming precisely,
-  // rather than reporting the whole candidate list.
-  if (override) {
-    throw new Error(
-      `${CONFIG_DIR_ENV} is set to "${override}" but ${path.join(path.resolve(override), PROBE)} was not found.`
-    );
   }
 
   throw new Error(`Configuration directory not found in candidates: ${candidates.join(", ")}`);
