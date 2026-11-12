@@ -52,8 +52,10 @@ function patterns(singaporeForms: boolean): RegExp[] {
     ...SEPARATOR_VALUE_SOURCES,
     // "This role is on-site", "work on-site at", "based onsite in", "located on-site"
     String.raw`\b(?:role|position|job|work|working|works|presence|based|located)\s+(?:(?:is|are)\s+)?${TOKEN}\b${NOUN_MODIFIER}${partial}`,
-    // 4+ days is on-site: "You'll be on-site with clients 4 days a week", "on-site daily"
-    String.raw`\b${TOKEN}\b${NOUN_MODIFIER}[^\n.]{0,40}?\b(?:[45][ \t]*(?:-[ \t]*5[ \t]*)?(?:days?|x)\b|daily\b|every[ \t]+(?:work[ \t]*)?day\b)`,
+    // 4+ days is on-site: "You'll be on-site with clients 4 days a week",
+    // "work on-site daily". Only a direct statement about the worker; a hedge
+    // ("positions may require onsite attendance 5 days per week") is not one.
+    String.raw`(?<!\b(?:may|might|can|could)\s+)\b(?:be|work|working|works|based|located)\s+(?:(?:is|are)\s+)?${TOKEN}\b${NOUN_MODIFIER}[^\n.]{0,40}?\b(?:[45][ \t]*(?:-[ \t]*5[ \t]*)?(?:days?|x)\b|daily\b|every[ \t]+(?:work[ \t]*)?day\b)`,
   ].map((source) => new RegExp(source, "i"));
   if (!singaporeForms) return base;
   const singaporeOnly = [
