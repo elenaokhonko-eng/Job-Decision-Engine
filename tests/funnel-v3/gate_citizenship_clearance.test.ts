@@ -1,8 +1,18 @@
 /**
- * Government citizenship and security-clearance requirements (gate-2026-11.2).
+ * Government citizenship, security-clearance and "US-based" conditions (gate-2026-11.2).
  *
  * Synthetic postings only: employer names are invented and descriptions model the
  * shape of real postings. The authorized region is Singapore (config default).
+ *
+ * Rules under test:
+ * - A clearance or citizenship condition takes its government from its own clause
+ *   (sentence or list item). Nearby text never makes it U.S.; a clause naming no
+ *   government is U.S. only when the job itself is located in the US.
+ * - A "US-based" placement applies only to a job not located in another territory, must
+ *   be addressed to the applicant, and is cancelled by an applicant-addressed opening to
+ *   Singapore/SEA/APAC/Asia/worldwide anywhere in the posting.
+ * - A remote job located only in the US is a location mismatch unless the posting opens
+ *   the role to applicants beyond the US.
  */
 import { describe, expect, it } from "vitest";
 import { applyGlobalGates } from "../../src/services/criteria.js";
@@ -19,21 +29,50 @@ import { TERRITORY_FIXTURES, type GatePolicyFixture } from "./fixtures/g_gate_po
 
 const policy = loadWorkabilityPolicy();
 const DUTIES = "Design Salesforce data models and integrations for a health records modernization program.";
+const BODY = "Build data pipelines in Python and Spark. This is a remote position.";
 
-function status(text: string) {
-  return evaluateWorkerTerritoryRequirements(extractExplicitWorkerTerritoryRequirements(text), ["SINGAPORE"]).status;
+/** Extraction plus evaluation for a job at `location` (default: location "Remote"). */
+function status(text: string, location = "Remote") {
+  const requirements = extractExplicitWorkerTerritoryRequirements(text.toLowerCase(), {
+    jobLocation: location.toLowerCase(),
+    authorizedRegions: ["SINGAPORE"],
+  });
+  return evaluateWorkerTerritoryRequirements(requirements, ["SINGAPORE"]).status;
 }
 
-function gate(location: string, workplaceType: string, description: string) {
-  return applyGlobalGates({
-    id: "synthetic",
-    title: "Solutions Architect",
-    company_name: "Synthetic Federal Systems",
-    location,
-    workplace_type: workplaceType,
-    employment_type: "PERMANENT",
-    raw_description: description,
-  } as any, policy);
+/** The full hard gate, as runHardGates and the replay use it. */
+function fullGate(location: string, workplaceType: string, description: string) {
+  return evaluateHardGatesForJob({
+    job: {
+      title: "Data Platform Engineer",
+      company_name: "Synthetic Cloud Works",
+      description,
+      location,
+      workplace_type: workplaceType,
+      employment_type: "PERMANENT",
+      compensation_raw: null,
+    },
+    requirements: [],
+    profileFacts: [],
+    policy,
+    stage3Preferences: {},
+    territoryScope: remoteTerritoryScopeForPolicy(policy),
+  });
+}
+
+function expectWorkAuthReject(location: string, workplaceType: string, description: string) {
+  const result = fullGate(location, workplaceType, description);
+  expect(result.status, JSON.stringify(result.rejection_codes)).toBe("HARD_REJECT");
+  expect(result.rejection_codes).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+  expect(result.workability_facts.location_restriction).toBe("UNITED_STATES");
+  return result;
+}
+
+function expectNoWorkAuthReject(location: string, workplaceType: string, description: string) {
+  const result = fullGate(location, workplaceType, description);
+  expect(result.status, JSON.stringify({ codes: result.rejection_codes, evidence: result.evidence_quotes })).not.toBe("HARD_REJECT");
+  expect(result.rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+  return result;
 }
 
 /** The shape of the reported posting: HTML list items, the "U." lost from "U.S.". */
@@ -56,7 +95,7 @@ describe("explicit foreign citizenship requirements", () => {
     "Applicants must be a U.S. person as defined by ITAR.",
     "Due to U.S. export control regulations, applicants must be U.S. citizens.",
   ])("rejects %s", (text) => {
-    expect(status(text.toLowerCase())).toBe("INCOMPATIBLE");
+    expect(status(text)).toBe("INCOMPATIBLE");
   });
 
   it("reads a truncated 'S. Citizenship required' as U.S. only with U.S. federal context nearby", () => {
@@ -65,28 +104,38 @@ describe("explicit foreign citizenship requirements", () => {
     expect(status("S. Citizenship required.")).toBe("ALLOWED");
     expect(status("Build dashboards for retail clients.\nS. Citizenship required.")).toBe("ALLOWED");
     expect(status("Supports federal health programs.\nS. Citizenship preferred.")).toBe("ALLOWED");
+    expect(status("Supports federal health programs.\nS. Citizenship required.", "Singapore")).toBe("ALLOWED");
   });
 
   it("quotes the truncated line and its U.S. context as evidence", () => {
-    const [requirement] = extractGovernmentEligibilityRequirements("Supports federal health programs.\nS. Citizenship required.");
+    const [requirement] = extractGovernmentEligibilityRequirements("Supports federal health programs.\nS. Citizenship required.", { jobLocation: "Remote" });
     expect(requirement?.territories).toEqual(["UNITED_STATES"]);
     expect(requirement?.evidenceText).toMatch(/^S\. Citizenship required\..*federal health programs/);
   });
 });
 
-describe("government security clearance requirements", () => {
+describe("clearances take their government from their own clause", () => {
   it.each([
     ["Must be able to obtain and maintain any required federal background investigation or VA clearance.", "UNITED_STATES"],
     ["Ability to obtain and maintain a Public Trust clearance.", "UNITED_STATES"],
     ["Active TS/SCI clearance with polygraph required.", "UNITED_STATES"],
     ["Active DoD Secret security clearance.", "UNITED_STATES"],
-    ["Must hold an active Secret clearance.\nSupports Department of Defense mission systems.", "UNITED_STATES"],
+    ["Must hold an active U.S. Government security clearance.", "UNITED_STATES"],
+    ["Clearance: TS/SCI with Polygraph", "UNITED_STATES"],
     ["Must hold current SC clearance.", "UNITED_KINGDOM"],
     ["Must hold NV1 security clearance.", "AUSTRALIA"],
   ])("rejects %s as a %s government requirement", (text, government) => {
-    const requirements = extractGovernmentEligibilityRequirements(text.toLowerCase());
+    const requirements = extractGovernmentEligibilityRequirements(text.toLowerCase(), { jobLocation: "remote" });
     expect(requirements.map((r) => r.territories[0])).toContain(government);
-    expect(status(text.toLowerCase())).toBe("INCOMPATIBLE");
+    expect(status(text)).toBe("INCOMPATIBLE");
+  });
+
+  it("reads a clearance that names no government as U.S. only on a US-located job", () => {
+    const text = "Must hold an active Secret clearance.\nSupports Department of Defense mission systems.";
+    expect(status(text, "Remote, United States")).toBe("INCOMPATIBLE");
+    expect(status(text, "Austin, TX")).toBe("INCOMPATIBLE");
+    expect(status(text, "Remote")).toBe("ALLOWED");
+    expect(status(text, "Singapore")).toBe("ALLOWED");
   });
 
   it.each([
@@ -98,161 +147,89 @@ describe("government security clearance requirements", () => {
     "A pre-employment background check is required.",
     "Individual salaries are determined by factors such as location, client contract requirements, education, experience and security clearances. Supports federal clients.",
     "As a condition of employment, candidates may be required to provide information to determine whether any export license, governmental authorization, security clearance or other approval is required.",
+    "Must hold an active security clearance (Singapore or U.S.).",
+    "Must hold an active security clearance with the U.S. Navy or Republic of Singapore Navy.",
   ])("does not reject %s", (text) => {
-    expect(status(text.toLowerCase())).toBe("ALLOWED");
+    expect(status(text)).toBe("ALLOWED");
   });
 });
 
-describe("review probes (#178): wording that is not a U.S. clearance or placement", () => {
-  const SG_REGULATOR = "Synthetic Monetary Regulator";
-  function singaporeGate(description: string) {
-    return applyGlobalGates({
-      id: "probe",
-      title: "Data Governance Officer",
-      company_name: SG_REGULATOR,
-      location: "Singapore (Hybrid)",
-      workplace_type: "HYBRID",
-      employment_type: "PERMANENT",
-      raw_description: description,
-    } as any, policy);
-  }
-
-  it("does not read a bare 'public trust' value as a U.S. Public Trust clearance", () => {
-    const text = "Officers must maintain public trust and uphold the integrity of the regulator. Build data quality checks in Python. Hybrid, 2 days a week in the office.";
-    expect(status(text.toLowerCase())).toBe("ALLOWED");
-    expect(singaporeGate(text).rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+describe("round-4 blocking 1: a bare clearance on a Singapore job is never U.S. from context", () => {
+  it.each([
+    ["Singapore", "HYBRID", "Successful candidates must be able to pass security clearance. You will deliver digital services for government agencies."],
+    ["Singapore", "HYBRID", "Must be able to obtain security clearance. This role supports government agencies."],
+    ["Singapore", "HYBRID", "Must be able to obtain security clearance. You will work on government contracts for public-sector clients."],
+    ["Singapore", "HYBRID", "Must be eligible for security clearance. The role supports federal agencies and ministries."],
+    ["Singapore (Remote)", "REMOTE", "Must hold an active security clearance. Our clients are federal agencies in the region."],
+    ["Singapore", "HYBRID", "Experience with U.S. GAAP and IFRS reporting. Must hold an active security clearance."],
+    ["Singapore", "HYBRID", "Must hold a current security clearance. You will support our US-based clients."],
+    ["Singapore", "HYBRID", "Must be able to obtain a security clearance. Coverage of USA equities and fixed income."],
+    ["Singapore", "HYBRID", "Experience with United States FDA submissions. Must hold current clearance to access restricted areas."],
+    ["Singapore", "HYBRID", "Must hold an active security clearance. You will brief U.S. and allied partners."],
+    ["Singapore", "HYBRID", "Must hold an active security clearance. Prior experience with the US Army Corps of Engineers is a plus."],
+    ["Singapore (Remote)", "REMOTE", "Must hold an active security clearance. You will support Navy programmes."],
+    ["Singapore", "HYBRID", "Must hold an active security clearance. Experience with VA systems is an advantage."],
+    ["Singapore", "HYBRID", "Officers must maintain public trust and uphold the integrity of the regulator."],
+  ])("%s / %s: %s", (location, workplaceType, text) => {
+    expectNoWorkAuthReject(location, workplaceType, `Build data quality checks in Python. Hybrid, 2 days a week in the office. ${text}`);
   });
 
-  it("still reads Public Trust as a clearance with clearance wording or U.S. federal context", () => {
-    expect(status("must obtain a public trust clearance.")).toBe("INCOMPATIBLE");
-    expect(status("this is a public trust position.\nmust pass the required public trust background investigation.")).toBe("INCOMPATIBLE");
-    expect(status("supports a federal agency modernization program.\nmust be able to obtain and maintain public trust.")).toBe("INCOMPATIBLE");
-  });
-
-  it("does not treat a non-country '-based role' as a placement", () => {
-    const text = "This cloud-based role supports clients across Japan. Build data pipelines in Python. Hybrid, 2 days a week in the office.";
-    expect(status(text.toLowerCase())).toBe("ALLOWED");
-    expect(singaporeGate(text).rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
-    expect(status("this web-based position serves customers in germany.")).toBe("ALLOWED");
-  });
-
-  it("treats US-, United States- and US-state-based roles or candidates as U.S. placements", () => {
-    expect(status("this is a remote, us-based role.")).toBe("INCOMPATIBLE");
-    expect(status("this is a united states-based position.")).toBe("INCOMPATIBLE");
-    expect(status("we are hiring california-based candidates for this role.")).toBe("INCOMPATIBLE");
-  });
-
-  it("does not take a bare 'security clearance' as U.S. from EEO, benefits or legal boilerplate", () => {
+  it("does not take a bare clearance as U.S. from EEO, benefits or legal boilerplate on a Remote job", () => {
     const text = [
       "Active security clearance required.",
       "Build data pipelines in Python.",
       "We are an equal opportunity employer in the United States. All qualified applicants receive consideration without regard to race, religion, national origin, disability or protected veteran status, as protected by federal, state or local law.",
       "We offer competitive benefits, including 401(k) and health insurance, to employees in the USA.",
     ].join("\n");
-    expect(status(text.toLowerCase())).toBe("ALLOWED");
-  });
-
-  it("reads a bare 'security clearance' as U.S. with federal or defence context in its section", () => {
-    expect(status("this role supports a government contract for a federal agency.\nactive security clearance required.")).toBe("INCOMPATIBLE");
-    expect(status("you will support dod mission systems.\nmust hold an active security clearance.")).toBe("INCOMPATIBLE");
+    expect(status(text)).toBe("ALLOWED");
   });
 });
 
-describe("review probes (#178 re-check): alternatives and non-U.S. military wording", () => {
-  function singaporeRemoteGate(description: string) {
-    return applyGlobalGates({
-      id: "probe-2",
-      title: "Machine Learning Engineer",
-      company_name: "Synthetic Defence Analytics",
-      location: "Singapore (Remote)",
-      workplace_type: "REMOTE",
-      employment_type: "PERMANENT",
-      raw_description: description,
-    } as any, policy);
-  }
-
+describe("round-4 blocking 2: US-based wording", () => {
   it.each([
-    "This role is open to US-based candidates or candidates in Singapore.",
-    "This role is open to US-based candidates as well as those in APAC.",
-    "We welcome US-based or Singapore-based applicants for this role.",
-    "We are hiring US-based candidates and candidates across Southeast Asia for this position.",
-    "This role is open to US-based candidates and talent anywhere in Asia.",
-    "We consider US-based candidates as well as candidates worldwide.",
-  ])("does not reject a US-based clause that also opens the role to Singapore/APAC/Asia/worldwide: %s", (text) => {
-    expect(status(text.toLowerCase())).toBe("ALLOWED");
-    const result = singaporeRemoteGate(`Build ML pipelines in Python. ${text}`);
-    expect(result.status, JSON.stringify(result.rejection_codes)).not.toBe("HARD_REJECT");
-  });
-
-  it("keeps a US-based clause whose alternatives exclude Singapore a restriction", () => {
-    expect(status("we are hiring us-based or canada-based candidates for this role.")).toBe("INCOMPATIBLE");
-    expect(status("this is a remote, us-based role.")).toBe("INCOMPATIBLE");
+    ["Remote", "REMOTE", "This is a remote, US-based role. Candidates in Singapore are also welcome."],
+    ["Remote", "REMOTE", "Open to US-based candidates; Singapore candidates are also considered."],
+    ["Remote", "REMOTE", "<ul><li>US-based candidates</li><li>Singapore-based candidates</li></ul>"],
+    ["Remote", "REMOTE", "Open to US-based candidates or those in Southeast Asian markets."],
+    ["Singapore", "HYBRID", "This role is not open to US-based candidates. It is based in our Singapore office."],
+    ["Singapore", "HYBRID", "US-based candidates preferred."],
+    ["Singapore", "HYBRID", "You will coordinate US-based consultants and vendors."],
+    ["Singapore", "HYBRID", "You will onboard US-based hires and support the global people team."],
+    ["Singapore", "HYBRID", "As a recruiter, you will source US-based talent for our clients."],
+    ["Singapore", "HYBRID", "This is a remote, US-based role."],
+    ["Remote", "REMOTE", "This role is open to US-based candidates or candidates in Singapore."],
+    ["Remote", "REMOTE", "This role is open to US-based candidates as well as those in APAC."],
+    ["Remote", "REMOTE", "We welcome US-based or Singapore-based applicants for this role."],
+    ["Remote", "REMOTE", "This role is open to US-based candidates and talent anywhere in Asia."],
+    ["Remote", "REMOTE", "We consider US-based candidates as well as candidates worldwide."],
+    ["Singapore", "HYBRID", "This cloud-based role supports clients across Japan."],
+  ])("%s / %s: %s", (location, workplaceType, text) => {
+    expectNoWorkAuthReject(location, workplaceType, `Build ML pipelines in Python. Hybrid, 2 days a week in the office. ${text}`);
   });
 
   it.each([
-    "Must hold an active security clearance.\nYou will support Navy programmes.",
-    "Must hold an active security clearance.\nYou will support Army and Air Force logistics programmes.",
-    "Must hold an active security clearance.\nExperience with VA systems is an advantage.",
-  ])("does not read bare military or VA words as a U.S. clearance: %s", (text) => {
-    expect(status(text.toLowerCase())).toBe("ALLOWED");
-    const result = singaporeRemoteGate(`Build ML pipelines in Python. ${text}`);
-    expect(result.rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
-  });
-
-  it.each([
-    "Must hold an active security clearance.\nYou will support U.S. Navy programmes.",
-    "Must hold an active security clearance.\nYou will support Department of the Navy programmes.",
-    "Must hold an active security clearance.\nThis role supports the Department of Veterans Affairs.",
-    "Must hold an active security clearance.\nThis role supports United States defence customers.",
-    "Must hold an active VA clearance.",
-  ])("still reads a clearance as U.S. with an explicit U.S. marker: %s", (text) => {
-    expect(status(text.toLowerCase())).toBe("INCOMPATIBLE");
-  });
-});
-
-describe("US-based remote roles", () => {
-  it("treats a remote, US-based role as a worker-territory restriction", () => {
-    expect(status("this is a remote, us-based role.")).toBe("INCOMPATIBLE");
-    expect(status("we are hiring us-based candidates only.")).toBe("INCOMPATIBLE");
+    "This is a remote, US-based role.",
+    "This is a U.S.-based remote role.",
+    "This is a United States-based position.",
+    "We are hiring California-based candidates for this role.",
+    "We are hiring US-based or Canada-based candidates for this role.",
+    "This is a US based remote role.",
+    "This role is US-based.",
+    "We are hiring a U.S.-based data engineer.",
+    "We are hiring US-based candidates only.",
+  ])("rejects an applicant-addressed US placement on a Remote job: %s", (text) => {
+    expectWorkAuthReject("Remote", "REMOTE", `${BODY} ${text}`);
   });
 
   it("does not treat employer, pay or benefit mentions of US-based as a restriction", () => {
-    expect(status("we are a us-based company with clients worldwide.")).toBe("ALLOWED");
-    expect(status("we provide u.s.-based employees with a comprehensive benefits package.")).toBe("ALLOWED");
-    expect(status("for this us-based position, the base pay range is $100,000 to $120,000.")).toBe("ALLOWED");
+    expect(status("We are a US-based company with clients worldwide.")).toBe("ALLOWED");
+    expect(status("We provide U.S.-based employees with a comprehensive benefits package.")).toBe("ALLOWED");
+    expect(status("For this US-based position, the base pay range is $100,000 to $120,000.")).toBe("ALLOWED");
+    expect(status("Join us based on your experience.")).toBe("ALLOWED");
   });
-
-  it.each(["United States (Remote)", "Remote - US", "Remote, United States"])(
-    "rejects a remote job located in the US (%s) as a location mismatch when no Singapore/APAC eligibility is stated",
-    (location) => {
-      const result = gate(location, "REMOTE", `${DUTIES} Fully remote role.`);
-      expect(result.status).toBe("HARD_REJECT");
-      expect(result.rejection_codes).toContain("GATE_JOB_LOCATION_MISMATCH");
-    },
-  );
 });
 
-describe("remote jobs located in the United States", () => {
-  function fullGate(location: string, description: string, workplaceType = "REMOTE") {
-    return evaluateHardGatesForJob({
-      job: {
-        title: "Data Platform Engineer",
-        company_name: "Synthetic Cloud Works",
-        description,
-        location,
-        workplace_type: workplaceType,
-        employment_type: "PERMANENT",
-        compensation_raw: null,
-      },
-      requirements: [],
-      profileFacts: [],
-      policy,
-      stage3Preferences: {},
-      territoryScope: remoteTerritoryScopeForPolicy(policy),
-    });
-  }
-  const BODY = "Build data pipelines in Python and Spark. This is a remote position.";
-
+describe("remote jobs located only in the United States", () => {
   it.each([
     ["United States", BODY],
     ["Remote (US)", BODY],
@@ -262,12 +239,23 @@ describe("remote jobs located in the United States", () => {
     ["Texas, United States", BODY],
     ["Austin, TX", BODY],
     ["Denver, CO (Remote)", BODY],
+    ["United States (Remote)", BODY],
+    ["Remote, United States", BODY],
     ["United States", `${BODY} You can work from anywhere in the US.`],
-  ])("rejects %s with a remote flag as GATE_JOB_LOCATION_MISMATCH", (location, description) => {
-    const result = fullGate(location, description);
+    ["Remote, United States", `${BODY} Work from anywhere in the U.S.`],
+    // Round-4 non-blocking: incidental wording does not open the role.
+    ["Remote, United States", `${BODY} We are a worldwide leader in payments.`],
+    ["Remote, United States", `${BODY} We serve clients in Asia and Europe.`],
+    ["Remote, United States", `${BODY} Our APAC team is based in Tokyo.`],
+    ["Remote, United States", `${BODY} Work from anywhere within the continental US.`],
+    ["Remote, United States", `${BODY} Work from anywhere in America.`],
+    ["Remote, United States", `${BODY} Work from anywhere in the lower 48 states.`],
+    ["Austin, TX", `${BODY} Our team spans North America and Asia.`],
+    ["Remote, United States", `${BODY} This role is not open to candidates in Singapore.`],
+  ])("rejects %s with a remote flag as GATE_JOB_LOCATION_MISMATCH (%s)", (location, description) => {
+    const result = fullGate(location, "REMOTE", description);
     expect(result.status).toBe("HARD_REJECT");
     expect(result.rejection_codes).toContain("GATE_JOB_LOCATION_MISMATCH");
-    expect(result.rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
     expect(result.workability_facts.location_restriction).toBe("UNITED_STATES");
   });
 
@@ -277,21 +265,27 @@ describe("remote jobs located in the United States", () => {
     ["California", `${BODY} We are open to candidates worldwide.`],
     ["Remote (US)", `${BODY} Candidates in Singapore are also welcome.`],
     ["United States", `${BODY} We are hiring across APAC.`],
-    ["Austin, TX", `${BODY} Our team spans North America and Asia.`],
-  ])("passes %s when the posting opens remote work wider (%s)", (location, description) => {
-    const result = fullGate(location, description);
+    ["Remote, United States", `${BODY} This role is open internationally.`],
+    // Multi-sentence, semicolon and list openings: the whole description is read.
+    ["Remote, United States", `${BODY}\nThis is a remote, US-based role.\nCandidates in Singapore are also welcome.`],
+    ["Remote, United States", `${BODY} Open to US-based candidates; Singapore candidates are also considered.`],
+    ["Remote, United States", `${BODY}<ul><li>US-based candidates</li><li>Singapore-based candidates</li></ul>`],
+    ["Remote, United States", `${BODY} Open to US-based candidates or those in Southeast Asian markets.`],
+    ["Remote, United States", `${BODY} Location: Remote - US, Canada, UK, Southeast Asia, and broader APAC.`],
+  ])("passes %s when the posting opens the role to applicants beyond the US (%s)", (location, description) => {
+    const result = fullGate(location, "REMOTE", description);
     expect(result.status, JSON.stringify(result.rejection_codes)).not.toBe("HARD_REJECT");
     expect(result.rejection_codes).not.toContain("GATE_JOB_LOCATION_MISMATCH");
   });
 
   it("passes a US-headquartered company hiring in Singapore", () => {
-    const result = fullGate("Singapore", "We are a company headquartered in San Francisco, California. Build data pipelines in Python. This is a remote position.");
+    const result = fullGate("Singapore", "REMOTE", "We are a company headquartered in San Francisco, California. Build data pipelines in Python. This is a remote position.");
     expect(result.status).toBe("PASS");
   });
 
   it("leaves bare 'Remote' and non-remote US locations to the existing rules", () => {
-    expect(fullGate("Remote", BODY).status).toBe("PASS");
-    expect(fullGate("Austin, TX", "Build data pipelines in Python. Hybrid, 2 days a week in the office.", "HYBRID").rejection_codes)
+    expect(fullGate("Remote", "REMOTE", BODY).status).toBe("PASS");
+    expect(fullGate("Austin, TX", "HYBRID", "Build data pipelines in Python. Hybrid, 2 days a week in the office.").rejection_codes)
       .not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
   });
 
@@ -307,35 +301,46 @@ describe("remote jobs located in the United States", () => {
   });
 });
 
+describe("genuine US-only wordings stay rejected (review positives)", () => {
+  it.each([
+    "US Citizens only.",
+    "Only U.S. citizens will be considered.",
+    "Citizenship: U.S. citizen.",
+    "Must be a U.S citizen",
+    "Green card holders or US citizens only.",
+    "This position requires U.S. citizenship due to federal contract requirements.",
+    "Requires an active U.S. Government security clearance.",
+    "Must be eligible to obtain a U.S. government security clearance.",
+    "Must be able to obtain a Public Trust clearance.",
+    "This is a U.S.-based remote role.",
+  ])("Remote job: %s", (text) => {
+    expectWorkAuthReject("Remote", "REMOTE", `${BODY} ${text}`);
+  });
+
+  it("rejects a bare clearance with Department of Defense customers on a US-located job", () => {
+    expectWorkAuthReject("Remote, United States", "REMOTE", `${BODY} Must hold an active security clearance. Support Department of Defense customers.`);
+  });
+
+  it("rejects 'Work from anywhere in the U.S.' on a US remote location as a location mismatch", () => {
+    const result = fullGate("Remote, United States", "REMOTE", `${BODY} Work from anywhere in the U.S.`);
+    expect(result.rejection_codes).toContain("GATE_JOB_LOCATION_MISMATCH");
+  });
+
+  it("passes the control: a Singapore job partnering with U.S. and European stakeholders", () => {
+    expect(fullGate("Singapore", "HYBRID", "Build data pipelines. Hybrid, 2 days a week in the office. Partner with stakeholders in the U.S. and Europe.").status).toBe("PASS");
+  });
+});
+
 describe("end to end through the hard gate", () => {
   it("hard-rejects the truncated-citizenship federal posting with quoted evidence", () => {
-    const result = evaluateHardGatesForJob({
-      job: {
-        title: "Salesforce Solutions Architect",
-        company_name: "Synthetic Federal Systems",
-        description: TRUNCATED_US_POSTING,
-        location: "Remote",
-        workplace_type: "REMOTE",
-        employment_type: "CONTRACT",
-        compensation_raw: null,
-      },
-      requirements: [],
-      profileFacts: [],
-      policy,
-      stage3Preferences: {},
-      territoryScope: remoteTerritoryScopeForPolicy(policy),
-    });
-    expect(result.status).toBe("HARD_REJECT");
-    expect(result.rejection_codes).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
-    expect(result.workability_facts.location_restriction).toBe("UNITED_STATES");
+    const result = expectWorkAuthReject("Remote", "REMOTE", TRUNCATED_US_POSTING);
     const evidence = result.evidence_quotes.join(" ");
     expect(evidence).toMatch(/s\. citizenship required/i);
     expect(evidence).toMatch(/federal background investigation or va clearance/i);
   });
 
   it("still passes the same posting when the security section is absent", () => {
-    const result = gate("Remote", "REMOTE", `<h3>Remote</h3><p>${DUTIES}</p>`);
-    expect(result.status).toBe("PASS");
+    expect(fullGate("Remote", "REMOTE", `<h3>Remote</h3><p>${DUTIES}</p>`).status).toBe("PASS");
   });
 
   it("bumps the gate version so stored decisions are re-gated", () => {
@@ -359,9 +364,9 @@ describe("#173 territory false positives stay fixed", () => {
   });
 
   it("keeps Southeast Asia/APAC lists, HQ mentions and ITAR licence conditions allowed", () => {
-    expect(status("candidates must be based in southeast asia.")).toBe("ALLOWED");
-    expect(status("remote - us, canada, uk, southeast asia, and broader apac.")).not.toBe("INCOMPATIBLE");
-    expect(status("fully remote role. the company is headquartered in california and serves us clients.")).toBe("ALLOWED");
-    expect(status("this role involves itar/ear controlled technical data and requires an export licence where applicable.")).toBe("ALLOWED");
+    expect(status("Candidates must be based in Southeast Asia.")).toBe("ALLOWED");
+    expect(status("Remote - US, Canada, UK, Southeast Asia, and broader APAC.")).not.toBe("INCOMPATIBLE");
+    expect(status("Fully remote role. The company is headquartered in California and serves US clients.")).toBe("ALLOWED");
+    expect(status("This role involves ITAR/EAR controlled technical data and requires an export licence where applicable.")).toBe("ALLOWED");
   });
 });

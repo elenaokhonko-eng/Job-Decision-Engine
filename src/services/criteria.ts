@@ -565,7 +565,10 @@ function evaluateWorkabilityRules(
       ? locationTerritories
       : [];
   const relevantLocationTerritories = isRemote ? remoteLocationTerritories : locationTerritories;
-  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d);
+  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d, {
+    jobLocation: loc,
+    authorizedRegions: [...authorizedRegions],
+  });
   const workerTerritoryEvaluation = evaluateWorkerTerritoryRequirements(
     workerTerritoryRequirements,
     [...authorizedRegions],
@@ -1223,7 +1226,10 @@ export function applyGlobalGates(
       ? locationTerritories
       : [];
   const relevantLocationTerritories = explicitlyRemote ? remoteLocationTerritories : locationTerritories;
-  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d);
+  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d, {
+    jobLocation: String(job.location || ""),
+    authorizedRegions: [...authorizedRegions],
+  });
   const disallowedLocationTerritories = relevantLocationTerritories.filter((territory) =>
     effectivePolicy.rejectExplicitForeignTerritory
     && authorizedRegions.size > 0
