@@ -60,6 +60,18 @@ export const DateEvidenceSchema = z.object({
   raw_value: z.union([z.string(), z.number()]).nullable(),
   timestamp_unit: z.enum(["ISO_STRING", "RFC2822_STRING", "UNIX_SECONDS", "UNIX_MILLISECONDS", "UNKNOWN"]),
   evidence: z.array(JobEvidenceSpanSchema).default([]),
+  /**
+   * Set when the date was converted from relative source text ("2 weeks ago"):
+   * `value` is then the newest possible date and `earliest_value` the oldest
+   * (one `precision` unit earlier). Absent for an authoritative source date.
+   */
+  approximation: z.object({
+    basis: z.literal("RELATIVE_SOURCE_TEXT"),
+    precision: z.enum(["MINUTE", "HOUR", "DAY", "WEEK", "MONTH", "YEAR"]),
+    earliest_value: z.string().datetime(),
+    source_text: z.string().min(1).max(200),
+    anchor_at: z.string().datetime(),
+  }).strict().optional(),
 });
 export type DateEvidence = z.infer<typeof DateEvidenceSchema>;
 

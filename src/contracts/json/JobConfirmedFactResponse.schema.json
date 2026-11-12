@@ -1,0 +1,238 @@
+{
+  "$ref": "#/definitions/JobConfirmedFactResponse",
+  "definitions": {
+    "JobConfirmedFactResponse": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "schema_version": {
+          "type": "string",
+          "const": "job_confirmed_fact_v1"
+        },
+        "fact": {
+          "type": "object",
+          "properties": {
+            "confirmed_fact_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "entry_kind": {
+              "type": "string",
+              "enum": [
+                "CONFIRMATION",
+                "WITHDRAWAL"
+              ]
+            },
+            "fact_type": {
+              "type": "string",
+              "enum": [
+                "WORK_MODE",
+                "OFFICE_DAYS",
+                "TRAVEL_PCT",
+                "ON_CALL",
+                "EMPLOYMENT_TYPE",
+                "LOCATION"
+              ]
+            },
+            "fact_value": {
+              "type": "object",
+              "additionalProperties": {}
+            },
+            "source_type": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "RECRUITER_EMAIL",
+                    "RECRUITER_CALL",
+                    "EMPLOYER_CAREERS_PAGE",
+                    "HIRING_MANAGER",
+                    "OTHER"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "posting_assessment": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "FILLS_UNKNOWN",
+                    "MATCHES_POSTING",
+                    "CONFLICTS_WITH_POSTING"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "posting_evidence": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "UNKNOWN",
+                        "STATED",
+                        "CONFLICTING"
+                      ]
+                    },
+                    "value": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": {}
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "source": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "STRUCTURED_FIELD",
+                            "EXTRACTED_REQUIREMENT",
+                            "DESCRIPTION",
+                            "SOURCE_EVIDENCE"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "evidence": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "summary": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "value",
+                    "source",
+                    "evidence",
+                    "summary"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "supersedes_fact_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "recorded_by_user_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "recorded_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "confirmed_fact_id",
+            "entry_kind",
+            "fact_type",
+            "fact_value",
+            "source_type",
+            "source_note",
+            "source_url",
+            "posting_assessment",
+            "posting_evidence",
+            "supersedes_fact_id",
+            "recorded_by_user_id",
+            "recorded_at"
+          ],
+          "additionalProperties": false
+        },
+        "superseded_fact_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rerun": {
+          "type": "object",
+          "properties": {
+            "task_type": {
+              "type": "string",
+              "const": "APPLY_HARD_GATES"
+            },
+            "task_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "task_key": {
+              "type": "string",
+              "minLength": 1
+            },
+            "inserted": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "task_type",
+            "task_id",
+            "task_key",
+            "inserted"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "ok",
+        "schema_version",
+        "fact",
+        "superseded_fact_id",
+        "rerun"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -8,6 +8,7 @@ import {
 } from "../policy/stage3PolicyEngine.js";
 import { resolveWorkspacePreferenceContext, type ResolvedWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
 import type { WorkspaceContext } from "../workspace/context.js";
+import { isRepostFreshnessBasis } from "../contracts/postingFacts.js";
 import type { Stage3ApplicationPriorityWeights, Stage3WorkPreferences } from "../policy/stage3Contracts.js";
 import {
   calculateRanking,
@@ -629,7 +630,7 @@ export async function materializeApplicationRankings(
         source_updated_at: row.source_updated_at,
         first_seen_at: row.first_seen_at,
         freshness_basis: row.freshness_basis,
-        is_repost: row.freshness_basis === 'REPOSTED_AT',
+        is_repost: isRepostFreshnessBasis(row.freshness_basis),
         posting_identity_is_new: row.freshness_basis === 'NEW_POSTING_ID',
       }, stage3Preferences?.freshness);
       const mobility = evaluateMobilityMatch({

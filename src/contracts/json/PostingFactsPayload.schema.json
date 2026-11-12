@@ -1,0 +1,114 @@
+{
+  "$ref": "#/definitions/PostingFactsPayload",
+  "definitions": {
+    "PostingFactsPayload": {
+      "type": "object",
+      "properties": {
+        "posting_facts_schema": {
+          "type": "string",
+          "const": "posting_facts_v1"
+        },
+        "posted_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reposted_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source_expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "open",
+            "closed"
+          ]
+        },
+        "availability_checked_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "availability_check_method": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "availability_evidence_text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "date_derivations": {
+          "type": "object",
+          "properties": {
+            "posted_at": {
+              "type": "object",
+              "properties": {
+                "basis": {
+                  "type": "string",
+                  "enum": [
+                    "ABSOLUTE_SOURCE_DATE",
+                    "RELATIVE_SOURCE_TEXT"
+                  ]
+                },
+                "precision": {
+                  "type": "string",
+                  "enum": [
+                    "EXACT",
+                    "DAY",
+                    "MINUTE",
+                    "HOUR",
+                    "WEEK",
+                    "MONTH",
+                    "YEAR"
+                  ]
+                },
+                "source_text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "anchor_at": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "basis",
+                "precision",
+                "source_text",
+                "anchor_at"
+              ],
+              "additionalProperties": false
+            },
+            "reposted_at": {
+              "$ref": "#/definitions/PostingFactsPayload/properties/date_derivations/properties/posted_at"
+            },
+            "source_expires_at": {
+              "$ref": "#/definitions/PostingFactsPayload/properties/date_derivations/properties/posted_at"
+            },
+            "publishedAt": {
+              "$ref": "#/definitions/PostingFactsPayload/properties/date_derivations/properties/posted_at"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "posting_facts_schema"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

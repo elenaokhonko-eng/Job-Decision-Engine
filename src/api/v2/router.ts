@@ -41,6 +41,7 @@ import { RejectedJobRowSchema, ShortlistRowV2Schema } from "../../readModels/con
 import { createManualApplicationRouter } from "./manualApplicationRouter.js";
 import { describeDatabaseFailure } from "./databaseFailure.js";
 import { createSavedJobsImportRouter } from "./savedJobsImportRouter.js";
+import { createJobConfirmedFactsRouter } from "./jobConfirmedFactsRouter.js";
 
 type QueryClient = {
   query: pg.PoolClient["query"];
@@ -256,6 +257,14 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
   router.use(
     "/imports",
     createSavedJobsImportRouter({
+      pool: dynamicPool,
+      resolveContext: (req) => (req as any).workspaceContext as WorkspaceContext,
+    }),
+  );
+
+  router.use(
+    "/jobs",
+    createJobConfirmedFactsRouter({
       pool: dynamicPool,
       resolveContext: (req) => (req as any).workspaceContext as WorkspaceContext,
     }),

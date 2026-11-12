@@ -64,6 +64,7 @@ from streamlit_manual_application import (
     render_selected_documents,
 )
 from streamlit_saved_jobs import render_saved_jobs_tab
+from streamlit_job_confirmations import render_employer_confirmation
 from streamlit_runtime import code_version, database_outage, ensure_hosted_api_ready, open_api_json
 
 
@@ -2479,6 +2480,12 @@ with tab_dashboard:
                         verification_action = verification_action_applies(job, workspace_category)
                         if verification_action:
                             st.text(f"Open question: {verification_question_for_job(job)}")
+                        render_employer_confirmation(
+                            job,
+                            api_request,
+                            f"employer_confirmation_{job.get('job_version_id')}",
+                            api_configured=bool(get_api_base_url()),
+                        )
                         artifact_status = job.get("current_artifact_status") or "CURRENTNESS_UNKNOWN"
                         artifact_reason = job.get("current_artifact_reason")
                         blocked_count = job.get("blocked_task_count") or 0
@@ -2703,6 +2710,12 @@ with tab_dashboard:
             open_checks = unresolved_readiness_checks(job_to_show)
             if open_checks:
                 st.text("Checks needing verification:\n" + "\n".join(f"- {line}" for line in open_checks))
+            render_employer_confirmation(
+                job_to_show,
+                api_request,
+                f"detail_employer_confirmation_{job_to_show.get('job_version_id')}",
+                api_configured=bool(get_api_base_url()),
+            )
 
             if verification_action_applies(job_to_show, workspace_category):
                 st.markdown("#### Verify, then apply")

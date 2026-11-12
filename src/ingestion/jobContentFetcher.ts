@@ -7,6 +7,7 @@ import { htmlToPlainText } from "./emailAlertExtractor.js";
 import { isUnknownEmployerName } from "./postingIdentity.js";
 import { classifyDescriptionQuality } from "../pipeline/descriptionQuality.js";
 import { stripHtmlToText } from "../security/sanitize.js";
+import { parseAbsoluteSourceDate, parseRelativePostedText, type PostingDateDerivation } from "./postingFacts.js";
 import {
   linkedInJobIdFromUrl,
   linkedInJobUrl,
@@ -58,6 +59,12 @@ export interface VerifiedPosting {
   readonly expiresAt: string | null;
   readonly availability: "OPEN" | "CLOSED" | "UNKNOWN";
   readonly rawPayload: unknown;
+  /**
+   * How a date was obtained when it is not an absolute source value, keyed by the
+   * posting field (e.g. publishedAt converted from "2 weeks ago"). The key is the
+   * payload field name the source-evidence builder reads (jobSourceEvidence.ts).
+   */
+  readonly date_derivations?: Readonly<Record<string, PostingDateDerivation>>;
 }
 
 export interface PostingSourceEvidence {
@@ -1408,6 +1415,26 @@ function linkedInWorkplaceType(location: string | undefined): VerifiedPosting["w
   return "UNKNOWN";
 }
 
+/**
+ * Publication date from a SearchAPI LinkedIn detail's posted_at: an absolute date
+ * as given, or relative text ("2 weeks ago") converted against the response time
+ * with its precision recorded. Reposted ages and unreadable text give null.
+ */
+export function linkedInDetailPublishedAt(
+  postedAt: string | undefined,
+  retrievedAt: string,
+): { iso: string; derivation: PostingDateDerivation } | null {
+  if (!postedAt) return null;
+  const absolute = parseAbsoluteSourceDate(postedAt);
+  if (absolute) {
+    if (new Date(absolute.iso).getTime() > new Date(retrievedAt).getTime()) return null;
+    return { iso: absolute.iso, derivation: { basis: "ABSOLUTE_SOURCE_DATE", precision: absolute.precision, source_text: absolute.sourceText, anchor_at: null } };
+  }
+  const relative = parseRelativePostedText(postedAt, retrievedAt);
+  if (!relative || relative.kind !== "POSTED") return null;
+  return { iso: relative.iso, derivation: relative.derivation };
+}
+
 async function fetchLinkedInPosting(
   requestedUrl: string,
   jobId: string,
@@ -1445,6 +1472,7 @@ async function fetchLinkedInPosting(
   }
   const description = stripHtmlToText(detail.description);
   if (!isCompletePostingText(description)) return { kind: "BLOCKED", reason: "UNSUPPORTED_SOURCE" };
+  const published = linkedInDetailPublishedAt(detail.posted_at, result.evidence.retrievedAt);
   const posting: VerifiedPosting = {
     title: detail.title,
     companyName: detail.company_name,
@@ -1456,12 +1484,14 @@ async function fetchLinkedInPosting(
     workplaceType: linkedInWorkplaceType(detail.location),
     employmentType: detail.employment_type ?? null,
     compensationRaw: detail.salary ?? null,
-    // LinkedIn reports relative ages ("2 weeks ago"); no absolute date is invented from them.
-    publishedAt: null,
+    // LinkedIn reports relative ages ("2 weeks ago"); they are converted against the
+    // response time and recorded as approximate. A "Reposted" age is not a publication date.
+    publishedAt: published?.iso ?? null,
     updatedAt: null,
     expiresAt: null,
     availability: "UNKNOWN",
     rawPayload: result.raw,
+    ...(published ? { date_derivations: { publishedAt: published.derivation } } : {}),
   };
   return makeCompleteResult(posting, {
     key: "LINKEDIN",
