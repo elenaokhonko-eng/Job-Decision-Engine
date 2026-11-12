@@ -7,6 +7,7 @@ import {
   extractTravelRequirement,
   GLOBAL_TITLE_EXCLUSIONS,
   nonTechnicalFunctionTitle,
+  presalesTitle,
   type GateResult,
 } from "../services/criteria.js";
 import { findOnsiteException } from "./onsiteExceptions.js";
@@ -355,6 +356,14 @@ export function applyPersistedRequirementGates(
     return makeReject(
       ["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"],
       [`Non-target title family "${nonTargetFunctionTitle}" in "${title}"`]
+    );
+  }
+  // A pre-sales title is a high-interaction role for any title (gate-2026-11.5).
+  const presalesTitlePhrase = presalesTitle(title);
+  if (presalesTitlePhrase) {
+    return makeReject(
+      ["GATE_HIGH_INTERACTION"],
+      [`Pre-sales title "${presalesTitlePhrase}" in "${title}"`]
     );
   }
   // The generic technical-function check (Axis 1) is not a hard gate: a

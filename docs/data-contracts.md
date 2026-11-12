@@ -28,7 +28,7 @@ Canonical source names use uppercase values from `SourceNameSchema`. Schema test
 
 ## Hard-gate reason codes and on-site exceptions
 
-Gate reason codes are free strings in `gate_decisions.rejection_codes` (JSONB) and `canonical_jobs.rejection_reason` (text), so new codes are additive. `src/pipeline/gateReasonCodes.ts` holds the labels, including the legacy codes. Gate logic is versioned by `GATE_VERSION` (`src/contracts/version.ts`, now `gate-2026-11.4`). Since the 2026-11 policy it is independent of `SCHEMA_VERSION`.
+Gate reason codes are free strings in `gate_decisions.rejection_codes` (JSONB) and `canonical_jobs.rejection_reason` (text), so new codes are additive. `src/pipeline/gateReasonCodes.ts` holds the labels, including the legacy codes. Gate logic is versioned by `GATE_VERSION` (`src/contracts/version.ts`, now `gate-2026-11.5`). Since the 2026-11 policy it is independent of `SCHEMA_VERSION`.
 
 | Code | Meaning | Status |
 |---|---|---|
