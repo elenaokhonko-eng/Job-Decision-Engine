@@ -5,10 +5,18 @@ import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { getEmbeddingSpaceRegistryConfiguration } from "../embeddings/spaceRegistry.js";
-import { computeEvidenceStrength, loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPolicy.js";
+import {
+  computeEvidenceStrength,
+  loadActiveEvidenceStrengthPolicy,
+  type EvidenceStrengthPolicy,
+} from "../evidence/evidenceStrengthPolicy.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement } from "./requirementComparators.js";
 import { isRequirementOptional } from "./hardGate.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
+import {
+  DETERMINISTIC_MATCHER_FINGERPRINT_VERSION,
+  DETERMINISTIC_MATCHER_POLICY_VERSION,
+} from "./profileMatchCurrency.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -25,7 +33,7 @@ interface RoutingCandidate {
   resolved_job_version_id: string | null;
 }
 
-interface RequirementRow {
+export interface RequirementRow {
   id: string;
   requirement_key: string;
   requirement_type: string;
@@ -35,7 +43,7 @@ interface RequirementRow {
   structured_value: Record<string, unknown> | null;
 }
 
-interface FactRow {
+export interface FactRow {
   id: string;
   source_type?: "PROFILE_FACT" | "CREDENTIAL" | "ENGAGEMENT";
   embedding_node_id?: string;
@@ -221,7 +229,105 @@ function scoreMatch(requirement: RequirementRow, fact: FactRow): number {
   return Math.min(1, score);
 }
 
-const SEMANTIC_MATCH_THRESHOLD = 0.45;
+export const SEMANTIC_MATCH_THRESHOLD = 0.45;
+
+/** A SEMANTIC match is counted (credited) only when its fact's evidence strength reaches this. */
+export const COUNTED_SEMANTIC_MIN_EVIDENCE_STRENGTH = 0.4;
+
+/** Requirement types whose structured comparison is a binary "holds the credential" check. */
+const CREDENTIAL_HOLDING_REQUIREMENT_TYPES = new Set(["DEGREE", "CREDENTIAL"]);
+
+/**
+ * Evidence strength credited to a fact for a requirement.
+ *
+ * Capability evidence is the hands-on evidence tier weight times the verification weight, scaled by
+ * the proficiency factor. A structured EXACT match on a DEGREE or CREDENTIAL requirement is
+ * different: holding a degree or credential is a binary fact, so the hands-on tier (for example an
+ * MBA recorded as KNOWLEDGE_ONLY, weight 0.1) is the wrong axis. Such a match is credited by its
+ * verification status only (SELF_ATTESTED 0.7, VERIFIED 1.0, UNVERIFIED 0.4 under the default
+ * policy). The tier table itself is unchanged and still governs every other requirement.
+ */
+export function computeRequirementEvidenceStrength(
+  fact: FactRow | null,
+  req: RequirementRow,
+  policy: EvidenceStrengthPolicy,
+  options: { structuredExactMatch: boolean },
+): number {
+  if (!fact) return 0;
+  if (options.structuredExactMatch && CREDENTIAL_HOLDING_REQUIREMENT_TYPES.has(req.requirement_type)) {
+    const verificationWeight =
+      policy.verification_status_weights[
+        fact.verification_status as keyof typeof policy.verification_status_weights
+      ] ?? 0;
+    return Math.max(0, Math.min(1, Number(verificationWeight.toFixed(6))));
+  }
+  const rawEvidenceStrength = computeEvidenceStrength(
+    fact.evidence_tier as any,
+    fact.verification_status as any,
+    policy,
+  );
+  return Number((rawEvidenceStrength * computeProficiencyFactor(fact, req)).toFixed(6));
+}
+
+export interface ScoredFactCandidate {
+  fact: FactRow;
+  score: number;
+  lexicalScore: number;
+  semanticScore: number;
+}
+
+export interface SelectedEvidenceFact extends ScoredFactCandidate {
+  evidenceStrength: number;
+  /** Credit the requirement receives from this fact: score x evidence strength when counted, else 0. */
+  credit: number;
+}
+
+/**
+ * Choose the fact that gives a requirement the most credit.
+ *
+ * A fact's credit is score x evidence strength when it would be a counted SEMANTIC match
+ * (score >= SEMANTIC_MATCH_THRESHOLD and evidence strength >= COUNTED_SEMANTIC_MIN_EVIDENCE_STRENGTH)
+ * and 0 otherwise. Choosing by raw similarity let a weakly evidenced fact (for example a 2/5
+ * self-rated KNOWLEDGE_ONLY domain fact) with a marginally higher cosine beat a professional
+ * production fact and collapse the credit to almost nothing.
+ *
+ * Ties on credit go to the higher score, then to the earlier candidate. When no candidate earns
+ * credit (or embeddings are not ready, so nothing can be a SEMANTIC match), the most similar fact
+ * with a positive score is kept for the record exactly as before, so NO_MATCH and pending (UNKNOWN)
+ * records are unchanged. Only candidates with a positive score can be selected.
+ */
+export function selectBestEvidenceFact(
+  candidates: readonly ScoredFactCandidate[],
+  req: RequirementRow,
+  policy: EvidenceStrengthPolicy,
+  options: { usedEmbeddings: boolean },
+): SelectedEvidenceFact | null {
+  let bestCredited: SelectedEvidenceFact | null = null;
+  let mostSimilar: ScoredFactCandidate | null = null;
+  for (const candidate of candidates) {
+    if (!(candidate.score > 0)) continue;
+    if (!mostSimilar || candidate.score > mostSimilar.score) mostSimilar = candidate;
+    if (!options.usedEmbeddings || candidate.score < SEMANTIC_MATCH_THRESHOLD) continue;
+    const evidenceStrength = computeRequirementEvidenceStrength(candidate.fact, req, policy, {
+      structuredExactMatch: false,
+    });
+    if (evidenceStrength < COUNTED_SEMANTIC_MIN_EVIDENCE_STRENGTH) continue;
+    const credit = candidate.score * evidenceStrength;
+    if (
+      !bestCredited ||
+      credit > bestCredited.credit ||
+      (credit === bestCredited.credit && candidate.score > bestCredited.score)
+    ) {
+      bestCredited = { ...candidate, evidenceStrength, credit };
+    }
+  }
+  if (bestCredited) return bestCredited;
+  if (!mostSimilar) return null;
+  const evidenceStrength = computeRequirementEvidenceStrength(mostSimilar.fact, req, policy, {
+    structuredExactMatch: false,
+  });
+  return { ...mostSimilar, evidenceStrength, credit: 0 };
+}
 
 type MatchableNodeType = "JOB_REQUIREMENT" | "PROFILE_FACT";
 
@@ -666,7 +772,7 @@ export async function runDeterministicMatcher(
             content_hash: jobContentHash,
             active_requirement_set_id: activeRequirementSetId,
             profile_version_id: profileVersionId,
-            matcher_version: "deterministic_matcher_v1",
+            matcher_version: DETERMINISTIC_MATCHER_FINGERPRINT_VERSION,
             evidence_strength_policy_hash: evidenceStrengthPolicy.policyHash,
           },
         });
@@ -685,7 +791,7 @@ export async function runDeterministicMatcher(
              evidence_strength_policy_config_revision_id,
              evidence_strength_policy_hash
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 'STARTED', 'deterministic_v1', $8, $9)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'STARTED', $10, $8, $9)
            RETURNING id`,
           [
             ctx.workspaceId,
@@ -697,6 +803,7 @@ export async function runDeterministicMatcher(
             matchContextFingerprint,
             evidencePolicyRevisionId,
             evidenceStrengthPolicy.policyHash,
+            DETERMINISTIC_MATCHER_POLICY_VERSION,
           ]
         );
         const matchRunId = runRes.rows[0].id;
@@ -1031,6 +1138,7 @@ export async function runDeterministicMatcher(
             bestSemantic = 1;
           }
 
+          const candidates: ScoredFactCandidate[] = [];
           for (const fact of factsRes.rows) {
             if (structuredComparison.status === "MATCH") break;
             const lexicalScore = scoreMatch(req, fact);
@@ -1046,23 +1154,27 @@ export async function runDeterministicMatcher(
                 ? semanticScore
                 : lexicalScore * 0.35 + semanticScore * 0.65
               : lexicalScore;
-            if (score > bestScore) {
-              bestScore = score;
-              bestLexical = lexicalScore;
-              bestSemantic = semanticScore;
-              bestFact = fact;
-            }
+            candidates.push({ fact, score, lexicalScore, semanticScore });
           }
 
+          let evidenceStrength = 0;
+          if (structuredComparison.status === "MATCH") {
+            evidenceStrength = computeRequirementEvidenceStrength(bestFact, req, evidenceStrengthPolicy.policy, {
+              structuredExactMatch: true,
+            });
+          } else {
+            const selected = selectBestEvidenceFact(candidates, req, evidenceStrengthPolicy.policy, {
+              usedEmbeddings,
+            });
+            if (selected) {
+              bestFact = selected.fact;
+              bestScore = selected.score;
+              bestLexical = selected.lexicalScore;
+              bestSemantic = selected.semanticScore;
+              evidenceStrength = selected.evidenceStrength;
+            }
+          }
           const proficiencyFactor = computeProficiencyFactor(bestFact, req);
-          const rawEvidenceStrength = bestFact
-            ? computeEvidenceStrength(
-                bestFact.evidence_tier as any,
-                bestFact.verification_status as any,
-                evidenceStrengthPolicy.policy
-              )
-            : 0;
-          const evidenceStrength = Number((rawEvidenceStrength * proficiencyFactor).toFixed(6));
 
           let matchType: 'EXACT' | 'SEMANTIC' | 'NO_MATCH' | 'UNKNOWN' = 'NO_MATCH';
           if (structuredComparison.status === "MATCH") {
@@ -1077,7 +1189,9 @@ export async function runDeterministicMatcher(
             matchType = 'UNKNOWN';
           }
 
-          const isCountedMatch = matchType === 'EXACT' || (matchType === 'SEMANTIC' && evidenceStrength >= 0.4);
+          const isCountedMatch =
+            matchType === 'EXACT' ||
+            (matchType === 'SEMANTIC' && evidenceStrength >= COUNTED_SEMANTIC_MIN_EVIDENCE_STRENGTH);
           const weightedScore = isCountedMatch ? bestScore * evidenceStrength : 0;
           weightedScoreSum += weightedScore * weight;
           if (isCountedMatch) {

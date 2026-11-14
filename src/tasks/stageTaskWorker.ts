@@ -21,6 +21,7 @@ import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/l
 import {
   AI_EVALUATION_OUTCOMES_SQL,
   PROFILE_REMATCH_OUTCOMES,
+  currentMatcherPolicySql,
   currentProfileMatchSql,
   decisionOnLatestMatchSql,
   eligibleRoutedJobSql,
@@ -1731,11 +1732,25 @@ async function lookupJobState(
   };
 }
 
+/**
+ * Whether the job version's latest match is current for the active profile.
+ *
+ * With requireCurrentMatcherRules, a match scored under superseded matcher rules
+ * (DETERMINISTIC_MATCHER_POLICY_VERSION) is not current, so a MATCH_PROFILE_EVIDENCE re-match task
+ * recomputes it instead of returning early. The DECIDE_RECOMMENDATION gate does not require it: an
+ * older-rules match is still a complete, persisted match for this job and profile, and blocking the
+ * decision on it would wait for a match task whose key (unchanged across matcher rules) may already
+ * be completed. Older-rules matches are re-matched by the superseded-match seeder instead.
+ */
 async function jobVersionHasCurrentMatch(
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
-  jobVersionId: string
+  jobVersionId: string,
+  options: { requireCurrentMatcherRules: boolean },
 ): Promise<boolean> {
+  const matcherRulesPredicate = options.requireCurrentMatcherRules
+    ? `AND ${currentMatcherPolicySql("mr")}`
+    : "";
   const { rows } = await (clientOrPool as QueryClient).query<{ exists: boolean }>(
     `SELECT EXISTS (
        SELECT 1
@@ -1757,6 +1772,7 @@ async function jobVersionHasCurrentMatch(
         AND mr.job_content_hash = jv.content_hash
         AND mr.context_fingerprint IS NOT NULL
         AND mr.status = 'COMPLETED'
+        ${matcherRulesPredicate}
        WHERE c.workspace_id = $1
      ) AS exists`,
     [ctx.workspaceId, jobVersionId]
@@ -3284,7 +3300,7 @@ async function executeStageTask(
     // must be re-matched; returning here made every re-match a silent no-op.
     if (
       matchState.processingState === "MATCHED" &&
-      (await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId))
+      (await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId, { requireCurrentMatcherRules: true }))
     ) {
       return;
     }
@@ -3327,7 +3343,7 @@ async function executeStageTask(
       return;
     }
     if (state.processingState === "MATCHED") {
-      if (supersededMatchRunId && !(await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId))) {
+      if (supersededMatchRunId && !(await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId, { requireCurrentMatcherRules: true }))) {
         // The matcher selected nothing (for example the posting lost its source-content
         // evidence), so the job would keep its superseded-profile match. Fail visibly instead.
         throw new Error(
@@ -3384,7 +3400,7 @@ async function executeStageTask(
       !isRoutingDeferred &&
       !isUnmatched &&
       (decisionState.gateDecision === "PASS" || matchDependentStates.has(decisionState.processingState || ""));
-    if (requiresCurrentMatch && !(await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId))) {
+    if (requiresCurrentMatch && !(await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId, { requireCurrentMatcherRules: false }))) {
       const payload = (task.payload || {}) as Record<string, unknown>;
       const matchTaskInserted = await enqueueStageTask(
         "MATCH_PROFILE_EVIDENCE",

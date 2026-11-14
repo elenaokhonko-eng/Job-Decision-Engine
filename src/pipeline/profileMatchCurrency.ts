@@ -1,3 +1,5 @@
+import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
+
 /**
  * Which deterministic outcomes are AI-evaluated, and when a job's profile match is current.
  *
@@ -74,10 +76,42 @@ export function uniqueActiveProfileSql(canonicalAlias: string): string {
 }
 
 /**
+ * Scoring rules version of the deterministic matcher, stored on match_runs.policy_version.
+ *
+ * Bump it whenever the matcher's scoring changes for the same job, profile and evidence-strength
+ * policy. A match run made under another version is superseded when the matcher can re-match the
+ * job (complete description with source-content evidence): the stage-task seeder re-matches every
+ * such eligible PRIORITY/REVIEW/TRACK job once (see profileMatchSupersededSql), and a
+ * MATCH_PROFILE_EVIDENCE task does not treat the older-rules match as current. A job the matcher
+ * cannot select keeps its older-rules match rather than getting a re-match task that cannot finish.
+ *
+ * deterministic_v2: the best fact is chosen by credited contribution (score x evidence strength)
+ * instead of raw similarity, and a structured DEGREE/CREDENTIAL match is credited by verification
+ * status only, not by the hands-on evidence tier.
+ */
+export const DETERMINISTIC_MATCHER_POLICY_VERSION = "deterministic_v2";
+
+/**
+ * matcher_version written into the MATCH_PROFILE_EVIDENCE context fingerprint. It moves with
+ * DETERMINISTIC_MATCHER_POLICY_VERSION so task currentness (src/tasks/pipelineTaskCurrentness.ts)
+ * also treats an older-rules match as not current. The stage task version used in task keys
+ * (deterministic_matcher_v1) is deliberately unchanged.
+ */
+export const DETERMINISTIC_MATCHER_FINGERPRINT_VERSION = "deterministic_matcher_v2";
+
+/** SQL predicate: match run (alias `mr`) was scored under the current matcher rules. */
+export function currentMatcherPolicySql(matchAlias: string): string {
+  const mr = alias(matchAlias, "match alias");
+  return `(${mr}.policy_version = '${DETERMINISTIC_MATCHER_POLICY_VERSION}')`;
+}
+
+/**
  * SQL predicate: the canonical job's latest match run (alias `mr`, joined on
  * c.latest_match_run_id) was made for the latest job version against a profile version that is no
- * longer the unique active one. Lane routing and hard gates are not part of this check: a
- * re-match never replays them.
+ * longer the unique active one, or under superseded matcher scoring rules
+ * (DETERMINISTIC_MATCHER_POLICY_VERSION) for a job the matcher can select (the same
+ * description-quality and source-content conditions as src/pipeline/deterministicMatcher.ts).
+ * Lane routing and hard gates are not part of this check: a re-match never replays them.
  */
 export function profileMatchSupersededSql(canonicalAlias: string, matchAlias: string): string {
   const c = alias(canonicalAlias, "canonical alias");
@@ -87,7 +121,14 @@ export function profileMatchSupersededSql(canonicalAlias: string, matchAlias: st
     AND ${mr}.id = ${c}.latest_match_run_id
     AND ${mr}.job_version_id = ${c}.latest_job_version_id
     AND ${uniqueActiveProfileSql(c)} IS NOT NULL
-    AND ${mr}.profile_version_id IS DISTINCT FROM ${uniqueActiveProfileSql(c)}
+    AND (
+      ${mr}.profile_version_id IS DISTINCT FROM ${uniqueActiveProfileSql(c)}
+      OR (
+        ${mr}.policy_version IS DISTINCT FROM '${DETERMINISTIC_MATCHER_POLICY_VERSION}'
+        AND ${c}.description_quality_status = 'COMPLETE'
+        AND ${sourceContentEvidencePredicate(`${c}.workspace_id`, `${c}.latest_job_version_id`)}
+      )
+    )
   )`;
 }
 

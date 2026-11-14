@@ -15,6 +15,7 @@ import {
   runPipelineStageTaskWorker,
   seedRecoverablePipelineTasks,
 } from "../../tasks/stageTaskWorker.js";
+import { DETERMINISTIC_MATCHER_POLICY_VERSION } from "../../pipeline/profileMatchCurrency.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { batchEmbeddingFromPerInput } from "../fixtures/embeddingBatchMock.js";
 import { insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
@@ -205,7 +206,7 @@ async function recordMatchAndDecision(
        coverage_score, overall_match_score, policy_version,
        job_content_hash, context_fingerprint, embedding_space_id, completed_at
      ) VALUES ($1, $2, $3, $4, $5, 'COMPLETED', 1, 1, 100.00, $6,
-               'zebra-rematch-fixture-v1', $7, $8, $9, NOW())
+               '${DETERMINISTIC_MATCHER_POLICY_VERSION}', $7, $8, $9, NOW())
      RETURNING id`,
     [workspaceId, job.canonicalJobId, job.jobVersionId, profileVersionId, job.requirementSetId,
      score, job.contentHash, fingerprint, await primaryEmbeddingSpaceId()],
@@ -691,7 +692,7 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
          coverage_score, overall_match_score, policy_version,
          job_content_hash, context_fingerprint, embedding_space_id, completed_at
        ) VALUES ($1, $2, $3, $4, $5, 'COMPLETED', 1, 1, 100.00, 80.00,
-                 'zebra-rematch-fixture-v1', $6, 'zebra-rematch-fresh', $7, NOW())
+                 '${DETERMINISTIC_MATCHER_POLICY_VERSION}', $6, 'zebra-rematch-fresh', $7, NOW())
        RETURNING id`,
       [ctx().workspaceId, job.canonicalJobId, job.jobVersionId, profileV2, job.requirementSetId, job.contentHash,
        await primaryEmbeddingSpaceId()],
@@ -745,5 +746,77 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
     const queued = await activeQueueRows(job);
     expect(queued).toHaveLength(1);
     expect(queued[0]).toMatchObject({ match_run_id: freshMatch.rows[0].id, profile_version_id: profileV2 });
+  }, 120_000);
+
+  it("re-matches a job whose latest match was scored under superseded matcher rules", async () => {
+    // A match for the active profile, made before the matcher scoring rules changed.
+    const job = jobs.trackCurrent;
+    const before = await jobState(job);
+    expect(before.match_profile_version_id).toBe(profileV2);
+    const olderRulesMatchRunId = before.latest_match_run_id;
+    await db().query(
+      `UPDATE match_runs SET policy_version = 'deterministic_v1' WHERE workspace_id = $1 AND id = $2`,
+      [ctx().workspaceId, olderRulesMatchRunId],
+    );
+
+    // The matcher cannot select a job whose description is incomplete, so it keeps its match
+    // instead of getting a re-match task that could never replace it.
+    await db().query(
+      `UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE workspace_id = $1 AND id = $2`,
+      [ctx().workspaceId, job.canonicalJobId],
+    );
+    const unmatchable = await seedRecoverablePipelineTasks(db(), {
+      context: ctx(),
+      taskTypes: ["MATCH_PROFILE_EVIDENCE"],
+      includeTestFixtures: true,
+    });
+    expect(unmatchable.supersededProfileMatch).toBe(0);
+    expect(await tasksFor(job, "MATCH_PROFILE_EVIDENCE")).toEqual([]);
+    await db().query(
+      `UPDATE canonical_jobs SET description_quality_status = 'COMPLETE' WHERE workspace_id = $1 AND id = $2`,
+      [ctx().workspaceId, job.canonicalJobId],
+    );
+
+    const seeded = await seedRecoverablePipelineTasks(db(), {
+      context: ctx(),
+      taskTypes: ["MATCH_PROFILE_EVIDENCE"],
+      includeTestFixtures: true,
+    });
+    expect(seeded.supersededProfileMatch).toBe(1);
+    expect(await tasksFor(job, "MATCH_PROFILE_EVIDENCE")).toEqual([expect.objectContaining({
+      task_key: `MATCH_PROFILE_EVIDENCE:${job.jobVersionId}:deterministic_matcher_v1:` +
+        `rematch-${olderRulesMatchRunId}:profile:${profileV2}`,
+      status: "PENDING",
+    })]);
+
+    // The re-match task runs the real matcher instead of treating the MATCHED job as current, and
+    // the decision follows from the new match. Lane routing is not replayed.
+    const recovered = await runPipelineStageTaskWorker(db(), {
+      ...workerOptions,
+      context: ctx(),
+      taskTypes: ["MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION"],
+      jobVersionIds: [job.jobVersionId],
+      maxTasks: 6,
+    });
+    expect(recovered.errors).toEqual([]);
+    expect(recovered.failed).toBe(0);
+    const after = await jobState(job);
+    expect(after.latest_match_run_id).not.toBe(olderRulesMatchRunId);
+    expect(after.match_profile_version_id).toBe(profileV2);
+    expect(after.decision_match_run_id).toBe(after.latest_match_run_id);
+    expect(after.latest_lane_decision_id).toBe(before.latest_lane_decision_id);
+    const newRun = await db().query<{ policy_version: string }>(
+      `SELECT policy_version FROM match_runs WHERE workspace_id = $1 AND id = $2`,
+      [ctx().workspaceId, after.latest_match_run_id],
+    );
+    expect(newRun.rows[0].policy_version).toBe(DETERMINISTIC_MATCHER_POLICY_VERSION);
+
+    // Once re-matched under the current rules, nothing is superseded any more.
+    const reseeded = await seedRecoverablePipelineTasks(db(), {
+      context: ctx(),
+      taskTypes: ["MATCH_PROFILE_EVIDENCE"],
+      includeTestFixtures: true,
+    });
+    expect(reseeded.supersededProfileMatch).toBe(0);
   }, 120_000);
 });
