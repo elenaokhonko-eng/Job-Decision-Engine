@@ -131,22 +131,62 @@ Job Decision Engine supports two distribution modes:
    cd Job-Decision-Engine
    npm ci
    ```
-2. Configure your environment:
+2. Run the one-command setup:
    ```bash
-   cp .env.example .env.local
-   # Edit .env.local with your DATABASE_URL, GEMINI_API_KEY, etc.
+   npm run setup
    ```
-3. Run migrations and initialize spaces:
-   ```bash
-   npm run migrate
-   npm run embeddings:registry:init
-   ```
-4. Run the desktop app in development:
+   It checks your Node version, asks for a PostgreSQL connection string, applies the migration chain, seeds embedding spaces and lanes, verifies your AI provider key, and writes `.env.local`.
+
+   Any PostgreSQL server works — Neon, Supabase, Railway, RDS, or self-hosted. No database yet? `npm run setup -- --docker` starts one locally.
+3. Run the desktop app in development:
    ```bash
    npm run desktop:dev
    ```
 
-See [Quickstart Guide](docs/quickstart.md) for complete instructions.
+**AI providers.** A provider is a wire protocol, not a vendor, so three cover the field:
+
+| Provider | Covers | Configuration |
+| --- | --- | --- |
+| `gemini` | Google Gemini | `GEMINI_API_KEY` |
+| `openai` | OpenAI | `OPENAI_API_KEY` |
+| `openai-compatible` | Ollama, LM Studio, vLLM, Groq, Together, OpenRouter, Moonshot/Kimi, DeepSeek, any gateway | `OPENAI_COMPATIBLE_BASE_URL` + `OPENAI_COMPATIBLE_API_KEY` |
+
+```bash
+# Local Ollama
+npm run setup -- --provider openai-compatible \
+  --base-url http://127.0.0.1:11434/v1 --api-key local
+
+# Groq / OpenRouter / Together / Kimi: same shape, different base URL and key
+npm run setup -- --provider openai-compatible \
+  --base-url https://openrouter.ai/api/v1 --api-key "$OPENROUTER_KEY"
+```
+
+The model dropdown is populated from the provider itself (`POST /api/v2/setup/ai/test`
+returns the models your key can actually call), and `POST /api/v2/setup/routes`
+rejects a model id the provider does not serve instead of saving it and failing
+at the first evaluation. Anthropic's native API is not OpenAI-shaped; reach it
+through a gateway (OpenRouter, LiteLLM) using the compatible provider.
+
+
+### The results dashboard (Streamlit)
+
+Electron is the app: it runs setup, the pipeline and the ranking. Streamlit is the
+optional **results dashboard** for reading the shortlist in depth, and it reuses the
+same `.env.local` that `npm run setup` wrote, so there is nothing to configure twice.
+
+```bash
+python -m pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+Open it after the app has produced results, not during setup — a new user should
+meet one surface at a time. See [The Streamlit dashboard](docs/streamlit-dashboard.md)
+for the reading/writing split, the API port, and troubleshooting.
+
+See [Quickstart Guide](docs/quickstart.md) for complete instructions, or the
+[Fork guide](docs/fork-guide.md) for the full fork → database → setup → launch
+walkthrough including the GitHub Actions secrets and variables.
+
 
 ---
 
@@ -161,7 +201,7 @@ npx tsc --noEmit
 # Unit & integration test suite (275+ tests)
 npm test
 
-# Desktop packaging & security checks (56 checks)
+# Desktop packaging & security checks (68 checks)
 npm run desktop:verify
 
 # Standalone desktop E2E gate check

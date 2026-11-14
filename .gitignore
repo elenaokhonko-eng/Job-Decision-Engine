@@ -10,6 +10,11 @@ coverage/
 .env*
 !.env.example
 
+# Local agent scratch space and git worktrees (never published)
+.claude/
+.worktrees/
+.oxcode-memory/
+
 # Private and generated files
 private/
 data/private/

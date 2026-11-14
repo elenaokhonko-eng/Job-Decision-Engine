@@ -1,6 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 
 import { readJsonResponseBounded } from "../security/boundedResponse.js";
+import { resolveOpenAiBaseUrl } from "./aiProviders.js";
 import { geminiBackend, geminiConfigProblem, resolveGeminiClientConfig } from "./geminiConfig.js";
 import {
   DEFAULT_OPENAI_FALLBACK_MODEL,
@@ -229,7 +230,7 @@ async function listGeminiModelIds(fetchImpl: typeof fetch, key: string, timeoutM
 async function listOpenAIModelIds(fetchImpl: typeof fetch, key: string, timeoutMs: number): Promise<Set<string>> {
   const payload = (await fetchJson(
     fetchImpl,
-    "https://api.openai.com/v1/models",
+    `${resolveOpenAiBaseUrl()}/models`,
     { Authorization: `Bearer ${key}` },
     timeoutMs,
   )) as { data?: Array<{ id?: unknown }> };

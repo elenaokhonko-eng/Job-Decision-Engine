@@ -8,8 +8,19 @@ import {
   getActiveModelRouteRevision,
   type ModelRoutePurpose,
 } from "../../modelRoutes/registry.js";
+import { listActiveLaneRevisions } from "../../lanes/registry.js";
 import { DEFAULT_USER_KEY, DEFAULT_WORKSPACE_KEY, resolveWorkspaceContext } from "../../workspace/context.js";
 import { isGeminiConfigured } from "../../services/geminiConfig.js";
+import {
+  AI_PROVIDERS,
+  authorizeProviderCall,
+  configuredAiProviderIds,
+  listAiProviderIds,
+  listProviderModels,
+  normalizeAiProviderId,
+  resolveProviderApiKey,
+  resolveProviderBaseUrl,
+} from "../../services/aiProviders.js";
 
 function asyncHandler(
   handler: (req: express.Request, res: express.Response, next: express.NextFunction) => Promise<void> | void
@@ -88,6 +99,10 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         }
       }
 
+      // Provider availability comes from the registry, so configuring an
+      // OpenAI-compatible endpoint counts without editing this route.
+      const configuredProviders = configuredAiProviderIds();
+      const anyProviderConfigured = configuredProviders.length > 0;
       const geminiConfigured = isGeminiConfigured();
       const openaiConfigured = Boolean(process.env.OPENAI_API_KEY);
 
@@ -130,11 +145,73 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         }
       }
 
+      // Ingestion and matching prerequisites. `isComplete` below only means the
+      // app can start; on its own it declares success on an install that will
+      // ingest nothing and rank nothing. These are what actually make it work.
+      const gmailConfigured = Boolean(
+        process.env.GMAIL_OAUTH_CLIENT_ID &&
+          process.env.GMAIL_OAUTH_CLIENT_SECRET &&
+          process.env.GMAIL_OAUTH_REFRESH_TOKEN
+      );
+      const searchApiKeyConfigured = Boolean(process.env.SEARCHAPI_API_KEY);
+      const searchApiEnabled =
+        String(process.env.SEARCHAPI_LINKEDIN_ENABLED || "").trim().toLowerCase() === "true";
+
+      let profileFactCount = 0;
+      let activeLaneCount = 0;
+      if (dbConnected && migrationStatus?.isInitialized) {
+        const pool = getActivePool();
+        if (pool) {
+          try {
+            const ctx = await resolveWorkspaceContext(pool as any, {
+              workspaceKey: DEFAULT_WORKSPACE_KEY,
+              userKey: DEFAULT_USER_KEY,
+            });
+            activeLaneCount = (await listActiveLaneRevisions(pool as any, { context: ctx })).length;
+          } catch {
+            // Lanes are seeded lazily on first use, so zero here is expected on a
+            // freshly migrated database and is reported rather than thrown.
+          }
+          try {
+            const { rows } = await pool.query<{ count: string }>(
+              "SELECT COUNT(*)::text AS count FROM profile_facts"
+            );
+            profileFactCount = Number(rows[0]?.count ?? 0);
+          } catch {
+            // Profile tables not migrated yet.
+          }
+        }
+      }
+
+      // Gmail alerts and SearchAPI are alternative sources of the same jobs, so
+      // either one satisfies ingestion. SearchAPI costs money per call and stays
+      // off by default, which must not read as a broken install.
+      const ingestionConfigured = gmailConfigured || (searchApiKeyConfigured && searchApiEnabled);
+
+      const prerequisites = [
+        {
+          key: "database",
+          label: "Database connected and migrations applied",
+          ok:
+            dbConnected &&
+            Boolean(migrationStatus?.isInitialized) &&
+            (migrationStatus?.pendingCount ?? 1) === 0,
+        },
+        { key: "provider", label: "AI provider configured", ok: anyProviderConfigured },
+        { key: "model_routes", label: "Embedding and evaluation models routed", ok: modelRoutesConfigured },
+        { key: "lanes", label: "Lanes seeded", ok: activeLaneCount > 0 },
+        { key: "profile", label: "Career profile loaded", ok: profileFactCount > 0 },
+        { key: "ingestion", label: "At least one job source connected", ok: ingestionConfigured },
+      ];
+
+      const pipelineReady = prerequisites.every((item) => item.ok);
+      const blockingPrerequisites = prerequisites.filter((item) => !item.ok).map((item) => item.key);
+
       const isComplete =
         dbConnected &&
         Boolean(migrationStatus?.isInitialized) &&
         (migrationStatus?.pendingCount ?? 1) === 0 &&
-        (geminiConfigured || openaiConfigured) &&
+        anyProviderConfigured &&
         modelRoutesConfigured;
 
       res.json({
@@ -153,10 +230,13 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         aiProviders: {
           gemini: geminiConfigured,
           openai: openaiConfigured,
+          compatible: configuredProviders.includes("openai-compatible"),
+          configured: configuredProviders,
         },
         ai: {
           geminiConfigured,
           openaiConfigured,
+          configuredProviders,
         },
         modelRoutes: {
           configured: modelRoutesConfigured,
@@ -166,6 +246,16 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
           document: activeRoutes.find((r) => r.purpose === "DOCUMENT")?.model ?? null,
           extraction: activeRoutes.find((r) => r.purpose === "EXTRACTION")?.model ?? null,
         },
+        ingestion: {
+          gmail: { configured: gmailConfigured },
+          searchApi: { keyConfigured: searchApiKeyConfigured, enabled: searchApiEnabled },
+          configured: ingestionConfigured,
+        },
+        profile: { factCount: profileFactCount, loaded: profileFactCount > 0 },
+        lanes: { activeCount: activeLaneCount, seeded: activeLaneCount > 0 },
+        prerequisites,
+        blockingPrerequisites,
+        pipelineReady,
         isComplete,
       });
     })
@@ -302,69 +392,54 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
   router.post(
     "/ai/test",
     asyncHandler(async (req, res) => {
-      const provider = String(req.body?.provider || "").trim().toLowerCase();
-      const apiKey = String(req.body?.apiKey || "").trim();
+      const requested = req.body?.provider;
+      const provider = normalizeAiProviderId(requested);
 
-      if (!apiKey) {
-        res.status(400).json({ ok: false, error: "API key is required." });
+      if (!provider) {
+        res.status(400).json({
+          ok: false,
+          error: `Unsupported AI provider: ${String(requested ?? "")}`,
+          supportedProviders: listAiProviderIds(),
+        });
         return;
       }
 
-      if (provider === "gemini") {
-        try {
-          const resp = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
-            { signal: AbortSignal.timeout(10000) }
-          );
-          if (!resp.ok) {
-            const body = await resp.json().catch(() => ({}));
-            const msg = (body as any)?.error?.message || `HTTP ${resp.status}`;
-            res.status(400).json({
-              ok: false,
-              error: `Google Gemini verification failed: ${msg}`,
-            });
-            return;
-          }
-          const data: any = await resp.json();
-          const models = Array.isArray(data.models)
-            ? data.models.map((m: any) => m.name.replace(/^models\//, ""))
-            : [];
-          res.json({ ok: true, provider: "gemini", models });
-        } catch (err: any) {
-          res.status(400).json({
-            ok: false,
-            error: `Failed to connect to Google Gemini API: ${sanitizeErrorMessage(err)}`,
-          });
-        }
-      } else if (provider === "openai") {
-        try {
-          const resp = await fetch("https://api.openai.com/v1/models", {
-            headers: { Authorization: `Bearer ${apiKey}` },
-            signal: AbortSignal.timeout(10000),
-          });
-          if (!resp.ok) {
-            const body = await resp.json().catch(() => ({}));
-            const msg = (body as any)?.error?.message || `HTTP ${resp.status}`;
-            res.status(400).json({
-              ok: false,
-              error: `OpenAI verification failed: ${msg}`,
-            });
-            return;
-          }
-          const data: any = await resp.json();
-          const models = Array.isArray(data.data) ? data.data.map((m: any) => m.id) : [];
-          res.json({ ok: true, provider: "openai", models });
-        } catch (err: any) {
-          res.status(400).json({
-            ok: false,
-            error: `Failed to connect to OpenAI API: ${sanitizeErrorMessage(err)}`,
-          });
-        }
-      } else {
-        res.status(400).json({ ok: false, error: `Unsupported AI provider: ${provider}` });
+      const definition = AI_PROVIDERS[provider];
+      // A stored key may be reused to re-test a saved provider, but only against
+      // the configured base URL. Pairing it with a caller-supplied baseUrl would
+      // let any authenticated caller have the key sent to a host they control.
+      const authorization = authorizeProviderCall({
+        bodyApiKey: req.body?.apiKey,
+        bodyBaseUrl: req.body?.baseUrl,
+        serverApiKey: resolveProviderApiKey(provider),
+      });
+      if (!authorization.ok) {
+        res.status(400).json({ ok: false, error: authorization.error });
+        return;
+      }
+
+      const apiKey = authorization.apiKey;
+      if (!apiKey && definition.requiresApiKey) {
+        res.status(400).json({ ok: false, error: `${definition.apiKeyEnv} is required for ${definition.label}.` });
+        return;
+      }
+
+      const baseUrl = authorization.baseUrl;
+      try {
+        const models = await listProviderModels({ provider, apiKey, baseUrl });
+        res.json({
+          ok: true,
+          provider,
+          label: definition.label,
+          baseUrl: resolveProviderBaseUrl(provider, baseUrl),
+          models,
+        });
+      } catch (err: any) {
+        res.status(400).json({ ok: false, error: sanitizeErrorMessage(err) });
       }
     })
   );
+
 
   // POST /api/v2/setup/routes
   router.post(
@@ -422,10 +497,72 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
           { key: "requirements_extraction", purpose: "EXTRACTION", conf: routes.extraction || routes.evaluation },
         ];
 
+        // Same rule as /ai/test: a caller-supplied baseUrl may only be used with a
+        // caller-supplied key, so the stored key is never sent to a URL the caller
+        // chose. This rejects before any provider call is made.
+        const baseUrlAuthorization = authorizeProviderCall({
+          bodyApiKey: req.body?.apiKey,
+          bodyBaseUrl: req.body?.baseUrl,
+          serverApiKey: "",
+        });
+        if (!baseUrlAuthorization.ok) {
+          res.status(400).json({ ok: false, error: baseUrlAuthorization.error });
+          return;
+        }
+        const callerApiKey = String(req.body?.apiKey ?? "").trim();
+        const baseUrl = baseUrlAuthorization.baseUrl;
+        const validationWarnings: string[] = [];
+        const unknownModels: Array<{ route: string; provider: string; model: string; available: string[] }> = [];
+
+        // Reject a model id the provider does not actually serve, instead of
+        // writing it and failing later at the first evaluation.
+        if (req.body?.validateModels !== false) {
+          const modelCache = new Map<string, Set<string> | null>();
+          for (const def of routeDefs) {
+            if (!def.conf || !def.conf.model) continue;
+            const provider = normalizeAiProviderId(def.conf.provider || "gemini");
+            if (!provider) continue;
+            if (!modelCache.has(provider)) {
+              const key = callerApiKey || resolveProviderApiKey(provider);
+              if (!key && AI_PROVIDERS[provider].requiresApiKey) {
+                validationWarnings.push(`Skipped model validation for ${provider}: no API key available.`);
+                modelCache.set(provider, null);
+              } else {
+                try {
+                  const models = await listProviderModels({ provider, apiKey: key, baseUrl });
+                  modelCache.set(provider, new Set(models));
+                } catch (err) {
+                  validationWarnings.push(`Could not list ${provider} models: ${sanitizeErrorMessage(err)}`);
+                  modelCache.set(provider, null);
+                }
+              }
+            }
+            const available = modelCache.get(provider);
+            if (available && available.size > 0 && !available.has(def.conf.model)) {
+              unknownModels.push({
+                route: def.key,
+                provider,
+                model: def.conf.model,
+                available: [...available].slice(0, 25),
+              });
+            }
+          }
+        }
+
+        if (unknownModels.length > 0) {
+          res.status(400).json({
+            ok: false,
+            error: "Unknown model id for the configured provider.",
+            unknownModels,
+            hint: "Call POST /api/v2/setup/ai/test to list the models this key can actually use.",
+          });
+          return;
+        }
+
         for (const def of routeDefs) {
           if (!def.conf || !def.conf.model) continue;
-          const provider = (def.conf.provider || "gemini").toLowerCase() as "gemini" | "openai";
-          const fallbackProvider = (def.conf.fallbackProvider || provider) as "gemini" | "openai";
+          const provider = normalizeAiProviderId(def.conf.provider || "gemini") ?? "gemini";
+          const fallbackProvider = normalizeAiProviderId(def.conf.fallbackProvider || provider) ?? provider;
           const fallbackModel = def.conf.fallbackModel || def.conf.model;
 
           const revision = await ensureModelRouteActiveRevision(
@@ -445,7 +582,7 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
           configured.push(revision);
         }
 
-        res.json({ ok: true, routes: configured });
+        res.json({ ok: true, routes: configured, warnings: validationWarnings });
       } catch (err: any) {
         res.status(500).json({ ok: false, error: `Failed to configure routes: ${sanitizeErrorMessage(err)}` });
       } finally {

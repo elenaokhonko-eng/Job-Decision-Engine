@@ -20,6 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { load as loadYaml } from "js-yaml";
+import { configPath } from "../config/configPaths.js";
 import type pg from "pg";
 import { MAX_SOURCE_RESPONSE_BYTES } from "./adapters/baseAdapter.js";
 import { isUnknownEmployerName } from "./postingIdentity.js";
@@ -297,7 +298,7 @@ export function locationsCompatible(expected: string | null | undefined, posting
 }
 
 /** Known boards from config/companies.yml (greenhouse/lever/ashby entries with a board_slug). */
-export function loadKnownEmployerBoards(filePath = path.resolve(process.cwd(), "config/companies.yml")): KnownEmployerBoard[] {
+export function loadKnownEmployerBoards(filePath = configPath("companies.yml")): KnownEmployerBoard[] {
   if (!fs.existsSync(filePath)) throw new Error(`Company source registry is missing: ${filePath}`);
   const document: unknown = loadYaml(fs.readFileSync(filePath, "utf8"));
   const companies = document !== null && typeof document === "object" && !Array.isArray(document)

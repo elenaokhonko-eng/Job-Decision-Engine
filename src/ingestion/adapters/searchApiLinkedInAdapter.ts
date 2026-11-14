@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { load } from "js-yaml";
 import { z } from "zod";
+import { configPath } from "../../config/configPaths.js";
 import { BaseSourceAdapter, type AdapterFetchOptions, type AdapterResult } from "./baseAdapter.js";
 import { ExtractedJob, SCHEMA_VERSION } from "../../contracts/index.js";
 import { stripHtmlToText } from "../../security/sanitize.js";
@@ -36,7 +37,7 @@ const SearchApiLinkedInPlanSchema = z.object({
 export type SearchApiLinkedInPlan = z.infer<typeof SearchApiLinkedInPlanSchema>;
 
 export function loadSearchApiLinkedInPlan(
-  filePath = path.resolve(process.cwd(), "config/source-plans/searchapi_linkedin.yml"),
+  filePath = configPath("source-plans", "searchapi_linkedin.yml"),
 ): SearchApiLinkedInPlan {
   return SearchApiLinkedInPlanSchema.parse(load(fs.readFileSync(filePath, "utf8")));
 }

@@ -1,17 +1,13 @@
 import fs from "fs";
-import path from "path";
 import * as yaml from "js-yaml";
-import { fileURLToPath } from "url";
 import { SCHEMA_VERSION } from "../contracts/version.js";
 import pg from "pg";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import { configPath } from "../config/configPaths.js";
 import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { LaneFileConfigSchema, type LaneFileConfig } from "../lanes/contracts.js";
 import { listActiveLaneRevisions, upsertLaneRevision, type ActiveLaneRevision } from "../lanes/registry.js";
 import { laneRoutingVersion } from "../lanes/laneRoutingCurrency.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 export interface LaneDefinition {
   title: string;
@@ -140,7 +136,7 @@ function laneConfigToDefinition(laneConfig: LaneFileConfig): LaneDefinition {
 }
 
 export function loadGlobalLanesConfig(): GlobalLanesConfig {
-  const registryPath = path.resolve(__dirname, "../../config/lanes/registry.yml");
+  const registryPath = configPath("lanes", "registry.yml");
   if (!fs.existsSync(registryPath)) {
     throw new Error(`Lane registry not found at ${registryPath}`);
   }
@@ -157,7 +153,7 @@ export function loadGlobalLanesConfig(): GlobalLanesConfig {
       continue;
     }
 
-    const lanePath = path.resolve(__dirname, `../../config/lanes/${entry.config_file}`);
+    const lanePath = configPath("lanes", entry.config_file);
     if (!fs.existsSync(lanePath)) {
       throw new Error(`Lane config file not found for ${entry.lane_key}: ${lanePath}`);
     }
@@ -204,7 +200,7 @@ export async function loadWorkspaceLanesConfig(
     try {
       let active = await listActiveLaneRevisions(client as any, { context: ctx });
 
-      const registryPath = path.resolve(__dirname, "../../config/lanes/registry.yml");
+      const registryPath = configPath("lanes", "registry.yml");
       if (fs.existsSync(registryPath) && options?.seedIfEmpty) {
         try {
           const registry = parseYamlFile<LaneRegistryFile>(registryPath);
@@ -215,7 +211,7 @@ export async function loadWorkspaceLanesConfig(
               continue;
             }
 
-            const lanePath = path.resolve(__dirname, `../../config/lanes/${entry.config_file}`);
+            const lanePath = configPath("lanes", entry.config_file);
             if (!fs.existsSync(lanePath)) {
               throw new Error(`Lane config file not found for ${entry.lane_key}: ${lanePath}`);
             }

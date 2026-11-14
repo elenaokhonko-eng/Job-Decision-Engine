@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import * as yaml from "js-yaml";
 import pg from "pg";
+import { configPath } from "../config/configPaths.js";
 import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 
@@ -1041,7 +1042,7 @@ function normalizeUnknownWorkModeDisposition(_value: unknown): WorkabilityPolicy
 }
 
 export function loadWorkabilityPolicy(): WorkabilityPolicy {
-  const filePath = path.resolve(process.cwd(), "config/policies/workability.yml");
+  const filePath = configPath("policies", "workability.yml");
   if (!fs.existsSync(filePath)) return defaults;
 
   const loadFn = (yaml as any).load || (yaml as any).default?.load || yaml;
