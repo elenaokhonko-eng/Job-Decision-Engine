@@ -53,12 +53,19 @@ describe('streamlit read-model integrity', () => {
     expect(content).toContain('st.markdown("## Top 10 — apply first")');
     expect(content).toContain('"Top 10 Ready": application_workspace_summary["top_ten_ready_count"]');
     expect(content).toContain('"Apply Now": application_workspace_summary["apply_now_count"]');
-    expect(content).toContain('"Track": application_workspace_summary["track_count"]');
-    expect(content).toContain('"Processing": application_workspace_summary["processing_count"]');
-    expect(content).toContain('"Rejected / Unmatched": application_workspace_summary["rejected_unmatched_count"]');
+    expect(content).toContain('"Rejected": application_workspace_summary["rejected_count"]');
+    expect(content).toContain('"Unmatched": application_workspace_summary["unmatched_count"]');
+    expect(content).toContain('"Removed": application_workspace_summary["removed_count"]');
+    expect(content).not.toContain('"Rejected / Unmatched"');
     expect(content).toContain('"Applied": application_workspace_summary["applied_count"]');
     expect(content).toContain('"Technical Errors": application_workspace_summary["technical_errors"]');
     expect(content).toContain('for metric_label, metric_value in metric_values.items():');
+    // In-between and closed-out counts come from the migration 112 read models only.
+    expect(content).toContain('FROM v_job_status_bucket_counts_scoped');
+    expect(content).toContain('FROM v_job_status_buckets_scoped');
+    expect(content).toContain('FROM v_job_support_issues_scoped');
+    expect(content).toContain('bucket_metrics(status_bucket_counts, IN_BETWEEN_BUCKETS)');
+    expect(content).not.toContain('Set JDEC_API_BASE_URL');
     expect(content).not.toContain('st.sidebar.metric("Recommended"');
     expect(content).not.toContain('st.sidebar.metric("Total Vault Jobs"');
     expect(content).not.toContain('verify_count');

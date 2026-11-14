@@ -102,6 +102,34 @@ npm run desktop:dev
 npm run dev
 ```
 
+### 4b. Run the Streamlit Dashboard With Its API (one command)
+```bash
+npm run workspace
+```
+
+This starts the managed API on `127.0.0.1` (port 3000), waits until its authenticated
+`/api/v2/health` answers, then starts Streamlit (`http://127.0.0.1:8501`) pointed at it. Closing
+either process, or pressing Ctrl+C, stops both. Without it, `python -m streamlit run streamlit_app.py`
+shows read-only data, and actions such as **Add to tracker**, **Prepare application documents**
+and the technical-error actions report that the local API isn't running.
+
+- The API token is `JDEC_API_TOKEN` from the environment or `.env.local`; when neither sets one, a
+  random token is generated for the session. It is passed to both processes through their
+  environment and is never printed.
+- Options: `JDEC_WORKSPACE_API_PORT` (default 3000), `JDEC_WORKSPACE_STREAMLIT_PORT` (default
+  8501), `JDEC_PYTHON` (default `python` on Windows, `python3` elsewhere).
+- Python needs the packages in `requirements.txt` (`pip install -r requirements.txt`).
+
+### Dashboard statuses
+The sidebar splits every current job into one status (`v_job_status_buckets_scoped`):
+**Rejected** (failed a hard workability gate), **Unmatched** (passed the gates, but no target lane
+fits or a mandatory qualification is missing), **Removed** (you removed or dismissed it), and the
+jobs between the gates and Apply Now: **Review (awaiting AI)**, **Review (evaluated, not ready)**,
+**Track (below review threshold)**, **Needs verification**, **Skip** and **Processing**. The
+sidebar's "What do these statuses mean?" explains each. Technical errors list the actions that
+resolve each kind of error (fetch or paste the full description, retry, or dismiss); every action is
+recorded in `job_support_actions`.
+
 ### 5. Verification & Testing
 ```bash
 # Run unit and integration tests

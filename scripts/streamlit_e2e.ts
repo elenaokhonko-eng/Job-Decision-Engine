@@ -20,6 +20,9 @@ interface DashboardSummaryRow extends pg.QueryResultRow {
   track_count: number;
   processing_count: number;
   rejected_unmatched_count: number;
+  rejected_count: number;
+  unmatched_count: number;
+  removed_count: number;
   applied_count: number;
   technical_errors: number;
   top_ten_ready_count: number;
@@ -29,7 +32,15 @@ interface DashboardMetrics {
   applyNow: number;
   track: number;
   processing: number;
-  rejectedUnmatched: number;
+  rejected: number;
+  unmatched: number;
+  removed: number;
+  reviewAwaitingAi: number;
+  reviewEvaluatedNotReady: number;
+  trackBucket: number;
+  needsVerification: number;
+  skipBucket: number;
+  processingBucket: number;
   applied: number;
   technicalErrors: number;
   topTenReady: number;
@@ -48,6 +59,7 @@ async function readDashboardMetrics(
       `
         SELECT summary.workspace_id, summary.apply_now_count, summary.track_count,
                summary.processing_count, summary.rejected_unmatched_count,
+               summary.rejected_count, summary.unmatched_count, summary.removed_count,
                summary.applied_count, summary.technical_errors, summary.top_ten_ready_count
         FROM v_application_workspace_summary_scoped AS summary
         JOIN workspaces AS workspace ON workspace.id = summary.workspace_id
@@ -62,12 +74,28 @@ async function readDashboardMetrics(
       "SELECT COUNT(*)::INTEGER AS count FROM v_top_ten_ready_jobs_stage3_scoped WHERE workspace_id = $1",
       [row.workspace_id]
     );
+    const buckets = await client.query<Record<string, number>>(
+      `SELECT review_awaiting_ai_count, review_evaluated_not_ready_count, track_count,
+              needs_verification_count, skip_count, processing_count
+       FROM v_job_status_bucket_counts_scoped WHERE workspace_id = $1`,
+      [row.workspace_id]
+    );
+    const bucket = buckets.rows[0];
+    if (!bucket) throw new Error("No SQL status bucket counts exist for the configured workspace.");
     await client.query("COMMIT");
     return {
       applyNow: row.apply_now_count,
       track: row.track_count,
       processing: row.processing_count,
-      rejectedUnmatched: row.rejected_unmatched_count,
+      rejected: row.rejected_count,
+      unmatched: row.unmatched_count,
+      removed: row.removed_count,
+      reviewAwaitingAi: bucket.review_awaiting_ai_count,
+      reviewEvaluatedNotReady: bucket.review_evaluated_not_ready_count,
+      trackBucket: bucket.track_count,
+      needsVerification: bucket.needs_verification_count,
+      skipBucket: bucket.skip_count,
+      processingBucket: bucket.processing_count,
       applied: row.applied_count,
       technicalErrors: row.technical_errors,
       topTenReady: topTen.rows[0]?.count ?? 0,
@@ -229,9 +257,15 @@ async function main(): Promise<void> {
     const expectedMetrics: Array<[string, number]> = [
       ["Top 10 Ready", sqlMetrics.topTenReady],
       ["Apply Now", sqlMetrics.applyNow],
-      ["Track", sqlMetrics.track],
-      ["Processing", sqlMetrics.processing],
-      ["Rejected / Unmatched", sqlMetrics.rejectedUnmatched],
+      ["Review (awaiting AI)", sqlMetrics.reviewAwaitingAi],
+      ["Review (evaluated, not ready)", sqlMetrics.reviewEvaluatedNotReady],
+      ["Track (below review threshold)", sqlMetrics.trackBucket],
+      ["Needs verification", sqlMetrics.needsVerification],
+      ["Skip (decided not to apply)", sqlMetrics.skipBucket],
+      ["Processing", sqlMetrics.processingBucket],
+      ["Rejected", sqlMetrics.rejected],
+      ["Unmatched", sqlMetrics.unmatched],
+      ["Removed", sqlMetrics.removed],
       ["Applied", sqlMetrics.applied],
       ["Technical Errors", sqlMetrics.technicalErrors],
     ];

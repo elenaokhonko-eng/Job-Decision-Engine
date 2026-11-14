@@ -224,7 +224,7 @@ def test_form_needs_the_api_and_a_matching_job_version():
     app = AppTest.from_file(str(FIXTURE_APP))
     app.session_state["api_configured"] = False
     _open_form(app.run(timeout=20))
-    assert any("managed API" in info.value for info in app.info)
+    assert any("npm run workspace" in info.value for info in app.info)
     assert "api_calls" not in app.session_state
 
     stale = AppTest.from_file(str(FIXTURE_APP))

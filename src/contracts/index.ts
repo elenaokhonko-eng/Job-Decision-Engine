@@ -17,6 +17,19 @@ export {
   JobConfirmedFactWithdrawRequestSchema,
 } from "./jobConfirmedFacts.js";
 export {
+  JobStatusBucketSchema,
+  JobStatusBucketRowSchema,
+  JobStatusBucketCountsSchema,
+  ApplicationWorkspaceSummarySchema,
+  JobSupportIssueClassSchema,
+  JobSupportActionSchema,
+  JobSupportIssueRowSchema,
+  JobSupportActionRequestSchema,
+  JobSupportActionResultSchema,
+  JobSupportIssuesResponseSchema,
+  JobSupportRetryAllResultSchema,
+} from "./jobStatus.js";
+export {
   ApplicationReadinessSchema,
   ApplicationReadinessStatusSchema,
   type ApplicationReadiness,

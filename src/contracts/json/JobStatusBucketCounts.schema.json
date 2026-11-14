@@ -1,0 +1,68 @@
+{
+  "$ref": "#/definitions/JobStatusBucketCounts",
+  "definitions": {
+    "JobStatusBucketCounts": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "total_jobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "apply_now_count": {
+          "$ref": "#/definitions/JobStatusBucketCounts/properties/total_jobs"
+        },
+        "review_awaiting_ai_count": {
+          "$ref": "#/definitions/JobStatusBucketCounts/properties/total_jobs"
+        },
+        "review_evaluated_not_ready_count": {
+          "$ref": "#/definitions/JobStatusBucketCounts/properties/total_jobs"
+        },
+        "track_count": {
+          "$ref": "#/definitions/JobStatusBucketCounts/properties/total_jobs"
+        },
+        "needs_verification_count": {
+          "$ref": "#/definitions/JobStatusBucketCounts/properties/total_jobs"
+        },
+        "processing_count": {
+          "$ref": "#/definitions/JobStatusBucketCounts/properties/total_jobs"
+        },
+        "skip_count": {
+          "$ref": "#/definitions/JobStatusBucketCounts/properties/total_jobs"
+        },
+        "technical_error_count": {
+          "$ref": "#/definitions/JobStatusBucketCounts/properties/total_jobs"
+        },
+        "rejected_count": {
+          "$ref": "#/definitions/JobStatusBucketCounts/properties/total_jobs"
+        },
+        "unmatched_count": {
+          "$ref": "#/definitions/JobStatusBucketCounts/properties/total_jobs"
+        },
+        "removed_count": {
+          "$ref": "#/definitions/JobStatusBucketCounts/properties/total_jobs"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "total_jobs",
+        "apply_now_count",
+        "review_awaiting_ai_count",
+        "review_evaluated_not_ready_count",
+        "track_count",
+        "needs_verification_count",
+        "processing_count",
+        "skip_count",
+        "technical_error_count",
+        "rejected_count",
+        "unmatched_count",
+        "removed_count"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

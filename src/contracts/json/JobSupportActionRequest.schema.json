@@ -1,0 +1,50 @@
+{
+  "$ref": "#/definitions/JobSupportActionRequest",
+  "definitions": {
+    "JobSupportActionRequest": {
+      "type": "object",
+      "properties": {
+        "job_version_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "issue_class": {
+          "type": "string",
+          "enum": [
+            "DESCRIPTION_INCOMPLETE",
+            "TASK_DEAD_LETTER",
+            "BLOCKED_DEPENDENCY",
+            "EVALUATION_FAILED",
+            "PROCESSING_ERROR"
+          ]
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "FETCH_DESCRIPTION",
+            "PASTE_DESCRIPTION",
+            "RETRY",
+            "DISMISS"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 200,
+          "maxLength": 60000
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "job_version_id",
+        "issue_class",
+        "action"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

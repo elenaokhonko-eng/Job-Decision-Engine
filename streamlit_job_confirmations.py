@@ -350,7 +350,8 @@ def render_employer_confirmation(
         return
     if not api_configured:
         st.info(
-            "Recording a confirmation needs the managed API (set JDEC_API_BASE_URL)."
+            "Recording a confirmation needs the app's local API. Start the app with "
+            "`npm run workspace`, which starts the API and the dashboard together."
         )
         return
 

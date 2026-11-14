@@ -22,17 +22,25 @@ CATEGORY_OPTIONS = (
     "Processing",
     "Applied",
     "Skip",
-    "Rejected / Unmatched",
+    "Rejected",
+    "Unmatched",
+    "Removed",
     "Archive",
     "All",
 )
 DEFAULT_CATEGORY_INDEX = CATEGORY_OPTIONS.index("Apply Now")
+# Closed-out categories and their v_job_status_buckets_scoped bucket (migration 112).
+CLOSED_OUT_CATEGORY_BUCKETS = {
+    "Rejected": "REJECTED",
+    "Unmatched": "UNMATCHED",
+    "Removed": "REMOVED",
+}
 # Categories whose rows come from their own scoped read model rather than the
 # shortlist page, so the sidebar filters are applied to them directly.
 SELF_SOURCED_CATEGORIES = frozenset({VERIFY_THEN_APPLY_CATEGORY, REVIEW_CATEGORY})
 # Categories the read model pages on the server (LIMIT/OFFSET); every other
 # category is loaded whole and paged in the listing.
-SERVER_PAGED_CATEGORIES = frozenset({"Archive", "Rejected / Unmatched"})
+SERVER_PAGED_CATEGORIES = frozenset({"Archive", *CLOSED_OUT_CATEGORY_BUCKETS})
 # Categories whose VERIFY-eligibility rows get the same verification action as
 # "Verify, then apply".
 VERIFICATION_ACTION_CATEGORIES = frozenset({"Track", REVIEW_CATEGORY})

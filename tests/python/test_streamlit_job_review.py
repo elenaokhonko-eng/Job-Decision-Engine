@@ -371,7 +371,7 @@ def test_page_count_handles_unknown_and_partial_pages():
     assert page_count(0) == 1
     assert page_count(25) == 1
     assert page_count(26) == 2
-    assert SERVER_PAGED_CATEGORIES == {"Archive", "Rejected / Unmatched"}
+    assert SERVER_PAGED_CATEGORIES == {"Archive", "Rejected", "Unmatched", "Removed"}
 
 
 def test_app_shows_one_page_control_per_category_and_reviews_every_job():
