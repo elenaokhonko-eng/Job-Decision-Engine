@@ -31,6 +31,7 @@ import {
   parseFreshnessBasis,
   type ApproximateDateUnit,
 } from '../contracts/postingFacts.js';
+import { extractTerritories, isTerritoryAuthorized } from '../pipeline/workabilityPolicy.js';
 
 // ============================================================================
 // 1. Freshness Evaluation & 60-Day Hard Gate
@@ -332,8 +333,11 @@ export function evaluateMobilityMatch(
   // counts, not only its first place name. A job whose own location is the home
   // base is not blocked by a "based in" mention elsewhere in its description.
   const residencyClause = text.match(/\b(?:must reside in|residents? of|based in)\s+(?:the\s+)?([^.;!?\n]{1,160})/i)?.[1] ?? '';
+  // A region that contains the home base counts as naming it ("based in Southeast Asia",
+  // "residents of APAC" include Singapore), as in the gate's territory rules.
   const clauseNamesHomeBase = homeBaseLower !== ''
-    && new RegExp(`\\b${escapeRegExp(homeBaseLower)}\\b`, 'i').test(residencyClause);
+    && (new RegExp(`\\b${escapeRegExp(homeBaseLower)}\\b`, 'i').test(residencyClause)
+      || extractTerritories(residencyClause).some((territory) => isTerritoryAuthorized(territory, [homeBase as string])));
   const isBasedInMention = /\bbased in\b/i.test(requiredResidency?.[0] ?? '');
   const jobLocatedInHomeBase = homeBaseLower !== ''
     && new RegExp(`\\b${escapeRegExp(homeBaseLower)}\\b`, 'i').test(String(input.location || ''));

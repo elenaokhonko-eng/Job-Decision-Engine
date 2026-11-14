@@ -294,6 +294,26 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     expect(result.remote_from_home_base).toBe(false);
   });
 
+  it.each([
+    // Synthetic: a CTO "based in Southeast Asia" on a remote Singapore/SEA role.
+    'Fully remote (Singapore / Southeast Asia). You will report to the CTO (currently based in Southeast Asia).',
+    'Remote role for residents of APAC. Python and Django backend services.',
+    'Remote role. Candidates must reside in South-East Asia.',
+  ])('does not treat a region that includes the home base as a residency mismatch: %j', (description) => {
+    const result = evaluateMobilityMatch({ workplace_type: 'REMOTE', description, location: 'Unknown' }, approvedMobility);
+    expect(result.is_hard_reject).toBe(false);
+  });
+
+  it('still rejects a residency requirement for a region outside the home base', () => {
+    const result = evaluateMobilityMatch({
+      workplace_type: 'REMOTE',
+      description: 'Remote role. Candidates must reside in Latin America.',
+      location: 'Unknown',
+    }, approvedMobility);
+    expect(result.is_hard_reject).toBe(true);
+    expect(result.rejection_code).toBe('UNWORKABLE_LOCATION_MODEL');
+  });
+
   // Scenario 5: Series-A startup + SGD 8k -> below configured floor
   it('Scenario 5: Series-A startup with SGD 8k/month cash salary is flagged below floor', () => {
     const job = {
