@@ -150,6 +150,9 @@ def validate_application_workspace_summary(
         "technical_errors",
         "skip_count",
         "top_ten_ready_count",
+        "rejected_count",
+        "unmatched_count",
+        "removed_count",
     )
     _require_fields(row, fields)
     _require_scope(row, workspace_id)
@@ -160,6 +163,132 @@ def validate_application_workspace_summary(
         )
     for field in fields[3:]:
         _require_nonnegative_count(row, field)
+    split_total = (
+        int(row["rejected_count"])
+        + int(row["unmatched_count"])
+        + int(row["removed_count"])
+    )
+    if split_total != int(row["rejected_unmatched_count"]):
+        raise ValueError(
+            "Rejected, Unmatched and Removed counts do not add up to "
+            "rejected_unmatched_count."
+        )
+
+
+JOB_STATUS_BUCKETS = (
+    "APPLY_NOW",
+    "REVIEW_AWAITING_AI",
+    "REVIEW_EVALUATED_NOT_READY",
+    "TRACK",
+    "NEEDS_VERIFICATION",
+    "PROCESSING",
+    "SKIP",
+    "TECHNICAL_ERROR",
+    "REJECTED",
+    "UNMATCHED",
+    "REMOVED",
+)
+STATUS_BUCKET_COUNT_FIELDS = (
+    "apply_now_count",
+    "review_awaiting_ai_count",
+    "review_evaluated_not_ready_count",
+    "track_count",
+    "needs_verification_count",
+    "processing_count",
+    "skip_count",
+    "technical_error_count",
+    "rejected_count",
+    "unmatched_count",
+    "removed_count",
+)
+SUPPORT_ISSUE_CLASSES = frozenset(
+    {
+        "DESCRIPTION_INCOMPLETE",
+        "TASK_DEAD_LETTER",
+        "BLOCKED_DEPENDENCY",
+        "EVALUATION_FAILED",
+        "PROCESSING_ERROR",
+    }
+)
+SUPPORT_ACTIONS = frozenset(
+    {"FETCH_DESCRIPTION", "PASTE_DESCRIPTION", "RETRY", "DISMISS"}
+)
+
+
+def validate_status_bucket_counts(
+    row: Mapping[str, object], workspace_id: object
+) -> None:
+    """Validate the per-workspace status-bucket counts (v_job_status_bucket_counts_scoped).
+
+    Raises:
+        ValueError: If the scope is wrong or the buckets do not add up to total_jobs.
+        TypeError: If a count has an invalid type.
+    """
+    fields = ("workspace_id", "total_jobs", *STATUS_BUCKET_COUNT_FIELDS)
+    _require_fields(row, fields)
+    _require_scope(row, workspace_id)
+    for field in fields[1:]:
+        _require_nonnegative_count(row, field)
+    bucket_total = sum(int(row[field]) for field in STATUS_BUCKET_COUNT_FIELDS)
+    if bucket_total != int(row["total_jobs"]):
+        raise ValueError("Status bucket counts do not add up to total_jobs.")
+
+
+def validate_status_bucket_row(row: Mapping[str, object], workspace_id: object) -> None:
+    """Validate one row of v_job_status_buckets_scoped."""
+    _require_fields(
+        row,
+        (
+            "workspace_id",
+            "canonical_job_id",
+            "job_version_id",
+            "title",
+            "company",
+            "processing_state",
+            "status_bucket",
+            "status_reason",
+        ),
+    )
+    _require_scope(row, workspace_id)
+    for field in ("canonical_job_id", "title", "company", "processing_state"):
+        _require_string(row, field)
+    if row.get("status_bucket") not in JOB_STATUS_BUCKETS:
+        raise ValueError("Status bucket is not a known bucket.")
+    reason = row.get("status_reason")
+    if reason is not None and not isinstance(reason, str):
+        raise TypeError("Read-model field status_reason must be a string or NULL.")
+
+
+def validate_support_issue_row(row: Mapping[str, object], workspace_id: object) -> None:
+    """Validate one row of v_job_support_issues_scoped."""
+    _require_fields(
+        row,
+        (
+            "workspace_id",
+            "canonical_job_id",
+            "job_version_id",
+            "title",
+            "company",
+            "processing_state",
+            "issue_class",
+            "issue_detail",
+            "task_ids",
+            "available_actions",
+        ),
+    )
+    _require_scope(row, workspace_id)
+    for field in ("canonical_job_id", "job_version_id", "title", "company"):
+        _require_string(row, field)
+    if row.get("issue_class") not in SUPPORT_ISSUE_CLASSES:
+        raise ValueError("Support issue class is not a known class.")
+    actions = row.get("available_actions")
+    if not isinstance(actions, (list, tuple)) or not actions:
+        raise ValueError("Support issue must offer at least one action.")
+    unknown = [action for action in actions if action not in SUPPORT_ACTIONS]
+    if unknown:
+        raise ValueError(f"Support issue offers unknown actions: {', '.join(unknown)}")
+    if not isinstance(row.get("task_ids"), (list, tuple)):
+        raise TypeError("Read-model field task_ids must be a list.")
 
 
 def validate_ranked_job_row(row: Mapping[str, object], workspace_id: object) -> None:

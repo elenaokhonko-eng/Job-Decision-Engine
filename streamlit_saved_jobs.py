@@ -612,9 +612,9 @@ def render_saved_jobs_section(
 
     if not api_configured:
         st.warning(
-            "The managed API is not configured (set JDEC_API_BASE_URL), so "
-            "validation and import are unavailable here. Use the command line "
-            "below."
+            "The app's local API isn't running, so validation and import are "
+            "unavailable here. Start the app with `npm run workspace` (it starts "
+            "the API and the dashboard together), or use the command line below."
         )
 
     uploaded = upload_widget(

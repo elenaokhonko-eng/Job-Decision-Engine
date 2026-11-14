@@ -9,6 +9,15 @@ import { SCHEMA_VERSION as CONTRACT_SCHEMA_VERSION, SchemaVersionSchema } from '
 
 export const READ_MODEL_SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION;
 
+// Status buckets, the workspace summary (Rejected / Unmatched / Removed split) and the
+// technical-error support issues are defined once in src/contracts/jobStatus.ts (migration 112).
+export {
+  ApplicationWorkspaceSummarySchema,
+  JobStatusBucketCountsSchema,
+  JobStatusBucketRowSchema,
+  JobSupportIssueRowSchema,
+} from '../contracts/jobStatus.js';
+
 const PostgresNumericInputSchema = z.union([
   z.number().finite(),
   z.string().trim().regex(/^-?(?:\d+(?:\.\d*)?|\.\d+)$/).transform(Number),

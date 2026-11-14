@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 
+import pytest
+
 from streamlit_workspace_contracts import (
     LANE_FILTER_OPTIONS,
     TARGET_LANE_KEYS,
@@ -16,6 +18,9 @@ from streamlit_workspace_contracts import (
     validate_profile_coverage_row,
     validate_profile_evidence_row,
     validate_ranked_job_row,
+    validate_status_bucket_counts,
+    validate_status_bucket_row,
+    validate_support_issue_row,
     validate_track_row,
     validate_verify_then_apply_row,
 )
@@ -52,6 +57,9 @@ def test_workspace_summary_contract_validates_scope_member_and_counts():
         "technical_errors": 0,
         "skip_count": 0,
         "top_ten_ready_count": 1,
+        "rejected_count": 2,
+        "unmatched_count": 1,
+        "removed_count": 1,
     }
     validate_application_workspace_summary(summary, WORKSPACE_ID, "member-1")
     try:
@@ -62,6 +70,84 @@ def test_workspace_summary_contract_validates_scope_member_and_counts():
         pass
     else:
         raise AssertionError("Workspace summary accepted a negative count")
+    with pytest.raises(ValueError, match="do not add up"):
+        validate_application_workspace_summary(
+            summary | {"unmatched_count": 2}, WORKSPACE_ID, "member-1"
+        )
+    without_split = {
+        key: value for key, value in summary.items() if key != "removed_count"
+    }
+    with pytest.raises(ValueError, match="removed_count"):
+        validate_application_workspace_summary(without_split, WORKSPACE_ID, "member-1")
+
+
+def _bucket_counts(**overrides):
+    counts = {
+        "workspace_id": WORKSPACE_ID,
+        "total_jobs": 11,
+        "apply_now_count": 1,
+        "review_awaiting_ai_count": 1,
+        "review_evaluated_not_ready_count": 1,
+        "track_count": 1,
+        "needs_verification_count": 1,
+        "processing_count": 1,
+        "skip_count": 1,
+        "technical_error_count": 1,
+        "rejected_count": 1,
+        "unmatched_count": 1,
+        "removed_count": 1,
+    }
+    return counts | overrides
+
+
+def test_status_bucket_counts_must_partition_total_jobs():
+    validate_status_bucket_counts(_bucket_counts(), WORKSPACE_ID)
+    with pytest.raises(ValueError, match="total_jobs"):
+        validate_status_bucket_counts(_bucket_counts(total_jobs=12), WORKSPACE_ID)
+    with pytest.raises(ValueError, match="workspace"):
+        validate_status_bucket_counts(_bucket_counts(), "other-workspace")
+
+
+def test_status_bucket_row_requires_a_known_bucket():
+    row = {
+        "workspace_id": WORKSPACE_ID,
+        "canonical_job_id": "job-1",
+        "job_version_id": "version-1",
+        "title": "Engineer",
+        "company": "Example",
+        "processing_state": "UNMATCHED",
+        "status_bucket": "UNMATCHED",
+        "status_reason": "NO_ACTIVE_LANE_MATCH",
+    }
+    validate_status_bucket_row(row, WORKSPACE_ID)
+    with pytest.raises(ValueError, match="known bucket"):
+        validate_status_bucket_row(
+            row | {"status_bucket": "REJECTED_UNMATCHED"}, WORKSPACE_ID
+        )
+
+
+def test_support_issue_row_offers_only_known_actions():
+    row = {
+        "workspace_id": WORKSPACE_ID,
+        "canonical_job_id": "job-1",
+        "job_version_id": "version-1",
+        "title": "Engineer",
+        "company": "Example",
+        "processing_state": "PROCESSING_ERROR",
+        "issue_class": "DESCRIPTION_INCOMPLETE",
+        "issue_detail": "DESCRIPTION_CONTENT_INCOMPLETE",
+        "task_ids": ["task-1"],
+        "available_actions": ["FETCH_DESCRIPTION", "PASTE_DESCRIPTION", "DISMISS"],
+    }
+    validate_support_issue_row(row, WORKSPACE_ID)
+    with pytest.raises(ValueError, match="unknown actions"):
+        validate_support_issue_row(
+            row | {"available_actions": ["DELETE"]}, WORKSPACE_ID
+        )
+    with pytest.raises(ValueError, match="at least one action"):
+        validate_support_issue_row(row | {"available_actions": []}, WORKSPACE_ID)
+    with pytest.raises(ValueError, match="class"):
+        validate_support_issue_row(row | {"issue_class": "HARD_REJECTED"}, WORKSPACE_ID)
 
 
 def test_company_culture_evidence_and_coverage_contracts_validate_provenance():

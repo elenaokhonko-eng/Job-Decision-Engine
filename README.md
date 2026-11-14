@@ -49,7 +49,10 @@ The Streamlit workspace separates current application opportunities from pipelin
 * The `Why I Fit` view links job requirements to non-private profile evidence in the current match context.
 * Company culture averages include observation counts and confidence. Missing signals remain `UNKNOWN` instead of appearing as zero.
 
-The Streamlit fallback uses workspace-scoped PostgreSQL read models in read-only mode. Application status changes require the managed API.
+* `Rejected`, `Unmatched` and `Removed` are separate: Rejected = failed a hard workability gate; Unmatched = passed the gates, but no target lane fits or a mandatory qualification is missing; Removed = removed or dismissed by you. The sidebar also counts jobs between the gates and Apply Now (Review awaiting AI, Review evaluated but not ready, Track, Needs verification, Skip, Processing) and explains each status.
+* `Technical errors requiring support` offers per-row actions chosen by the kind of error: fetch or paste the full description, retry a failed step, or dismiss the job. Operational failures never become rejections, and every action is audited.
+
+The Streamlit fallback uses workspace-scoped PostgreSQL read models in read-only mode. Application status changes and the actions above require the managed API: start the dashboard with `npm run workspace`, which runs the API on `127.0.0.1` and Streamlit together (see [Quickstart](docs/quickstart.md#4b-run-the-streamlit-dashboard-with-its-api-one-command)).
 
 ---
 

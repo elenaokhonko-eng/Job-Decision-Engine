@@ -32,6 +32,7 @@ def test_streamlit_entrypoint_and_all_direct_helpers_import_together():
         "streamlit_saved_jobs",
         "streamlit_job_review",
         "streamlit_job_confirmations",
+        "streamlit_job_status",
     ):
         importlib.import_module(module_name)
 

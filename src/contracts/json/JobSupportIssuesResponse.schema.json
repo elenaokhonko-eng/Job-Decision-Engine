@@ -1,0 +1,158 @@
+{
+  "$ref": "#/definitions/JobSupportIssuesResponse",
+  "definitions": {
+    "JobSupportIssuesResponse": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "job_status_v1"
+        },
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "workspace_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "canonical_job_id": {
+                "$ref": "#/definitions/JobSupportIssuesResponse/properties/issues/items/properties/workspace_id"
+              },
+              "job_version_id": {
+                "$ref": "#/definitions/JobSupportIssuesResponse/properties/issues/items/properties/workspace_id"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "company": {
+                "type": "string",
+                "minLength": 1
+              },
+              "canonical_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "processing_state": {
+                "type": "string",
+                "minLength": 1
+              },
+              "recommendation_outcome": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "issue_class": {
+                "type": "string",
+                "enum": [
+                  "DESCRIPTION_INCOMPLETE",
+                  "TASK_DEAD_LETTER",
+                  "BLOCKED_DEPENDENCY",
+                  "EVALUATION_FAILED",
+                  "PROCESSING_ERROR"
+                ]
+              },
+              "issue_detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "repair_action": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "task_ids": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/JobSupportIssuesResponse/properties/issues/items/properties/workspace_id"
+                }
+              },
+              "task_types": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "fetchable_source": {
+                "type": "boolean"
+              },
+              "available_actions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "FETCH_DESCRIPTION",
+                    "PASTE_DESCRIPTION",
+                    "RETRY",
+                    "DISMISS"
+                  ]
+                },
+                "minItems": 1
+              },
+              "detected_at": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "workspace_id",
+              "canonical_job_id",
+              "job_version_id",
+              "title",
+              "company",
+              "canonical_url",
+              "source",
+              "processing_state",
+              "recommendation_outcome",
+              "issue_class",
+              "issue_detail",
+              "repair_action",
+              "task_ids",
+              "task_types",
+              "retryable",
+              "fetchable_source",
+              "available_actions",
+              "detected_at"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "ok",
+        "issues"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

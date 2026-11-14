@@ -1,0 +1,109 @@
+{
+  "$ref": "#/definitions/JobSupportRetryAllResult",
+  "definitions": {
+    "JobSupportRetryAllResult": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "job_support_action_v1"
+        },
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "considered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retried": {
+          "$ref": "#/definitions/JobSupportRetryAllResult/properties/considered"
+        },
+        "unchanged": {
+          "$ref": "#/definitions/JobSupportRetryAllResult/properties/considered"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "type": "string",
+                "const": "job_support_action_v1"
+              },
+              "ok": {
+                "type": "boolean",
+                "const": true
+              },
+              "canonical_job_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "FETCH_DESCRIPTION",
+                  "PASTE_DESCRIPTION",
+                  "RETRY",
+                  "DISMISS"
+                ]
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "APPLIED",
+                  "NO_CHANGE"
+                ]
+              },
+              "audit_id": {
+                "$ref": "#/definitions/JobSupportRetryAllResult/properties/results/items/properties/canonical_job_id"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "task_ids": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/JobSupportRetryAllResult/properties/results/items/properties/canonical_job_id"
+                }
+              },
+              "observation_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/JobSupportRetryAllResult/properties/results/items/properties/canonical_job_id"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "schema_version",
+              "ok",
+              "canonical_job_id",
+              "action",
+              "outcome",
+              "audit_id",
+              "message",
+              "task_ids",
+              "observation_id"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "ok",
+        "considered",
+        "retried",
+        "unchanged",
+        "results"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -22,6 +22,7 @@ from streamlit_formatters import as_number, format_percent, format_score, format
 from streamlit_formatters import format_career_track, safe_http_url
 from streamlit_job_review import (
     CATEGORY_OPTIONS,
+    CLOSED_OUT_CATEGORY_BUCKETS,
     DEFAULT_CATEGORY_INDEX,
     PAGE_SIZE,
     REVIEW_CATEGORY,
@@ -55,8 +56,20 @@ from streamlit_workspace_contracts import (
     validate_profile_evidence_row,
     validate_ranked_job_row,
     validate_review_row,
+    validate_status_bucket_counts,
+    validate_status_bucket_row,
+    validate_support_issue_row,
     validate_track_row,
     validate_verify_then_apply_row,
+)
+from streamlit_job_status import (
+    API_SETUP_HINT,
+    CLOSED_OUT_BUCKETS,
+    IN_BETWEEN_BUCKETS,
+    bucket_metrics,
+    render_status_help,
+    render_support_issues,
+    support_issue_job_count,
 )
 from streamlit_manual_application import (
     render_manual_application_flow,
@@ -283,10 +296,47 @@ REJECTED_READ_MODEL_QUERY = """
 APPLICATION_WORKSPACE_SUMMARY_QUERY = """
     SELECT workspace_id, user_id, total_jobs, apply_now_count, track_count,
            processing_count, rejected_unmatched_count, applied_count, technical_errors,
-           top_ten_ready_count, skip_count, user_key
+           top_ten_ready_count, skip_count, user_key,
+           rejected_count, unmatched_count, removed_count
     FROM v_application_workspace_summary_scoped
     WHERE workspace_id = %s AND user_key = %s
     LIMIT 1
+"""
+
+# One status bucket per current job (migration 112); the bucket counts sum to total_jobs.
+STATUS_BUCKET_COUNTS_QUERY = """
+    SELECT workspace_id, total_jobs, apply_now_count, review_awaiting_ai_count,
+           review_evaluated_not_ready_count, track_count, needs_verification_count,
+           processing_count, skip_count, technical_error_count, rejected_count,
+           unmatched_count, removed_count
+    FROM v_job_status_bucket_counts_scoped
+    WHERE workspace_id = %s
+"""
+
+# Rejected, Unmatched and Removed rows, newest first, paged by the read model.
+STATUS_BUCKET_JOBS_QUERY = """
+    SELECT workspace_id, canonical_job_id, job_version_id, title, company,
+           canonical_url, source, processing_state, gate_status,
+           recommendation_eligibility, recommendation_outcome, rejection_codes,
+           pipeline_display_category, status_bucket, status_reason,
+           status_reason AS rejection_reason, observed_at
+    FROM v_job_status_buckets_scoped
+    WHERE workspace_id = %s AND status_bucket = %s
+    ORDER BY observed_at DESC NULLS LAST, canonical_job_id DESC
+    LIMIT %s OFFSET %s
+"""
+
+# Technical errors with the actions their issue class offers.
+SUPPORT_ISSUES_QUERY = """
+    SELECT workspace_id::text AS workspace_id, canonical_job_id::text AS canonical_job_id,
+           job_version_id::text AS job_version_id, title, company, canonical_url, source,
+           processing_state, recommendation_outcome, issue_class, issue_detail,
+           repair_action, task_ids::text[] AS task_ids, task_types, retryable,
+           fetchable_source, available_actions, detected_at
+    FROM v_job_support_issues_scoped
+    WHERE workspace_id = %s
+    ORDER BY detected_at DESC NULLS LAST, company, title, canonical_job_id, issue_class
+    LIMIT 200
 """
 
 ARCHIVED_JOBS_READ_MODEL_QUERY = """
@@ -685,6 +735,39 @@ def fetch_application_workspace_summary():
     )[0]
 
 
+def _active_workspace_id():
+    connection = _open_read_only_connection()
+    try:
+        return _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+
+
+def fetch_status_bucket_counts():
+    """Per-workspace status-bucket counts from v_job_status_bucket_counts_scoped."""
+    workspace_id = _active_workspace_id()
+    rows = _read_model_query(STATUS_BUCKET_COUNTS_QUERY, (workspace_id,))
+    if not rows:
+        raise RuntimeError("No status bucket counts are available for this workspace.")
+    return _validate_workspace_rows(rows, workspace_id, validate_status_bucket_counts)[0]
+
+
+def fetch_status_bucket_jobs(status_bucket, limit=PAGE_SIZE, offset=0):
+    """One page of jobs in a status bucket (Rejected, Unmatched or Removed)."""
+    workspace_id = _active_workspace_id()
+    rows = _read_model_query(
+        STATUS_BUCKET_JOBS_QUERY, (workspace_id, status_bucket, limit, offset)
+    )
+    return _validate_workspace_rows(rows, workspace_id, validate_status_bucket_row)
+
+
+def fetch_support_issues():
+    """Open technical errors with their available actions."""
+    workspace_id = _active_workspace_id()
+    rows = _read_model_query(SUPPORT_ISSUES_QUERY, (workspace_id,))
+    return _validate_workspace_rows(rows, workspace_id, validate_support_issue_row)
+
+
 def fetch_top_ten_ready_jobs():
     connection = _open_read_only_connection()
     try:
@@ -872,9 +955,7 @@ def api_request(method, path, params=None, body=None, timeout=30):
 
     base = get_api_base_url()
     if not base:
-        raise RuntimeError(
-            "Managed API base URL is not configured. Set JDEC_API_BASE_URL for API operations."
-        )
+        raise RuntimeError(API_SETUP_HINT)
     normalized_path = application_api_path(path)
     url = f"{base}{normalized_path}"
     if params:
@@ -1585,7 +1666,7 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
 
 def save_application_status(job, status, application=None):
     if not get_api_base_url():
-        st.error("Application tracking changes require the managed API. Configure JDEC_API_BASE_URL and JDEC_API_TOKEN.")
+        st.error(API_SETUP_HINT)
         return
 
     if application and application.get("application_record_id"):
@@ -1894,27 +1975,44 @@ except Exception as exc:
 if summary_error:
     st.sidebar.error(f"Application workspace summary is unavailable: {summary_error}")
     metric_values = {label: "Unavailable" for label in (
-        "Top 10 Ready", "Apply Now", "Track", "Processing",
-        "Rejected / Unmatched", "Applied", "Technical Errors",
+        "Top 10 Ready", "Apply Now", "Applied", "Technical Errors",
     )}
+    closed_out_values = {label: "Unavailable" for _field, label in CLOSED_OUT_BUCKETS}
+    processing_count = "Unavailable"
 else:
     metric_values = {
         "Top 10 Ready": application_workspace_summary["top_ten_ready_count"],
         "Apply Now": application_workspace_summary["apply_now_count"],
-        "Track": application_workspace_summary["track_count"],
-        "Processing": application_workspace_summary["processing_count"],
-        "Rejected / Unmatched": application_workspace_summary["rejected_unmatched_count"],
         "Applied": application_workspace_summary["applied_count"],
         "Technical Errors": application_workspace_summary["technical_errors"],
     }
+    # Rejected / Unmatched / Removed are separate counts; together they equal the
+    # compatibility column rejected_unmatched_count.
+    closed_out_values = {
+        "Rejected": application_workspace_summary["rejected_count"],
+        "Unmatched": application_workspace_summary["unmatched_count"],
+        "Removed": application_workspace_summary["removed_count"],
+    }
+    processing_count = application_workspace_summary["processing_count"]
 
-processing_count = metric_values["Processing"]
-rejected_count = metric_values["Rejected / Unmatched"]
-technical_error_count = metric_values["Technical Errors"]
+try:
+    status_bucket_counts = fetch_status_bucket_counts()
+except Exception as exc:
+    status_bucket_counts = None
+    st.sidebar.error(f"Status bucket counts are unavailable: {exc}")
 
 st.sidebar.subheader("Application workspace")
 for metric_label, metric_value in metric_values.items():
     st.sidebar.metric(metric_label, metric_value)
+
+st.sidebar.subheader("Passed the gates, not in Apply Now yet")
+for metric_label, metric_value in bucket_metrics(status_bucket_counts, IN_BETWEEN_BUCKETS):
+    st.sidebar.metric(metric_label, metric_value)
+
+st.sidebar.subheader("Closed out")
+for metric_label, metric_value in closed_out_values.items():
+    st.sidebar.metric(metric_label, metric_value)
+render_status_help()
 
 try:
     top_ten_ready_jobs = fetch_top_ten_ready_jobs()
@@ -2198,7 +2296,9 @@ with tab_dashboard:
         "Processing": application_workspace_summary.get("processing_count"),
         "Applied": application_workspace_summary.get("applied_count"),
         "Skip": application_workspace_summary.get("skip_count"),
-        "Rejected / Unmatched": application_workspace_summary.get("rejected_unmatched_count"),
+        "Rejected": application_workspace_summary.get("rejected_count"),
+        "Unmatched": application_workspace_summary.get("unmatched_count"),
+        "Removed": application_workspace_summary.get("removed_count"),
         "All": application_workspace_summary.get("total_jobs"),
     }
     category_count = category_counts.get(workspace_category)
@@ -2245,8 +2345,10 @@ with tab_dashboard:
                     "OFFER", "REJECTED", "WITHDRAWN"
                 )
             ]
-        elif workspace_category == "Rejected / Unmatched":
-            category_rows = fetch_rejected_jobs_from_postgres_read_model(page_size, category_offset)
+        elif workspace_category in CLOSED_OUT_CATEGORY_BUCKETS:
+            category_rows = fetch_status_bucket_jobs(
+                CLOSED_OUT_CATEGORY_BUCKETS[workspace_category], page_size, category_offset
+            )
         elif workspace_category == "Processing":
             category_rows = [job for job in jobs_list if job.get("pipeline_display_category") == "PROCESSING_AUTOMATICALLY"]
         elif workspace_category == "Skip":
@@ -2277,7 +2379,7 @@ with tab_dashboard:
                 track_filter=track_filter,
                 search_query=search_query,
             )
-        elif workspace_category not in ("Applied", "Rejected / Unmatched"):
+        elif workspace_category != "Applied" and workspace_category not in CLOSED_OUT_CATEGORY_BUCKETS:
             for category_job in category_rows:
                 category_job["decision_eligibility"] = category_job.get("recommendation_eligibility")
                 category_job["decision_outcome"] = category_job.get("recommendation_outcome")
@@ -2289,14 +2391,12 @@ with tab_dashboard:
         job for job in jobs_list
         if job.get("pipeline_display_category") == "PROCESSING_AUTOMATICALLY"
     ]
-    technical_error_jobs = [
-        job for job in jobs_list
-        if job.get("pipeline_display_category") == "TECHNICAL_ERROR"
-    ]
-    unmatched_jobs = [
-        job for job in jobs_list
-        if job.get("pipeline_display_category") == "REJECTED_UNMATCHED"
-    ]
+    support_issues_error = None
+    try:
+        support_issues = fetch_support_issues()
+    except Exception as exc:
+        support_issues = None
+        support_issues_error = str(exc)
 
     st.markdown("---")
     with st.expander(f"⚙️ Processing automatically ({processing_count})", expanded=False):
@@ -2314,34 +2414,28 @@ with tab_dashboard:
         else:
             st.info("No jobs are awaiting automatic pipeline work.")
 
-    with st.expander(f"🔴 Rejected / Unmatched ({rejected_count})", expanded=False):
-        st.caption("Terminal career outcomes. These are not retry queues.")
-        if unmatched_jobs:
-            st.dataframe([
-                {
-                    "Title": job.get("title"),
-                    "Company": job.get("company"),
-                    "Reason": job.get("rejection_reason") or "UNMATCHED",
-                }
-                for job in unmatched_jobs[:100]
-            ], width="stretch")
-        else:
-            st.info("No unmatched jobs in the current shortlist.")
+    closed_out_summary = " · ".join(f"{label} {value}" for label, value in closed_out_values.items())
+    with st.expander(f"🔴 Closed out — {closed_out_summary}", expanded=False):
+        st.caption("Final outcomes, not retry queues.")
+        st.markdown(
+            "- **Rejected**: failed a hard workability gate (stored reason codes).\n"
+            "- **Unmatched**: passed the gates, but no target lane fits the role or the posting "
+            "requires a qualification your profile does not show.\n"
+            "- **Removed**: you removed or dismissed the job; its record is kept.\n\n"
+            "Choose Rejected, Unmatched or Removed under **Opportunity category** to browse each list."
+        )
 
-    with st.expander(f"🛠️ Technical errors requiring support ({technical_error_count})", expanded=False):
-        st.caption("These are dead-lettered processing dependencies, not career-review items.")
-        if technical_error_jobs:
-            st.dataframe([
-                {
-                    "Title": job.get("title"),
-                    "Company": job.get("company"),
-                    "State": job.get("processing_state"),
-                    "Reason": job.get("current_artifact_reason") or job.get("rejection_reason"),
-                }
-                for job in technical_error_jobs[:100]
-            ], width="stretch")
+    support_job_count = support_issue_job_count(support_issues)
+    support_count_label = support_job_count if support_job_count is not None else "unavailable"
+    with st.expander(f"🛠️ Technical errors requiring support ({support_count_label})", expanded=False):
+        st.caption(
+            "Operational failures, never career decisions. Each row offers the actions that can "
+            "resolve its kind of error; every action is recorded."
+        )
+        if support_issues is None:
+            st.error(f"Technical errors are unavailable from the read model: {support_issues_error}")
         else:
-            st.info("No technical support items.")
+            render_support_issues(support_issues, api_request, api_configured=bool(get_api_base_url()))
 
     # Interactive search filters inside the main tab
     search_col1, search_col2 = st.columns(2)
@@ -2415,7 +2509,7 @@ with tab_dashboard:
             )
             start_index = (int(listing_page) - 1) * page_size
             active_jobs = sorted_filtered_jobs[start_index:start_index + page_size]
-        rejected_jobs = [] if workspace_category in ("Rejected / Unmatched", VERIFY_THEN_APPLY_CATEGORY, REVIEW_CATEGORY, "Archive") else rejected_jobs_audit
+        rejected_jobs = [] if workspace_category in (*CLOSED_OUT_CATEGORY_BUCKETS, VERIFY_THEN_APPLY_CATEGORY, REVIEW_CATEGORY, "Archive") else rejected_jobs_audit
 
         if workspace_category == "Archive":
             st.subheader("Archived jobs")

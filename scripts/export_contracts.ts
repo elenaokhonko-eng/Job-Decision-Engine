@@ -65,6 +65,14 @@ import {
   JobConfirmedFactResponseSchema,
   JobConfirmedFactsListResponseSchema,
   JobConfirmedFactWithdrawRequestSchema,
+  JobStatusBucketRowSchema,
+  JobStatusBucketCountsSchema,
+  ApplicationWorkspaceSummarySchema,
+  JobSupportIssueRowSchema,
+  JobSupportActionRequestSchema,
+  JobSupportActionResultSchema,
+  JobSupportIssuesResponseSchema,
+  JobSupportRetryAllResultSchema,
 } from "../src/contracts/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -138,6 +146,14 @@ const schemas = {
   JobConfirmedFactResponse: JobConfirmedFactResponseSchema,
   JobConfirmedFactsListResponse: JobConfirmedFactsListResponseSchema,
   JobConfirmedFactWithdrawRequest: JobConfirmedFactWithdrawRequestSchema,
+  JobStatusBucketRow: JobStatusBucketRowSchema,
+  JobStatusBucketCounts: JobStatusBucketCountsSchema,
+  ApplicationWorkspaceSummary: ApplicationWorkspaceSummarySchema,
+  JobSupportIssueRow: JobSupportIssueRowSchema,
+  JobSupportActionRequest: JobSupportActionRequestSchema,
+  JobSupportActionResult: JobSupportActionResultSchema,
+  JobSupportIssuesResponse: JobSupportIssuesResponseSchema,
+  JobSupportRetryAllResult: JobSupportRetryAllResultSchema,
 };
 
 console.log("Exporting runtime Zod contracts to JSON Schemas for Python and Streamlit...");

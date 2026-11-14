@@ -1,0 +1,139 @@
+{
+  "$ref": "#/definitions/JobStatusBucketRow",
+  "definitions": {
+    "JobStatusBucketRow": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "canonical_job_id": {
+          "$ref": "#/definitions/JobStatusBucketRow/properties/workspace_id"
+        },
+        "job_version_id": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/JobStatusBucketRow/properties/workspace_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "company": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processing_state": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gate_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recommendation_eligibility": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recommendation_outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rejection_codes": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pipeline_display_category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status_bucket": {
+          "type": "string",
+          "enum": [
+            "APPLY_NOW",
+            "REVIEW_AWAITING_AI",
+            "REVIEW_EVALUATED_NOT_READY",
+            "TRACK",
+            "NEEDS_VERIFICATION",
+            "PROCESSING",
+            "SKIP",
+            "TECHNICAL_ERROR",
+            "REJECTED",
+            "UNMATCHED",
+            "REMOVED"
+          ]
+        },
+        "status_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "workspace_id",
+        "canonical_job_id",
+        "job_version_id",
+        "title",
+        "company",
+        "canonical_url",
+        "source",
+        "processing_state",
+        "gate_status",
+        "recommendation_eligibility",
+        "recommendation_outcome",
+        "rejection_codes",
+        "pipeline_display_category",
+        "status_bucket",
+        "status_reason",
+        "observed_at"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

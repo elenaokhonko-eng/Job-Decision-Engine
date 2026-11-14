@@ -33,6 +33,7 @@
     "cutover:audit": "tsx scripts/backfill_cutover.ts",
     "backfill:v22": "tsx scripts/v22_backfill.ts",
     "api:v2": "tsx scripts/start_api_v2.ts",
+    "workspace": "tsx scripts/start_local_workspace.ts",
     "test:streamlit": "tsx scripts/streamlit_e2e.ts",
     "contracts:export": "tsx scripts/export_contracts.ts",
     "contracts:check": "npm run contracts:export && git diff --exit-code -- src/contracts/json",

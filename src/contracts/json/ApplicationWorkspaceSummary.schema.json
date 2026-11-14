@@ -1,0 +1,77 @@
+{
+  "$ref": "#/definitions/ApplicationWorkspaceSummary",
+  "definitions": {
+    "ApplicationWorkspaceSummary": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "user_id": {
+          "$ref": "#/definitions/ApplicationWorkspaceSummary/properties/workspace_id"
+        },
+        "user_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "total_jobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "apply_now_count": {
+          "$ref": "#/definitions/ApplicationWorkspaceSummary/properties/total_jobs"
+        },
+        "track_count": {
+          "$ref": "#/definitions/ApplicationWorkspaceSummary/properties/total_jobs"
+        },
+        "processing_count": {
+          "$ref": "#/definitions/ApplicationWorkspaceSummary/properties/total_jobs"
+        },
+        "rejected_unmatched_count": {
+          "$ref": "#/definitions/ApplicationWorkspaceSummary/properties/total_jobs"
+        },
+        "applied_count": {
+          "$ref": "#/definitions/ApplicationWorkspaceSummary/properties/total_jobs"
+        },
+        "technical_errors": {
+          "$ref": "#/definitions/ApplicationWorkspaceSummary/properties/total_jobs"
+        },
+        "skip_count": {
+          "$ref": "#/definitions/ApplicationWorkspaceSummary/properties/total_jobs"
+        },
+        "top_ten_ready_count": {
+          "$ref": "#/definitions/ApplicationWorkspaceSummary/properties/total_jobs"
+        },
+        "rejected_count": {
+          "$ref": "#/definitions/ApplicationWorkspaceSummary/properties/total_jobs"
+        },
+        "unmatched_count": {
+          "$ref": "#/definitions/ApplicationWorkspaceSummary/properties/total_jobs"
+        },
+        "removed_count": {
+          "$ref": "#/definitions/ApplicationWorkspaceSummary/properties/total_jobs"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "user_id",
+        "user_key",
+        "total_jobs",
+        "apply_now_count",
+        "track_count",
+        "processing_count",
+        "rejected_unmatched_count",
+        "applied_count",
+        "technical_errors",
+        "skip_count",
+        "top_ten_ready_count",
+        "rejected_count",
+        "unmatched_count",
+        "removed_count"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}
