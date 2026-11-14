@@ -7,7 +7,12 @@ import { createApiV2Router } from "../../api/v2/router.js";
 import { verifyArchiveApplyActivation } from "../../../scripts/archive_jobs.js";
 import { buildJobSourceEvidence } from "../../ingestion/jobSourceEvidence.js";
 import { runNormalization } from "../../pipeline/normalize.js";
-import { runJobArchive, createArchiveHold } from "../../services/jobArchive.js";
+import {
+  runJobArchive,
+  createArchiveHold,
+  listArchivedJobsWithOperationalStatus,
+  restoreArchivedJob,
+} from "../../services/jobArchive.js";
 import { validatePersistedDocumentCurrentness } from "../../documents/provenanceCurrentness.js";
 import { pgConnectionConfig, isLocalPostgresConnectionString } from "../../db/pgSsl.js";
 import { runMigrations } from "../../db/migrate.js";
@@ -212,6 +217,88 @@ async function readArchiveState(job: JobFixture): Promise<{ archived_at: Date | 
   const row = result.rows[0];
   if (!row) throw new Error(`Archive fixture job ${job.canonicalJobId} was not found.`);
   return row;
+}
+
+interface HardRejectOptions {
+  readonly decidedAt?: Date;
+  readonly codes?: readonly string[];
+  /** false: legacy job with no gate_decisions row. */
+  readonly gateRow?: boolean;
+  readonly processingState?: string;
+  readonly gateDecision?: string;
+}
+
+/** Records a deterministic hard-gate outcome the way src/pipeline/hardGate.ts persists it. */
+async function markGateOutcome(job: JobFixture, options: HardRejectOptions = {}): Promise<string | null> {
+  const codes = options.codes ?? ["ONSITE_ONLY"];
+  const processingState = options.processingState ?? "HARD_REJECTED";
+  const gateDecision = options.gateDecision ?? "HARD_REJECT";
+  await pool.query(
+    `UPDATE canonical_jobs
+     SET processing_state = $3, processing_status = $3, gate_decision = $4,
+         rejection_reason = $5
+     WHERE workspace_id = $1 AND id = $2`,
+    [job.workspaceId, job.canonicalJobId, processingState, gateDecision,
+      codes.length > 0 ? codes.join(", ") : null],
+  );
+  if (options.gateRow === false) return null;
+  const inserted = await pool.query<{ id: string }>(
+    `INSERT INTO gate_decisions (
+       workspace_id, canonical_job_id, job_version_id, decision, rejection_codes, created_at
+     ) VALUES ($1, $2, $3, $4, $5::jsonb, $6) RETURNING id::text`,
+    [job.workspaceId, job.canonicalJobId, job.jobVersionId, gateDecision,
+      JSON.stringify(codes), options.decidedAt ?? new Date(runStartedAt.getTime() - 2 * 60 * 60 * 1000)],
+  );
+  return inserted.rows[0]?.id ?? null;
+}
+
+async function addSourceObservation(job: JobFixture, sourceName: string): Promise<string> {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO raw_job_observations (
+       id, workspace_id, source_name, source_external_id, source_url, retrieved_at,
+       company_name, title, description_raw, raw_payload, raw_payload_hash,
+       processing_status, job_version_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, 'Saved Co', $7, $8, '{}'::jsonb, $9, 'PROCESSED', $10)`,
+    [id, job.workspaceId, sourceName, `${sourceName}-${job.canonicalJobId}`,
+      `https://saved.example.test/${job.canonicalJobId}`, new Date(runStartedAt.getTime() - 60 * 60 * 1000),
+      job.title, longDescription, `raw-${sourceName}-${job.canonicalJobId}`, job.jobVersionId],
+  );
+  return id;
+}
+
+async function readFullArchiveState(job: JobFixture): Promise<{
+  archived_at: Date | null;
+  archive_reason: string | null;
+  archive_age_basis: string | null;
+  archive_reference_at: Date | null;
+  archive_run_id: string | null;
+}> {
+  const result = await pool.query(
+    `SELECT archived_at, archive_reason, archive_age_basis, archive_reference_at, archive_run_id::text
+     FROM canonical_jobs WHERE workspace_id = $1 AND id = $2`,
+    [job.workspaceId, job.canonicalJobId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new Error(`Archive fixture job ${job.canonicalJobId} was not found.`);
+  return row;
+}
+
+async function rejectedUnmatchedCount(context: WorkspaceContext): Promise<number> {
+  const result = await pool.query<{ rejected_unmatched_count: number | null }>(
+    `SELECT rejected_unmatched_count FROM v_application_workspace_summary_scoped
+     WHERE workspace_id = $1 AND user_id = $2`,
+    [context.workspaceId, context.userId],
+  );
+  return Number(result.rows[0]?.rejected_unmatched_count ?? 0);
+}
+
+async function inRejectedAudit(job: JobFixture): Promise<boolean> {
+  const result = await pool.query<{ count: number }>(
+    `SELECT COUNT(*)::int AS count FROM v_rejected_jobs_audit_scoped WHERE workspace_id = $1 AND id = $2`,
+    [job.workspaceId, job.canonicalJobId],
+  );
+  return (result.rows[0]?.count ?? 0) > 0;
 }
 
 describe.skipIf(skipReal)("daily job archiving PostgreSQL integration", () => {
@@ -724,5 +811,359 @@ describe.skipIf(skipReal)("daily job archiving PostgreSQL integration", () => {
     );
     expect(version.rows[0]?.freshness_basis).toBe("REPOSTED_AT");
     expect(version.rows[0]?.reposted_at).toBeInstanceOf(Date);
+  });
+
+  it("migration 111 widens the archive basis constraints without accepting unknown bases", async () => {
+    const constraints = await pool.query<{ conname: string; definition: string }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS definition
+       FROM pg_constraint
+       WHERE conname IN ('canonical_jobs_archive_metadata_check', 'job_archive_events_age_basis_check')
+       ORDER BY conname`,
+    );
+    expect(constraints.rows.map((row) => row.conname)).toEqual([
+      "canonical_jobs_archive_metadata_check",
+      "job_archive_events_age_basis_check",
+    ]);
+    for (const row of constraints.rows) {
+      expect(row.definition).toContain("HARD_REJECTED_DECISION");
+      expect(row.definition).toContain("OBSERVED_AGE_PUBLICATION_UNKNOWN");
+    }
+    const context = await createWorkspace("basis-constraint");
+    const job = await createJobFixture(context, { sourcePublishedAt: oldPublicationDate });
+    const run = await pool.query<{ id: string }>(
+      // A completed, failed dry run: it must not become the operational status's last success.
+      `INSERT INTO job_archive_runs (run_started_at, cutoff_at, mode, status, completed_at)
+       VALUES ($1, $2, 'DRY_RUN', 'FAILED', $1) RETURNING id::text`,
+      [runStartedAt, subtractCalendarMonths(runStartedAt, 3)],
+    );
+    await expect(pool.query(
+      `UPDATE canonical_jobs
+       SET archived_at = NOW(), archive_reason = 'X', archive_age_basis = 'NOT_A_BASIS',
+           archive_reference_at = NOW(), archive_run_id = $3
+       WHERE workspace_id = $1 AND id = $2`,
+      [job.workspaceId, job.canonicalJobId, run.rows[0]?.id],
+    )).rejects.toThrow(/canonical_jobs_archive_metadata_check/);
+  });
+
+  it("archives hard-rejected jobs the day they are rejected, excluding saved sources and protected jobs, then restores", async () => {
+    const context = await createWorkspace("hard-rejected");
+    const recent = new Date(runStartedAt.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const decidedAt = new Date(runStartedAt.getTime() - 3 * 60 * 60 * 1000);
+
+    const eligible = await createJobFixture(context, { sourcePublishedAt: recent, firstSeenAt: recent });
+    const eligibleGateId = await markGateOutcome(eligible, { decidedAt, codes: ["ONSITE_ONLY", "TRAVEL_OVER_LIMIT"] });
+    const linkedInSaved = await createJobFixture(context, { sourcePublishedAt: recent, firstSeenAt: recent });
+    await markGateOutcome(linkedInSaved);
+    await addSourceObservation(linkedInSaved, "LINKEDIN_SAVED");
+    const mcfSaved = await createJobFixture(context, { sourcePublishedAt: recent, firstSeenAt: recent });
+    await markGateOutcome(mcfSaved);
+    await addSourceObservation(mcfSaved, "MCF_SAVED");
+    const held = await createJobFixture(context, { sourcePublishedAt: recent, firstSeenAt: recent });
+    await markGateOutcome(held);
+    const applied = await createJobFixture(context, { sourcePublishedAt: recent, firstSeenAt: recent });
+    await markGateOutcome(applied);
+    await pool.query(
+      `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status)
+       VALUES ($1, $2, $3, $4, 'APPLIED')`,
+      [context.workspaceId, context.userId, applied.canonicalJobId, applied.jobVersionId],
+    );
+    const needsVerification = await createJobFixture(context, { sourcePublishedAt: recent, firstSeenAt: recent });
+    await markGateOutcome(needsVerification, { processingState: "NEEDS_VERIFICATION", gateDecision: "NEEDS_VERIFICATION", codes: ["WORK_MODE_UNKNOWN"] });
+    const passed = await createJobFixture(context, { sourcePublishedAt: recent, firstSeenAt: recent });
+    await markGateOutcome(passed, { processingState: "PREQUALIFIED", gateDecision: "PASS", codes: [] });
+    const noCodes = await createJobFixture(context, { sourcePublishedAt: recent, firstSeenAt: recent });
+    await markGateOutcome(noCodes, { codes: [] });
+    const legacyNoGateRow = await createJobFixture(context, { sourcePublishedAt: recent, firstSeenAt: recent });
+    await markGateOutcome(legacyNoGateRow, { gateRow: false, codes: ["SALARY_BELOW_FLOOR"] });
+    // Qualifies under both rules: the hard-rejected rule runs first and gives the specific reason.
+    const oldAndRejected = await createJobFixture(context, { sourcePublishedAt: oldPublicationDate });
+    await markGateOutcome(oldAndRejected);
+    // Only the age rule applies.
+    const oldOnly = await createJobFixture(context, { sourcePublishedAt: oldPublicationDate });
+
+    const holdClient = await pool.connect();
+    try {
+      await createArchiveHold(holdClient, {
+        workspaceId: context.workspaceId,
+        canonicalJobId: held.canonicalJobId,
+        holdReason: "Keep this rejected role visible for a manual check.",
+        holdType: "USER_PRESERVE",
+        createdBy: `user:${context.userId}`,
+        expiresAt: new Date(Math.max(runStartedAt.getTime(), Date.now()) + 7 * 24 * 60 * 60 * 1000),
+      });
+    } finally {
+      holdClient.release();
+    }
+    const pendingTask = await pool.query<{ id: string }>(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, context_fingerprint, status)
+       VALUES ($1, 'ROUTE_LANES', $2, $3::jsonb, 'hard-rejected-archive-test', 'PENDING') RETURNING id::text`,
+      [context.workspaceId, `hard-rejected-${randomUUID()}`,
+        JSON.stringify({ canonical_job_id: eligible.canonicalJobId, job_version_id: eligible.jobVersionId })],
+    );
+
+    expect(await inRejectedAudit(eligible)).toBe(true);
+    const rejectedBefore = await rejectedUnmatchedCount(context);
+
+    const dryRun = await runJobArchive(pool, {
+      mode: "DRY_RUN", rule: "hard-rejected", workspaceId: context.workspaceId, runStartedAt, maxArchives: 10,
+    });
+    expect(dryRun.rule).toBe("hard-rejected");
+    expect(dryRun.scanned_count).toBe(0);
+    expect(dryRun.hard_rejected).toMatchObject({
+      enabled: true,
+      // eligible, linkedInSaved, mcfSaved, held, applied, noCodes, legacyNoGateRow, oldAndRejected
+      scanned_count: 8,
+      eligible_count: 3,
+      archived_count: 0,
+      protected_count: 2,
+      excluded_saved_source_count: 2,
+      missing_reason_codes_count: 1,
+      unverifiable_decision_count: 0,
+      reference_fallback_count: 1,
+      failed_count: 0,
+      candidate_count: 3,
+    });
+    expect(dryRun.hard_rejected.candidates.map((candidate) => candidate.canonical_job_id).sort()).toEqual(
+      [eligible.canonicalJobId, legacyNoGateRow.canonicalJobId, oldAndRejected.canonicalJobId].sort(),
+    );
+    expect((await readFullArchiveState(eligible)).archived_at).toBeNull();
+
+    // A deferred cap is reported, not silently dropped.
+    const capped = await runJobArchive(pool, {
+      mode: "DRY_RUN", rule: "hard-rejected", workspaceId: context.workspaceId, runStartedAt, maxArchives: 1,
+    });
+    expect(capped.hard_rejected).toMatchObject({ eligible_count: 3, candidate_count: 1, deferred_count: 2 });
+
+    const applied1 = await runJobArchive(pool, {
+      mode: "APPLY", rule: "all", workspaceId: context.workspaceId, runStartedAt, maxArchives: 10,
+    });
+    expect(applied1.run_status).toBe("SUCCEEDED");
+    expect(applied1.hard_rejected.archived_count).toBe(3);
+    // The age rule scanned only what the hard-rejected rule left active and archived oldOnly.
+    expect(applied1.archived_count).toBe(1);
+    expect(applied1.candidates.map((candidate) => candidate.canonical_job_id)).toEqual([oldOnly.canonicalJobId]);
+
+    const eligibleState = await readFullArchiveState(eligible);
+    expect(eligibleState).toMatchObject({
+      archive_reason: "HARD_REJECTED_PERMANENT",
+      archive_age_basis: "HARD_REJECTED_DECISION",
+      archive_run_id: applied1.run_id,
+    });
+    expect(eligibleState.archived_at?.toISOString()).toBe(runStartedAt.toISOString());
+    expect(eligibleState.archive_reference_at?.toISOString()).toBe(decidedAt.toISOString());
+    expect((await readFullArchiveState(oldAndRejected)).archive_reason).toBe("HARD_REJECTED_PERMANENT");
+    expect((await readFullArchiveState(oldOnly)).archive_reason).toBe("JOB_OLDER_THAN_THREE_CALENDAR_MONTHS");
+    for (const kept of [linkedInSaved, mcfSaved, held, applied, needsVerification, passed, noCodes]) {
+      expect((await readFullArchiveState(kept)).archived_at).toBeNull();
+    }
+
+    const events = await pool.query<{ canonical_job_id: string; reason: string; age_basis: string; reference_at: Date; details: Record<string, unknown> }>(
+      `SELECT canonical_job_id::text, reason, age_basis, reference_at, details
+       FROM job_archive_events
+       WHERE workspace_id = $1 AND action = 'ARCHIVED' AND reason = 'HARD_REJECTED_PERMANENT'`,
+      [context.workspaceId],
+    );
+    expect(events.rows).toHaveLength(3);
+    const eligibleEvent = events.rows.find((row) => row.canonical_job_id === eligible.canonicalJobId);
+    expect(eligibleEvent?.age_basis).toBe("HARD_REJECTED_DECISION");
+    expect(eligibleEvent?.details).toMatchObject({
+      reference_source: "GATE_DECISION",
+      gate_decision_id: eligibleGateId,
+      rejection_codes: ["ONSITE_ONLY", "TRAVEL_OVER_LIMIT"],
+    });
+    expect(events.rows.find((row) => row.canonical_job_id === legacyNoGateRow.canonicalJobId)?.details)
+      .toMatchObject({ reference_source: "CANONICAL_UPDATED_AT_FALLBACK", gate_decision_id: null });
+
+    const task = await pool.query<{ status: string; repair_action: string | null }>(
+      `SELECT status, repair_action FROM pipeline_tasks WHERE workspace_id = $1 AND id = $2::uuid`,
+      [context.workspaceId, pendingTask.rows[0]?.id],
+    );
+    expect(task.rows[0]).toEqual({ status: "COMPLETED", repair_action: "SKIPPED_ARCHIVED_JOB" });
+
+    // Read models: the archived rejections leave the Rejected list and count and appear in the Archive.
+    expect(await inRejectedAudit(eligible)).toBe(false);
+    expect(await inRejectedAudit(linkedInSaved)).toBe(true);
+    expect(await rejectedUnmatchedCount(context)).toBe(rejectedBefore - 3);
+    const archiveList = await listArchivedJobsWithOperationalStatus(pool, {
+      workspaceId: context.workspaceId, userId: context.userId, limit: 20, offset: 0,
+    });
+    expect(archiveList.totalCount).toBe(4);
+    expect(archiveList.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        canonical_job_id: eligible.canonicalJobId,
+        archive_reason: "HARD_REJECTED_PERMANENT",
+        archive_age_basis: "HARD_REJECTED_DECISION",
+        processing_state: "HARD_REJECTED",
+      }),
+    ]));
+
+    const persistedRun = await pool.query<{ report_summary: { rule?: string; hard_rejected?: { archived_count?: number } } }>(
+      `SELECT report_summary FROM job_archive_runs WHERE id = $1`,
+      [applied1.run_id],
+    );
+    expect(persistedRun.rows[0]?.report_summary.rule).toBe("all");
+    expect(persistedRun.rows[0]?.report_summary.hard_rejected?.archived_count).toBe(3);
+
+    const rerun = await runJobArchive(pool, {
+      mode: "APPLY", rule: "hard-rejected", workspaceId: context.workspaceId, runStartedAt, maxArchives: 10,
+    });
+    expect(rerun.hard_rejected.archived_count).toBe(0);
+    expect(rerun.hard_rejected.scanned_count).toBe(5);
+
+    // Restore works for the new reason and queues a forced gate re-run.
+    const restoreClient = await pool.connect();
+    try {
+      await restoreClient.query("BEGIN");
+      const restored = await restoreArchivedJob(restoreClient, {
+        workspaceId: context.workspaceId,
+        canonicalJobId: eligible.canonicalJobId,
+        actor: `user:${context.userId}`,
+        reason: "Employer confirmed remote work.",
+        context,
+      });
+      await restoreClient.query("COMMIT");
+      expect(restored).toMatchObject({ restored: true, reasonCode: "RESTORED" });
+      expect(restored.reassessmentTaskId).not.toBeNull();
+      expect(restored.hold?.hold_type).toBe("RESTORE_REASSESSMENT");
+    } finally {
+      restoreClient.release();
+    }
+    expect(await readFullArchiveState(eligible)).toMatchObject({
+      archived_at: null, archive_reason: null, archive_age_basis: null, archive_reference_at: null, archive_run_id: null,
+    });
+    const restoreEvent = await pool.query<{ details: Record<string, unknown> }>(
+      `SELECT details FROM job_archive_events
+       WHERE workspace_id = $1 AND canonical_job_id = $2 AND action = 'RESTORED'`,
+      [context.workspaceId, eligible.canonicalJobId],
+    );
+    expect(restoreEvent.rows[0]?.details).toMatchObject({
+      previous_archive_reason: "HARD_REJECTED_PERMANENT",
+      previous_age_basis: "HARD_REJECTED_DECISION",
+    });
+    expect(await inRejectedAudit(eligible)).toBe(true);
+    // The reassessment hold keeps the restored job active while the gate re-runs.
+    const afterRestore = await runJobArchive(pool, {
+      mode: "APPLY", rule: "hard-rejected", workspaceId: context.workspaceId, runStartedAt: new Date(), maxArchives: 10,
+    });
+    expect(afterRestore.hard_rejected.archived_count).toBe(0);
+    expect((await readFullArchiveState(eligible)).archived_at).toBeNull();
+  });
+
+  it("restores a HARD_REJECTED_PERMANENT archive when the owner re-saves the job, but not for other sources", async () => {
+    const context = await createWorkspace("hard-rejected-resave");
+    const sourceExternalId = `resave-${randomUUID()}`;
+    const sourceUrl = `https://jobs.example.test/${sourceExternalId}`;
+    const recent = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const firstPayload = { posted_at: recent };
+    const firstObservationId = await insertObservation(context, {
+      sourceExternalId,
+      sourceUrl,
+      retrievedAt: recent,
+      description: longDescription,
+      payload: firstPayload,
+      normalizedEvidence: sourceEvidence(firstPayload, sourceExternalId, recent, longDescription),
+    });
+    const first = await runNormalization(pool, { context, observationIds: [firstObservationId], limit: 1 });
+    const canonicalJobId = first.details[0]?.canonicalJobId;
+    const jobVersionId = first.details[0]?.versionId;
+    if (!canonicalJobId || !jobVersionId) throw new Error("Initial normalization did not create canonical lineage.");
+    const job: JobFixture = { workspaceId: context.workspaceId, canonicalJobId, jobVersionId, title: "Platform Engineer" };
+    await markGateOutcome(job, { decidedAt: new Date(Date.now() - 60 * 60 * 1000) });
+
+    const archived = await runJobArchive(pool, {
+      mode: "APPLY", rule: "hard-rejected", workspaceId: context.workspaceId, runStartedAt: new Date(), maxArchives: 10,
+    });
+    expect(archived.hard_rejected.archived_count).toBe(1);
+    expect((await readFullArchiveState(job)).archive_reason).toBe("HARD_REJECTED_PERMANENT");
+
+    const insertSourceObservation = async (sourceName: string, suffix: string): Promise<string> => {
+      const id = randomUUID();
+      await pool.query(
+        `INSERT INTO raw_job_observations (
+           id, workspace_id, source_name, source_external_id, source_url, retrieved_at,
+           company_name, title, description_raw, raw_payload, raw_payload_hash, processing_status
+         ) VALUES ($1, $2, $3, $4, $5, NOW(), 'Repost Test Company', 'Platform Engineer', $6,
+                   '{}'::jsonb, $7, 'PENDING')`,
+        [id, context.workspaceId, sourceName, `${sourceName}-${suffix}`, sourceUrl, longDescription,
+          `raw-${sourceName}-${suffix}`],
+      );
+      return id;
+    };
+
+    // Ingestion re-seeing the job from a non-saved source keeps it archived.
+    const reseenId = await insertSourceObservation("LINKEDIN", randomUUID());
+    const reseen = await runNormalization(pool, { context, observationIds: [reseenId], limit: 1 });
+    expect(reseen.totalErrors).toBe(0);
+    expect(reseen.details[0]?.canonicalJobId).toBe(canonicalJobId);
+    expect((await readFullArchiveState(job)).archived_at).not.toBeNull();
+
+    // The owner saving it on LinkedIn restores it for re-evaluation.
+    const savedId = await insertSourceObservation("LINKEDIN_SAVED", randomUUID());
+    const saved = await runNormalization(pool, { context, observationIds: [savedId], limit: 1 });
+    expect(saved.totalErrors).toBe(0);
+    expect(saved.details[0]?.canonicalJobId).toBe(canonicalJobId);
+    expect((await readFullArchiveState(job)).archived_at).toBeNull();
+    const restoreEvent = await pool.query<{ actor: string; reason: string; details: Record<string, unknown> }>(
+      `SELECT actor, reason, details FROM job_archive_events
+       WHERE workspace_id = $1 AND canonical_job_id = $2 AND action = 'RESTORED'`,
+      [context.workspaceId, canonicalJobId],
+    );
+    expect(restoreEvent.rows).toHaveLength(1);
+    expect(restoreEvent.rows[0]).toMatchObject({
+      actor: "system:source-normalizer",
+      reason: "OWNER_SAVED_SOURCE_OBSERVATION",
+      details: {
+        restore_trigger: "OWNER_SAVED_SOURCE_OBSERVATION",
+        source_name: "LINKEDIN_SAVED",
+        observation_id: savedId,
+        previous_archive_reason: "HARD_REJECTED_PERMANENT",
+      },
+    });
+    const gateTask = await pool.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM pipeline_tasks
+       WHERE workspace_id = $1 AND task_type = 'APPLY_HARD_GATES'
+         AND payload->>'canonical_job_id' = $2 AND status = 'PENDING'`,
+      [context.workspaceId, canonicalJobId],
+    );
+    expect(gateTask.rows[0]?.count).toBe(1);
+
+    // Now that it is the owner's saved job, the hard-rejected rule never archives it again,
+    // even after the restore hold expires.
+    await pool.query(
+      `UPDATE job_archive_holds SET released_at = NOW(), released_by = 'test', release_reason = 'test'
+       WHERE workspace_id = $1 AND canonical_job_id = $2 AND released_at IS NULL`,
+      [context.workspaceId, canonicalJobId],
+    );
+    await markGateOutcome(job, { decidedAt: new Date() });
+    const later = await runJobArchive(pool, {
+      mode: "APPLY", rule: "hard-rejected", workspaceId: context.workspaceId, runStartedAt: new Date(), maxArchives: 10,
+    });
+    expect(later.hard_rejected).toMatchObject({ archived_count: 0, excluded_saved_source_count: 1 });
+
+    // A job archived for age stays archived when the owner saves it (only HARD_REJECTED_PERMANENT
+    // archives are restored by a re-save).
+    const ageJob = await createJobFixture(context, { sourcePublishedAt: oldPublicationDate });
+    const ageRun = await runJobArchive(pool, {
+      mode: "APPLY", rule: "age", workspaceId: context.workspaceId, runStartedAt, maxArchives: 10,
+    });
+    expect(ageRun.hard_rejected.enabled).toBe(false);
+    expect((await readFullArchiveState(ageJob)).archive_reason).toBe("JOB_OLDER_THAN_THREE_CALENDAR_MONTHS");
+    const restoreClient = await pool.connect();
+    try {
+      const { restoreHardRejectedArchiveForOwnerSavedObservation } = await import("../../services/jobArchive.js");
+      await restoreClient.query("BEGIN");
+      const result = await restoreHardRejectedArchiveForOwnerSavedObservation(restoreClient, {
+        workspaceId: context.workspaceId,
+        canonicalJobId: ageJob.canonicalJobId,
+        observationId: null,
+        sourceName: "MCF_SAVED",
+        context,
+      });
+      await restoreClient.query("COMMIT");
+      expect(result).toBeNull();
+    } finally {
+      restoreClient.release();
+    }
+    expect((await readFullArchiveState(ageJob)).archived_at).not.toBeNull();
   });
 });

@@ -10,7 +10,7 @@ import { extractFreshnessEvidence } from "../ingestion/freshnessEvidence.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../contracts/jobSourceEvidence.js";
 import { approximateFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
 import { assessJobArchiveAge, referenceIsOlderThanCutoff, subtractCalendarMonths } from "../services/jobArchivePolicy.js";
-import { reactivateGenuineRepost } from "../services/jobArchive.js";
+import { reactivateGenuineRepost, restoreHardRejectedArchiveForOwnerSavedObservation } from "../services/jobArchive.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import { employerTitleMatches } from "../ingestion/jobContentFetcher.js";
 
@@ -626,6 +626,19 @@ export async function runNormalization(
               evidenceType: reactivationEvidenceType,
             });
           }
+        }
+
+        // An owner re-save (LINKEDIN_SAVED / MCF_SAVED) of a job archived as permanently
+        // hard-rejected restores it for re-evaluation; the function re-reads the archive state, so
+        // a job the repost path above already reactivated is left alone.
+        if (archiveState.archived_at !== null) {
+          await restoreHardRejectedArchiveForOwnerSavedObservation(client, {
+            workspaceId: ctx.workspaceId,
+            canonicalJobId,
+            observationId: obs.id ? String(obs.id) : null,
+            sourceName: obs.source_name ? String(obs.source_name) : null,
+            context: ctx,
+          });
         }
 
         // Every observation, including a duplicate, receives a durable version mapping.

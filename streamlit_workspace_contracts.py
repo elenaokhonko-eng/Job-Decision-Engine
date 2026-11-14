@@ -893,6 +893,7 @@ def validate_archive_job_row(row: Mapping[str, object], workspace_id: object) ->
         "GENUINE_REPOST_DATE",
         "AUTHORITATIVE_PUBLICATION_DATE",
         "OBSERVED_AGE_PUBLICATION_UNKNOWN",
+        "HARD_REJECTED_DECISION",
     }:
         raise ValueError("Archived job age basis is invalid.")
     for field in (

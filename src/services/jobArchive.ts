@@ -8,11 +8,17 @@ import {
   ArchiveJobRowSchema,
   ArchiveOperationsStatusSchema,
   ArchiveRunReportSchema,
+  HardRejectedArchiveCandidateSchema,
+  type ArchiveBasis,
   type ArchiveCandidate,
   type ArchiveHold,
   type ArchiveJobRow,
   type ArchiveOperationsStatus,
+  type ArchiveReason,
+  type ArchiveRuleSelection,
   type ArchiveRunReport,
+  type HardRejectedArchiveCandidate,
+  type HardRejectedArchiveReport,
 } from "../contracts/archive.js";
 import {
   assessJobArchiveAge,
@@ -20,6 +26,14 @@ import {
   type JobArchiveAgeAssessment,
   type JobArchiveVersionEvidence,
 } from "./jobArchivePolicy.js";
+import {
+  assessHardRejectedArchive,
+  HARD_REJECTED_ARCHIVE_BASIS,
+  HARD_REJECTED_ARCHIVE_REASON,
+  isOwnerSavedSource,
+  OWNER_SAVED_SOURCE_NAMES,
+  type HardRejectedArchiveAssessment,
+} from "./jobArchiveHardRejectedPolicy.js";
 import { enqueuePipelineTask } from "../tasks/pipelineTasks.js";
 import { pipelineTaskStageVersion } from "../tasks/pipelineTaskCurrentness.js";
 import { createTaskIntentV2 } from "../tasks/taskIntent.js";
@@ -27,9 +41,13 @@ import type { WorkspaceContext } from "../workspace/context.js";
 
 const ARCHIVE_REASON = "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS";
 const DEFAULT_PAGE_SIZE = 250;
+/** Daily default per rule; a one-off backfill may pass a larger --max-archives. */
 const DEFAULT_MAX_ARCHIVES = 500;
 const MAX_PAGE_SIZE = 1000;
-const MAX_ARCHIVES_PER_RUN = 2000;
+/** Upper bound per rule per run, large enough for the one-off hard-rejected backfill. */
+export const MAX_ARCHIVES_PER_RUN = 10000;
+/** Hard-rejected candidates listed in a report; the counts always cover every job. */
+const MAX_REPORTED_HARD_REJECTED_CANDIDATES = 500;
 const RESTORE_REASSESSMENT_HOLD_DAYS = 14;
 const uuidSchema = z.string().uuid();
 const holdTypeSchema = z.enum(["USER_PRESERVE", "AGENT2_PILOT", "RESTORE_REASSESSMENT"]);
@@ -60,6 +78,8 @@ interface ArchiveSchemaCapabilities {
   readonly archiveHoldTable: boolean;
   readonly rawObservationEvidence: boolean;
   readonly evaluationQueueSkipColumns: boolean;
+  /** Migration 111 widened the archive basis CHECK to accept HARD_REJECTED_DECISION. */
+  readonly hardRejectedArchiveBasis: boolean;
 }
 
 interface CandidateRow extends pg.QueryResultRow {
@@ -96,8 +116,44 @@ interface ArchiveCounts {
   deferred: number;
 }
 
+interface HardRejectedCandidateRow extends pg.QueryResultRow {
+  workspace_id: string;
+  canonical_job_id: string;
+  processing_state: string | null;
+  gate_decision: string | null;
+  rejection_reason: string | null;
+  canonical_updated_at: Date | null;
+  latest_gate_decision_id: string | null;
+  latest_gate_decision: string | null;
+  latest_gate_decided_at: Date | null;
+  latest_gate_rejection_codes: unknown;
+  has_saved_source_observation: boolean;
+  has_active_application: boolean;
+  has_active_document_run: boolean;
+  has_active_document_task: boolean;
+  has_running_pipeline_lease: boolean;
+  has_running_evaluation_lease: boolean;
+  has_manual_review: boolean;
+  has_active_archive_hold: boolean;
+}
+
+interface HardRejectedCounts {
+  scanned: number;
+  eligible: number;
+  archived: number;
+  protected: number;
+  excludedSavedSource: number;
+  missingReasonCodes: number;
+  unverifiableDecision: number;
+  referenceFallback: number;
+  failed: number;
+  deferred: number;
+}
+
 export interface RunJobArchiveOptions {
   readonly mode: "DRY_RUN" | "APPLY";
+  /** Which rules to evaluate; defaults to "all" (hard-rejected first, then age). */
+  readonly rule?: ArchiveRuleSelection;
   readonly workspaceId?: string;
   readonly pageSize?: number;
   readonly maxArchives?: number;
@@ -120,6 +176,8 @@ export interface RestoreArchivedJobInput {
   readonly actor: string;
   readonly reason: string;
   readonly context: WorkspaceContext;
+  /** Extra audit details recorded on the RESTORED event. */
+  readonly details?: Record<string, unknown>;
 }
 
 export interface RestoreArchivedJobResult {
@@ -166,8 +224,12 @@ function parseVersions(value: unknown): JobArchiveVersionEvidence[] {
   return rows;
 }
 
-function candidateSelectSql(capabilities: ArchiveSchemaCapabilities, whereClause: string): string {
-  const archiveFilter = capabilities.archiveColumns ? "AND canonical.archived_at IS NULL" : "";
+/**
+ * Archive protections shared by both rules: active application, active document run or task,
+ * running pipeline/evaluation lease, manual review, and an active archive hold. `$1` is the run
+ * start time; `canonical` is the canonical_jobs alias.
+ */
+function protectionColumnsSql(capabilities: ArchiveSchemaCapabilities): string {
   const holdExists = capabilities.archiveHoldTable
     ? `EXISTS (
         SELECT 1 FROM job_archive_holds hold
@@ -177,20 +239,7 @@ function candidateSelectSql(capabilities: ArchiveSchemaCapabilities, whereClause
           AND hold.expires_at > $1
       )`
     : "FALSE";
-  const observationEvidenceSelect = capabilities.rawObservationEvidence
-    ? `observation.normalized_evidence AS date_evidence`
-    : `NULL::jsonb AS date_evidence`;
-  const observationEvidencePredicate = capabilities.rawObservationEvidence
-    ? "AND observation.normalized_evidence IS NOT NULL"
-    : "";
   return `
-    SELECT
-      canonical.workspace_id,
-      canonical.id::text AS canonical_job_id,
-      canonical.latest_job_version_id::text AS latest_job_version_id,
-      COALESCE(canonical.normalized_title, 'Untitled role') AS title,
-      COALESCE(canonical.company_name, 'Unknown company') AS company,
-      COALESCE(version_data.versions, '[]'::jsonb) AS versions,
       EXISTS (
         SELECT 1 FROM application_records application
         WHERE application.workspace_id = canonical.workspace_id
@@ -253,7 +302,26 @@ function candidateSelectSql(capabilities: ArchiveSchemaCapabilities, whereClause
           AND evaluation.canonical_job_id = canonical.id
           AND evaluation.status = 'NEEDS_MANUAL_REVIEW'
       ) AS has_manual_review,
-      ${holdExists} AS has_active_archive_hold
+      ${holdExists} AS has_active_archive_hold`;
+}
+
+function candidateSelectSql(capabilities: ArchiveSchemaCapabilities, whereClause: string): string {
+  const archiveFilter = capabilities.archiveColumns ? "AND canonical.archived_at IS NULL" : "";
+  const observationEvidenceSelect = capabilities.rawObservationEvidence
+    ? `observation.normalized_evidence AS date_evidence`
+    : `NULL::jsonb AS date_evidence`;
+  const observationEvidencePredicate = capabilities.rawObservationEvidence
+    ? "AND observation.normalized_evidence IS NOT NULL"
+    : "";
+  return `
+    SELECT
+      canonical.workspace_id,
+      canonical.id::text AS canonical_job_id,
+      canonical.latest_job_version_id::text AS latest_job_version_id,
+      COALESCE(canonical.normalized_title, 'Untitled role') AS title,
+      COALESCE(canonical.company_name, 'Unknown company') AS company,
+      COALESCE(version_data.versions, '[]'::jsonb) AS versions,
+      ${protectionColumnsSql(capabilities)}
     FROM canonical_jobs canonical
     LEFT JOIN LATERAL (
       SELECT jsonb_agg(
@@ -299,6 +367,7 @@ async function readSchemaCapabilities(client: pg.PoolClient): Promise<ArchiveSch
     archive_hold_table: boolean;
     raw_observation_evidence: boolean;
     evaluation_queue_skip_columns: boolean;
+    hard_rejected_archive_basis: boolean;
   }>(
     `SELECT
        (SELECT COUNT(*) = 5 FROM information_schema.columns
@@ -311,7 +380,11 @@ async function readSchemaCapabilities(client: pg.PoolClient): Promise<ArchiveSch
            AND column_name = 'normalized_evidence') AS raw_observation_evidence,
        (SELECT COUNT(*) = 2 FROM information_schema.columns
          WHERE table_schema = current_schema() AND table_name = 'evaluation_queue'
-           AND column_name IN ('skipped_at', 'skip_reason_code')) AS evaluation_queue_skip_columns`,
+           AND column_name IN ('skipped_at', 'skip_reason_code')) AS evaluation_queue_skip_columns,
+       EXISTS (SELECT 1 FROM pg_constraint
+         WHERE conrelid = to_regclass('canonical_jobs')
+           AND conname = 'canonical_jobs_archive_metadata_check'
+           AND pg_get_constraintdef(oid) LIKE '%HARD_REJECTED_DECISION%') AS hard_rejected_archive_basis`,
   );
   const row = result.rows[0];
   return {
@@ -320,10 +393,20 @@ async function readSchemaCapabilities(client: pg.PoolClient): Promise<ArchiveSch
     archiveHoldTable: row?.archive_hold_table === true,
     rawObservationEvidence: row?.raw_observation_evidence === true,
     evaluationQueueSkipColumns: row?.evaluation_queue_skip_columns === true,
+    hardRejectedArchiveBasis: row?.hard_rejected_archive_basis === true,
   };
 }
 
-function isProtected(row: CandidateRow): boolean {
+type ArchiveProtectionFlags = Pick<CandidateRow,
+  | "has_active_application"
+  | "has_active_document_run"
+  | "has_active_document_task"
+  | "has_running_pipeline_lease"
+  | "has_running_evaluation_lease"
+  | "has_manual_review"
+  | "has_active_archive_hold">;
+
+function isProtected(row: ArchiveProtectionFlags): boolean {
   return row.has_active_application || row.has_active_document_run ||
     row.has_active_document_task || row.has_running_pipeline_lease ||
     row.has_running_evaluation_lease || row.has_manual_review || row.has_active_archive_hold;
@@ -379,6 +462,99 @@ async function readCandidateForUpdate(
   return result.rows[0] ?? null;
 }
 
+const OWNER_SAVED_SOURCE_SQL_LIST = OWNER_SAVED_SOURCE_NAMES.map((name) => `'${name}'`).join(", ");
+
+/**
+ * Candidate scan for the HARD_REJECTED_PERMANENT rule. `$1` is the run start time. The latest
+ * gate_decisions row supplies the reference time and stored reason codes; a saved-source
+ * observation on any version of the job excludes it.
+ */
+function hardRejectedCandidateSelectSql(capabilities: ArchiveSchemaCapabilities, whereClause: string): string {
+  return `
+    SELECT
+      canonical.workspace_id::text AS workspace_id,
+      canonical.id::text AS canonical_job_id,
+      canonical.processing_state,
+      canonical.gate_decision,
+      canonical.rejection_reason,
+      canonical.updated_at AS canonical_updated_at,
+      latest_gate.id::text AS latest_gate_decision_id,
+      latest_gate.decision AS latest_gate_decision,
+      latest_gate.created_at AS latest_gate_decided_at,
+      latest_gate.rejection_codes AS latest_gate_rejection_codes,
+      EXISTS (
+        SELECT 1
+        FROM job_versions saved_version
+        JOIN raw_job_observations saved_observation
+          ON saved_observation.workspace_id = saved_version.workspace_id
+         AND saved_observation.job_version_id = saved_version.id
+        WHERE saved_version.workspace_id = canonical.workspace_id
+          AND saved_version.canonical_job_id = canonical.id
+          AND saved_observation.source_name IN (${OWNER_SAVED_SOURCE_SQL_LIST})
+      ) AS has_saved_source_observation,
+      ${protectionColumnsSql(capabilities)}
+    FROM canonical_jobs canonical
+    LEFT JOIN LATERAL (
+      SELECT gate.id, gate.decision, gate.created_at, gate.rejection_codes
+      FROM gate_decisions gate
+      WHERE gate.canonical_job_id = canonical.id
+      ORDER BY gate.created_at DESC, gate.id DESC
+      LIMIT 1
+    ) latest_gate ON TRUE
+    WHERE ${whereClause}
+      AND canonical.is_test_fixture = FALSE
+      AND canonical.archived_at IS NULL
+      AND canonical.processing_state = 'HARD_REJECTED'
+      AND canonical.gate_decision = 'HARD_REJECT'
+  `;
+}
+
+async function readHardRejectedCandidatePage(
+  client: pg.PoolClient,
+  capabilities: ArchiveSchemaCapabilities,
+  runStartedAt: Date,
+  cursor: string | null,
+  pageSize: number,
+  workspaceId: string | null,
+): Promise<HardRejectedCandidateRow[]> {
+  const query = hardRejectedCandidateSelectSql(
+    capabilities,
+    "($4::uuid IS NULL OR canonical.workspace_id = $4::uuid) AND ($2::uuid IS NULL OR canonical.id > $2::uuid)",
+  ) + " ORDER BY canonical.id LIMIT $3";
+  const result = await client.query<HardRejectedCandidateRow>(query, [runStartedAt, cursor, pageSize, workspaceId]);
+  return result.rows;
+}
+
+async function readHardRejectedCandidateForUpdate(
+  client: pg.PoolClient,
+  capabilities: ArchiveSchemaCapabilities,
+  runStartedAt: Date,
+  workspaceId: string,
+  canonicalJobId: string,
+): Promise<HardRejectedCandidateRow | null> {
+  const query = hardRejectedCandidateSelectSql(
+    capabilities,
+    "canonical.workspace_id = $2::uuid AND canonical.id = $3::uuid",
+  ) + " FOR UPDATE OF canonical";
+  const result = await client.query<HardRejectedCandidateRow>(query, [runStartedAt, workspaceId, canonicalJobId]);
+  return result.rows[0] ?? null;
+}
+
+function hardRejectedAssessment(row: HardRejectedCandidateRow): HardRejectedArchiveAssessment {
+  return assessHardRejectedArchive({
+    processing_state: row.processing_state,
+    gate_decision: row.gate_decision,
+    rejection_reason: row.rejection_reason,
+    canonical_updated_at: row.canonical_updated_at,
+    latest_gate_decision_id: row.latest_gate_decision_id,
+    latest_gate_decision: row.latest_gate_decision,
+    latest_gate_decided_at: row.latest_gate_decided_at,
+    latest_gate_rejection_codes: row.latest_gate_rejection_codes,
+    has_saved_source_observation: row.has_saved_source_observation,
+    is_protected: isProtected(row),
+  });
+}
+
 function archiveCandidate(row: CandidateRow, state: ArchiveCandidateState): ArchiveCandidate {
   if (state.age.status !== "REFERENCE_FOUND") {
     throw new Error("Cannot create an archive candidate without an evidenced age reference.");
@@ -419,6 +595,119 @@ async function insertArchiveEvent(
   );
 }
 
+/**
+ * Moves one locked, eligible canonical job into the archive. Callers own the transaction and the
+ * row lock and have already re-checked eligibility. Sets the archive columns, appends the ARCHIVED
+ * event, completes the job's open pipeline tasks (except NORMALIZE_OBSERVATION, which can still
+ * prove a repost or an owner re-save) with repair_action SKIPPED_ARCHIVED_JOB, and skips its
+ * pending evaluation_queue rows. Returns false when the job was archived concurrently.
+ */
+async function applyArchiveTransition(
+  client: pg.PoolClient,
+  capabilities: ArchiveSchemaCapabilities,
+  input: {
+    workspaceId: string;
+    canonicalJobId: string;
+    archivedAt: Date;
+    runId: string;
+    actor: string;
+    reason: ArchiveReason;
+    basis: ArchiveBasis;
+    referenceAt: Date;
+    details: Record<string, unknown>;
+  },
+): Promise<boolean> {
+  const update = await client.query(
+    `UPDATE canonical_jobs
+     SET archived_at = $3,
+         archive_reason = $4,
+         archive_age_basis = $5,
+         archive_reference_at = $6,
+         archive_run_id = $7,
+         updated_at = $3
+     WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL`,
+    [input.workspaceId, input.canonicalJobId, input.archivedAt,
+      input.reason, input.basis, input.referenceAt, input.runId],
+  );
+  if (update.rowCount !== 1) return false;
+  await insertArchiveEvent(client, {
+    workspaceId: input.workspaceId,
+    canonicalJobId: input.canonicalJobId,
+    archiveRunId: input.runId,
+    action: "ARCHIVED",
+    actor: input.actor,
+    reason: input.reason,
+    referenceAt: input.referenceAt,
+    ageBasis: input.basis,
+    details: input.details,
+  });
+  await client.query(
+    `WITH skipped_tasks AS (
+       SELECT task.id
+       FROM pipeline_tasks task
+       WHERE task.workspace_id = $1::uuid
+         AND task.task_type <> 'NORMALIZE_OBSERVATION'
+         AND (task.status IN ('PENDING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+           OR (task.status = 'RUNNING' AND (task.lease_expires_at IS NULL OR task.lease_expires_at <= $3::timestamptz)))
+         AND (task.payload->>'canonical_job_id' = ($2::uuid)::text
+           OR EXISTS (
+             SELECT 1 FROM job_versions version
+             WHERE version.workspace_id = $1::uuid
+               AND version.canonical_job_id = $2::uuid
+               AND task.payload->>'job_version_id' = version.id::text
+           )
+           OR EXISTS (
+             SELECT 1 FROM raw_job_observations observation
+             JOIN job_versions version
+               ON version.workspace_id = observation.workspace_id
+              AND version.id = observation.job_version_id
+             WHERE observation.workspace_id = $1::uuid
+               AND observation.id::text = task.payload->>'observation_id'
+               AND version.canonical_job_id = $2::uuid
+           ))
+       FOR UPDATE SKIP LOCKED
+     ), completed_tasks AS (
+       UPDATE pipeline_tasks task
+       SET status = 'COMPLETED',
+           completed_at = $3::timestamptz,
+           lease_id = NULL,
+           lease_expires_at = NULL,
+           heartbeat_at = NULL,
+           last_error = NULL,
+           dead_letter_reason = NULL,
+           repair_action = 'SKIPPED_ARCHIVED_JOB',
+           updated_at = $3::timestamptz
+       FROM skipped_tasks
+       WHERE task.workspace_id = $1::uuid AND task.id = skipped_tasks.id
+       RETURNING task.id
+     )
+     UPDATE pipeline_task_attempts attempt
+     SET status = 'COMPLETED', finished_at = $3::timestamptz
+     WHERE attempt.workspace_id = $1::uuid
+       AND attempt.status = 'STARTED'
+       AND attempt.task_id IN (SELECT id FROM completed_tasks)`,
+    [input.workspaceId, input.canonicalJobId, input.archivedAt],
+  );
+  if (capabilities.evaluationQueueSkipColumns) {
+    await client.query(
+      `UPDATE evaluation_queue
+       SET status = 'SKIPPED_ARCHIVED',
+           skipped_at = $3,
+           skip_reason_code = 'JOB_ARCHIVED',
+           lease_id = NULL,
+           lease_expires_at = NULL,
+           last_error = NULL,
+           updated_at = $3
+       WHERE workspace_id = $1
+         AND canonical_job_id = $2
+         AND (status IN ('PENDING', 'RETRY_WAIT')
+           OR (status = 'EVALUATING' AND (lease_expires_at IS NULL OR lease_expires_at <= $3)))`,
+      [input.workspaceId, input.canonicalJobId, input.archivedAt],
+    );
+  }
+  return true;
+}
+
 async function archiveOne(
   client: pg.PoolClient,
   capabilities: ArchiveSchemaCapabilities,
@@ -454,103 +743,217 @@ async function archiveOne(
       await client.query("COMMIT");
       return "NO_LONGER_ELIGIBLE";
     }
-    const update = await client.query(
-      `UPDATE canonical_jobs
-       SET archived_at = $3,
-           archive_reason = $4,
-           archive_age_basis = $5,
-           archive_reference_at = $6,
-           archive_run_id = $7,
-           updated_at = $3
-       WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL`,
-      [input.workspaceId, input.canonicalJobId, input.runStartedAt,
-        ARCHIVE_REASON, age.ageBasis, age.referenceAt, input.runId],
-    );
-    if (update.rowCount !== 1) {
-      await client.query("COMMIT");
-      return "NO_LONGER_ELIGIBLE";
-    }
-    await insertArchiveEvent(client, {
+    const archived = await applyArchiveTransition(client, capabilities, {
       workspaceId: input.workspaceId,
       canonicalJobId: input.canonicalJobId,
-      archiveRunId: input.runId,
-      action: "ARCHIVED",
+      archivedAt: input.runStartedAt,
+      runId: input.runId,
       actor: input.actor,
       reason: ARCHIVE_REASON,
+      basis: age.ageBasis,
       referenceAt: age.referenceAt,
-      ageBasis: age.ageBasis,
       details: { cutoff_at: ageState.cutoffAt.toISOString(), publication_date_unknown: age.publicationDateUnknown },
     });
-    await client.query(
-      `WITH skipped_tasks AS (
-         SELECT task.id
-         FROM pipeline_tasks task
-         WHERE task.workspace_id = $1::uuid
-           AND task.task_type <> 'NORMALIZE_OBSERVATION'
-           AND (task.status IN ('PENDING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
-             OR (task.status = 'RUNNING' AND (task.lease_expires_at IS NULL OR task.lease_expires_at <= $3::timestamptz)))
-           AND (task.payload->>'canonical_job_id' = ($2::uuid)::text
-             OR EXISTS (
-               SELECT 1 FROM job_versions version
-               WHERE version.workspace_id = $1::uuid
-                 AND version.canonical_job_id = $2::uuid
-                 AND task.payload->>'job_version_id' = version.id::text
-             )
-             OR EXISTS (
-               SELECT 1 FROM raw_job_observations observation
-               JOIN job_versions version
-                 ON version.workspace_id = observation.workspace_id
-                AND version.id = observation.job_version_id
-               WHERE observation.workspace_id = $1::uuid
-                 AND observation.id::text = task.payload->>'observation_id'
-                 AND version.canonical_job_id = $2::uuid
-             ))
-         FOR UPDATE SKIP LOCKED
-       ), completed_tasks AS (
-         UPDATE pipeline_tasks task
-         SET status = 'COMPLETED',
-             completed_at = $3::timestamptz,
-             lease_id = NULL,
-             lease_expires_at = NULL,
-             heartbeat_at = NULL,
-             last_error = NULL,
-             dead_letter_reason = NULL,
-             repair_action = 'SKIPPED_ARCHIVED_JOB',
-             updated_at = $3::timestamptz
-         FROM skipped_tasks
-         WHERE task.workspace_id = $1::uuid AND task.id = skipped_tasks.id
-         RETURNING task.id
-       )
-       UPDATE pipeline_task_attempts attempt
-       SET status = 'COMPLETED', finished_at = $3::timestamptz
-       WHERE attempt.workspace_id = $1::uuid
-         AND attempt.status = 'STARTED'
-         AND attempt.task_id IN (SELECT id FROM completed_tasks)`,
-      [input.workspaceId, input.canonicalJobId, input.runStartedAt],
-    );
-    if (capabilities.evaluationQueueSkipColumns) {
-      await client.query(
-        `UPDATE evaluation_queue
-         SET status = 'SKIPPED_ARCHIVED',
-             skipped_at = $3,
-             skip_reason_code = 'JOB_ARCHIVED',
-             lease_id = NULL,
-             lease_expires_at = NULL,
-             last_error = NULL,
-             updated_at = $3
-         WHERE workspace_id = $1
-           AND canonical_job_id = $2
-           AND (status IN ('PENDING', 'RETRY_WAIT')
-             OR (status = 'EVALUATING' AND (lease_expires_at IS NULL OR lease_expires_at <= $3)))`,
-        [input.workspaceId, input.canonicalJobId, input.runStartedAt],
-      );
-    }
     await client.query("COMMIT");
-    return "ARCHIVED";
+    return archived ? "ARCHIVED" : "NO_LONGER_ELIGIBLE";
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
   }
+}
+
+type HardRejectedArchiveOutcome =
+  | "ARCHIVED"
+  | "PROTECTED"
+  | "EXCLUDED_SAVED_SOURCE"
+  | "MISSING_REASON_CODES"
+  | "UNVERIFIABLE_DECISION"
+  | "NO_LONGER_ELIGIBLE";
+
+async function archiveHardRejectedOne(
+  client: pg.PoolClient,
+  capabilities: ArchiveSchemaCapabilities,
+  input: {
+    workspaceId: string;
+    canonicalJobId: string;
+    runStartedAt: Date;
+    runId: string;
+    actor: string;
+  },
+): Promise<HardRejectedArchiveOutcome> {
+  await client.query("BEGIN");
+  try {
+    const row = await readHardRejectedCandidateForUpdate(
+      client, capabilities, input.runStartedAt, input.workspaceId, input.canonicalJobId,
+    );
+    if (row === null) {
+      await client.query("COMMIT");
+      return "NO_LONGER_ELIGIBLE";
+    }
+    const assessment = hardRejectedAssessment(row);
+    if (assessment.status !== "ELIGIBLE") {
+      await client.query("COMMIT");
+      return assessment.status === "NOT_HARD_REJECTED" ? "NO_LONGER_ELIGIBLE" : assessment.status;
+    }
+    const archived = await applyArchiveTransition(client, capabilities, {
+      workspaceId: input.workspaceId,
+      canonicalJobId: input.canonicalJobId,
+      archivedAt: input.runStartedAt,
+      runId: input.runId,
+      actor: input.actor,
+      reason: HARD_REJECTED_ARCHIVE_REASON,
+      basis: HARD_REJECTED_ARCHIVE_BASIS,
+      referenceAt: assessment.referenceAt,
+      details: {
+        rule: "hard-rejected",
+        reference_source: assessment.referenceSource,
+        gate_decision_id: assessment.gateDecisionId,
+        rejection_codes: assessment.rejectionCodes,
+      },
+    });
+    await client.query("COMMIT");
+    return archived ? "ARCHIVED" : "NO_LONGER_ELIGIBLE";
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
+}
+
+function hardRejectedCandidate(
+  row: HardRejectedCandidateRow,
+  assessment: Extract<HardRejectedArchiveAssessment, { status: "ELIGIBLE" }>,
+): HardRejectedArchiveCandidate {
+  return HardRejectedArchiveCandidateSchema.parse({
+    canonical_job_id: row.canonical_job_id,
+    workspace_id: row.workspace_id,
+    reference_at: assessment.referenceAt.toISOString(),
+    reference_source: assessment.referenceSource,
+    gate_decision_id: assessment.gateDecisionId,
+    rejection_codes: [...assessment.rejectionCodes],
+    archive_reason: HARD_REJECTED_ARCHIVE_REASON,
+  });
+}
+
+/**
+ * Runs the HARD_REJECTED_PERMANENT rule over every hard-rejected, unarchived, non-fixture job.
+ * In DRY_RUN the caller holds a read-only transaction and nothing is written.
+ */
+async function runHardRejectedRule(
+  client: pg.PoolClient,
+  capabilities: ArchiveSchemaCapabilities,
+  input: {
+    mode: "DRY_RUN" | "APPLY";
+    runStartedAt: Date;
+    pageSize: number;
+    maxArchives: number;
+    workspaceId: string | null;
+    runId: string | null;
+    actor: string;
+  },
+): Promise<HardRejectedArchiveReport> {
+  const counts: HardRejectedCounts = {
+    scanned: 0, eligible: 0, archived: 0, protected: 0, excludedSavedSource: 0,
+    missingReasonCodes: 0, unverifiableDecision: 0, referenceFallback: 0, failed: 0, deferred: 0,
+  };
+  const candidates: HardRejectedArchiveCandidate[] = [];
+  const failedJobs: Array<{ canonical_job_id: string; reason: string }> = [];
+  let selected = 0;
+  let cursor: string | null = null;
+
+  const countOutcome = (status: Exclude<HardRejectedArchiveOutcome, "ARCHIVED" | "NO_LONGER_ELIGIBLE">): void => {
+    if (status === "PROTECTED") counts.protected += 1;
+    else if (status === "EXCLUDED_SAVED_SOURCE") counts.excludedSavedSource += 1;
+    else if (status === "MISSING_REASON_CODES") counts.missingReasonCodes += 1;
+    else counts.unverifiableDecision += 1;
+  };
+
+  while (true) {
+    const page = await readHardRejectedCandidatePage(
+      client, capabilities, input.runStartedAt, cursor, input.pageSize, input.workspaceId,
+    );
+    if (page.length === 0) break;
+    cursor = page.at(-1)?.canonical_job_id ?? cursor;
+    for (const row of page) {
+      counts.scanned += 1;
+      const assessment = hardRejectedAssessment(row);
+      if (assessment.status === "NOT_HARD_REJECTED") continue;
+      if (assessment.status !== "ELIGIBLE") {
+        countOutcome(assessment.status);
+        continue;
+      }
+      counts.eligible += 1;
+      if (selected >= input.maxArchives) {
+        counts.deferred += 1;
+        continue;
+      }
+      selected += 1;
+      if (input.mode === "DRY_RUN") {
+        if (assessment.referenceSource === "CANONICAL_UPDATED_AT_FALLBACK") counts.referenceFallback += 1;
+        if (candidates.length < MAX_REPORTED_HARD_REJECTED_CANDIDATES) candidates.push(hardRejectedCandidate(row, assessment));
+        continue;
+      }
+      try {
+        const outcome = await archiveHardRejectedOne(client, capabilities, {
+          workspaceId: row.workspace_id,
+          canonicalJobId: row.canonical_job_id,
+          runStartedAt: input.runStartedAt,
+          runId: input.runId ?? "",
+          actor: input.actor,
+        });
+        if (outcome === "ARCHIVED") {
+          counts.archived += 1;
+          if (assessment.referenceSource === "CANONICAL_UPDATED_AT_FALLBACK") counts.referenceFallback += 1;
+          if (candidates.length < MAX_REPORTED_HARD_REJECTED_CANDIDATES) candidates.push(hardRejectedCandidate(row, assessment));
+        } else {
+          counts.eligible -= 1;
+          selected -= 1;
+          if (outcome !== "NO_LONGER_ELIGIBLE") countOutcome(outcome);
+        }
+      } catch (error) {
+        counts.failed += 1;
+        counts.eligible -= 1;
+        selected -= 1;
+        failedJobs.push({ canonical_job_id: row.canonical_job_id, reason: errorMessage(error).slice(0, 500) });
+      }
+    }
+    if (page.length < input.pageSize) break;
+  }
+
+  return {
+    enabled: true,
+    scanned_count: counts.scanned,
+    eligible_count: counts.eligible,
+    archived_count: counts.archived,
+    protected_count: counts.protected,
+    excluded_saved_source_count: counts.excludedSavedSource,
+    missing_reason_codes_count: counts.missingReasonCodes,
+    unverifiable_decision_count: counts.unverifiableDecision,
+    reference_fallback_count: counts.referenceFallback,
+    failed_count: counts.failed,
+    deferred_count: counts.deferred,
+    candidate_count: input.mode === "DRY_RUN" ? selected : counts.archived,
+    candidates,
+    failed_jobs: failedJobs,
+  };
+}
+
+function disabledHardRejectedReport(): HardRejectedArchiveReport {
+  return {
+    enabled: false,
+    scanned_count: 0,
+    eligible_count: 0,
+    archived_count: 0,
+    protected_count: 0,
+    excluded_saved_source_count: 0,
+    missing_reason_codes_count: 0,
+    unverifiable_decision_count: 0,
+    reference_fallback_count: 0,
+    failed_count: 0,
+    deferred_count: 0,
+    candidate_count: 0,
+    candidates: [],
+    failed_jobs: [],
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -561,20 +964,48 @@ async function appendWorkflowSummary(report: ArchiveRunReport): Promise<void> {
   const summaryFile = process.env.GITHUB_STEP_SUMMARY?.trim();
   if (!summaryFile) return;
   const { appendFile } = await import("node:fs/promises");
+  const hardRejected = report.hard_rejected;
+  const ageRuleEnabled = report.rule !== "hard-rejected";
   const lines = [
     "## Daily job archiving",
     "",
     `- Mode: ${report.mode}`,
+    `- Rules: ${report.rule}`,
     `- Started: ${report.run_started_at}`,
-    `- Cutoff: ${report.cutoff_at}`,
-    `- Scanned: ${report.scanned_count}`,
-    `- Eligible: ${report.eligible_count}`,
-    `- Archived: ${report.archived_count}`,
-    `- Protected: ${report.protected_count}`,
-    `- Invalid dates: ${report.invalid_date_count}`,
-    `- Failed: ${report.failed_count}`,
-    `- Observed-age/publication-unknown: ${report.observed_age_publication_unknown_count}`,
     `- Run status: ${report.run_status}`,
+    "",
+    "### Hard-rejected rule (HARD_REJECTED_PERMANENT)",
+    "",
+    ...(hardRejected.enabled
+      ? [
+          `- Scanned: ${hardRejected.scanned_count}`,
+          `- Eligible: ${hardRejected.eligible_count}`,
+          `- Archived: ${hardRejected.archived_count}`,
+          `- Protected: ${hardRejected.protected_count}`,
+          `- Excluded (owner-saved source): ${hardRejected.excluded_saved_source_count}`,
+          `- Missing reason codes: ${hardRejected.missing_reason_codes_count}`,
+          `- Unverifiable gate decision: ${hardRejected.unverifiable_decision_count}`,
+          `- Reference from canonical updated_at (no gate decision row): ${hardRejected.reference_fallback_count}`,
+          `- Deferred (over --max-archives): ${hardRejected.deferred_count}`,
+          `- Failed: ${hardRejected.failed_count}`,
+        ]
+      : ["- Not run (--rule age)"]),
+    "",
+    "### Age rule (JOB_OLDER_THAN_THREE_CALENDAR_MONTHS)",
+    "",
+    ...(ageRuleEnabled
+      ? [
+          `- Cutoff: ${report.cutoff_at}`,
+          `- Scanned: ${report.scanned_count}`,
+          `- Eligible: ${report.eligible_count}`,
+          `- Archived: ${report.archived_count}`,
+          `- Protected: ${report.protected_count}`,
+          `- Invalid dates: ${report.invalid_date_count}`,
+          `- Deferred (over --max-archives): ${report.deferred_count}`,
+          `- Failed: ${report.failed_count}`,
+          `- Observed-age/publication-unknown: ${report.observed_age_publication_unknown_count}`,
+        ]
+      : ["- Not run (--rule hard-rejected)"]),
     "",
   ];
   await appendFile(summaryFile, `${lines.join("\n")}\n`, "utf8");
@@ -588,6 +1019,10 @@ export async function runJobArchive(
   if (Number.isNaN(runStartedAt.getTime())) throw new Error("Invalid archive run start timestamp.");
   const pageSize = Math.min(Math.max(options.pageSize ?? DEFAULT_PAGE_SIZE, 1), MAX_PAGE_SIZE);
   const maxArchives = Math.min(Math.max(options.maxArchives ?? DEFAULT_MAX_ARCHIVES, 1), MAX_ARCHIVES_PER_RUN);
+  const rule: ArchiveRuleSelection = options.rule ?? "all";
+  const runAgeRule = rule === "age" || rule === "all";
+  const runHardRejected = rule === "hard-rejected" || rule === "all";
+  let hardRejectedReport = disabledHardRejectedReport();
   const workspaceId = options.workspaceId === undefined ? null : uuidSchema.parse(options.workspaceId);
   const actor = options.actor?.trim() || `workflow:${process.env.GITHUB_ACTOR?.trim() || "local"}`;
   const client = await pool.connect();
@@ -622,6 +1057,9 @@ export async function runJobArchive(
     if (!capabilities.archiveColumns) {
       throw new Error("Archive age scan requires migration 075 and the canonical job-version date columns.");
     }
+    if (options.mode === "APPLY" && runHardRejected && !capabilities.hardRejectedArchiveBasis) {
+      throw new Error("The hard-rejected archive rule requires migration 111 before archive mode.");
+    }
 
     const cutoffResult = await client.query<{ cutoff_at: Date }>(
       `SELECT $1::timestamptz - INTERVAL '3 months' AS cutoff_at`,
@@ -646,7 +1084,21 @@ export async function runJobArchive(
       readOnlyTransaction = true;
     }
 
-    while (true) {
+    // The hard-rejected rule runs first so a job that also qualifies by age is archived under the
+    // more specific HARD_REJECTED_PERMANENT reason; the age scan then skips it (archived_at is set).
+    if (runHardRejected) {
+      hardRejectedReport = await runHardRejectedRule(client, capabilities, {
+        mode: options.mode,
+        runStartedAt,
+        pageSize,
+        maxArchives,
+        workspaceId,
+        runId,
+        actor,
+      });
+    }
+
+    while (runAgeRule) {
       const page = await readCandidatePage(client, capabilities, runStartedAt, cursor, pageSize, workspaceId);
       if (page.length === 0) break;
       cursor = page.at(-1)?.canonical_job_id ?? cursor;
@@ -708,11 +1160,13 @@ export async function runJobArchive(
     }
 
     completedAt = new Date();
-    runStatus = options.mode === "DRY_RUN" ? "DRY_RUN" : counts.failed > 0 ? "FAILED" : "SUCCEEDED";
+    const anyFailed = counts.failed > 0 || hardRejectedReport.failed_count > 0;
+    runStatus = options.mode === "DRY_RUN" ? "DRY_RUN" : anyFailed ? "FAILED" : "SUCCEEDED";
     const report = ArchiveRunReportSchema.parse({
       schema_version: ARCHIVE_CONTRACT_SCHEMA_VERSION,
       run_id: runId,
       mode: options.mode,
+      rule,
       workspace_id: workspaceId,
       run_status: runStatus,
       completed_at: completedAt.toISOString(),
@@ -730,6 +1184,7 @@ export async function runJobArchive(
       candidates,
       invalid_date_jobs: invalidDateJobs,
       failed_jobs: failedJobs,
+      hard_rejected: hardRejectedReport,
     });
 
     if (readOnlyTransaction) {
@@ -752,17 +1207,27 @@ export async function runJobArchive(
              error_summary = $11::jsonb,
              completed_at = $12
          WHERE id = $1`,
+        // The count columns stay the age rule's (as before this rule existed), except failed_count,
+        // which totals both rules so a FAILED run never shows zero failures. The hard-rejected
+        // rule's counts are in report_summary.hard_rejected.
         [runId, persistedRunStatus, counts.scanned, counts.eligible, counts.archived,
-          counts.protected, counts.invalidDate, counts.failed, counts.unknownPublication,
+          counts.protected, counts.invalidDate, counts.failed + hardRejectedReport.failed_count,
+          counts.unknownPublication,
           JSON.stringify({
             workspace_id: workspaceId,
+            rule,
             deferred_count: counts.deferred,
             candidate_count: candidates.length,
             candidates: options.mode === "DRY_RUN" ? candidates : [],
             invalid_date_jobs: invalidDateJobs.slice(0, 100),
             failed_jobs: failedJobs,
+            hard_rejected: {
+              ...hardRejectedReport,
+              candidates: options.mode === "DRY_RUN" ? hardRejectedReport.candidates : [],
+            },
           }),
-          JSON.stringify(failedJobs), completedAt],
+          JSON.stringify([...failedJobs, ...hardRejectedReport.failed_jobs.map((job) => ({ ...job, rule: "hard-rejected" }))]),
+          completedAt],
       );
     }
     console.log(JSON.stringify(report, null, 2));
@@ -963,8 +1428,9 @@ export async function restoreArchivedJob(
     archived_at: Date | null;
     archive_reference_at: Date | null;
     archive_age_basis: string | null;
+    archive_reason: string | null;
   }>(
-    `SELECT latest_job_version_id::text, archived_at, archive_reference_at, archive_age_basis
+    `SELECT latest_job_version_id::text, archived_at, archive_reference_at, archive_age_basis, archive_reason
      FROM canonical_jobs WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
     [input.workspaceId, input.canonicalJobId],
   );
@@ -980,7 +1446,12 @@ export async function restoreArchivedJob(
     reason: input.reason,
     action: "RESTORED",
     referenceAt: job.archive_reference_at,
-    details: { previous_age_basis: job.archive_age_basis, previous_archive_at: toIso(job.archived_at) },
+    details: {
+      previous_age_basis: job.archive_age_basis,
+      previous_archive_reason: job.archive_reason,
+      previous_archive_at: toIso(job.archived_at),
+      ...(input.details ?? {}),
+    },
   });
   await client.query(
     `UPDATE canonical_jobs
@@ -1013,6 +1484,45 @@ export async function restoreArchivedJob(
   };
 }
 
+/**
+ * The owner's own saved jobs must always be evaluated. When a LINKEDIN_SAVED or MCF_SAVED
+ * observation maps to a job archived under HARD_REJECTED_PERMANENT, restore it (audited RESTORED
+ * event, RESTORE_REASSESSMENT hold, forced APPLY_HARD_GATES task) so the new observation is
+ * re-evaluated instead of being silently absorbed by the archive. Jobs archived for age, and
+ * observations from any other source, are left as they are. Runs inside the caller's transaction.
+ */
+export async function restoreHardRejectedArchiveForOwnerSavedObservation(
+  client: pg.PoolClient,
+  input: {
+    readonly workspaceId: string;
+    readonly canonicalJobId: string;
+    readonly observationId: string | null;
+    readonly sourceName: string | null;
+    readonly context: WorkspaceContext;
+  },
+): Promise<RestoreArchivedJobResult | null> {
+  if (!isOwnerSavedSource(input.sourceName)) return null;
+  const state = await client.query<{ archived_at: Date | null; archive_reason: string | null }>(
+    `SELECT archived_at, archive_reason
+     FROM canonical_jobs WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+    [input.workspaceId, input.canonicalJobId],
+  );
+  const row = state.rows[0];
+  if (!row || row.archived_at === null || row.archive_reason !== HARD_REJECTED_ARCHIVE_REASON) return null;
+  return restoreArchivedJob(client, {
+    workspaceId: input.workspaceId,
+    canonicalJobId: input.canonicalJobId,
+    actor: "system:source-normalizer",
+    reason: "OWNER_SAVED_SOURCE_OBSERVATION",
+    context: input.context,
+    details: {
+      restore_trigger: "OWNER_SAVED_SOURCE_OBSERVATION",
+      source_name: input.sourceName,
+      observation_id: input.observationId,
+    },
+  });
+}
+
 export async function reactivateGenuineRepost(
   client: pg.PoolClient,
   input: {
@@ -1028,13 +1538,18 @@ export async function reactivateGenuineRepost(
     archived_at: Date | null;
     archive_reference_at: Date | null;
     archive_age_basis: string | null;
+    archive_reason: string | null;
   }>(
-    `SELECT archived_at, archive_reference_at, archive_age_basis
+    `SELECT archived_at, archive_reference_at, archive_age_basis, archive_reason
      FROM canonical_jobs WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
     [input.workspaceId, input.canonicalJobId],
   );
   const row = state.rows[0];
   if (!row?.archived_at || !row.archive_reference_at || input.repostedAt <= row.archive_reference_at) return null;
+  // Repost evidence rebuts an age-based archive only. A deterministic hard rejection still holds
+  // for a reposted job, so HARD_REJECTED_PERMANENT archives are restored only by the owner
+  // re-saving the job (restoreHardRejectedArchiveForOwnerSavedObservation) or a manual restore.
+  if (row.archive_reason === HARD_REJECTED_ARCHIVE_REASON) return null;
   const eventId = await insertArchiveRestoreEvent(client, {
     workspaceId: input.workspaceId,
     canonicalJobId: input.canonicalJobId,

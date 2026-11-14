@@ -1,17 +1,40 @@
 name: Daily Job Archiving
 
+# Two independent archive rules run in one scan (scripts/archive_jobs.ts --rule):
+#   hard-rejected  HARD_REJECTED_PERMANENT: deterministic hard rejections with stored reason codes,
+#                  never the owner's LINKEDIN_SAVED / MCF_SAVED jobs, archived the day they are rejected.
+#   age            JOB_OLDER_THAN_THREE_CALENDAR_MONTHS (unchanged).
+#
+# Scheduled runs evaluate vars.JOB_ARCHIVING_RULE (default all). They APPLY only when
+# JOB_ARCHIVING_ENABLED is true and either JOB_ARCHIVING_PILOT_COMPLETE is true or the scheduled
+# rule is hard-rejected (that rule does not need the age rule's live-job pilot); otherwise DRY_RUN.
+
 on:
   schedule:
     - cron: "15 19 * * *"
   workflow_dispatch:
     inputs:
       mode:
-        description: "Archive mode. Apply requires JOB_ARCHIVING_ENABLED=true."
+        description: "Archive mode. Apply requires JOB_ARCHIVING_ENABLED=true (and JOB_ARCHIVING_PILOT_COMPLETE=true unless rule is hard-rejected)."
         type: choice
         options:
           - DRY_RUN
           - APPLY
         default: DRY_RUN
+        required: true
+      rule:
+        description: "Archive rules to evaluate."
+        type: choice
+        options:
+          - all
+          - hard-rejected
+          - age
+        default: all
+        required: true
+      max_archives:
+        description: "Archive cap per rule for this run (1-10000). Scheduled runs always use 500."
+        type: string
+        default: "500"
         required: true
 
 concurrency:
@@ -30,6 +53,8 @@ jobs:
         env:
           REQUESTED_REF: ${{ github.ref }}
           INPUT_MODE: ${{ inputs.mode }}
+          INPUT_RULE: ${{ inputs.rule }}
+          INPUT_MAX_ARCHIVES: ${{ inputs.max_archives }}
           WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH || 'false' }}
           JOB_ARCHIVING_ENABLED: ${{ vars.JOB_ARCHIVING_ENABLED || 'false' }}
           JOB_ARCHIVING_PILOT_COMPLETE: ${{ vars.JOB_ARCHIVING_PILOT_COMPLETE || 'false' }}
@@ -44,23 +69,35 @@ jobs:
             echo "Archive mode must be DRY_RUN or APPLY." >&2
             exit 1
           fi
+          if [[ "$INPUT_RULE" != "all" && "$INPUT_RULE" != "hard-rejected" && "$INPUT_RULE" != "age" ]]; then
+            echo "Archive rule must be all, hard-rejected or age." >&2
+            exit 1
+          fi
+          if ! [[ "$INPUT_MAX_ARCHIVES" =~ ^[1-9][0-9]{0,4}$ ]] || (( INPUT_MAX_ARCHIVES > 10000 )); then
+            echo "max_archives must be an integer from 1 to 10000." >&2
+            exit 1
+          fi
           if [[ "$INPUT_MODE" == "APPLY" ]]; then
             if [[ "$WORKFLOW_KILL_SWITCH" == "true" ]]; then
               echo "Archive APPLY dispatch is disabled while WORKFLOW_KILL_SWITCH=true." >&2
               exit 1
             fi
-            if [[ "$JOB_ARCHIVING_ENABLED" != "true" || "$JOB_ARCHIVING_PILOT_COMPLETE" != "true" ]]; then
-              echo "Archive APPLY dispatch requires JOB_ARCHIVING_ENABLED=true and JOB_ARCHIVING_PILOT_COMPLETE=true." >&2
+            if [[ "$JOB_ARCHIVING_ENABLED" != "true" ]]; then
+              echo "Archive APPLY dispatch requires JOB_ARCHIVING_ENABLED=true." >&2
+              exit 1
+            fi
+            if [[ "$INPUT_RULE" != "hard-rejected" && "$JOB_ARCHIVING_PILOT_COMPLETE" != "true" ]]; then
+              echo "Archive APPLY dispatch with the age rule requires JOB_ARCHIVING_ENABLED=true and JOB_ARCHIVING_PILOT_COMPLETE=true." >&2
               exit 1
             fi
           fi
 
   archive_jobs:
-    name: Archive aged canonical jobs
+    name: Archive hard-rejected and aged canonical jobs
     needs: validate-manual-dispatch
     runs-on: ubuntu-latest
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.validate-manual-dispatch.result == 'success') && github.ref == 'refs/heads/main' && vars.WORKFLOW_KILL_SWITCH != 'true' }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -86,5 +123,7 @@ jobs:
           JOB_ARCHIVING_ENABLED: ${{ vars.JOB_ARCHIVING_ENABLED || 'false' }}
           JOB_ARCHIVING_PILOT_COMPLETE: ${{ vars.JOB_ARCHIVING_PILOT_COMPLETE || 'false' }}
           JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID: ${{ vars.JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID || '' }}
-          ARCHIVE_MODE: ${{ github.event_name == 'schedule' && (vars.JOB_ARCHIVING_ENABLED == 'true' && vars.JOB_ARCHIVING_PILOT_COMPLETE == 'true' && 'APPLY' || 'DRY_RUN') || inputs.mode }}
-        run: npx tsx scripts/archive_jobs.ts --mode "${ARCHIVE_MODE}" --page-size 250 --max-archives 500
+          ARCHIVE_RULE: ${{ github.event_name == 'schedule' && (vars.JOB_ARCHIVING_RULE || 'all') || inputs.rule }}
+          ARCHIVE_MODE: ${{ github.event_name == 'schedule' && (vars.JOB_ARCHIVING_ENABLED == 'true' && (vars.JOB_ARCHIVING_PILOT_COMPLETE == 'true' || vars.JOB_ARCHIVING_RULE == 'hard-rejected') && 'APPLY' || 'DRY_RUN') || inputs.mode }}
+          ARCHIVE_MAX_ARCHIVES: ${{ github.event_name == 'schedule' && '500' || inputs.max_archives }}
+        run: npx tsx scripts/archive_jobs.ts --mode "${ARCHIVE_MODE}" --rule "${ARCHIVE_RULE}" --page-size 250 --max-archives "${ARCHIVE_MAX_ARCHIVES}"
