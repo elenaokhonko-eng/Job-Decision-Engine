@@ -38,7 +38,10 @@ def test_archive_age_basis_label_names_the_hard_rejected_basis(
     monkeypatch.syspath_prepend(str(project_root))
     from streamlit_archive import archive_age_basis_label
 
-    assert archive_age_basis_label("HARD_REJECTED_DECISION") == "Hard-gate rejection decision"
+    assert (
+        archive_age_basis_label("HARD_REJECTED_DECISION")
+        == "Hard-gate rejection decision"
+    )
     assert archive_age_basis_label("SOMETHING_ELSE") == "Unknown age basis"
 
 
