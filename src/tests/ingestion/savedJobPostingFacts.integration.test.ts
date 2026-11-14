@@ -229,7 +229,8 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
     // The date came from "2 weeks ago": stored as the newest possible date with an approximate basis.
     expect(updated).toMatchObject({ freshness_basis: "POSTED_AT_APPROXIMATE_WEEK", availability_status: "OPEN" });
     expect(updated.availability_verified_at?.toISOString()).toBe(checkedAt);
-    expect(updated.availability_recheck_at?.toISOString()).toBe(new Date(new Date(checkedAt).getTime() + DAY).toISOString());
+    // An OPEN status read from the posting page stays current for seven days from the read.
+    expect(updated.availability_recheck_at?.toISOString()).toBe(new Date(new Date(checkedAt).getTime() + 7 * DAY).toISOString());
     expect(await readiness(target.canonicalJobId)).toEqual({ AVAILABILITY: "MET", FRESHNESS: "MET" });
 
     // Same file again: nothing new is staged.
@@ -288,12 +289,12 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
     const [observationId] = await importLinkedIn([linkedInItem("4300000203", {
       postedAt: iso(-120 * DAY),
       availabilityStatus: "OPEN",
-      postingCheckedAt: iso(-3 * DAY),
-      exportedAt: iso(-3 * DAY),
+      postingCheckedAt: iso(-8 * DAY),
+      exportedAt: iso(-8 * DAY),
     })]);
     const target = (await normalizeAndDecide([observationId as string])).get(observationId as string);
     if (!target) throw new Error("stale saved job was not normalized");
-    // The open status was read three days ago: past its one-day window.
+    // The open status was read eight days ago: past its seven-day window.
     expect(await readiness(target.canonicalJobId)).toEqual({ AVAILABILITY: "NEEDS_VERIFICATION", FRESHNESS: "BLOCKED" });
   });
 

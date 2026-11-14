@@ -43,7 +43,7 @@
  *   3. If it stopped early, `await jdeLinkedInExport.resume()` continues the
  *      description pass; `jdeLinkedInExport.download()` downloads what is
  *      collected so far; `jdeLinkedInExport.clear()` forgets the stored progress.
- *   4. Open/closed status is current for one day after the page was read. To
+ *   4. An open status is current for seven days after the page was read (closed: one day). To
  *      re-check every saved job's posted date and status later (for example
  *      before an application round), run `await jdeLinkedInExport.refresh()` and
  *      import the downloaded file with `npm run enrich:linkedin-saved`.

@@ -359,7 +359,7 @@ describe("LinkedIn saved export posting facts", () => {
     expect(evidence.availability).toMatchObject({
       status: "OPEN",
       verified_at: CHECKED_AT,
-      expires_at: new Date(new Date(CHECKED_AT).getTime() + DAY).toISOString(),
+      expires_at: new Date(new Date(CHECKED_AT).getTime() + 7 * DAY).toISOString(),
       verification_method: "EXPLICIT_SOURCE_STATUS",
       reason_code: "CURRENT_LISTING_EVIDENCE",
     });
