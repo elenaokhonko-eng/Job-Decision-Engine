@@ -804,6 +804,112 @@ export async function seedRecoverablePipelineTasks(
         )`
       : "FALSE";
 
+    // Seed AI enqueue first. Jobs matched and decided outside the task chain (rematch and replay
+    // scripts) reach the AI queue only through this seed, and it is the last stage before Apply Now.
+    // Seeding stops at a shared time budget, so this seed must not wait behind the upstream seeds.
+    await selectAndEnqueue(
+      client as any,
+      ctx,
+      summary,
+      "ENQUEUE_EXPLANATION",
+      `SELECT c.id AS canonical_job_id,
+              COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
+              last_deferral.budget_run_id::text AS deferred_budget_run_id
+       FROM canonical_jobs c
+       LEFT JOIN LATERAL (
+         SELECT id
+         FROM job_versions
+         WHERE workspace_id = c.workspace_id AND canonical_job_id = c.id
+         ORDER BY observed_at DESC
+         LIMIT 1
+       ) jv ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT deferral.budget_run_id
+         FROM evaluation_budget_deferrals deferral
+         WHERE deferral.workspace_id = c.workspace_id
+           AND deferral.canonical_job_id = c.id
+           AND deferral.job_version_id = COALESCE(c.latest_job_version_id, jv.id)
+         ORDER BY deferral.created_at DESC, deferral.id DESC
+         LIMIT 1
+       ) last_deferral ON TRUE
+       WHERE c.workspace_id = $1
+         AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET')
+         AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
+         -- AI evaluation is for Apply Now outcomes only; TRACK is excluded by design.
+         AND c.recommendation_outcome IN (${AI_EVALUATION_OUTCOMES_SQL})
+         AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
+         AND EXISTS (
+           SELECT 1
+           FROM job_versions target_jv
+           JOIN profile_versions current_profile
+             ON current_profile.workspace_id = target_jv.workspace_id
+            AND current_profile.status = 'ACTIVE'
+           JOIN match_runs current_match
+             ON current_match.workspace_id = c.workspace_id
+            AND current_match.canonical_job_id = c.id
+            AND current_match.id = c.latest_match_run_id
+            AND current_match.job_version_id = target_jv.id
+            AND current_match.profile_version_id = current_profile.id
+            AND current_match.requirement_set_id = target_jv.active_requirement_set_id
+            AND current_match.job_content_hash = target_jv.content_hash
+            AND current_match.context_fingerprint IS NOT NULL
+            AND current_match.status = 'COMPLETED'
+           -- A decision that predates the current match is allowed: the ENQUEUE task queues a
+           -- DECIDE_RECOMMENDATION and waits for it instead of enqueueing nothing.
+           WHERE target_jv.workspace_id = c.workspace_id
+             AND target_jv.id = COALESCE(c.latest_job_version_id, jv.id)
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM ai_evaluations ae
+           WHERE ae.workspace_id = c.workspace_id
+             AND ae.canonical_job_id = c.id
+             AND ae.job_version_id = COALESCE(c.latest_job_version_id, jv.id)
+             AND ae.profile_version_id IS NOT DISTINCT FROM (
+               SELECT pv.id
+               FROM profile_versions pv
+               WHERE pv.workspace_id = c.workspace_id
+                 AND pv.status = 'ACTIVE'
+               ORDER BY pv.created_at DESC
+               LIMIT 1
+             )
+             AND ae.match_run_id = c.latest_match_run_id
+             AND ae.deterministic_decision_id = c.latest_deterministic_decision_id
+             AND ae.job_content_hash IS NOT DISTINCT FROM (
+               SELECT target_jv.content_hash
+               FROM job_versions target_jv
+               WHERE target_jv.workspace_id = c.workspace_id
+                 AND target_jv.id = COALESCE(c.latest_job_version_id, jv.id)
+             )
+             AND ae.context_fingerprint IS NOT NULL
+         )
+       ORDER BY c.updated_at ASC
+       LIMIT $2`,
+      [ctx.workspaceId, maxPerType],
+      (row) => ({
+        id: requiredSeedValue(row, "job_version_id"),
+        payload: {
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
+          // The routing version is part of the task identity, so enqueue is retried once per
+          // lane routing content and never after a budget-only lane revision.
+          ...(laneRoutingVersion ? { lane_routing_version: laneRoutingVersion } : {}),
+          // The job's latest AI budget deferral is part of the task context (queue_budget_run_id
+          // is a context-fingerprint key): a job deferred for budget gets one new enqueue attempt
+          // in a later pass (a new budget run) instead of being stranded behind its completed
+          // task. The enqueuer still applies the lane budget to that attempt.
+          ...(typeof row.deferred_budget_run_id === "string" && row.deferred_budget_run_id !== ""
+            ? { queue_budget_run_id: row.deferred_budget_run_id }
+            : {}),
+        },
+      }),
+      enabledTypes,
+      includeTestFixtures,
+      deadlineAt,
+    seedScope,
+    maxPerType,
+    );
+
     await selectAndEnqueue(
       client as any,
       ctx,
@@ -1485,109 +1591,6 @@ export async function seedRecoverablePipelineTasks(
           ...(row.repair_existing_state === true ? { repair_existing_state: true } : {}),
           ...(row.readiness_reassessment_required === true
             ? { reprocess_existing_state: true, reassessment_reason: "APPLICATION_READINESS_REFRESH" }
-            : {}),
-        },
-      }),
-      enabledTypes,
-      includeTestFixtures,
-      deadlineAt,
-    seedScope,
-    maxPerType,
-    );
-
-    await selectAndEnqueue(
-      client as any,
-      ctx,
-      summary,
-      "ENQUEUE_EXPLANATION",
-      `SELECT c.id AS canonical_job_id,
-              COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
-              last_deferral.budget_run_id::text AS deferred_budget_run_id
-       FROM canonical_jobs c
-       LEFT JOIN LATERAL (
-         SELECT id
-         FROM job_versions
-         WHERE workspace_id = c.workspace_id AND canonical_job_id = c.id
-         ORDER BY observed_at DESC
-         LIMIT 1
-       ) jv ON TRUE
-       LEFT JOIN LATERAL (
-         SELECT deferral.budget_run_id
-         FROM evaluation_budget_deferrals deferral
-         WHERE deferral.workspace_id = c.workspace_id
-           AND deferral.canonical_job_id = c.id
-           AND deferral.job_version_id = COALESCE(c.latest_job_version_id, jv.id)
-         ORDER BY deferral.created_at DESC, deferral.id DESC
-         LIMIT 1
-       ) last_deferral ON TRUE
-       WHERE c.workspace_id = $1
-         AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET')
-         AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
-         -- AI evaluation is for Apply Now outcomes only; TRACK is excluded by design.
-         AND c.recommendation_outcome IN (${AI_EVALUATION_OUTCOMES_SQL})
-         AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
-         AND EXISTS (
-           SELECT 1
-           FROM job_versions target_jv
-           JOIN profile_versions current_profile
-             ON current_profile.workspace_id = target_jv.workspace_id
-            AND current_profile.status = 'ACTIVE'
-           JOIN match_runs current_match
-             ON current_match.workspace_id = c.workspace_id
-            AND current_match.canonical_job_id = c.id
-            AND current_match.id = c.latest_match_run_id
-            AND current_match.job_version_id = target_jv.id
-            AND current_match.profile_version_id = current_profile.id
-            AND current_match.requirement_set_id = target_jv.active_requirement_set_id
-            AND current_match.job_content_hash = target_jv.content_hash
-            AND current_match.context_fingerprint IS NOT NULL
-            AND current_match.status = 'COMPLETED'
-           -- A decision that predates the current match is allowed: the ENQUEUE task queues a
-           -- DECIDE_RECOMMENDATION and waits for it instead of enqueueing nothing.
-           WHERE target_jv.workspace_id = c.workspace_id
-             AND target_jv.id = COALESCE(c.latest_job_version_id, jv.id)
-         )
-         AND NOT EXISTS (
-           SELECT 1
-           FROM ai_evaluations ae
-           WHERE ae.workspace_id = c.workspace_id
-             AND ae.canonical_job_id = c.id
-             AND ae.job_version_id = COALESCE(c.latest_job_version_id, jv.id)
-             AND ae.profile_version_id IS NOT DISTINCT FROM (
-               SELECT pv.id
-               FROM profile_versions pv
-               WHERE pv.workspace_id = c.workspace_id
-                 AND pv.status = 'ACTIVE'
-               ORDER BY pv.created_at DESC
-               LIMIT 1
-             )
-             AND ae.match_run_id = c.latest_match_run_id
-             AND ae.deterministic_decision_id = c.latest_deterministic_decision_id
-             AND ae.job_content_hash IS NOT DISTINCT FROM (
-               SELECT target_jv.content_hash
-               FROM job_versions target_jv
-               WHERE target_jv.workspace_id = c.workspace_id
-                 AND target_jv.id = COALESCE(c.latest_job_version_id, jv.id)
-             )
-             AND ae.context_fingerprint IS NOT NULL
-         )
-       ORDER BY c.updated_at ASC
-       LIMIT $2`,
-      [ctx.workspaceId, maxPerType],
-      (row) => ({
-        id: requiredSeedValue(row, "job_version_id"),
-        payload: {
-          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
-          job_version_id: requiredSeedValue(row, "job_version_id"),
-          // The routing version is part of the task identity, so enqueue is retried once per
-          // lane routing content and never after a budget-only lane revision.
-          ...(laneRoutingVersion ? { lane_routing_version: laneRoutingVersion } : {}),
-          // The job's latest AI budget deferral is part of the task context (queue_budget_run_id
-          // is a context-fingerprint key): a job deferred for budget gets one new enqueue attempt
-          // in a later pass (a new budget run) instead of being stranded behind its completed
-          // task. The enqueuer still applies the lane budget to that attempt.
-          ...(typeof row.deferred_budget_run_id === "string" && row.deferred_budget_run_id !== ""
-            ? { queue_budget_run_id: row.deferred_budget_run_id }
             : {}),
         },
       }),

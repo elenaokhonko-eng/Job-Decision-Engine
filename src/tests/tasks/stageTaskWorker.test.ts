@@ -1132,6 +1132,46 @@ describe("stageTaskWorker", () => {
     expect(decisionSeed?.sql).toContain("current_match.context_fingerprint IS NOT NULL");
   });
 
+  it("seeds AI enqueue before upstream seeds can exhaust the seed time budget", async () => {
+    const seedTypesQueried: string[] = [];
+    let now = 1_700_000_000_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("last_deferral.budget_run_id")) {
+        seedTypesQueried.push("ENQUEUE_EXPLANATION");
+        return {
+          rows: [{ canonical_job_id: "job-review", job_version_id: "version-review", deferred_budget_run_id: null }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("obs.job_version_id IS NULL")) {
+        seedTypesQueried.push("NORMALIZE_OBSERVATION");
+        // A slow upstream seed uses up the whole budget, as in production.
+        now += 60_000;
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        now += 60_000;
+        return { rows: [{ id: "task-enqueue" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+
+    try {
+      const summary = await seedRecoverablePipelineTasks({ query } as any, {
+        context: ctx,
+        maxSeedPerType: 1,
+        timeBudgetMs: 1_000,
+      });
+
+      expect(summary.byType.ENQUEUE_EXPLANATION).toEqual({ inserted: 1, existing: 0 });
+      expect(summary.timeBudgetExceeded).toBe(true);
+      expect(seedTypesQueried).toEqual(["ENQUEUE_EXPLANATION"]);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("seeds embedding repair for semantic match orphans before matching", async () => {
     const calls: Array<{ sql: string; params?: unknown[] }> = [];
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
