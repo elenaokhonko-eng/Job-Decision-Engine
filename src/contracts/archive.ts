@@ -9,6 +9,23 @@ export const ArchiveAgeBasisSchema = z.enum([
 ]);
 export type ArchiveAgeBasis = z.infer<typeof ArchiveAgeBasisSchema>;
 
+/** Basis of an archived job: an evidenced age basis, or the hard-gate decision for the hard-rejected rule. */
+export const ArchiveBasisSchema = z.enum([
+  ...ArchiveAgeBasisSchema.options,
+  "HARD_REJECTED_DECISION",
+]);
+export type ArchiveBasis = z.infer<typeof ArchiveBasisSchema>;
+
+export const ArchiveReasonSchema = z.enum([
+  "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS",
+  "HARD_REJECTED_PERMANENT",
+]);
+export type ArchiveReason = z.infer<typeof ArchiveReasonSchema>;
+
+/** Which archive rules a run evaluates. */
+export const ArchiveRuleSelectionSchema = z.enum(["age", "hard-rejected", "all"]);
+export type ArchiveRuleSelection = z.infer<typeof ArchiveRuleSelectionSchema>;
+
 export const ArchiveEventActionSchema = z.enum([
   "ARCHIVED",
   "RESTORED",
@@ -32,7 +49,7 @@ export const ArchiveJobRowSchema = z.object({
   recommendation_outcome: z.string().nullable(),
   archived_at: z.string().datetime(),
   archive_reason: z.string().min(1),
-  archive_age_basis: ArchiveAgeBasisSchema,
+  archive_age_basis: ArchiveBasisSchema,
   archive_reference_at: z.string().datetime(),
   application_status: z.string().nullable(),
   active_hold_until: z.string().datetime().nullable(),
@@ -84,10 +101,47 @@ export const ArchiveCandidateSchema = z.object({
 });
 export type ArchiveCandidate = z.infer<typeof ArchiveCandidateSchema>;
 
+/**
+ * A job the hard-rejected rule archives (or would archive in a dry run). Titles and companies are
+ * left out because the report is printed to public workflow logs.
+ */
+export const HardRejectedArchiveCandidateSchema = z.object({
+  canonical_job_id: z.string().uuid(),
+  workspace_id: z.string().uuid(),
+  reference_at: z.string().datetime(),
+  reference_source: z.enum(["GATE_DECISION", "CANONICAL_UPDATED_AT_FALLBACK"]),
+  gate_decision_id: z.string().uuid().nullable(),
+  rejection_codes: z.array(z.string().min(1)).min(1),
+  archive_reason: z.literal("HARD_REJECTED_PERMANENT"),
+});
+export type HardRejectedArchiveCandidate = z.infer<typeof HardRejectedArchiveCandidateSchema>;
+
+export const HardRejectedArchiveReportSchema = z.object({
+  enabled: z.boolean(),
+  scanned_count: z.number().int().min(0),
+  eligible_count: z.number().int().min(0),
+  archived_count: z.number().int().min(0),
+  protected_count: z.number().int().min(0),
+  excluded_saved_source_count: z.number().int().min(0),
+  missing_reason_codes_count: z.number().int().min(0),
+  unverifiable_decision_count: z.number().int().min(0),
+  reference_fallback_count: z.number().int().min(0),
+  failed_count: z.number().int().min(0),
+  deferred_count: z.number().int().min(0),
+  candidate_count: z.number().int().min(0),
+  candidates: z.array(HardRejectedArchiveCandidateSchema),
+  failed_jobs: z.array(z.object({
+    canonical_job_id: z.string().uuid(),
+    reason: z.string().min(1),
+  })),
+});
+export type HardRejectedArchiveReport = z.infer<typeof HardRejectedArchiveReportSchema>;
+
 export const ArchiveRunReportSchema = z.object({
   schema_version: z.literal(ARCHIVE_CONTRACT_SCHEMA_VERSION),
   run_id: z.string().uuid().nullable(),
   mode: z.enum(["DRY_RUN", "APPLY"]),
+  rule: ArchiveRuleSelectionSchema,
   workspace_id: z.string().uuid().nullable(),
   run_status: z.enum(["DRY_RUN", "RUNNING", "SUCCEEDED", "FAILED"]),
   completed_at: z.string().datetime().nullable(),
@@ -111,7 +165,8 @@ export const ArchiveRunReportSchema = z.object({
     canonical_job_id: z.string().uuid(),
     reason: z.string().min(1),
   })),
-
+  /** The hard-rejected rule's counts; the top-level counts above are the age rule's. */
+  hard_rejected: HardRejectedArchiveReportSchema,
 });
 export type ArchiveRunReport = z.infer<typeof ArchiveRunReportSchema>;
 

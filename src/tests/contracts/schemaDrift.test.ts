@@ -159,7 +159,41 @@ describe("P0-01: Data Contract Validation & Schema Drift Baseline", () => {
       candidates: [],
       invalid_date_jobs: [],
       failed_jobs: [],
+      rule: "all",
+      hard_rejected: {
+        enabled: true,
+        scanned_count: 2,
+        eligible_count: 1,
+        archived_count: 0,
+        protected_count: 0,
+        excluded_saved_source_count: 1,
+        missing_reason_codes_count: 0,
+        unverifiable_decision_count: 0,
+        reference_fallback_count: 0,
+        failed_count: 0,
+        deferred_count: 0,
+        candidate_count: 1,
+        candidates: [{
+          canonical_job_id: archiveJob.canonical_job_id,
+          workspace_id: archiveJob.workspace_id,
+          reference_at: timestamp,
+          reference_source: "GATE_DECISION",
+          gate_decision_id: "88888888-8888-4888-8888-888888888888",
+          rejection_codes: ["ONSITE_ONLY"],
+          archive_reason: "HARD_REJECTED_PERMANENT",
+        }],
+        failed_jobs: [],
+      },
     })).not.toThrow();
+    // The archived-job read model accepts the hard-rejected rule's basis; the age rule's own
+    // basis enum does not.
+    expect(() => ArchiveJobRowSchema.parse({
+      ...archiveJob,
+      processing_state: "HARD_REJECTED",
+      archive_reason: "HARD_REJECTED_PERMANENT",
+      archive_age_basis: "HARD_REJECTED_DECISION",
+    })).not.toThrow();
+    expect(() => ArchiveAgeBasisSchema.parse("HARD_REJECTED_DECISION")).toThrow();
     expect(() => ArchiveOperationsStatusSchema.parse({
       schema_version: ARCHIVE_CONTRACT_SCHEMA_VERSION,
       last_success_at: timestamp,

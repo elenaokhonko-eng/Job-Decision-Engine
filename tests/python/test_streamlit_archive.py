@@ -30,6 +30,21 @@ def test_archive_card_renders_age_disclosure_and_calls_restore(
     assert app.session_state["restore_reason"] == "Agent 2 pilot review"
 
 
+def test_archive_age_basis_label_names_the_hard_rejected_basis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hard-rejected archives show their basis instead of an unknown-basis label."""
+    project_root = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(project_root))
+    from streamlit_archive import archive_age_basis_label
+
+    assert (
+        archive_age_basis_label("HARD_REJECTED_DECISION")
+        == "Hard-gate rejection decision"
+    )
+    assert archive_age_basis_label("SOMETHING_ELSE") == "Unknown age basis"
+
+
 def test_archive_hold_form_submits_a_temporary_agent_pilot_hold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

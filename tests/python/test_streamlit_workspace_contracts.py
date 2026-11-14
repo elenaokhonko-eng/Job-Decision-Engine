@@ -356,6 +356,16 @@ def test_archive_job_contract_validates_basis_scope_and_timestamps():
         "active_hold_until": None,
     }
     validate_archive_job_row(row, WORKSPACE_ID)
+    validate_archive_job_row(
+        row
+        | {
+            "processing_state": "HARD_REJECTED",
+            "recommendation_outcome": None,
+            "archive_reason": "HARD_REJECTED_PERMANENT",
+            "archive_age_basis": "HARD_REJECTED_DECISION",
+        },
+        WORKSPACE_ID,
+    )
     for invalid_row, expected_error in (
         (row | {"archive_age_basis": "UNKNOWN"}, ValueError),
         (row | {"archived_at": "2026-10-01T00:00:00"}, ValueError),
