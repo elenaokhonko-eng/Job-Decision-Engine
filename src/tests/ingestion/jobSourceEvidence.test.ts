@@ -124,6 +124,40 @@ describe("job source evidence builder", () => {
     },
   );
 
+  it.each([
+    ["OPEN", "open", 7],
+    ["CLOSED", "closed", 1],
+  ] as const)("gives a %s status read from the posting page a %s window of %i day(s) from the read", (expected, status, days) => {
+    const checkedAt = "2026-11-12T16:02:35.000Z";
+    const evidence = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "LINKEDIN_SAVED",
+      sourceUrl: "https://www.linkedin.com/jobs/view/4300000201/",
+      canonicalApplyUrl: "https://www.linkedin.com/jobs/view/4300000201/",
+      retrievedAt: "2026-11-13T09:00:00.000Z",
+      rawPayload: { status, availability_checked_at: checkedAt },
+      descriptionText: "A short role teaser.",
+    });
+
+    expect(evidence.availability).toMatchObject({ status: expected, verified_at: checkedAt });
+    expect(Date.parse(evidence.availability.expires_at!) - Date.parse(checkedAt)).toBe(days * 24 * 60 * 60 * 1000);
+  });
+
+  it("keeps an OPEN status without a recorded page-read time on the one-day window", () => {
+    const evidence = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "LINKEDIN_SAVED",
+      sourceUrl: "https://www.linkedin.com/jobs/view/4300000202/",
+      canonicalApplyUrl: "https://www.linkedin.com/jobs/view/4300000202/",
+      retrievedAt: "2026-11-13T09:00:00.000Z",
+      rawPayload: { status: "open" },
+      descriptionText: "A short role teaser.",
+    });
+
+    expect(evidence.availability.status).toBe("OPEN");
+    expect(Date.parse(evidence.availability.expires_at!) - Date.parse(evidence.availability.verified_at!)).toBe(24 * 60 * 60 * 1000);
+  });
+
   it("keeps an incomplete ATS listing on the one-day window", () => {
     const retrievedAt = "2026-10-24T00:00:00.000Z";
     const evidence = buildJobSourceEvidence({

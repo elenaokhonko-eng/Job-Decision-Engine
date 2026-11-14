@@ -790,8 +790,13 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
     ? statusCheckedAt
     : retrievedAt;
   const availabilityVerifiedAt = availabilityStatus === "UNKNOWN" ? null : statusVerifiedAt;
+  // OPEN lasts seven days when the posting itself was read: a complete posting retrieved by the
+  // system, or a saved-jobs export that read the posting page at a recorded time. Anything else
+  // (CLOSED, or OPEN from a listing alone) is re-checked after one day.
+  const postingPageReadOpen = isExplicitOpen && typeof statusCheckedAt === "string" && statusCheckedAt !== "INVALID";
+  const availabilityWindowDays = availabilityStatus === "OPEN" && (completePostingRetrieved || postingPageReadOpen) ? 7 : 1;
   const availabilityExpiresAt = availabilityVerifiedAt
-    ? new Date(new Date(availabilityVerifiedAt).getTime() + (availabilityStatus === "OPEN" && completePostingRetrieved ? 7 : 1) * 24 * 60 * 60 * 1000).toISOString()
+    ? new Date(new Date(availabilityVerifiedAt).getTime() + availabilityWindowDays * 24 * 60 * 60 * 1000).toISOString()
     : null;
   const availabilityEvidence = availabilityStatus === "UNKNOWN"
     ? []
