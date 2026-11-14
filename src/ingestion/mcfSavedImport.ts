@@ -100,7 +100,7 @@ function savedObservation(job: McfSavedJob, retrievedAt: string) {
     companyName: job.company,
     title: job.title,
     descriptionRaw: job.description,
-    ...(job.location ? { locationRaw: job.location } : {}),
+    locationRaw: job.location,
     workplaceTypeRaw: "UNKNOWN",
     employmentTypeRaw: job.employmentTypeRaw,
     ...(job.compensation ? { compensationRaw: job.compensation } : {}),

@@ -203,7 +203,11 @@ export async function runNormalization(
                  AND BTRIM(regexp_replace(lower(canonical.company_name), '[^a-z0-9]+', ' ', 'g'))
                    = BTRIM(regexp_replace(lower($5), '[^a-z0-9]+', ' ', 'g'))
                  AND ($7::boolean = FALSE OR canonical.normalized_title = lower($8))
-                 AND ($7::boolean = TRUE OR BTRIM(regexp_replace(lower(COALESCE(canonical.location, canonical.location_summary, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
+                 -- A still-unknown stored location matches: the same source id and company is the
+                 -- same posting, whose location a later observation may now carry (it is then filled).
+                 AND ($7::boolean = TRUE
+                   OR COALESCE(NULLIF(canonical.location, 'Unknown'), NULLIF(canonical.location_summary, 'Unknown')) IS NULL
+                   OR BTRIM(regexp_replace(lower(COALESCE(canonical.location, canonical.location_summary, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
                    = BTRIM(regexp_replace(lower(COALESCE($6, 'Unknown')), '[^a-z0-9]+', ' ', 'g')))
                ORDER BY version.observed_at DESC, version.id DESC
                LIMIT 1`,
@@ -490,15 +494,25 @@ export async function runNormalization(
             ]
           );
           // A later observation of the same content (e.g. a saved-job re-export that now carries
-          // the posting's employment-type label) fills a still-unknown employment type; a known
-          // value is never replaced here.
+          // the posting's employment-type label, or an MCF job whose hidden address is now recorded
+          // as Singapore) fills a still-unknown employment type or location; a known value is never
+          // replaced here.
           await client.query(
             `UPDATE canonical_jobs
-             SET employment_type = $3
+             SET employment_type = CASE
+                   WHEN NULLIF($3, 'UNKNOWN') IS NOT NULL
+                     AND (employment_type IS NULL OR employment_type = 'UNKNOWN') THEN $3
+                   ELSE employment_type
+                 END,
+                 location = CASE
+                   WHEN NULLIF($4, 'Unknown') IS NOT NULL
+                     AND (location IS NULL OR location = 'Unknown') THEN $4
+                   ELSE location
+                 END
              WHERE workspace_id = $1 AND id = $2
-               AND NULLIF($3, 'UNKNOWN') IS NOT NULL
-               AND (employment_type IS NULL OR employment_type = 'UNKNOWN')`,
-            [ctx.workspaceId, canonicalJobId, obs.employment_type_raw || "UNKNOWN"]
+               AND ((NULLIF($3, 'UNKNOWN') IS NOT NULL AND (employment_type IS NULL OR employment_type = 'UNKNOWN'))
+                 OR (NULLIF($4, 'Unknown') IS NOT NULL AND (location IS NULL OR location = 'Unknown')))`,
+            [ctx.workspaceId, canonicalJobId, obs.employment_type_raw || "UNKNOWN", obs.location_raw || "Unknown"]
           );
         }
 
