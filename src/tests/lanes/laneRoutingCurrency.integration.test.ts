@@ -16,6 +16,7 @@ import {
   runPipelineStageTaskWorker,
   seedRecoverablePipelineTasks,
 } from "../../tasks/stageTaskWorker.js";
+import { DETERMINISTIC_MATCHER_POLICY_VERSION } from "../../pipeline/profileMatchCurrency.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { setLaneBudget } from "../../../scripts/workspace_lanes.js";
 import { batchEmbeddingFromPerInput } from "../fixtures/embeddingBatchMock.js";
@@ -190,7 +191,7 @@ async function seedRoutedJob(index: number, profileVersionId: string, policySnap
        coverage_score, overall_match_score, policy_version,
        job_content_hash, context_fingerprint, completed_at
      ) VALUES ($1, $2, $3, $4, $5, 'COMPLETED', 1, 1, 100.00, 80.00,
-               'zebra-fixture-v1', $6, $7, NOW())
+               '${DETERMINISTIC_MATCHER_POLICY_VERSION}', $6, $7, NOW())
      RETURNING id`,
     [workspaceId, canonicalJobId, jobVersionId, profileVersionId, requirementSet.rows[0].id,
      contentHash, contextFingerprint],

@@ -7,6 +7,7 @@ import { loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPo
 import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 import { completeRetrievedPostingPredicate } from "../pipeline/descriptionQuality.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
+import { DETERMINISTIC_MATCHER_FINGERPRINT_VERSION } from "../pipeline/profileMatchCurrency.js";
 import {
   applicationReadinessViewAvailable,
   isCurrentReadinessAssessment,
@@ -488,7 +489,7 @@ function expectedMatchContextFingerprint(
       content_hash: facts.current_content_hash,
       active_requirement_set_id: facts.current_requirement_set_id,
       profile_version_id: facts.active_profile_version_id,
-      matcher_version: "deterministic_matcher_v1",
+      matcher_version: DETERMINISTIC_MATCHER_FINGERPRINT_VERSION,
       evidence_strength_policy_hash: evidenceStrengthPolicyHash,
     },
   });
