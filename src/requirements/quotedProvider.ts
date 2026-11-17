@@ -167,7 +167,8 @@ function parseAndValidateQuotedPayload(input: QuotedProviderInput, rawText: stri
   }
 
   const validated = validateQuotedRequirements(input.descriptionText, payload);
-  if (!validated.valid) {
+  // Keep the quotes that are found in the posting; fail only when none is.
+  if (!validated.valid && validated.requirements.length === 0) {
     throw new Error(
       `Quoted requirement validation failed: ${validated.issues
         .map((issue) => `${issue.requirement_key}: ${issue.message}`)

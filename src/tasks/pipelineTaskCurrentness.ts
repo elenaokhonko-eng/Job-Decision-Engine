@@ -7,6 +7,7 @@ import { loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPo
 import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 import { completeRetrievedPostingPredicate } from "../pipeline/descriptionQuality.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
+import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
 import { DETERMINISTIC_MATCHER_FINGERPRINT_VERSION } from "../pipeline/profileMatchCurrency.js";
 import {
   applicationReadinessViewAvailable,
@@ -130,7 +131,7 @@ export function pipelineTaskStageVersion(taskType: string): string | null {
   switch (taskType) {
     case "FETCH_JOB_CONTENT": return "posting_fetch_v1";
     case "NORMALIZE_OBSERVATION": return "normalizer_v1";
-    case "EXTRACT_DETERMINISTIC_REQUIREMENTS": return "deterministic_v3";
+    case "EXTRACT_DETERMINISTIC_REQUIREMENTS": return DETERMINISTIC_EXTRACTOR_VERSION;
     case "APPLY_HARD_GATES": return "hard_gate_v1";
     case "EXTRACT_QUOTED_REQUIREMENTS": return "quoted_requirements_v1";
     case "PUBLISH_EMBEDDING": return "embedding_publication_v1";
