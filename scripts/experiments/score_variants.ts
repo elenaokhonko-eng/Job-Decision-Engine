@@ -110,7 +110,11 @@ async function main() {
     for (const j of all) { const c = laneShare.get(j.lane) ?? [0, 0]; c[j.saved ? 0 : 1] += 1; laneShare.set(j.lane, c); }
     console.log('lane (saved/non-fit):', JSON.stringify([...laneShare.entries()]));
 
-    const cap = (j: Job) => j.reqs.filter((r) => r.type !== 'EXPERIENCE_YEARS' && r.type !== 'DEGREE' && r.type !== 'CERTIFICATION');
+    const typeCounts = new Map<string, number>();
+    for (const j of all) for (const r of j.reqs) typeCounts.set(r.type, (typeCounts.get(r.type) ?? 0) + 1);
+    console.log('requirement types:', JSON.stringify([...typeCounts.entries()].sort((x, y) => y[1] - x[1])));
+    const NON_RANKING = new Set(['EXPERIENCE_YEARS', 'DEGREE', 'CREDENTIAL', 'OFFICE_DAYS', 'WORK_MODE', 'EMPLOYMENT_TYPE', 'TRAVEL', 'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK']);
+    const cap = (j: Job) => j.reqs.filter((r) => !NON_RANKING.has(r.type));
     const variants: Variant[] = [
       { name: 'V0 current score', score: (j) => j.base },
       { name: 'V2 semantic-only mean', score: (j) => mean(j.reqs.map((r) => r.semantic ?? 0)) },
@@ -127,6 +131,17 @@ async function main() {
       { name: 'V3h top-12 capability only', score: (j) => topK(cap(j).map((r) => r.score), 12) },
       { name: 'V3i top-5 capability semantic', score: (j) => topK(cap(j).map((r) => r.semantic ?? 0), 5) },
       { name: 'V3j capability mean (no top-K)', score: (j) => mean(cap(j).map((r) => r.score)) },
+    );
+    // Fixed design candidates (K fixed at 7, the middle of the 3-12 plateau; no further tuning).
+    const K = 7;
+    const must = (j: Job) => cap(j).filter((r) => r.importance === 'MUST');
+    const unmatchedMustShare = (j: Job) => { const m = must(j); return m.length ? m.filter((r) => r.matchType !== 'EXACT' && r.matchType !== 'SEMANTIC').length / m.length : 0; };
+    variants.push(
+      { name: 'D1 top-7 capability semantic (simple)', score: (j) => topK(cap(j).map((r) => r.semantic ?? 0), K) },
+      { name: 'D2 top-7 MUST-only semantic', score: (j) => topK(must(j).map((r) => r.semantic ?? 0), K) },
+      { name: 'D3 top-7 semantic - 0.10 x unmatched-MUST share', score: (j) => topK(cap(j).map((r) => r.semantic ?? 0), K) - 0.1 * unmatchedMustShare(j) },
+      { name: 'D4 top-7 semantic - 0.20 x unmatched-MUST share', score: (j) => topK(cap(j).map((r) => r.semantic ?? 0), K) - 0.2 * unmatchedMustShare(j) },
+      { name: 'D5 top-7 MUST semantic - 0.20 x unmatched-MUST share', score: (j) => topK(must(j).map((r) => r.semantic ?? 0), K) - 0.2 * unmatchedMustShare(j) },
     );
     const roleFit = (j: Job, train: Job[]) => { const t = laneRate(train); return t.get(j.lane) ?? t.get('__prior')!; };
     const zs = (f: (j: Job) => number, jobsIn: Job[]) => { const v = jobsIn.map(f); const m = mean(v); const sd = Math.sqrt(mean(v.map((x) => (x - m) ** 2))) || 1; return (j: Job) => (f(j) - m) / sd; };

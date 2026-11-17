@@ -8,7 +8,7 @@ import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext
 import { completeRetrievedPostingPredicate } from "../pipeline/descriptionQuality.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
-import { DETERMINISTIC_MATCHER_FINGERPRINT_VERSION } from "../pipeline/profileMatchCurrency.js";
+import { currentMatcherFingerprintVersion } from "../pipeline/profileMatchCurrency.js";
 import {
   applicationReadinessViewAvailable,
   isCurrentReadinessAssessment,
@@ -490,7 +490,7 @@ function expectedMatchContextFingerprint(
       content_hash: facts.current_content_hash,
       active_requirement_set_id: facts.current_requirement_set_id,
       profile_version_id: facts.active_profile_version_id,
-      matcher_version: DETERMINISTIC_MATCHER_FINGERPRINT_VERSION,
+      matcher_version: currentMatcherFingerprintVersion(),
       evidence_strength_policy_hash: evidenceStrengthPolicyHash,
     },
   });

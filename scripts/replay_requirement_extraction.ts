@@ -16,6 +16,8 @@
  *   npm run replay:requirements            (read-only plan + before)
  *   npm run replay:requirements -- --migrate (applies pending migrations to the replay branch)
  *   npm run replay:requirements -- --apply (writes to the replay branch)
+ *   npm run replay:requirements -- --apply --scope matched (also every job that already has a match)
+ *   npm run replay:requirements -- --apply --rematch-only (re-match and re-decide; e.g. SCORING_POLICY=topk_capability_semantic_v1)
  */
 import dotenv from 'dotenv';
 import pg from 'pg';
@@ -36,6 +38,8 @@ const MAX_EMBEDDING_FAILURE_SHARE = 0.05;
 
 async function main(): Promise<void> {
   const apply = process.argv.includes('--apply');
+  // Re-match and re-decide only (requirements and embeddings already current), e.g. to apply a new scoring policy.
+  const rematchOnly = process.argv.includes('--rematch-only');
   const { pgConnectionConfig } = await import('../src/db/pgSsl.js');
   const { requireApprovedReplayTarget } = await import('../src/reporting/replayGuard.js');
   const { resolveWorkspaceContext } = await import('../src/workspace/context.js');
@@ -84,15 +88,19 @@ async function main(): Promise<void> {
       }
     };
 
-    const { rows } = await client.query<{ canonical_job_id: string; job_version_id: string; title: string | null; saved: boolean }>(
+    const { rows } = await client.query<{ canonical_job_id: string; job_version_id: string; title: string | null; saved: boolean; matched: boolean }>(
       `SELECT cj.id AS canonical_job_id, cj.latest_job_version_id AS job_version_id, cj.normalized_title AS title,
+              (cj.latest_match_run_id IS NOT NULL) AS matched,
               EXISTS (SELECT 1 FROM raw_job_observations o JOIN job_versions ojv ON ojv.id = o.job_version_id
                       WHERE o.workspace_id = cj.workspace_id AND o.source_name = $2 AND ojv.canonical_job_id = cj.id) AS saved
        FROM canonical_jobs cj
        WHERE cj.workspace_id = $1 AND cj.archived_at IS NULL AND cj.latest_job_version_id IS NOT NULL`,
       [workspace.workspaceId, LINKEDIN_SAVED_SOURCE_NAME],
     );
-    const scope = rows.filter((row) => row.saved || classifyNonFitTitle(row.title ?? '') !== null);
+    // Default scope: saved jobs and non-fit titles. --scope matched: also every job that already has a match
+    // (a wider, unbiased pool for blind review).
+    const wide = process.argv.includes('--scope') && process.argv[process.argv.indexOf('--scope') + 1] === 'matched';
+    const scope = rows.filter((row) => row.saved || classifyNonFitTitle(row.title ?? '') !== null || (wide && row.matched));
     console.log(`Replay scope: ${scope.filter((r) => r.saved).length} saved jobs + ${scope.filter((r) => !r.saved).length} non-fit jobs`);
 
     await measure('BEFORE (current staging data)');
@@ -112,6 +120,7 @@ async function main(): Promise<void> {
       const jobVersionIds = chunk.map((row) => row.job_version_id);
       const canonicalJobIds = chunk.map((row) => row.canonical_job_id);
 
+      if (!rematchOnly) {
       const extraction = await runRequirementsExtraction(pool as never, {
         context: workspace,
         jobVersionIds,
@@ -126,6 +135,7 @@ async function main(): Promise<void> {
       const embeddings = await runEmbeddingBatchWithFallback(2000, pool as never, { context: workspace, jobVersionIds });
       totals.embeddingsOk += embeddings.primary.succeeded;
       totals.embeddingsFailed += embeddings.primary.failed;
+      }
 
       const attempted = totals.embeddingsOk + totals.embeddingsFailed;
       if (attempted > 0 && totals.embeddingsFailed / attempted > MAX_EMBEDDING_FAILURE_SHARE) {
