@@ -22,6 +22,9 @@ export class HimalayasAdapter extends BaseSourceAdapter {
     this.timeoutMs = 15_000;
   }
 
+  // The live feed names the posting link `guid` and the apply link `applicationLink`, and lists the
+  // places a remote job can be done from in `locationRestrictions`. source_external_id deliberately does
+  // not use them: it must stay what earlier runs stored, or every stored job would be seen as new.
   private stableExternalId(item: Record<string, unknown>): string {
     const candidates = [item?.id, item?.slug, item?.jobUrl, item?.applicationUrl, item?.url];
     const usable = candidates.find((value) => value !== null && value !== undefined && String(value).trim().length > 0);
@@ -73,13 +76,13 @@ export class HimalayasAdapter extends BaseSourceAdapter {
         const employmentType = Array.isArray(employment)
           ? employment.filter((part): part is string => typeof part === "string").join(", ")
           : textValue(employment, "FULL_TIME");
-        const location = item.location ?? item.locationRaw;
+        const location = item.location ?? item.locationRaw ?? item.locationRestrictions;
         const locationText = Array.isArray(location)
           ? location.filter((part): part is string => typeof part === "string").join(", ")
           : textValue(location, "Unknown");
         const fallbackUrl = `https://himalayas.app/jobs/${encodeURIComponent(sourceExternalId)}`;
-        const postingUrl = textValue(item.jobUrl ?? item.url, fallbackUrl);
-        const applyUrl = textValue(item.applicationUrl ?? item.applicationUrlRaw, postingUrl);
+        const postingUrl = textValue(item.jobUrl ?? item.url ?? item.guid, fallbackUrl);
+        const applyUrl = textValue(item.applicationUrl ?? item.applicationUrlRaw ?? item.applicationLink, postingUrl);
         const title = textValue(item.title ?? item.jobTitle, "Unknown Title");
         const workplace = textValue(item.workplaceType ?? item.work_mode, "UNKNOWN");
         const candidate = {
