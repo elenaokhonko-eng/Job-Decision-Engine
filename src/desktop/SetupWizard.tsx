@@ -48,7 +48,7 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
 
   const [preset, setPreset] = useState<"gemini" | "openai">("gemini");
   const [embeddingModel, setEmbeddingModel] = useState<string>("gemini-embedding-001");
-  const [evaluationModel, setEvaluationModel] = useState<string>("gemini-3.6-flash");
+  const [evaluationModel, setEvaluationModel] = useState<string>("gemini-4-hydrogen");
   const [documentModel, setDocumentModel] = useState<string>("gemini-3.8-flash");
   const [extractionModel, setExtractionModel] = useState<string>("gemini-3.1-flash-lite");
 
@@ -95,7 +95,7 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
   useEffect(() => {
     if (preset === "gemini") {
       setEmbeddingModel("gemini-embedding-001");
-      setEvaluationModel("gemini-3.6-flash");
+      setEvaluationModel("gemini-4-hydrogen");
       setDocumentModel("gemini-3.8-flash");
       setExtractionModel("gemini-3.1-flash-lite");
     } else {
@@ -610,7 +610,7 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
                 >
                   <span className="block font-bold">Gemini Preset (Recommended)</span>
                   <span className="text-xs text-slate-500">
-                    gemini-embedding-001 + gemini-3.6-flash
+                    gemini-embedding-001 + gemini-4-hydrogen
                   </span>
                 </button>
 

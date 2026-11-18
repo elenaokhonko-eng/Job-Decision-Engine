@@ -1,6 +1,7 @@
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import dotenv from "dotenv";
 import crypto from "crypto";
+import { DEFAULT_GEMINI_EVALUATION_MODEL } from "./modelDefaults.js";
 import pg from "pg";
 import { db, Job } from "../db/db.ts";
 import { fetchGmailAlerts } from "./gmail.js";
@@ -86,7 +87,7 @@ dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 export const MODEL_REGISTRY = {
-  EVALUATION_PRIMARY_MODEL: process.env.EVALUATION_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-3.6-flash",
+  EVALUATION_PRIMARY_MODEL: process.env.EVALUATION_PRIMARY_MODEL || process.env.GEMINI_MODEL || DEFAULT_GEMINI_EVALUATION_MODEL,
   /** Import-time snapshot; call sites resolve evaluationOpenAiModel() when the call is made. */
   EVALUATION_FALLBACK_MODEL: evaluationOpenAiModel(),
   EMBEDDING_PRIMARY_MODEL: process.env.EMBEDDING_PRIMARY_MODEL || "gemini-embedding-001",

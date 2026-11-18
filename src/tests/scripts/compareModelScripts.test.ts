@@ -71,9 +71,9 @@ describe("compare_embedding_backends", () => {
 
 describe("compare_evaluation_models", () => {
   it("defaults to a dry run of 20 jobs comparing two Gemini models", () => {
-    expect(parseArgs([], {})).toMatchObject({ run: false, limit: 20, models: ["gemini-3.6-flash", "gemini-2.5-flash"], noFlex: false });
+    expect(parseArgs([], {})).toMatchObject({ run: false, limit: 20, models: ["gemini-4-hydrogen", "gemini-3.8-flash"], noFlex: false });
     expect(parseArgs(["--run", "--limit", "5", "--model-b", "gemini-3.1-flash-lite"], {}))
-      .toMatchObject({ run: true, limit: 5, models: ["gemini-3.6-flash", "gemini-3.1-flash-lite"] });
+      .toMatchObject({ run: true, limit: 5, models: ["gemini-4-hydrogen", "gemini-3.1-flash-lite"] });
     expect(() => parseArgs(["--limit", "0"], {})).toThrow("--limit");
   });
 
