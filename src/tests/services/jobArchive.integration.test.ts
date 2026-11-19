@@ -12,6 +12,7 @@ import {
   createArchiveHold,
   listArchivedJobsWithOperationalStatus,
   restoreArchivedJob,
+  archiveJobsAsPostingNotConfirmable,
 } from "../../services/jobArchive.js";
 import { validatePersistedDocumentCurrentness } from "../../documents/provenanceCurrentness.js";
 import { pgConnectionConfig, isLocalPostgresConnectionString } from "../../db/pgSsl.js";
@@ -1165,5 +1166,47 @@ describe.skipIf(skipReal)("daily job archiving PostgreSQL integration", () => {
       restoreClient.release();
     }
     expect((await readFullArchiveState(ageJob)).archived_at).not.toBeNull();
+  });
+
+  it("archives a posting whose real link was never stored under its own reason, not as closed, and restores it", async () => {
+    const context = await createWorkspace("not-confirmable");
+    const job = await createJobFixture(context);
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const archived = await archiveJobsAsPostingNotConfirmable(client, {
+        workspaceId: context.workspaceId,
+        canonicalJobIds: [job.canonicalJobId],
+        actor: "script:test",
+        details: { restore_point: "test" },
+      });
+      await client.query("COMMIT");
+      expect(archived).toEqual([job.canonicalJobId]);
+
+      const row = await pool.query(
+        `SELECT archived_at, archive_reason, archive_age_basis, processing_state FROM canonical_jobs WHERE id = $1`,
+        [job.canonicalJobId],
+      );
+      expect(row.rows[0]).toMatchObject({ archive_reason: "POSTING_NOT_CONFIRMABLE", archive_age_basis: "POSTING_LINK_UNVERIFIABLE" });
+      expect(row.rows[0].archived_at).not.toBeNull();
+      // Unknown stays unknown: the job is archived, never marked closed.
+      expect(String(row.rows[0].processing_state)).not.toMatch(/CLOSED/);
+      const events = await pool.query(`SELECT action, age_basis FROM job_archive_events WHERE canonical_job_id = $1`, [job.canonicalJobId]);
+      expect(events.rows).toEqual([{ action: "ARCHIVED", age_basis: "POSTING_LINK_UNVERIFIABLE" }]);
+
+      await client.query("BEGIN");
+      const restored = await restoreArchivedJob(client, {
+        workspaceId: context.workspaceId,
+        canonicalJobId: job.canonicalJobId,
+        actor: `user:${context.userId}`,
+        reason: "Real posting found.",
+        context,
+      });
+      await client.query("COMMIT");
+      expect(restored).toMatchObject({ restored: true, reasonCode: "RESTORED" });
+      expect((await readFullArchiveState(job)).archived_at).toBeNull();
+    } finally {
+      client.release();
+    }
   });
 });

@@ -78,6 +78,18 @@ function safeErrorCode(error: unknown): string | null {
   return null;
 }
 
+/**
+ * A Postgres error's SQLSTATE (for example 42P01, undefined table) is a fixed five-character
+ * class code that names the kind of failure and carries no connection details, row data or
+ * message text. Only a real pg DatabaseError (it also has a `severity`) qualifies.
+ */
+function safeSqlState(error: unknown): string | null {
+  const record = recordValue(error);
+  const code = record?.code;
+  if (typeof code !== "string" || typeof record?.severity !== "string") return null;
+  return /^[0-9A-Z]{5}$/.test(code) ? `SQLSTATE ${code}` : null;
+}
+
 function failureCategory(text: string, status: number | null): string {
   const normalized = text.toLowerCase();
   if (status === 429 || /rate.?limit|too many requests|quota|resource_exhausted/.test(normalized)) {
@@ -117,6 +129,7 @@ export function publicErrorSummary(error: unknown, provider: string = "external"
   const details = [
     status === null ? null : `HTTP ${status}`,
     code,
+    safeSqlState(error),
     failureCategory(rawText, status),
   ].filter((part): part is string => Boolean(part));
   return `${safeProvider} request failed (${details.join("; ")})`.slice(0, 240);

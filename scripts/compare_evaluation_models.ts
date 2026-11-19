@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import pg from "pg";
 
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
+import { DEFAULT_GEMINI_EVALUATION_MODEL } from "../src/services/modelDefaults.js";
 import { isProfileFactModelShareable } from "../src/profile/privacy.js";
 import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
@@ -17,7 +18,7 @@ dotenv.config({ path: ".env.local" });
  *
  *   npx tsx scripts/compare_evaluation_models.ts                  # dry run: lists the sample only
  *   npx tsx scripts/compare_evaluation_models.ts --run [--limit 20]
- *     [--models gemini-3.6-flash,gpt-6.1-terra,gpt-6-luna]       # the first model is the baseline
+ *     [--models gemini-4-hydrogen,gpt-6.1-terra,gpt-6-luna]       # the first model is the baseline
  *     [--prices-file prices.json | --prices '{"gpt-6-luna":{"input_per_1m":..,"output_per_1m":..}}']
  *     [--no-flex]                                                 # Gemini on standard PayGo only
  *
@@ -37,7 +38,7 @@ const SCORE_FIELDS = [
   "strategic_value_score", "technical_depth_score", "role_ownership_score",
 ] as const;
 
-export const DEFAULT_COMPARISON_MODELS = ["gemini-3.6-flash", "gemini-2.5-flash"] as const;
+export const DEFAULT_COMPARISON_MODELS = [DEFAULT_GEMINI_EVALUATION_MODEL, "gemini-3.8-flash"] as const;
 const MAX_MODELS = 6;
 
 export interface ModelPrice {

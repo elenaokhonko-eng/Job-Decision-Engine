@@ -126,7 +126,9 @@ const SUPERSEDED_LANE_ROUTING_SQL = `(
  * active profile; DECIDE_RECOMMENDATION and (for PRIORITY/REVIEW) ENQUEUE_EXPLANATION follow as
  * normal successors. Hard gates and lane routing are not replayed.
  */
-const SUPERSEDED_PROFILE_MATCH_SQL = `(
+// A function, not a constant: the matcher policy version (SCORING_POLICY) is read when the SQL is built,
+// the same moment the matcher and task currentness read it, so they cannot disagree about the active policy.
+const supersededProfileMatchSql = (): string => `(
   ${eligibleRoutedJobSql("c", PROFILE_REMATCH_OUTCOMES)}
   AND ${profileMatchSupersededSql("c", "mr")}
 )`;
@@ -1372,7 +1374,7 @@ export async function seedRecoverablePipelineTasks(
          ON mr.workspace_id = c.workspace_id
         AND mr.id = c.latest_match_run_id
        WHERE c.workspace_id = $1
-         AND ${SUPERSEDED_PROFILE_MATCH_SQL}
+         AND ${supersededProfileMatchSql()}
          AND NOT EXISTS (
            SELECT 1
            FROM pipeline_tasks rematch
@@ -1467,7 +1469,7 @@ export async function seedRecoverablePipelineTasks(
            FROM match_runs mr
            WHERE mr.workspace_id = c.workspace_id
              AND mr.id = c.latest_match_run_id
-             AND ${SUPERSEDED_PROFILE_MATCH_SQL}
+             AND ${supersededProfileMatchSql()}
          )
          AND (
            COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'

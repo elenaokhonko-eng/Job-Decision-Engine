@@ -48,7 +48,7 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
 
   const [preset, setPreset] = useState<"gemini" | "openai">("gemini");
   const [embeddingModel, setEmbeddingModel] = useState<string>("gemini-embedding-001");
-  const [evaluationModel, setEvaluationModel] = useState<string>("gemini-3.6-flash");
+  const [evaluationModel, setEvaluationModel] = useState<string>("gemini-4-hydrogen");
   const [documentModel, setDocumentModel] = useState<string>("gemini-3.8-flash");
   const [extractionModel, setExtractionModel] = useState<string>("gemini-3.1-flash-lite");
 
@@ -95,13 +95,13 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
   useEffect(() => {
     if (preset === "gemini") {
       setEmbeddingModel("gemini-embedding-001");
-      setEvaluationModel("gemini-3.6-flash");
+      setEvaluationModel("gemini-4-hydrogen");
       setDocumentModel("gemini-3.8-flash");
       setExtractionModel("gemini-3.1-flash-lite");
     } else {
       setEmbeddingModel("text-embedding-3-small");
-      setEvaluationModel("gpt-4o-mini");
-      setDocumentModel("gpt-4o-mini");
+      setEvaluationModel("gpt-5.6-luna");
+      setDocumentModel("gpt-5.6-luna");
       setExtractionModel("gpt-5.6-luna");
     }
   }, [preset]);
@@ -610,7 +610,7 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
                 >
                   <span className="block font-bold">Gemini Preset (Recommended)</span>
                   <span className="text-xs text-slate-500">
-                    gemini-embedding-001 + gemini-3.6-flash
+                    gemini-embedding-001 + gemini-4-hydrogen
                   </span>
                 </button>
 
@@ -625,7 +625,7 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
                 >
                   <span className="block font-bold">OpenAI Preset</span>
                   <span className="text-xs text-slate-500">
-                    text-embedding-3-small + gpt-4o-mini
+                    text-embedding-3-small + gpt-5.6-luna
                   </span>
                 </button>
               </div>

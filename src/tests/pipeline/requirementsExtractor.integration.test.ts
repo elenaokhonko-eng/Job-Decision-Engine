@@ -35,8 +35,8 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
         'Hybrid role with 2 days per week in office.',
         'Must have at least 5 years of experience.',
         'Work rights required.',
-        'Machine learning engineer for data platform initiatives.',
       ].join(' ');
+      // Fewer than 5 capability items, so the rules came up short and the quoted (AI) step is asked.
 
       await client.query(
         `INSERT INTO job_versions (id, canonical_job_id, content_hash, description_text, observed_at)
@@ -178,7 +178,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
       const { enqueuePipelineTask } = await import('../../tasks/pipelineTasks.js');
       const { runPipelineStageTaskWorker } = await import('../../tasks/stageTaskWorker.js');
       const context = await resolveWorkspaceContext(client as any);
-      const sparseTaskKey = `EXTRACT_DETERMINISTIC_REQUIREMENTS:${sparseJobVersionId}:deterministic_v3`;
+      const sparseTaskKey = `EXTRACT_DETERMINISTIC_REQUIREMENTS:${sparseJobVersionId}:deterministic_v4`;
       await enqueuePipelineTask(
         {
           taskType: 'EXTRACT_DETERMINISTIC_REQUIREMENTS',
@@ -292,13 +292,187 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
         `SELECT payload
          FROM pipeline_tasks
          WHERE task_key = $1`,
-        [`EXTRACT_DETERMINISTIC_REQUIREMENTS:${lateJobVersionId}:deterministic_v3:repair`]
+        [`EXTRACT_DETERMINISTIC_REQUIREMENTS:${lateJobVersionId}:deterministic_v4:repair`]
       );
       expect(repairTask.rows[0].payload).toMatchObject({
         canonical_job_id: lateCanonicalJobId,
         job_version_id: lateJobVersionId,
         repair_existing_state: true,
       });
+    } finally {
+      await client.query('RESET search_path').catch(() => undefined);
+      await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+      client.release();
+      await pool.end();
+    }
+  }, REAL_DB_TEST_TIMEOUT_MS);
+
+  it('asks the AI only when the rules found too few items, and does not re-queue jobs that skipped it', async () => {
+    const pool = new pg.Pool(pgConnectionConfig(DB_URL));
+    const client = await pool.connect();
+    const schemaName = `req_ai_gate_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+
+    try {
+      await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
+      await client.query(`SET search_path TO ${schemaName}, public`);
+      await runMigrations(client);
+
+      const rich = [
+        COMPLETE_TEST_POSTING_DESCRIPTION,
+        '',
+        'Requirements',
+        '- Strong SQL and Python',
+        '- Experience with cloud platforms',
+        '- Clear written communication',
+        '- Stakeholder management across business units',
+        '- Experience running delivery programmes',
+      ].join('\n');
+      const jobId = '92000000-0000-4000-8000-000000000001';
+      const versionId = '92000000-0000-4000-8000-000000000002';
+      await client.query(
+        `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status)
+         VALUES ($1, 'Gate Co', 'programme lead', 'https://integration.example.com/gate/1', 'RAW_STAGED')`,
+        [jobId],
+      );
+      await client.query(
+        `INSERT INTO job_versions (id, canonical_job_id, content_hash, description_text, observed_at)
+         VALUES ($1, $2, 'gate-hash-1', $3, NOW())`,
+        [versionId, jobId, rich],
+      );
+      const workspace = await client.query<{ workspace_id: string }>(
+        `SELECT workspace_id::text AS workspace_id FROM canonical_jobs WHERE id = $1`,
+        [jobId],
+      );
+      await insertCompletePostingEvidence(client, {
+        workspaceId: workspace.rows[0]!.workspace_id,
+        jobVersionId: versionId,
+        companyName: 'Gate Co',
+        title: 'programme lead',
+        sourceUrl: 'https://integration.example.com/gate/1',
+        description: rich,
+      });
+      await client.query(`UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE id = $2`, [versionId, jobId]);
+
+      let aiCalls = 0;
+      const quotedExtractor = async () => {
+        aiCalls += 1;
+        return null;
+      };
+      const first = await runRequirementsExtraction(client, { quotedExtractor });
+      expect(first.processed).toBe(1);
+      expect(aiCalls).toBe(0);
+
+      const skipped = await client.query(
+        `SELECT provider, model, status FROM requirement_extraction_runs
+         WHERE job_version_id = $1 AND run_type = 'LLM_QUOTED'`,
+        [versionId],
+      );
+      expect(skipped.rows).toEqual([{ provider: 'RULES', model: 'AI_NOT_NEEDED', status: 'COMPLETED' }]);
+
+      const second = await runRequirementsExtraction(client, { quotedExtractor });
+      expect(second.discovered).toBe(0);
+      expect(aiCalls).toBe(0);
+    } finally {
+      await client.query('RESET search_path').catch(() => undefined);
+      await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+      client.release();
+      await pool.end();
+    }
+  }, REAL_DB_TEST_TIMEOUT_MS);
+
+  it('stores each posting bullet as its own requirement, and records when a posting is too thin', async () => {
+    const pool = new pg.Pool(pgConnectionConfig(DB_URL));
+    const client = await pool.connect();
+    const schemaName = `req_items_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+
+    try {
+      await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
+      await client.query(`SET search_path TO ${schemaName}, public`);
+      await runMigrations(client);
+
+      const sectioned = [
+        COMPLETE_TEST_POSTING_DESCRIPTION,
+        '',
+        'Responsibilities',
+        '- Lead delivery of the enterprise data platform roadmap',
+        '',
+        'Requirements',
+        '- Strong SQL and Python',
+        '- Experience with AWS, Azure or GCP',
+        '',
+        'Nice to have',
+        '- Familiarity with Snowflake',
+      ].join('\n');
+      // The fixture text alone yields two items: too thin to judge.
+      const thin = COMPLETE_TEST_POSTING_DESCRIPTION;
+
+      const jobs = [
+        { canonical: '91000000-0000-4000-8000-000000000001', version: '91000000-0000-4000-8000-000000000002', text: sectioned, hash: 'items-hash-1' },
+        { canonical: '91000000-0000-4000-8000-000000000003', version: '91000000-0000-4000-8000-000000000004', text: thin, hash: 'items-hash-2' },
+      ];
+      for (const job of jobs) {
+        await client.query(
+          `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status)
+           VALUES ($1, 'Items Co', 'programme lead', $2, 'RAW_STAGED')`,
+          [job.canonical, `https://integration.example.com/items/${job.hash}`],
+        );
+        await client.query(
+          `INSERT INTO job_versions (id, canonical_job_id, content_hash, description_text, observed_at)
+           VALUES ($1, $2, $3, $4, NOW())`,
+          [job.version, job.canonical, job.hash, job.text],
+        );
+        const workspace = await client.query<{ workspace_id: string }>(
+          `SELECT workspace_id::text AS workspace_id FROM canonical_jobs WHERE id = $1`,
+          [job.canonical],
+        );
+        await insertCompletePostingEvidence(client, {
+          workspaceId: workspace.rows[0]!.workspace_id,
+          jobVersionId: job.version,
+          companyName: 'Items Co',
+          title: 'programme lead',
+          sourceUrl: `https://integration.example.com/items/${job.hash}`,
+          description: job.text,
+        });
+        await client.query(`UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE id = $2`, [job.version, job.canonical]);
+      }
+
+      const summary = await runRequirementsExtraction(client, { quotedMode: 'deterministic_only' });
+      expect(summary.errors).toBe(0);
+      expect(summary.processed).toBe(2);
+
+      const items = await client.query(
+        `SELECT requirement_type, importance, requirement_text, quote_text, extractor_version, structured_value
+         FROM job_requirements
+         WHERE job_version_id = $1 AND requirement_type = 'CUSTOM'
+         ORDER BY requirement_key`,
+        [jobs[0].version],
+      );
+      // The shared fixture text is itself a (flattened) posting, so it contributes its own sentences;
+      // the bullets added here must all be present, in order, with their exact quote.
+      const texts = items.rows.map((row: any) => row.requirement_text as string);
+      const bullets = [
+        'Lead delivery of the enterprise data platform roadmap',
+        'Strong SQL and Python',
+        'Experience with AWS, Azure or GCP',
+        'Familiarity with Snowflake',
+      ];
+      expect(texts.filter((text) => bullets.includes(text))).toEqual(bullets);
+      for (const row of items.rows as any[]) {
+        expect(row.quote_text).toBe(row.requirement_text);
+        expect(row.extractor_version).toBe('deterministic_v4');
+        expect(sectioned).toContain(row.quote_text);
+      }
+      expect((items.rows as any[]).find((row) => row.requirement_text === 'Familiarity with Snowflake').importance).toBe('NICE_TO_HAVE');
+
+      const payloads = await client.query(
+        `SELECT job_version_id::text AS job_version_id, response_payload
+         FROM requirement_extraction_runs
+         WHERE run_type = 'DETERMINISTIC' AND status = 'COMPLETED'`,
+      );
+      const byVersion = new Map((payloads.rows as any[]).map((row) => [row.job_version_id, row.response_payload]));
+      expect(byVersion.get(jobs[0].version)).toMatchObject({ needs_description: false, has_requirements_section: true });
+      expect(byVersion.get(jobs[1].version)).toMatchObject({ needs_description: true, confirmed_requirement_count: 2 });
+      expect(String(byVersion.get(jobs[1].version).warning)).toContain('NEEDS_DESCRIPTION');
     } finally {
       await client.query('RESET search_path').catch(() => undefined);
       await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
