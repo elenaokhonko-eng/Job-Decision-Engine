@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyGlobalGates, nonTechnicalFunctionTitle, presalesTitle } from "../../services/criteria.js";
+import { applyGlobalGates, forwardDeployedTitle, nonTechnicalFunctionTitle, presalesTitle } from "../../services/criteria.js";
 import { applyPersistedRequirementGates } from "../../pipeline/hardGate.js";
 
 // Synthetic postings: each description mentions SQL/Python so the old keyword check passed them.
@@ -109,5 +109,31 @@ describe("pre-sales titles in the hard gates", () => {
     "Senior Solutions Architect",
   ])("does not match %j", (title) => {
     expect(presalesTitle(title)).toBeNull();
+  });
+});
+
+describe("forward-deployed titles are high-interaction rejects (owner policy, 2026-11-19)", () => {
+  it.each([
+    ["Forward Deployed Engineer", "Forward Deployed"],
+    ["AI FDE", "FDE"],
+    ["Engineering Manager, FDE Infrastructure", "FDE"],
+    ["Deployed Architect, Professional Services (Remote)", "Deployed Architect"],
+    ["Deployed Engineer", "Deployed Engineer"],
+  ])("rejects %j as GATE_HIGH_INTERACTION in both gates", (title, matched) => {
+    expect(forwardDeployedTitle(title)).toBe(matched);
+    const { persisted, global } = gates(title, "Design and build data pipelines in Python and SQL for the analytics platform.");
+    for (const result of [persisted, global]) {
+      expect(result.status).toBe("HARD_REJECT");
+      expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+    }
+  });
+
+  it.each([
+    "Cloud-Deployed Systems Engineer",
+    "Senior Solutions Architect",
+    "Machine Learning Engineer, Deployment Platform",
+    "Staff Software Engineer",
+  ])("does not match %j", (title) => {
+    expect(forwardDeployedTitle(title)).toBeNull();
   });
 });
