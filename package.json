@@ -145,7 +145,7 @@
     "@types/node": "^26.4.1",
     "@types/pg": "^8.11.5",
     "dependency-cruiser": "^16.10.4",
-    "electron": "^44.2.0",
+    "electron": "^45.3.3",
     "electron-builder": "^26.15.3",
     "js-yaml": "^5.2.1",
     "tsx": "^4.21.0",
