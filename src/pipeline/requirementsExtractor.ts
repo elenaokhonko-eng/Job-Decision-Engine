@@ -2,7 +2,11 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import { pgPoolConfig } from '../db/pgSsl.js';
-import { extractDeterministicRequirements } from '../requirements/deterministicExtractors.js';
+import { shouldRequestAiFallback } from '../requirements/requirementKinds.js';
+import {
+  DETERMINISTIC_EXTRACTOR_VERSION,
+  extractDeterministicRequirements,
+} from '../requirements/deterministicExtractors.js';
 import { validateQuotedRequirements } from '../requirements/quotedRequirementExtractor.js';
 import { JobRequirementSchema, REQUIREMENTS_SCHEMA_VERSION } from '../requirements/contracts.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
@@ -97,7 +101,7 @@ export interface RequirementExtractionSummary {
   }>;
 }
 
-const DETERMINISTIC_VERSION = 'deterministic_v3';
+const DETERMINISTIC_VERSION = DETERMINISTIC_EXTRACTOR_VERSION;
 const QUOTED_VERSION = 'quoted_v1';
 const NORMALIZER_HASH = crypto
   .createHash('sha256')
@@ -717,6 +721,7 @@ export async function runRequirementsExtraction(
         let detInserted = 0;
         let quotedInserted = 0;
         let warning: string | undefined;
+        let extractionAudit: Record<string, unknown> = {};
 
         if (templateSetId && templateSetId !== requirementSetId) {
           const countsRes = await client.query<{ extractor_type: string; n: number }>(
@@ -841,9 +846,35 @@ export async function runRequirementsExtraction(
             requirementSetId,
             deterministicRequirements
           );
+          extractionAudit = {
+            needs_description: deterministic.needsDescription,
+            confirmed_requirement_count: deterministic.confirmedRequirementCount,
+            has_requirements_section: deterministic.hasRequirementsSection,
+            posting_item_count: deterministic.postingItemCount,
+          };
           console.log(`${progress} deterministic_inserted=${detInserted}`);
 
-          if (quotedExtractor) {
+          // The rules go first. The AI is asked only when they found too few items in the posting.
+          // A skipped AI step still leaves a completed audit row so the stage is not re-queued.
+          const aiFallbackWanted = shouldRequestAiFallback({ postingItemCount: deterministic.postingItemCount });
+          if (quotedExtractor && !aiFallbackWanted) {
+            await client.query(
+              `INSERT INTO requirement_extraction_runs (
+                 workspace_id, canonical_job_id, job_version_id, requirement_set_id,
+                 run_type, provider, model, status, requirements_extracted,
+                 response_payload, started_at, completed_at
+               )
+               VALUES ($1, $2, $3, $4, 'LLM_QUOTED', 'RULES', 'AI_NOT_NEEDED', 'COMPLETED', 0, $5, NOW(), NOW())`,
+              [
+                ctx.workspaceId,
+                job.canonical_job_id,
+                job.job_version_id,
+                requirementSetId,
+                { skipped: 'rules_found_enough_items', posting_item_count: deterministic.postingItemCount },
+              ]
+            );
+          }
+          if (quotedExtractor && aiFallbackWanted) {
             summary.metrics.quotedAttempted += 1;
             const quotedRunStart = await client.query<{ id: string }>(
               `INSERT INTO requirement_extraction_runs (
@@ -888,7 +919,7 @@ export async function runRequirementsExtraction(
 
                 const validated = validateQuotedRequirements(job.description_text, quotedResult.payload);
 
-                if (!validated.valid) {
+                if (!validated.valid && validated.requirements.length === 0) {
                   summary.quotedFailed += 1;
                   summary.metrics.quotedValidationFailures += 1;
                   bucket.validationFailures += 1;
@@ -919,6 +950,10 @@ export async function runRequirementsExtraction(
                   // quoted run is retained above for audit/replay and the
                   // warning is attached to the completed deterministic stage.
                 } else {
+                  if (!validated.valid) {
+                    // Some quotes were not found in the posting and were dropped; the verified ones are kept.
+                    warning = `dropped_unverified_quotes: ${validated.issues.length}`;
+                  }
                   const startIndex = deterministicRequirements.length + 1;
                   const quotedRequirements = validated.requirements.map((req, idx) =>
                     JobRequirementSchema.parse({
@@ -1018,7 +1053,9 @@ export async function runRequirementsExtraction(
             }
           }
 
-          warning = deterministic.warnings.length > 0 ? deterministic.warnings.join('; ') : warning;
+          // Keep both: a deterministic notice (for example NEEDS_DESCRIPTION) must not hide a quoted failure.
+          const combinedWarnings = [...deterministic.warnings, ...(warning ? [warning] : [])];
+          warning = combinedWarnings.length > 0 ? combinedWarnings.join('; ') : undefined;
         }
 
         summary.deterministicInserted += detInserted;
@@ -1036,6 +1073,7 @@ export async function runRequirementsExtraction(
             detInserted,
             {
               warning,
+              ...extractionAudit,
             },
           ]
         );

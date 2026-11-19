@@ -12,11 +12,22 @@ import {
 } from "../evidence/evidenceStrengthPolicy.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement } from "./requirementComparators.js";
 import { isRequirementOptional } from "./hardGate.js";
+import {
+  isCapabilityRequirementType,
+  MIN_CONFIRMED_REQUIREMENTS,
+  requirementOwnText,
+} from "../requirements/requirementKinds.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import {
-  DETERMINISTIC_MATCHER_FINGERPRINT_VERSION,
-  DETERMINISTIC_MATCHER_POLICY_VERSION,
+  currentMatcherFingerprintVersion,
+  currentMatcherPolicyVersion,
 } from "./profileMatchCurrency.js";
+import {
+  activeScoringPolicy,
+  rankingEvidenceRow,
+  selectOverallScore,
+  type RankingEvidenceRow,
+} from "./scoringPolicy.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -120,6 +131,8 @@ function flattenStructuredValue(value: Record<string, unknown> | null): string {
 }
 
 function buildRequirementText(req: RequirementRow): string {
+  const ownText = requirementOwnText(req);
+  if (ownText) return ownText;
   return [
     req.requirement_type,
     req.requirement_text,
@@ -159,18 +172,29 @@ function requirementWeight(importance: RequirementRow["importance"]): number {
   return 0.4;
 }
 
-const NON_CAPABILITY_REQUIREMENT_TYPES = new Set([
-  "OFFICE_DAYS",
-  "WORK_MODE",
-  "EMPLOYMENT_TYPE",
-  "TRAVEL",
-  "WORK_AUTH",
-  "ON_CALL",
-  "SHIFT_WORK",
-]);
+export { isCapabilityRequirementType };
 
-export function isCapabilityRequirementType(requirementType: string): boolean {
-  return !NON_CAPABILITY_REQUIREMENT_TYPES.has(requirementType);
+export type ProfileMatchStatus = "NO_PROFILE_MATCH" | "UNKNOWN" | "POSITIVE_MATCH";
+
+/**
+ * The job-level profile match status.
+ *
+ * Too few confirmed requirements means the posting is too thin to judge: the job needs a fuller
+ * description. That is an unknown, never a "no match". A positive match or a failed mandatory
+ * qualification is still reported as it is.
+ */
+export function decideProfileMatchStatus(input: {
+  hasMandatoryQualFailure: boolean;
+  semanticEvidenceIncomplete: boolean;
+  matchedCount: number;
+  requirementCount: number;
+  usedEmbeddings: boolean;
+}): ProfileMatchStatus {
+  if (input.hasMandatoryQualFailure) return "NO_PROFILE_MATCH";
+  if (input.semanticEvidenceIncomplete) return "UNKNOWN";
+  if (input.matchedCount > 0) return "POSITIVE_MATCH";
+  if (input.requirementCount < MIN_CONFIRMED_REQUIREMENTS) return "UNKNOWN";
+  return input.usedEmbeddings ? "NO_PROFILE_MATCH" : "UNKNOWN";
 }
 
 export function computeProficiencyFactor(fact: FactRow | null, req: RequirementRow): number {
@@ -772,7 +796,7 @@ export async function runDeterministicMatcher(
             content_hash: jobContentHash,
             active_requirement_set_id: activeRequirementSetId,
             profile_version_id: profileVersionId,
-            matcher_version: DETERMINISTIC_MATCHER_FINGERPRINT_VERSION,
+            matcher_version: currentMatcherFingerprintVersion(),
             evidence_strength_policy_hash: evidenceStrengthPolicy.policyHash,
           },
         });
@@ -803,7 +827,7 @@ export async function runDeterministicMatcher(
             matchContextFingerprint,
             evidencePolicyRevisionId,
             evidenceStrengthPolicy.policyHash,
-            DETERMINISTIC_MATCHER_POLICY_VERSION,
+            currentMatcherPolicyVersion(),
           ]
         );
         const matchRunId = runRes.rows[0].id;
@@ -949,6 +973,9 @@ export async function runDeterministicMatcher(
         let weightSum = 0;
         let matchedCount = 0;
         const mandatoryQualificationFailures: string[] = [];
+        // Evidence rows for the top-K ranking score (scoringPolicy.ts). Years, degrees and credentials
+        // are never added: they stay checks (mandatory-qualification failures), not ranking evidence.
+        const rankingEvidence: RankingEvidenceRow[] = [];
 
         for (const req of reqRes.rows) {
           if (!isCapabilityRequirementType(req.requirement_type)) {
@@ -1192,6 +1219,15 @@ export async function runDeterministicMatcher(
           const isCountedMatch =
             matchType === 'EXACT' ||
             (matchType === 'SEMANTIC' && evidenceStrength >= COUNTED_SEMANTIC_MIN_EVIDENCE_STRENGTH);
+          const rankingRow = rankingEvidenceRow({
+            requirementType: req.requirement_type,
+            importance: req.importance,
+            matchType,
+            usedEmbeddings,
+            hasBestFact: Boolean(bestFact),
+            bestSemantic,
+          });
+          if (rankingRow) rankingEvidence.push(rankingRow);
           const weightedScore = isCountedMatch ? bestScore * evidenceStrength : 0;
           weightedScoreSum += weightedScore * weight;
           if (isCountedMatch) {
@@ -1256,7 +1292,8 @@ export async function runDeterministicMatcher(
         }
 
         const reqCount = scoredRequirements.length;
-        const overallScore = weightSum > 0 ? (weightedScoreSum / weightSum) * 100 : 0;
+        const legacyScore = weightSum > 0 ? (weightedScoreSum / weightSum) * 100 : 0;
+        const overallScore = selectOverallScore(activeScoringPolicy(), legacyScore, rankingEvidence);
         const coverageScore = reqCount > 0 ? (matchedCount / reqCount) * 100 : 0;
 
         await client.query(
@@ -1285,16 +1322,13 @@ export async function runDeterministicMatcher(
         );
 
         const hasMandatoryQualFailure = mandatoryQualificationFailures.length > 0;
-        const profileMatchStatus =
-          hasMandatoryQualFailure
-            ? 'NO_PROFILE_MATCH'
-            : semanticEvidenceIncomplete
-              ? 'UNKNOWN'
-              : matchedCount > 0
-                ? 'POSITIVE_MATCH'
-                : usedEmbeddings
-                  ? 'NO_PROFILE_MATCH'
-                  : 'UNKNOWN';
+        const profileMatchStatus = decideProfileMatchStatus({
+          hasMandatoryQualFailure,
+          semanticEvidenceIncomplete,
+          matchedCount,
+          requirementCount: reqCount,
+          usedEmbeddings,
+        });
 
         const canonicalUpdate = await client.query(
           `UPDATE canonical_jobs

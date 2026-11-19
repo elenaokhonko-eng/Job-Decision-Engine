@@ -100,8 +100,8 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
       setExtractionModel("gemini-3.1-flash-lite");
     } else {
       setEmbeddingModel("text-embedding-3-small");
-      setEvaluationModel("gpt-4o-mini");
-      setDocumentModel("gpt-4o-mini");
+      setEvaluationModel("gpt-5.6-luna");
+      setDocumentModel("gpt-5.6-luna");
       setExtractionModel("gpt-5.6-luna");
     }
   }, [preset]);
@@ -625,7 +625,7 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
                 >
                   <span className="block font-bold">OpenAI Preset</span>
                   <span className="text-xs text-slate-500">
-                    text-embedding-3-small + gpt-4o-mini
+                    text-embedding-3-small + gpt-5.6-luna
                   </span>
                 </button>
               </div>
