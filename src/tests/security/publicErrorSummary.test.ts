@@ -36,4 +36,23 @@ describe("public provider error summaries", () => {
     expect(publicErrorSummary("role facts and candidate output were echoed", "unknown-provider"))
       .toBe("external request failed (details redacted)");
   });
+
+  it("logs a Postgres SQLSTATE but never the connection details or message text", () => {
+    const dbError = Object.assign(
+      new Error('relation "v_secret" does not exist at postgresql://user:hunter2@ep-host.neon.tech/neondb'),
+      { code: "42P01", severity: "ERROR" },
+    );
+
+    const summary = publicErrorSummary(dbError, "pipeline");
+
+    expect(summary).toContain("SQLSTATE 42P01");
+    expect(summary).not.toContain("hunter2");
+    expect(summary).not.toContain("ep-host");
+    expect(summary).not.toContain("v_secret");
+  });
+
+  it("does not treat a non-database error code as a SQLSTATE", () => {
+    const summary = publicErrorSummary(Object.assign(new Error("boom"), { code: "ABCDE" }), "pipeline");
+    expect(summary).not.toContain("SQLSTATE");
+  });
 });
