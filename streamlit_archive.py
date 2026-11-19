@@ -26,6 +26,7 @@ def archive_age_basis_label(value: object) -> str:
         "AUTHORITATIVE_PUBLICATION_DATE": "Authoritative publication date",
         "OBSERVED_AGE_PUBLICATION_UNKNOWN": "Observed age; publication date unknown",
         "HARD_REJECTED_DECISION": "Hard-gate rejection decision",
+        "POSTING_LINK_UNVERIFIABLE": "Posting link never stored; not confirmable",
     }
     return labels.get(str(value), "Unknown age basis")
 

@@ -13,12 +13,14 @@ export type ArchiveAgeBasis = z.infer<typeof ArchiveAgeBasisSchema>;
 export const ArchiveBasisSchema = z.enum([
   ...ArchiveAgeBasisSchema.options,
   "HARD_REJECTED_DECISION",
+  "POSTING_LINK_UNVERIFIABLE",
 ]);
 export type ArchiveBasis = z.infer<typeof ArchiveBasisSchema>;
 
 export const ArchiveReasonSchema = z.enum([
   "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS",
   "HARD_REJECTED_PERMANENT",
+  "POSTING_NOT_CONFIRMABLE",
 ]);
 export type ArchiveReason = z.infer<typeof ArchiveReasonSchema>;
 
