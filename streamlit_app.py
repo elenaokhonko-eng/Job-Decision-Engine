@@ -108,6 +108,16 @@ def load_dotenv():
 
 load_dotenv()
 
+def streamlit_gemini_model():
+    # Same override names as the backend; the default mirrors DEFAULT_GEMINI_EVALUATION_MODEL
+    # in src/services/modelDefaults.ts (gemini-3.6-flash retires 2027-01-28).
+    return (
+        os.environ.get("EVALUATION_PRIMARY_MODEL", "").strip()
+        or os.environ.get("GEMINI_MODEL", "").strip()
+        or "gemini-4-hydrogen"
+    )
+
+
 def get_api_base_url():
     # Hosted Streamlit cannot reach a developer machine's localhost. An empty
     # value intentionally selects the read-only canonical PostgreSQL fallback
@@ -1638,7 +1648,7 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
     # 2. Try Gemini second
     if gemini_key:
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={gemini_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{streamlit_gemini_model()}:generateContent?key={gemini_key}"
             headers = {"Content-Type": "application/json"}
             
             body = {
