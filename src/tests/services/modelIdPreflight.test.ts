@@ -9,7 +9,7 @@ import {
 const GEMINI_KEY = 'gemini-secret-key-123';
 const OPENAI_KEY = 'sk-openai-secret-456';
 
-const GEMINI_DEFAULT_IDS = ['gemini-3.6-flash', 'gemini-embedding-001', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'];
+const GEMINI_DEFAULT_IDS = ['gemini-4-hydrogen', 'gemini-embedding-001', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'];
 const OPENAI_DEFAULT_IDS = ['gpt-4o-mini', 'text-embedding-3-small', 'gpt-5.6-luna'];
 
 function json(body: unknown, status = 200): Response {

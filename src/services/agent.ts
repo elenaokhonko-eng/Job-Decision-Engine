@@ -1,6 +1,7 @@
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import dotenv from "dotenv";
 import crypto from "crypto";
+import { DEFAULT_GEMINI_EVALUATION_MODEL } from "./modelDefaults.js";
 import pg from "pg";
 import { db, Job } from "../db/db.ts";
 import { fetchGmailAlerts } from "./gmail.js";
@@ -86,7 +87,7 @@ dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 export const MODEL_REGISTRY = {
-  EVALUATION_PRIMARY_MODEL: process.env.EVALUATION_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-3.6-flash",
+  EVALUATION_PRIMARY_MODEL: process.env.EVALUATION_PRIMARY_MODEL || process.env.GEMINI_MODEL || DEFAULT_GEMINI_EVALUATION_MODEL,
   /** Import-time snapshot; call sites resolve evaluationOpenAiModel() when the call is made. */
   EVALUATION_FALLBACK_MODEL: evaluationOpenAiModel(),
   EMBEDDING_PRIMARY_MODEL: process.env.EMBEDDING_PRIMARY_MODEL || "gemini-embedding-001",
@@ -2810,45 +2811,8 @@ You MUST return a JSON object matching this schema exactly.
 
   trace.push(`Step ${trace.length + 1}: Multi-stage decision engine completed successfully via ${successProvider} (${successModel}).`);
 
-  // Write evaluation results BACK to the persistent database
-  if (parsedResult.evaluated_jobs && parsedResult.evaluated_jobs.length > 0) {
-    const dbJobs = await db.queryJobs();
-    for (const job of parsedResult.evaluated_jobs) {
-      let matchedJob = dbJobs.find(
-        (j) => j.id === job.job_id || (j.title === job.job_title && j.company_name === job.company)
-      );
-      
-      if (matchedJob) {
-        await db.updateJobEvaluation(matchedJob.id, {
-          processing_status: "EVALUATED",
-          primary_lane: job.primary_lane,
-          secondary_lanes: job.secondary_lanes,
-          lane_confidence: job.lane_confidence,
-          lane_evidence: job.lane_evidence,
-          source_lane: "LLM",
-          nd_gate_status: job.nd_gate_status || undefined,
-          nd_score: job.nd_score || undefined,
-          nd_evidence: job.nd_evidence || undefined,
-          nd_risk_flags: job.nd_risk_flags || undefined,
-          work_mode_status: job.work_mode_status || undefined,
-          office_days: job.office_days || undefined,
-          interaction_load: job.interaction_load || undefined,
-          building_research_ratio: job.building_research_ratio || undefined,
-          rejection_codes: job.rejection_codes || undefined,
-          nd_friendly_score: job.nd_friendly_score || 50,
-          politics_stress_score: job.politics_stress_score || 50,
-          sensory_overload_index: job.sensory_overload_index || 50,
-          biological_stress_risk: job.biological_and_stress_risk_assessment || undefined,
-          strategic_value: job.strategic_value,
-          recommended_cv_version: job.recommended_cv_version,
-          next_action: job.next_action,
-          careers_portal_url: job.careers_portal_url || matchedJob.careers_portal_url
-        });
-        trace.push(`Step ${trace.length + 1}: Recorded persistent ND culture metrics for ${job.company} in database.`);
-      }
-    }
-  }
-
+  // runAgent is read-only with respect to job rows: it returns the evaluation and never writes it back.
+  // (It used to UPDATE the legacy jobs table here. The pipeline's own stages are the only writers of job rows.)
   await db.logInteraction(userQuestion, toolsUsed, parsedResult, trace);
 
   return {

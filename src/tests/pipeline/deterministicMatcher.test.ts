@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  decideProfileMatchStatus,
   isCapabilityRequirementType,
   runDeterministicMatcher,
 } from '../../pipeline/deterministicMatcher.js';
@@ -31,6 +32,39 @@ describe('deterministic matching requirement classification', () => {
     expect(isCapabilityRequirementType('OFFICE_DAYS')).toBe(false);
     expect(isCapabilityRequirementType('WORK_AUTH')).toBe(false);
     expect(isCapabilityRequirementType('TRAVEL')).toBe(false);
+  });
+});
+
+describe('profile match status', () => {
+  const base = {
+    hasMandatoryQualFailure: false,
+    semanticEvidenceIncomplete: false,
+    matchedCount: 0,
+    requirementCount: 6,
+    usedEmbeddings: true,
+  };
+
+  it('reports no match only when enough requirements were checked and none were matched', () => {
+    expect(decideProfileMatchStatus(base)).toBe('NO_PROFILE_MATCH');
+  });
+
+  it('reports "unknown", never "no match", when fewer than 3 requirements were confirmed', () => {
+    expect(decideProfileMatchStatus({ ...base, requirementCount: 2 })).toBe('UNKNOWN');
+    expect(decideProfileMatchStatus({ ...base, requirementCount: 0 })).toBe('UNKNOWN');
+    expect(decideProfileMatchStatus({ ...base, requirementCount: 3 })).toBe('NO_PROFILE_MATCH');
+  });
+
+  it('still reports a positive match when a thin posting has a matched requirement', () => {
+    expect(decideProfileMatchStatus({ ...base, requirementCount: 2, matchedCount: 1 })).toBe('POSITIVE_MATCH');
+  });
+
+  it('keeps a failed mandatory qualification as a no-match, even on a thin posting', () => {
+    expect(decideProfileMatchStatus({ ...base, requirementCount: 1, hasMandatoryQualFailure: true })).toBe('NO_PROFILE_MATCH');
+  });
+
+  it('stays unknown while embeddings are incomplete or unavailable', () => {
+    expect(decideProfileMatchStatus({ ...base, semanticEvidenceIncomplete: true, matchedCount: 2 })).toBe('UNKNOWN');
+    expect(decideProfileMatchStatus({ ...base, usedEmbeddings: false })).toBe('UNKNOWN');
   });
 });
 

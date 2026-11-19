@@ -6,6 +6,7 @@ import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/con
 import { isProfileFactModelShareable } from '../profile/privacy.js';
 import { listActiveLaneRevisions } from '../lanes/registry.js';
 import type { LaneFileConfig } from '../lanes/contracts.js';
+import { requirementOwnText } from '../requirements/requirementKinds.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -30,6 +31,9 @@ export function buildRequirementInputText(row: {
   quote_text: string | null;
   structured_value: unknown;
 }): string {
+  // A requirement taken from a posting item embeds as its own sentence only.
+  const ownText = requirementOwnText(row);
+  if (ownText) return ownText;
   const quote = row.quote_text ? ` Quote: ${row.quote_text}` : '';
   const structured = row.structured_value ? ` Structured: ${JSON.stringify(row.structured_value)}` : '';
   return `${row.requirement_type}: ${row.requirement_text}${quote}${structured}`.trim();

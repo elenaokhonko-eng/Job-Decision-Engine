@@ -7,7 +7,8 @@ import { loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPo
 import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 import { completeRetrievedPostingPredicate } from "../pipeline/descriptionQuality.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
-import { DETERMINISTIC_MATCHER_FINGERPRINT_VERSION } from "../pipeline/profileMatchCurrency.js";
+import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
+import { currentMatcherFingerprintVersion } from "../pipeline/profileMatchCurrency.js";
 import {
   applicationReadinessViewAvailable,
   isCurrentReadinessAssessment,
@@ -130,7 +131,7 @@ export function pipelineTaskStageVersion(taskType: string): string | null {
   switch (taskType) {
     case "FETCH_JOB_CONTENT": return "posting_fetch_v1";
     case "NORMALIZE_OBSERVATION": return "normalizer_v1";
-    case "EXTRACT_DETERMINISTIC_REQUIREMENTS": return "deterministic_v3";
+    case "EXTRACT_DETERMINISTIC_REQUIREMENTS": return DETERMINISTIC_EXTRACTOR_VERSION;
     case "APPLY_HARD_GATES": return "hard_gate_v1";
     case "EXTRACT_QUOTED_REQUIREMENTS": return "quoted_requirements_v1";
     case "PUBLISH_EMBEDDING": return "embedding_publication_v1";
@@ -489,7 +490,7 @@ function expectedMatchContextFingerprint(
       content_hash: facts.current_content_hash,
       active_requirement_set_id: facts.current_requirement_set_id,
       profile_version_id: facts.active_profile_version_id,
-      matcher_version: DETERMINISTIC_MATCHER_FINGERPRINT_VERSION,
+      matcher_version: currentMatcherFingerprintVersion(),
       evidence_strength_policy_hash: evidenceStrengthPolicyHash,
     },
   });

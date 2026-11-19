@@ -2,6 +2,7 @@ import { GoogleGenAI } from "@google/genai";
 
 import { readJsonResponseBounded } from "../security/boundedResponse.js";
 import { geminiBackend, geminiConfigProblem, resolveGeminiClientConfig } from "./geminiConfig.js";
+import { DEFAULT_GEMINI_EVALUATION_MODEL } from "./modelDefaults.js";
 import {
   DEFAULT_OPENAI_FALLBACK_MODEL,
   DOCUMENT_OPENAI_MODEL_CHAIN,
@@ -33,7 +34,7 @@ interface ModelIdSetting {
 }
 
 const MODEL_ID_SETTINGS: readonly ModelIdSetting[] = [
-  { provider: "gemini", envChain: ["EVALUATION_PRIMARY_MODEL", "GEMINI_MODEL"], defaultId: "gemini-3.6-flash" },
+  { provider: "gemini", envChain: ["EVALUATION_PRIMARY_MODEL", "GEMINI_MODEL"], defaultId: DEFAULT_GEMINI_EVALUATION_MODEL },
   { provider: "openai", envChain: EVALUATION_OPENAI_MODEL_CHAIN, defaultId: DEFAULT_OPENAI_FALLBACK_MODEL },
   { provider: "gemini", envChain: ["EMBEDDING_PRIMARY_MODEL"], defaultId: "gemini-embedding-001", kind: "embedding" },
   { provider: "openai", envChain: ["EMBEDDING_FALLBACK_MODEL"], defaultId: "text-embedding-3-small" },
