@@ -264,4 +264,46 @@ describe.skipIf(skipReal)("hard-gate on-site exceptions (PostgreSQL)", () => {
     // Gate decisions are append-only: exactly one new row per re-gated job.
     expect(after.rows[0]!.count - before.rows[0]!.count).toBe(2);
   }, 120_000);
+
+  it("a hard reject on a new job version clears the recommendation stored for the old version", async () => {
+    // A changed posting arrives as a new version and goes back to RAW_STAGED. The gate then rejects it
+    // in a normal (non-reprocess) run. The REVIEW/TRACK recommendation of the earlier version must not
+    // survive on the canonical row: a gate-rejected job can never keep a recommendation.
+    const { rows } = await db().query<{ id: string }>(
+      `SELECT id::text AS id FROM canonical_jobs WHERE workspace_id = $1 AND company_name = 'Synthetic Retail Analytics'`,
+      [ctx().workspaceId],
+    );
+    const jobId = rows[0]!.id;
+    await db().query(
+      `UPDATE canonical_jobs
+          SET description_quality_status = 'COMPLETE',
+              processing_state = 'RAW_STAGED', processing_status = 'RAW_STAGED',
+              gate_decision = NULL,
+              recommendation_eligibility = 'ELIGIBLE', recommendation_outcome = 'REVIEW',
+              recommendation_requirement_score = 0.8, recommendation_decided_at = NOW()
+        WHERE workspace_id = $1 AND id = $2`,
+      [ctx().workspaceId, jobId],
+    );
+
+    const summary = await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId] });
+    expect(summary.errors).toBe(0);
+    expect(summary.hardRejected).toBe(1);
+
+    const { rows: after } = await db().query<{
+      gate_decision: string;
+      recommendation_outcome: string | null;
+      recommendation_eligibility: string | null;
+      recommendation_decided_at: Date | null;
+    }>(
+      `SELECT gate_decision, recommendation_outcome, recommendation_eligibility, recommendation_decided_at
+         FROM canonical_jobs WHERE workspace_id = $1 AND id = $2`,
+      [ctx().workspaceId, jobId],
+    );
+    expect(after[0]).toMatchObject({
+      gate_decision: "HARD_REJECT",
+      recommendation_outcome: null,
+      recommendation_eligibility: null,
+      recommendation_decided_at: null,
+    });
+  }, 120_000);
 });

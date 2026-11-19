@@ -25,6 +25,7 @@ vi.mock('../../services/criteria.js', () => ({
   GLOBAL_TITLE_EXCLUSIONS: [],
   nonTechnicalFunctionTitle: vi.fn(() => null),
   presalesTitle: vi.fn(() => null),
+  forwardDeployedTitle: vi.fn(() => null),
   isTechnicalRole: vi.fn(() => ({ isTechnical: true, hasBuildingEvidence: true }))
 }));
 
