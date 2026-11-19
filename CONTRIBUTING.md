@@ -34,6 +34,7 @@ npm test
 3. Do not commit secrets or personal profile data.
 4. For migration changes, verify both clean-install and upgrade-path behavior.
 5. Update docs when behavior, env vars, or workflows change.
+6. Follow the layers, table ownership and boundary rules in [docs/architecture.md](docs/architecture.md). `npm test` checks them; list any exception added to `src/architecture/boundary-baseline.json`, with its reason, at the top of the pull request description.
 
 ## Safety Rules
 

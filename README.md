@@ -23,7 +23,7 @@ Job searching often presents overwhelming cognitive fatigue, rejection trauma fr
 1. **Local-First & Private**: Runs as a standalone desktop app on your machine. Your job vault lives in your private [Neon PostgreSQL](https://neon.tech) database. No central telemetry, tracking, or intermediary SaaS servers exist.
 2. **Deterministic Hard Gates Before AI**: Hard constraints (location restrictions, remote vs office days, employment type, compensation minimums) are checked locally by deterministic code *before* any LLM evaluation. Non-fits are filtered out without incurring AI costs or hallucinated justifications.
 3. **Operational Failures Are Never Career Rejections**: Parser timeouts, network hiccups, schema mismatches, or API rate limits transition to `RETRY_WAIT` and `NEEDS_MANUAL_REVIEW`. They never become `HARD_REJECTED`.
-4. **Unknowns Stay Explicit**: An unknown workplace model is rejected after available evidence is examined; other unresolved workability facts produce `NEEDS_VERIFICATION`, never fabricated assumptions.
+4. **Unknowns Stay Explicit**: An unknown workplace model, like any other unresolved workability fact, produces `NEEDS_VERIFICATION`. It is never rejected on an assumption and never filled in with a fabricated value.
 5. **Multi-Lane Strategic Discovery**: Discovers broadly across six strategic lanes and routes to eight target lanes:
    - `CORE_AI_DATA`
    - `LEGAL_REGTECH`
@@ -66,16 +66,19 @@ flowchart LR
   end
 
   subgraph Screening [Deterministic Rules]
-    Vault --> Gates{Deterministic\nHard Gates}
+    Vault --> Reqs[Requirements\nExtracted]
+    Reqs --> Gates{Deterministic\nHard Gates}
     Gates -->|Non-fit| Rejected[HARD_REJECTED\nWith Evidence Reason Code]
-    Gates -->|Unknown workplace model| UnknownWorkplace[HARD_REJECTED\nWorkplace Evidence]
-    Gates -->|Other missing workability fact| Verify[NEEDS_VERIFICATION]
-    Gates -->|Fit| Lane[Lane Routing & Scoring]
+    Gates -->|Unknown workability fact\nincluding workplace model| Verify[NEEDS_VERIFICATION]
+    Gates -->|Fit| Lane[Lane Routing]
+    Lane --> Match[Match To\nProfile Evidence]
+    Match --> Decision[Deterministic Decision\nPRIORITY / REVIEW / TRACK / SKIP]
   end
 
   subgraph Evaluation [BYOK AI Evaluation]
-    Lane --> AI{AI Evaluation\nGemini / OpenAI}
-    AI --> Shortlist[(Canonical Shortlist\nRead Model)]
+    Decision -->|PRIORITY or REVIEW| AI{Advisory AI Evaluation\nGemini / OpenAI}
+    Decision --> Shortlist[(Canonical Shortlist\nRead Model)]
+    AI --> Shortlist
   end
 
   subgraph Output [Actionable Outcomes]
@@ -83,6 +86,10 @@ flowchart LR
     Shortlist --> Docs[Evidence-Grounded\nDOCX Resumes & Letters]
   end
 ```
+
+The deterministic decision sets the outcome. The AI evaluation is advisory and cannot change it.
+
+For the layers, the modules, the owner of every table and the boundary rules that the build enforces, see [docs/architecture.md](docs/architecture.md).
 
 ---
 
@@ -139,10 +146,9 @@ Job Decision Engine supports two distribution modes:
    cp .env.example .env.local
    # Edit .env.local with your DATABASE_URL, GEMINI_API_KEY, etc.
    ```
-3. Run migrations and initialize spaces:
+3. Run the database migrations:
    ```bash
-   npm run migrate
-   npm run embeddings:registry:init
+   npm run db:init
    ```
 4. Run the desktop app in development:
    ```bash
