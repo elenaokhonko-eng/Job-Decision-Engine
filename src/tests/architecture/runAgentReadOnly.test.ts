@@ -34,6 +34,17 @@ describe("runAgent callers never write job rows", () => {
     expect(fs.readFileSync(file as string, "utf8")).not.toMatch(JOB_TABLE_WRITE);
   });
 
+  it("runAgent itself (src/services/agent.ts) does not write job rows back through the db helper", () => {
+    const source = fs.readFileSync(path.join(root, "src", "services", "agent.ts"), "utf8");
+    const runAgentAt = source.indexOf("export async function runAgent(");
+    expect(runAgentAt).toBeGreaterThan(-1);
+    const end = source.indexOf("export ", runAgentAt + 10);
+    const body = source.slice(runAgentAt, end === -1 ? undefined : end);
+    // The db helper methods that mutate job rows. logInteraction writes an interaction log, not a job row.
+    expect(body).not.toMatch(/\bdb\s*\.\s*(?:updateJobEvaluation|upsertJob|insertJob|saveJob|updateJob|deleteJob)\w*\s*\(/);
+    expect(body).not.toMatch(JOB_TABLE_WRITE);
+  });
+
   it("the legacy evaluator script and its npm entry are gone", () => {
     expect(fs.existsSync(path.join(root, "scripts", "evaluate_jobs.ts"))).toBe(false);
     expect(fs.existsSync(path.join(root, "scripts", "re_evaluate_all.ts"))).toBe(false);

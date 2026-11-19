@@ -6,7 +6,7 @@ import { evaluationOpenAiModel } from "./openAiModelRoles.js";
 async function callOpenAI(raw: string, schema?: any): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY not set – cannot use OpenAI fallback.");
-  // Serves the legacy alert evaluator (scripts/evaluate_jobs.ts), whose Gemini step uses the
+  // Serves the legacy alert evaluator (removed; its callers are gone), whose Gemini step uses the
   // evaluation model: the evaluation chain applies (EVALUATION_FALLBACK_MODEL -> OPENAI_MODEL).
   const model = evaluationOpenAiModel();
   const client = new OpenAI({ apiKey });
