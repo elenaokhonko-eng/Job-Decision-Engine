@@ -8,6 +8,7 @@ import {
   GLOBAL_TITLE_EXCLUSIONS,
   nonTechnicalFunctionTitle,
   presalesTitle,
+  forwardDeployedTitle,
   type GateResult,
 } from "../services/criteria.js";
 import { findOnsiteException } from "./onsiteExceptions.js";
@@ -364,6 +365,14 @@ export function applyPersistedRequirementGates(
     return makeReject(
       ["GATE_HIGH_INTERACTION"],
       [`Pre-sales title "${presalesTitlePhrase}" in "${title}"`]
+    );
+  }
+  // A forward-deployed title is a high-interaction role for any title (owner policy, 2026-11-19).
+  const forwardDeployedPhrase = forwardDeployedTitle(title);
+  if (forwardDeployedPhrase) {
+    return makeReject(
+      ["GATE_HIGH_INTERACTION"],
+      [`Forward-deployed title "${forwardDeployedPhrase}" in "${title}"`]
     );
   }
   // The generic technical-function check (Axis 1) is not a hard gate: a
