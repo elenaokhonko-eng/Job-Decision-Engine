@@ -244,7 +244,10 @@ export class DesktopWorkerSupervisor implements WorkerSupervisor {
 
   constructor(options: WorkerSupervisorOptions = {}) {
     this.env = options.env ?? process.env;
-    this.isPackaged = options.isPackaged ?? Boolean(process.versions.electron && process.defaultApp === false);
+    // `defaultApp` is set by the Electron runtime but is not part of @types/node, so it is
+    // read through a narrowed view rather than widening the global Process type.
+    const electronDefaultApp = (process as NodeJS.Process & { defaultApp?: boolean }).defaultApp;
+    this.isPackaged = options.isPackaged ?? Boolean(process.versions.electron && electronDefaultApp === false);
     this.bundledDir = options.bundledDir;
     this.projectRoot = options.projectRoot;
     this.resolveCommand = options.resolveCommand ?? ((kind, resolutionOptions) =>

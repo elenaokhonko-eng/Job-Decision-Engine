@@ -4,7 +4,13 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/con
 
 export type ModelRoutePurpose = "EVALUATION" | "EMBEDDING" | "DOCUMENT" | "EXTRACTION";
 
-export type ModelRouteProvider = "gemini" | "openai";
+/**
+ * A provider is a wire protocol, not a vendor. `openai-compatible` covers every
+ * endpoint that implements the OpenAI API shape (Ollama, LM Studio, vLLM, Groq,
+ * Together, OpenRouter, Moonshot/Kimi, DeepSeek, self-hosted gateways), with its
+ * base URL supplied through the environment. See `services/aiProviders.ts`.
+ */
+export type ModelRouteProvider = "gemini" | "openai" | "openai-compatible";
 
 type PgQueryable = pg.Pool | pg.PoolClient | pg.Client;
 
@@ -40,8 +46,8 @@ function asPurpose(value: string): ModelRoutePurpose {
 }
 
 function asProvider(value: string): ModelRouteProvider {
-  const normalized = (value || "").toLowerCase();
-  if (normalized === "gemini" || normalized === "openai") {
+  const normalized = (value || "").trim().toLowerCase();
+  if (normalized === "gemini" || normalized === "openai" || normalized === "openai-compatible") {
     return normalized;
   }
   throw new Error(`Unsupported model provider: ${value}`);
