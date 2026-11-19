@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import { getGeminiClient, runAgent, generateContent, generateEmbedding } from "../src/services/agent.ts";
 import { isGeminiConfigured } from "../src/services/geminiConfig.ts";
 import { extractWithFallback } from "../src/services/llmFallback.ts";
+import { DEFAULT_GEMINI_EVALUATION_MODEL } from "../src/services/modelDefaults.ts";
 import { db, verifyUrlLive } from "../src/db/db.ts";
 import { applyGlobalGates, generateContentHash, LANE_VOCABULARIES, MULTI_LANE_SCORECARDS } from "../src/services/criteria.ts";
 import { runDeduplication } from "./deduplicate.ts";
@@ -202,13 +203,13 @@ async function runPipeline() {
   try {
     const ai = getGeminiClient();
     await generateContent({
-      model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
+      model: process.env.GEMINI_MODEL || DEFAULT_GEMINI_EVALUATION_MODEL,
       contents: "ping",
       systemInstruction: "reply pong"
     });
-    console.log(`✅ Model ${process.env.GEMINI_MODEL || "gemini-1.5-flash"} is accessible.`);
+    console.log(`✅ Model ${process.env.GEMINI_MODEL || DEFAULT_GEMINI_EVALUATION_MODEL} is accessible.`);
   } catch (err: any) {
-    console.error(`❌ ERROR: Failed to access model ${process.env.GEMINI_MODEL || "gemini-1.5-flash"}: ${err.message}`);
+    console.error(`❌ ERROR: Failed to access model ${process.env.GEMINI_MODEL || DEFAULT_GEMINI_EVALUATION_MODEL}: ${err.message}`);
     console.error("Failing pipeline to prevent masked provider failure.");
     pipelineHealth = "FAILED";
     process.exit(1);
