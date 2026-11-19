@@ -61,6 +61,9 @@ export const BOUNDARY_RULES: Readonly<Record<string, string>> = {
   F6: "No new writer of a job status column.",
   F7: "No new legacy area writes a table.",
   F8: "The Streamlit interface reads no new table and writes none.",
+  F9: "No new upward import: src/db imports no area above it; src/pipeline imports no queue, API, read model or desktop code.",
+  F10: "The model-call resilience layer imports no database, workspace, pipeline, queue, read-model or API code.",
+  F11: "Code under src/ never imports a script.",
 };
 
 /** Legacy areas that moved code may still import while the migration is in progress. */
@@ -95,6 +98,21 @@ export const JOB_STATUS_COLUMNS = [
   "recommendation_outcome",
   "recommendation_eligibility",
 ] as const;
+
+/** Areas above `src/db`. The database layer imports none of them. */
+const AREAS_ABOVE_DB = new Set(
+  [
+    "pipeline", "tasks", "services", "api", "readModels", "desktop", "ingestion", "documents", "reporting", "mcp",
+    "sdk", "matching", "decision", "eligibility", "evidence", "lanes", "policy", "profile", "requirements", "embeddings",
+  ].map((area) => `src/${area}`),
+);
+
+/** Areas above `src/pipeline`. Stage logic imports none of them. */
+const AREAS_ABOVE_PIPELINE = new Set(["src/tasks", "src/api", "src/readModels", "src/desktop"]);
+
+/** The file that holds retry, timeout and fallback logic for model calls, and what it must not import. */
+const MODEL_CALL_RESILIENCE = "src/services/modelCallResilience.ts";
+const AREAS_FORBIDDEN_TO_MODEL_CALLS = new Set(["src/db", "src/workspace", "src/pipeline", "src/tasks", "src/readModels", "src/api"]);
 
 /** Legacy files that must gain no new importers. */
 const FROZEN_IMPORT_TARGETS = ["src/services/agent.ts", "src/db/db.ts"];
@@ -421,8 +439,8 @@ function writerAreaOf(file: string): string {
 
 /**
  * Every boundary violation in the graph, as stable keys of the form `RULE|subject|detail`.
- * Rules B1 to B8 govern the target layout; F1 to F7 freeze the legacy layout (F8 is reported by
- * `findStreamlitViolations`).
+ * Rules B1 to B8 govern the target layout; F1 to F11 freeze the legacy layout (F8 is reported
+ * by `findStreamlitViolations`).
  * B8 and F7 need the table registry and are skipped without it.
  */
 export function findViolations(graph: ImportGraph, registry?: TableRegistry): string[] {
@@ -478,6 +496,19 @@ export function findViolations(graph: ImportGraph, registry?: TableRegistry): st
 
     // F4: frozen legacy files gain no new importers.
     if (FROZEN_IMPORT_TARGETS.includes(to)) add("F4", from, to);
+
+    // F9: no new upward import in the legacy layout.
+    const fromArea = legacyAreaOf(from);
+    const toArea = legacyAreaOf(to);
+    if (toArea !== null) {
+      if (fromArea === "src/db" && AREAS_ABOVE_DB.has(toArea)) add("F9", from, to);
+      if (fromArea === "src/pipeline" && AREAS_ABOVE_PIPELINE.has(toArea)) add("F9", from, to);
+      // F10: the model-call resilience layer knows nothing about jobs or the database.
+      if (from === MODEL_CALL_RESILIENCE && AREAS_FORBIDDEN_TO_MODEL_CALLS.has(toArea)) add("F10", from, to);
+    }
+
+    // F11: application code never imports a script.
+    if (from.startsWith("src/") && to.startsWith("scripts/")) add("F11", from, to);
   }
 
   for (const file of graph.files) {
@@ -503,6 +534,8 @@ export function findViolations(graph: ImportGraph, registry?: TableRegistry): st
       if (isTargetLayout(file.path) && !file.path.startsWith("src/platform/persistence/")) add("B6", file.path, "imports pg");
       // F3: no new database access from scripts or API routers.
       if (file.path.startsWith("scripts/") || file.path.startsWith("src/api/")) add("F3", file.path, "imports pg");
+      // F10: the model-call resilience layer never imports the database driver.
+      if (file.path === MODEL_CALL_RESILIENCE) add("F10", file.path, "imports pg");
     }
 
     // F5: src/services takes no new files.

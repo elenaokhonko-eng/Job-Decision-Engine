@@ -159,6 +159,9 @@ The code that exists today breaks these rules in known places. Those places are 
 | F6 | No new writer of a job status column on `canonical_jobs` (section 7). |
 | F7 | No new legacy area writes a table. An area is `scripts` or one folder under `src/`. |
 | F8 | The Streamlit interface reads no new table and writes none. It reads views. |
+| F9 | No new upward import. `src/db/` imports no area above it. `src/pipeline/` imports no queue, API, read-model or desktop code. |
+| F10 | `src/services/modelCallResilience.ts`, which holds retry, timeout and fallback for model calls, imports no database, workspace, pipeline, queue, read-model or API code. |
+| F11 | Code under `src/` never imports a script. |
 
 `src/services/agent.ts` also has a line limit. It may shrink and may not grow.
 
@@ -210,7 +213,7 @@ Matching needs a shared vocabulary: a requirement is about a concept, and a prof
 | No database in the gateway | B5 | The audited call path in `src/services/agent.ts` takes a database client |
 | Model IDs in one place | `src/platform/config/` only; checked against the providers with `npm run models:check` | The evaluation default is in `src/services/modelDefaults.ts`. Other defaults are still spread across `src/services/agent.ts`, `src/services/openAiModelRoles.ts`, scripts and environment variables |
 | Versioned prompts | Each stored output records prompt id, prompt version and model | Prompts are built inline. Only the quoted-requirement prompt records a hash |
-| Advice only | An evaluation is stored in `ai_evaluations` and never changes a gate, a score or an outcome | Holds for the queue evaluator. The older `runAgent` path in `src/services/agent.ts` still writes model output to job rows and is to be deleted |
+| Advice only | An evaluation is stored in `ai_evaluations` and never changes a gate, a score or an outcome | Holds for the queue evaluator. The older `runAgent` function in `src/services/agent.ts` still writes model output to rows of the legacy `jobs` table, through `src/db/db.ts`, and is to be deleted |
 | Cleaned input | Posting text is cleaned and delimited before any model sees it | The posting is placed in the same message as the instructions, with no cleaning step |
 | Bounded spend | Lane budgets and deferrals are recorded per run | In place: `ai_evaluation_budget_runs`, `evaluation_budget_deferrals` |
 
@@ -372,6 +375,8 @@ Counted on 19 November 2026, when the check was introduced. The live list is the
 | F6 | 46 | Writers of job status columns: `processing_state` from 14 files, `recommendation_outcome` from 6 |
 | F7 | 162 | Table and area pairs; 30 tables are written from more than one area |
 | F8 | 5 | Tables that `streamlit_app.py` reads directly |
+| F9 | 1 | `src/pipeline/laneRouter.ts` imports the task queue |
+| F10, F11 | 0 | Clean today; the rules keep them so |
 
 Two files concentrate the problem. `src/services/agent.ts` (3,365 lines) holds model configuration, provider calls, cost accounting, prompts, parsing, embeddings and a legacy evaluator. `src/tasks/stageTaskWorker.ts` (4,012 lines) holds the queue and the logic that links every stage.
 
@@ -381,7 +386,7 @@ Each phase is a series of small pull requests merged to `main`. Behaviour does n
 
 | Phase | Goal | Done when |
 |---|---|---|
-| 0 | Stop new damage | This check runs in CI; the legacy evaluator cannot write to job rows |
+| 0 | Stop new damage | This check runs in CI; `runAgent` no longer writes to the legacy `jobs` table |
 | 1 | Model gateway out of `src/services/agent.ts` | The file is deleted; F1 and its F4 entries are gone |
 | 2 | Prompt registry and `evaluation` module | Every stored evaluation records a prompt version |
 | 3 | One writer per decision | F6 shows one writer per status column |

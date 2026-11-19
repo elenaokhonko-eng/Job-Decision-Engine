@@ -250,6 +250,38 @@ describe("architecture boundary rules", () => {
     ]);
   });
 
+  it("F9: the database layer and the stage logic import nothing above them", () => {
+    const found = violationsOf([
+      file("src/db/pool.ts", 'import { gate } from "../pipeline/hardGate.js";\nimport type { Ctx } from "../workspace/context.js";'),
+      file("src/pipeline/hardGate.ts", 'import { enqueue } from "../tasks/pipelineTasks.js";\nimport { load } from "../policy/snapshot.js";'),
+      file("src/tasks/pipelineTasks.ts"),
+      file("src/policy/snapshot.ts"),
+      file("src/workspace/context.ts"),
+    ]);
+    expect(found.filter((key) => key.startsWith("F9|"))).toEqual([
+      "F9|src/db/pool.ts|src/pipeline/hardGate.ts",
+      "F9|src/pipeline/hardGate.ts|src/tasks/pipelineTasks.ts",
+    ]);
+  });
+
+  it("F10 and F11: model-call resilience stays free of job and database code; src never imports a script", () => {
+    const found = violationsOf([
+      file(
+        "src/services/modelCallResilience.ts",
+        'import pg from "pg";\nimport { ssl } from "../db/pgSsl.js";\nimport { summary } from "../security/publicErrorSummary.js";',
+      ),
+      file("src/db/pgSsl.ts"),
+      file("src/security/publicErrorSummary.ts"),
+      file("src/reporting/board.ts", 'import { run } from "../../scripts/report.js";'),
+      file("scripts/report.ts"),
+    ]);
+    expect(found.filter((key) => /^F1[01]\|/.test(key))).toEqual([
+      "F10|src/services/modelCallResilience.ts|imports pg",
+      "F10|src/services/modelCallResilience.ts|src/db/pgSsl.ts",
+      "F11|src/reporting/board.ts|scripts/report.ts",
+    ]);
+  });
+
   it("F7: a legacy area that writes a table is reported per table and area", () => {
     const found = violationsOf(
       [
