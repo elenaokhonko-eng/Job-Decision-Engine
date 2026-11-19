@@ -1,4 +1,5 @@
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
+import { activeScoringPolicy, matcherPolicyVersionFor } from "./scoringPolicy.js";
 
 /**
  * Which deterministic outcomes are AI-evaluated, and when a job's profile match is current.
@@ -99,10 +100,23 @@ export const DETERMINISTIC_MATCHER_POLICY_VERSION = "deterministic_v2";
  */
 export const DETERMINISTIC_MATCHER_FINGERPRINT_VERSION = "deterministic_matcher_v2";
 
+/**
+ * The matcher policy version in force: the legacy version, or the legacy version plus the top-K
+ * scoring policy when SCORING_POLICY selects it (see scoringPolicy.ts). Read at call time so the
+ * flag moves the matcher, the match-run stamp and task currentness together.
+ */
+export function currentMatcherPolicyVersion(env: NodeJS.ProcessEnv = process.env): string {
+  return matcherPolicyVersionFor(activeScoringPolicy(env), DETERMINISTIC_MATCHER_POLICY_VERSION);
+}
+
+export function currentMatcherFingerprintVersion(env: NodeJS.ProcessEnv = process.env): string {
+  return matcherPolicyVersionFor(activeScoringPolicy(env), DETERMINISTIC_MATCHER_FINGERPRINT_VERSION);
+}
+
 /** SQL predicate: match run (alias `mr`) was scored under the current matcher rules. */
 export function currentMatcherPolicySql(matchAlias: string): string {
   const mr = alias(matchAlias, "match alias");
-  return `(${mr}.policy_version = '${DETERMINISTIC_MATCHER_POLICY_VERSION}')`;
+  return `(${mr}.policy_version = '${currentMatcherPolicyVersion()}')`;
 }
 
 /**
@@ -124,7 +138,7 @@ export function profileMatchSupersededSql(canonicalAlias: string, matchAlias: st
     AND (
       ${mr}.profile_version_id IS DISTINCT FROM ${uniqueActiveProfileSql(c)}
       OR (
-        ${mr}.policy_version IS DISTINCT FROM '${DETERMINISTIC_MATCHER_POLICY_VERSION}'
+        ${mr}.policy_version IS DISTINCT FROM '${currentMatcherPolicyVersion()}'
         AND ${c}.description_quality_status = 'COMPLETE'
         AND ${sourceContentEvidencePredicate(`${c}.workspace_id`, `${c}.latest_job_version_id`)}
       )

@@ -45,3 +45,31 @@ the result with `npm run measure:ranking`.
 
 `npm run preview:requirements` runs the extractor in memory over the stored descriptions of
 the saved and non-fit jobs and prints counts only: no writes, no AI calls, no posting text.
+
+## Job score policy (`SCORING_POLICY`)
+
+The ranking score is chosen by the `SCORING_POLICY` environment variable and is off by default.
+
+| Policy | Job score |
+| --- | --- |
+| `legacy_weighted_v1` (default) | Weighted share of all requirements credited by evidence. |
+| `topk_capability_semantic_v1` | Mean semantic similarity of the 7 best capability requirements (0-100). |
+
+Why: on the replay branch, with 5-fold cross-validation, word overlap alone separates saved from
+non-fit jobs no better than chance (0.51), and years, degree and certificate rows match almost
+every job, so they add nothing to the ranking. The share of all requirements punishes a long
+posting for bullets nobody matches. The top-K mean is stable for K = 3 to 12 (0.77 to 0.84); K is
+fixed at 7, the middle of that plateau, and is not tuned further. A penalty for unmatched
+must-haves lowered separation at every weight tried, so it is not in the score.
+
+- Years, degrees and credentials leave the ranking score only. They are still compared with the
+  profile, still produce mandatory-qualification failures, and still feed the career-track cap
+  (`src/pipeline/careerTrack.ts` reads the requirement rows, not the score).
+- Unmatched must-haves are reported beside each job (`unmatchedMustHaves` in
+  `src/pipeline/scoringPolicy.ts`), not scored.
+- The policy has its own matcher version (`deterministic_v2+topk_capability_semantic_v1`), so
+  turning it on makes older matches superseded and the queue re-matches them. Existing cut-offs
+  (`recommendation_*` thresholds) are on the legacy scale and must be re-fitted before the flag is
+  turned on in production; the cut-offs are not fitted here.
+- Role fit (lane, track, title family) is deliberately not in the score yet: most jobs have no lane
+  until the production replay.

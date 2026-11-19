@@ -15,7 +15,8 @@ import {
   runPipelineStageTaskWorker,
   seedRecoverablePipelineTasks,
 } from "../../tasks/stageTaskWorker.js";
-import { DETERMINISTIC_MATCHER_POLICY_VERSION } from "../../pipeline/profileMatchCurrency.js";
+import { currentMatcherPolicyVersion, DETERMINISTIC_MATCHER_POLICY_VERSION, profileMatchSupersededSql } from "../../pipeline/profileMatchCurrency.js";
+import { TOPK_SCORING_POLICY } from "../../pipeline/scoringPolicy.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { batchEmbeddingFromPerInput } from "../fixtures/embeddingBatchMock.js";
 import { insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
@@ -818,5 +819,61 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
       includeTestFixtures: true,
     });
     expect(reseeded.supersededProfileMatch).toBe(0);
+  }, 120_000);
+
+  it("flipping SCORING_POLICY supersedes matches made under the other policy, re-matches under the new one, and settles", async () => {
+    const job = jobs.trackCurrent;
+    const previous = process.env.SCORING_POLICY;
+    const seed = () => seedRecoverablePipelineTasks(db(), { context: ctx(), taskTypes: ["MATCH_PROFILE_EVIDENCE"], includeTestFixtures: true });
+    const supersededFor = async () => {
+      const { rows } = await db().query<{ superseded: boolean }>(
+        `SELECT COALESCE(${profileMatchSupersededSql("c", "mr")}, FALSE) AS superseded
+           FROM canonical_jobs c LEFT JOIN match_runs mr ON mr.id = c.latest_match_run_id
+          WHERE c.workspace_id = $1 AND c.id = $2`,
+        [ctx().workspaceId, job.canonicalJobId],
+      );
+      return rows[0]!.superseded;
+    };
+    try {
+      delete process.env.SCORING_POLICY;
+      // The job's latest match is current under the default (legacy) policy.
+      const legacyRun = (await jobState(job)).latest_match_run_id;
+      const legacyStamp = await db().query<{ policy_version: string }>(`SELECT policy_version FROM match_runs WHERE workspace_id = $1 AND id = $2`, [ctx().workspaceId, legacyRun]);
+      expect(legacyStamp.rows[0].policy_version).toBe(DETERMINISTIC_MATCHER_POLICY_VERSION);
+      expect(await supersededFor()).toBe(false);
+
+      // Turn the flag on: every match made under the legacy policy is superseded, this job's included,
+      // and a re-match task is queued for it.
+      process.env.SCORING_POLICY = TOPK_SCORING_POLICY;
+      const topkVersion = currentMatcherPolicyVersion();
+      expect(topkVersion).not.toBe(DETERMINISTIC_MATCHER_POLICY_VERSION);
+      expect(await supersededFor()).toBe(true);
+      expect((await seed()).supersededProfileMatch).toBeGreaterThanOrEqual(1);
+      expect(await tasksFor(job, "MATCH_PROFILE_EVIDENCE")).toEqual(expect.arrayContaining([expect.objectContaining({ status: "PENDING" })]));
+
+      // The re-match runs the real matcher and stamps the top-K policy on the new run.
+      const recovered = await runPipelineStageTaskWorker(db(), {
+        ...workerOptions,
+        context: ctx(),
+        taskTypes: ["MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION"],
+        jobVersionIds: [job.jobVersionId],
+        maxTasks: 6,
+      });
+      expect(recovered.errors).toEqual([]);
+      const topkRun = (await jobState(job)).latest_match_run_id;
+      expect(topkRun).not.toBe(legacyRun);
+      const topkStamp = await db().query<{ policy_version: string }>(`SELECT policy_version FROM match_runs WHERE workspace_id = $1 AND id = $2`, [ctx().workspaceId, topkRun]);
+      expect(topkStamp.rows[0].policy_version).toBe(topkVersion);
+
+      // Settled for this job: not superseded again under the same flag, so no re-enqueue loop.
+      expect(await supersededFor()).toBe(false);
+
+      // Turning the flag back off supersedes the top-K match in the other direction.
+      delete process.env.SCORING_POLICY;
+      expect(await supersededFor()).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.SCORING_POLICY;
+      else process.env.SCORING_POLICY = previous;
+    }
   }, 120_000);
 });

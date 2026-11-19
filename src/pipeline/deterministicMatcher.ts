@@ -19,9 +19,15 @@ import {
 } from "../requirements/requirementKinds.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import {
-  DETERMINISTIC_MATCHER_FINGERPRINT_VERSION,
-  DETERMINISTIC_MATCHER_POLICY_VERSION,
+  currentMatcherFingerprintVersion,
+  currentMatcherPolicyVersion,
 } from "./profileMatchCurrency.js";
+import {
+  activeScoringPolicy,
+  rankingEvidenceRow,
+  selectOverallScore,
+  type RankingEvidenceRow,
+} from "./scoringPolicy.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -790,7 +796,7 @@ export async function runDeterministicMatcher(
             content_hash: jobContentHash,
             active_requirement_set_id: activeRequirementSetId,
             profile_version_id: profileVersionId,
-            matcher_version: DETERMINISTIC_MATCHER_FINGERPRINT_VERSION,
+            matcher_version: currentMatcherFingerprintVersion(),
             evidence_strength_policy_hash: evidenceStrengthPolicy.policyHash,
           },
         });
@@ -821,7 +827,7 @@ export async function runDeterministicMatcher(
             matchContextFingerprint,
             evidencePolicyRevisionId,
             evidenceStrengthPolicy.policyHash,
-            DETERMINISTIC_MATCHER_POLICY_VERSION,
+            currentMatcherPolicyVersion(),
           ]
         );
         const matchRunId = runRes.rows[0].id;
@@ -967,6 +973,9 @@ export async function runDeterministicMatcher(
         let weightSum = 0;
         let matchedCount = 0;
         const mandatoryQualificationFailures: string[] = [];
+        // Evidence rows for the top-K ranking score (scoringPolicy.ts). Years, degrees and credentials
+        // are never added: they stay checks (mandatory-qualification failures), not ranking evidence.
+        const rankingEvidence: RankingEvidenceRow[] = [];
 
         for (const req of reqRes.rows) {
           if (!isCapabilityRequirementType(req.requirement_type)) {
@@ -1210,6 +1219,15 @@ export async function runDeterministicMatcher(
           const isCountedMatch =
             matchType === 'EXACT' ||
             (matchType === 'SEMANTIC' && evidenceStrength >= COUNTED_SEMANTIC_MIN_EVIDENCE_STRENGTH);
+          const rankingRow = rankingEvidenceRow({
+            requirementType: req.requirement_type,
+            importance: req.importance,
+            matchType,
+            usedEmbeddings,
+            hasBestFact: Boolean(bestFact),
+            bestSemantic,
+          });
+          if (rankingRow) rankingEvidence.push(rankingRow);
           const weightedScore = isCountedMatch ? bestScore * evidenceStrength : 0;
           weightedScoreSum += weightedScore * weight;
           if (isCountedMatch) {
@@ -1274,7 +1292,8 @@ export async function runDeterministicMatcher(
         }
 
         const reqCount = scoredRequirements.length;
-        const overallScore = weightSum > 0 ? (weightedScoreSum / weightSum) * 100 : 0;
+        const legacyScore = weightSum > 0 ? (weightedScoreSum / weightSum) * 100 : 0;
+        const overallScore = selectOverallScore(activeScoringPolicy(), legacyScore, rankingEvidence);
         const coverageScore = reqCount > 0 ? (matchedCount / reqCount) * 100 : 0;
 
         await client.query(
