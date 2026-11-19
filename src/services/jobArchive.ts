@@ -708,6 +708,51 @@ async function applyArchiveTransition(
   return true;
 }
 
+/**
+ * Archives jobs whose posting cannot be confirmed (their real link was never stored) under
+ * POSTING_NOT_CONFIRMABLE / POSTING_LINK_UNVERIFIABLE. Not "closed": the posting's state is unknown, and
+ * the archive is reversible through restoreArchivedJob. Runs inside the caller's transaction, records one
+ * APPLY run row, and reuses the audited archive transition. Returns the ids actually archived.
+ */
+export async function archiveJobsAsPostingNotConfirmable(
+  client: pg.PoolClient,
+  input: { workspaceId: string; canonicalJobIds: readonly string[]; actor: string; details: Record<string, unknown> },
+): Promise<string[]> {
+  uuidSchema.parse(input.workspaceId);
+  if (input.canonicalJobIds.length === 0) return [];
+  const capabilities = await readSchemaCapabilities(client);
+  const now = new Date();
+  const run = await client.query<{ id: string }>(
+    `INSERT INTO job_archive_runs (run_started_at, cutoff_at, mode, status)
+     VALUES ($1, $2, 'APPLY', 'RUNNING') RETURNING id::text`,
+    [now, new Date(now.getTime() - 1000)],
+  );
+  const runId = run.rows[0]?.id;
+  if (!runId) throw new Error("Archive run could not be persisted.");
+  const archived: string[] = [];
+  for (const id of input.canonicalJobIds) {
+    uuidSchema.parse(id);
+    const done = await applyArchiveTransition(client, capabilities, {
+      workspaceId: input.workspaceId,
+      canonicalJobId: id,
+      archivedAt: now,
+      runId,
+      actor: input.actor,
+      reason: "POSTING_NOT_CONFIRMABLE",
+      basis: "POSTING_LINK_UNVERIFIABLE",
+      referenceAt: now,
+      details: input.details,
+    });
+    if (done) archived.push(id);
+  }
+  await client.query(
+    `UPDATE job_archive_runs SET status = 'SUCCEEDED', scanned_count = $2, eligible_count = $2, archived_count = $3,
+            report_summary = $4::jsonb, completed_at = NOW() WHERE id = $1`,
+    [runId, input.canonicalJobIds.length, archived.length, JSON.stringify({ rule: "posting-not-confirmable", ...input.details })],
+  );
+  return archived;
+}
+
 async function archiveOne(
   client: pg.PoolClient,
   capabilities: ArchiveSchemaCapabilities,
