@@ -105,6 +105,17 @@ export function presalesTitle(title: string): string | null {
   return String(title || "").match(PRESALES_TITLE)?.[0] ?? null;
 }
 
+// 1d. Owner policy (2026-11-19): forward-deployed roles are customer-facing every day, in effect a
+// sales-adjacent job, so they are GATE_HIGH_INTERACTION for any title. "Deployed Architect" and
+// "Deployed Engineer" (professional-services titles for the same work) are included; "deployed" in
+// other positions ("cloud-deployed systems engineer") is not.
+const FORWARD_DEPLOYED_TITLE = /\b(?:fde|forward[\s‐‑-]?deployed|deployed\s+(?:software\s+)?(?:engineer(?:ing)?|architect|specialist|lead|manager|director))\b/i;
+
+/** The matched forward-deployed title phrase, or null. */
+export function forwardDeployedTitle(title: string): string | null {
+  return String(title || "").match(FORWARD_DEPLOYED_TITLE)?.[0] ?? null;
+}
+
 // 2. Axis 1: Target Technical Functions (Must pass)
 export const TECHNICAL_FUNCTION_KEYWORDS: RegExp[] = [
   /\b(software engineer|data engineer|ml engineer|machine learning engineer|ai engineer)\b/i,
@@ -1060,7 +1071,11 @@ function evaluateGlobalGates(
 
   // FDE is a global exclusion when the role itself is an FDE-family role.
   // Do NOT reject merely because FDE is an adjacent team, collaborator, or prior background.
-  const isFdeTitle = /\b(?:fde|forward[- ]deployed(?:\s+(?:software\s+)?(?:engineer(?:ing)?|architect|specialist|lead|manager|director))?)\b/i.test(t);
+  const fdeTitlePhrase = forwardDeployedTitle(job.title || "");
+  if (fdeTitlePhrase) {
+    return makeReject(["GATE_HIGH_INTERACTION", "GATE_OUT_OF_SCOPE_DOMAIN"], [`FDE title: "${fdeTitlePhrase}"`]);
+  }
+  const isFdeTitle = false;
   const isFdeRoleIdentity = /\b(?:this\s+role\s+is|hiring\s+for\s+(?:an?|the)\s+role\s+of|looking\s+for\s+an?|seeking\s+an?)\s+(?:forward[- ]deployed\s+(?:software\s+)?engineer|fde)\b/i.test(d);
   if (isFdeTitle || isFdeRoleIdentity) {
     const titleMatch = (job.title || "").match(/\b(?:fde|forward[- ]deployed(?:\s+(?:software\s+)?(?:engineer(?:ing)?|architect|specialist|lead|manager|director))?)\b/i);
