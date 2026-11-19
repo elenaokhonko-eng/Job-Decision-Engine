@@ -1,5 +1,6 @@
 import fs from "fs";
 import { generateContent } from "../src/services/agent.js";
+import { DEFAULT_GEMINI_EVALUATION_MODEL } from "../src/services/modelDefaults.js";
 import path from "path";
 
 const PROFILE_PATH = path.resolve("my_profile.md");
@@ -73,7 +74,7 @@ async function main() {
 
   console.log("Calling LLM to build evidence ledger...");
   let rawText = await generateContent({
-    model: "gemini-3.6-flash",
+    model: DEFAULT_GEMINI_EVALUATION_MODEL,
     contents: PROMPT + mdContent,
     responseMimeType: "application/json",
     systemInstruction: "You are an expert data architect converting markdown resumes into highly structured, addressable JSON fact ledgers.",
