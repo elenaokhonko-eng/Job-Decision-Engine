@@ -459,8 +459,8 @@ function matchesExperienceScope(
 }
 
 function degreeLevel(text: string): number | null {
-  if (/\b(phd|doctorate|doctoral)\b/i.test(text)) return 3;
-  if (/\b(master'?s?|msc|ma|mba)\b/i.test(text)) return 2;
+  if (/\b(ph\.?\s?d|doctorate|doctoral|doctor\s+of\s+philosophy)\b/i.test(text)) return 3;
+  if (/\b(master'?s?|m\.?\s?sc|ma|mba)\b/i.test(text)) return 2;
   if (/\b(bachelor'?s?|undergraduate|bsc|ba)\b/i.test(text)) return 1;
   return null;
 }
@@ -495,7 +495,7 @@ function requirementCredentialIdentifier(requirement: ComparableRequirement): st
   ].find((value) => typeof value === "string" && value.trim().length > 0);
   const source = String(structuredCandidate || requirement.quote_text || requirement.requirement_text || "");
   const normalized = normalizeComparableText(source);
-  const known = normalized.match(/\b(aws certified [a-z0-9 .+#-]+|cissp|cfa|cpa|pmp|prince2|scrum master|kubernetes|terraform|azure certified [a-z0-9 .+#-]+|google cloud [a-z0-9 .+#-]+)\b/i);
+  const known = normalized.match(/\b(aws certified [a-z0-9 .+#-]+|cissp|cfa|cpa|pmp|fsa|asa|fcas|acas|maaa|acca|frm|cfp|cisa|cism|caia|fellow of the society of actuaries|prince2|scrum master|kubernetes|terraform|azure certified [a-z0-9 .+#-]+|google cloud [a-z0-9 .+#-]+)\b/i);
   if (known) return normalizeComparableText(known[1]);
   const genericRemoved = normalized
     .replace(/\b(required|required certification|preferred|certification|certificate|credential|license|licence|holder|must have|or equivalent)\b/g, " ")

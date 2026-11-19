@@ -1225,6 +1225,58 @@ export function hasNonTechnicalProjectSubject(title: string, scopeText: string):
   return !TECHNICAL_TITLE_QUALIFIER.test(title) && NON_TECHNICAL_PROJECT_SCOPE.test(scopeText);
 }
 
+/**
+ * Cybersecurity work is outside every lane, whatever the title says (owner decision: "I don't want
+ * cybersecurity"). Two independent signals, both read from the role itself:
+ *  - the title names a security function and no AI/ML work ("Security Engineer", "AppSec Lead");
+ *  - the scope describes security work: at least CYBERSECURITY_CONTENT_MIN_SIGNALS distinct security
+ *    phrases and more of them than distinct AI/ML engineering phrases. This catches a title like
+ *    "Staff Software Engineer (AI Engineer)" whose duties are threat detection and vulnerability work,
+ *    while an ML role that merely mentions security keeps its lane.
+ * Never invents a verdict from missing text: an empty scope with a non-security title is not cybersecurity.
+ */
+export const CYBERSECURITY_CONTENT_MIN_SIGNALS = 4;
+const CYBERSECURITY_TITLE = /\b(?:cyber\s*-?security|information\s+security|infosec|appsec|application\s+security|security\s+(?:engineer|engineering|architect|analyst|operations|researcher|specialist)|devsecops|penetration\s+test\w*|red\s+team|blue\s+team|soc\s+analyst)\b/i;
+const AI_TITLE_TERM = /\b(?:ai|ml|machine\s+learning|llm|generative|data\s+scien\w+)\b/i;
+const CYBERSECURITY_SIGNALS: readonly RegExp[] = [
+  /\bthreat\s+(?:detection|intelligence|hunting|model(?:l)?ing)\b/i,
+  /\bvulnerabilit(?:y|ies)\b/i,
+  /\bpenetration\s+test\w*/i,
+  /\bsecurity\s+operations\b|\bsoc\b/i,
+  /\bsiem\b/i,
+  /\bincident\s+response\b/i,
+  /\bmalware\b/i,
+  /\bzero[- ]trust\b/i,
+  /\bidentity\s+and\s+access\s+management\b|\biam\b/i,
+  /\bcryptograph\w*/i,
+  /\bendpoint\s+(?:security|protection|detection)\b/i,
+  /\bsecurity\s+(?:controls?|posture|architecture|monitoring|tooling)\b/i,
+  /\bcyber\s*-?(?:security|defen[cs]e|threats?|attacks?)\b/i,
+  /\b(?:attack\s+surface|exploit\w*|intrusion)\b/i,
+];
+const AI_ENGINEERING_SIGNALS: readonly RegExp[] = [
+  /\bmachine\s+learning\b/i,
+  /\bdeep\s+learning\b/i,
+  /\b(?:llms?|large\s+language\s+models?)\b/i,
+  /\bneural\s+networks?\b/i,
+  /\bmodel\s+(?:training|evaluation|serving|deployment)\b/i,
+  /\b(?:pytorch|tensorflow)\b/i,
+  /\b(?:rag|retrieval[- ]augmented)\b/i,
+  /\bfeature\s+(?:store|engineering)\b/i,
+  /\bmlops\b/i,
+  /\bgenerative\s+ai\b/i,
+];
+
+export function hasCybersecurityFocus(title: string, scopeText: string): boolean {
+  const titleValue = String(title || "");
+  if (CYBERSECURITY_TITLE.test(titleValue) && !AI_TITLE_TERM.test(titleValue)) return true;
+  const scope = String(scopeText || "");
+  const security = CYBERSECURITY_SIGNALS.filter((signal) => signal.test(scope)).length;
+  if (security < CYBERSECURITY_CONTENT_MIN_SIGNALS) return false;
+  const ai = AI_ENGINEERING_SIGNALS.filter((signal) => signal.test(scope)).length;
+  return security > ai;
+}
+
 export function hasApprovedLaneFunction(laneKey: string, title: string): boolean {
   if (laneKey === "INVESTIGATIONS_ENFORCEMENT") return hasInvestigationFunction(title);
   if (hasNonTechnicalRoleFamily(title)) return false;
@@ -1724,6 +1776,7 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
         && matchedSector(employerOnlySectorText, laneDef.required_sector_concepts).length > 0
     );
     functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, title)
+      || hasCybersecurityFocus(title, scopeText)
       || (laneKey === "TECHNICAL_PRODUCT_TRANSFORMATION" && hasNonTechnicalProjectSubject(title, scopeText))
       ? 0
       : conceptScopeScore(scopeText, laneDef.required_function_concepts);

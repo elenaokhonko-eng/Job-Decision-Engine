@@ -330,3 +330,47 @@ describe("structured requirement comparators", () => {
     expect(mlResult.status).toBe("MATCH");
   });
 });
+
+describe("a mandatory degree or credential the owner does not hold", () => {
+  // The owner's real shape: credentials reach the matcher as CREDENTIAL facts (master's degrees, certifications).
+  const credential = (statement: string, level: string | null = null) => ({
+    id: "cred-1",
+    statement,
+    structured_value: { credential_type: "DEGREE", level },
+    source_type: "CREDENTIAL" as const,
+  });
+
+  it("is a degree gap when the posting requires a PhD written as Ph.D. and the profile tops out at a master's", () => {
+    const result = compareStructuredRequirement(
+      { requirement_type: "DEGREE", requirement_text: "Role requires a degree qualification.", quote_text: "Ph.D. in Pharmacology or a related scientific field", structured_value: null },
+      [credential("Master of Science in Wealth Management", "MASTER")],
+    );
+    expect(result.status).toBe("MISMATCH");
+    expect(result.qualificationCode).toBe("MATCH_QUALIFICATION_DEGREE_GAP");
+  });
+
+  it("is a credential mismatch when the posting requires an actuarial fellowship the profile does not hold", () => {
+    const result = compareStructuredRequirement(
+      { requirement_type: "CREDENTIAL", requirement_text: "Role requires a credential or certification.", quote_text: "Fellow of the Society of Actuaries", structured_value: null },
+      [credential("PRINCE2 Practitioner")],
+    );
+    expect(result.status).toBe("MISMATCH");
+    expect(result.qualificationCode).toBe("MATCH_QUALIFICATION_MANDATORY_CERT_MISSING");
+  });
+
+  it("stays unknown, never a mismatch, when the profile has no degree evidence at all", () => {
+    const result = compareStructuredRequirement(
+      { requirement_type: "DEGREE", requirement_text: "Role requires a degree qualification.", quote_text: "Ph.D. in Physics", structured_value: null },
+      [],
+    );
+    expect(result.status).toBe("UNKNOWN");
+  });
+
+  it("still matches when the profile holds the required level", () => {
+    const result = compareStructuredRequirement(
+      { requirement_type: "DEGREE", requirement_text: "Role requires a degree qualification.", quote_text: "Master's degree in a quantitative field", structured_value: null },
+      [credential("Master of Business Administration", "MASTER")],
+    );
+    expect(result.status).toBe("MATCH");
+  });
+});

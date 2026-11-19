@@ -2,6 +2,38 @@ import { describe, expect, it } from 'vitest';
 import { extractDeterministicRequirements } from '../../requirements/deterministicExtractors.js';
 
 describe('extractDeterministicRequirements', () => {
+
+  describe('degree and professional-credential requirements the owner lacks', () => {
+    const extract = (description_text: string) => extractDeterministicRequirements({
+      canonical_job_id: '11111111-1111-4111-8111-111111111111',
+      job_version_id: '22222222-2222-4222-8222-222222222222',
+      description_text,
+    }).requirements;
+
+    it.each([
+      ['PhD', 'Qualifications: PhD in computational biology or a related field.'],
+      ['Ph.D', 'Qualifications: <li>Ph.D in machine learning</li>'],
+      ['Ph.D.', 'You hold a Ph.D. in physics.'],
+      ['M.Sc', 'You hold an MSc in statistics.'],
+      ['Doctor of Philosophy', 'A Doctor of Philosophy in a quantitative discipline.'],
+    ])('extracts a %s degree requirement', (_label, text) => {
+      expect(extract(text).some((r) => r.requirement_type === 'DEGREE')).toBe(true);
+    });
+
+    it.each([
+      ['Fellow of the Society of Actuaries', 'You are a Fellow of the Society of Actuaries (FSA) and a Member of the American Academy of Actuaries.'],
+      ['FSA', 'Credential: FSA required for this role.'],
+      ['ACCA', 'Qualified accountant (ACCA) preferred.'],
+    ])('extracts a professional credential: %s', (_label, text) => {
+      expect(extract(text).some((r) => r.requirement_type === 'CREDENTIAL')).toBe(true);
+    });
+
+    it('does not read ordinary words as degrees or credentials', () => {
+      const types = extract('We value asa tree-like structure, the msc folder and a phdr library; nothing formal is required.').map((r) => r.requirement_type);
+      expect(types).not.toContain('DEGREE');
+      expect(types).not.toContain('CREDENTIAL');
+    });
+  });
   it('extracts hard constraints with quote offsets and structured values', () => {
     const description = [
       'Mandatory 5 days per week in office in Singapore CBD.',

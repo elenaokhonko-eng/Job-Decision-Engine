@@ -476,7 +476,10 @@ export function extractDeterministicRequirements(
   sequence = extractedExperience.nextSequence;
 
   const degree = findFirstMatch(description, [
-    /\b(?:bachelor(?:'s)?|master(?:'s)?|phd|doctorate|doctoral)(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100})?/i,
+    // "Ph.D", "PhD", "Ph. D." count as degree levels, like the words below.
+    /\b(?:bachelor(?:'s)?|master(?:'s)?|ph\.?\s?d\b\.?|doctorate|doctoral|doctor\s+of\s+philosophy)(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100})?/i,
+    // Abbreviations are case-sensitive so ordinary lowercase words are not read as degrees.
+    /\b(?:B\.?Sc|M\.?Sc|M\.?Eng)\b\.?(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100})?/,
     /\bdegree\s+in\s+[^.;\n]{1,100}/i,
   ]);
   if (degree) {
@@ -497,6 +500,8 @@ export function extractDeterministicRequirements(
 
   const credential = findFirstMatch(description, [
     /\b(CFA|CPA|CISSP|PMP|AWS\s+Certified|certification\s+required|license\s+required)\b/i,
+    // Professional designations named by a regulated body (actuarial, audit, risk, financial planning).
+    /\b(?:Fellow|Associate)\s+of\s+the\s+(?:Society\s+of\s+Actuaries|Casualty\s+Actuarial\s+Society|Institute\s+and\s+Faculty\s+of\s+Actuaries)\b|\bMember\s+of\s+the\s+American\s+Academy\s+of\s+Actuaries\b|\b(?:FSA|ASA|FCAS|ACAS|MAAA|FIA|ACCA|FRM|CFP|CISA|CISM|CAIA)\b/,
   ]);
   if (credential) {
     requirements.push(
