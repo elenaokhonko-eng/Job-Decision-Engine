@@ -8,6 +8,16 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+function httpUrl(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const parsed = new URL(value.trim());
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function textValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
@@ -77,12 +87,24 @@ export class HimalayasAdapter extends BaseSourceAdapter {
           ? employment.filter((part): part is string => typeof part === "string").join(", ")
           : textValue(employment, "FULL_TIME");
         const location = item.location ?? item.locationRaw ?? item.locationRestrictions;
+        const places = Array.isArray(location) ? location.filter((part): part is string => typeof part === "string" && part.trim().length > 0) : [];
+        // An empty restriction list on this remote-job feed means "remote, anywhere", not "unknown".
         const locationText = Array.isArray(location)
-          ? location.filter((part): part is string => typeof part === "string").join(", ")
+          ? places.length > 0
+            ? places.join(", ")
+            : item.location === undefined && item.locationRaw === undefined && Array.isArray(item.locationRestrictions)
+              ? "Remote, worldwide"
+              : "Unknown"
           : textValue(location, "Unknown");
-        const fallbackUrl = `https://himalayas.app/jobs/${encodeURIComponent(sourceExternalId)}`;
-        const postingUrl = textValue(item.jobUrl ?? item.url ?? item.guid, fallbackUrl);
-        const applyUrl = textValue(item.applicationUrl ?? item.applicationUrlRaw ?? item.applicationLink, postingUrl);
+        // Only a real http(s) link from the feed is stored. A link is never made up: a job with none is
+        // quarantined with its raw payload, so it is visible and nothing points at a page that does not exist.
+        const postingUrl = httpUrl(item.jobUrl) ?? httpUrl(item.url) ?? httpUrl(item.guid);
+        const applyUrl = httpUrl(item.applicationUrl) ?? httpUrl(item.applicationUrlRaw) ?? httpUrl(item.applicationLink) ?? postingUrl;
+        if (!applyUrl) {
+          this.quarantineCandidate(rawItem, sourceExternalId, "Himalayas record has no usable posting or application link");
+          quarantined++;
+          continue;
+        }
         const title = textValue(item.title ?? item.jobTitle, "Unknown Title");
         const workplace = textValue(item.workplaceType ?? item.work_mode, "UNKNOWN");
         const candidate = {
@@ -94,7 +116,7 @@ export class HimalayasAdapter extends BaseSourceAdapter {
           workplace_type_raw: workplace,
           employment_type_raw: employmentType,
           compensation_raw: typeof item.salary === "string" ? item.salary : typeof item.compensation === "string" ? item.compensation : "UNKNOWN",
-          employer_posting_url: postingUrl,
+          employer_posting_url: postingUrl ?? applyUrl,
           application_url: applyUrl,
           canonical_apply_url: applyUrl,
           description_raw: textValue(item.description ?? item.jobDescription, title),

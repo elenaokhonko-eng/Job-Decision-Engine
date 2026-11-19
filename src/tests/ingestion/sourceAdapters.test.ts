@@ -254,6 +254,18 @@ describe("public source adapters", () => {
     expect(job.source_external_id).toMatch(/^[0-9a-f]{24}$/);
   });
 
+  it("never invents a link: a record with no usable link is quarantined, and an empty restriction list reads as remote anywhere", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ jobs: [
+      { companyName: "A", title: "No link", guid: "not-a-url", description: "Build data platforms." },
+      { companyName: "B", title: "Anywhere", guid: "https://himalayas.example/companies/b/jobs/anywhere", locationRestrictions: [], description: "Build data platforms." },
+    ] })));
+    const result = await new HimalayasAdapter("https://himalayas.example/api").fetchJobs();
+    expect(result.jobs).toHaveLength(1);
+    expect(result.quarantined).toBe(1);
+    expect(result.quarantinedCandidates?.[0]?.error).toContain("no usable posting or application link");
+    expect(result.jobs[0].location_raw).toBe("Remote, worldwide");
+  });
+
   it("treats an empty Jobicy response as a successful zero-result run", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ jobs: [] })));
     const result = await new JobicyAdapter("https://jobicy.example/api").fetchJobs();
