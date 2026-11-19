@@ -20,6 +20,7 @@ import { STAGE1_3_STAGING_IDENTITY_EXPECTATIONS } from "../src/db/stagingDatabas
 import { LINKEDIN_SAVED_SOURCE_NAME } from "../src/ingestion/linkedInSavedExport.js";
 import {
   buildMeasurementReport,
+  hasMixedScorePolicies,
   type GroupFigures,
   type MeasurementReport,
 } from "../src/reporting/rankingMeasurement.js";
@@ -74,6 +75,11 @@ export function formatReport(report: MeasurementReport): string {
   }
   lines.push(`  dropped because the job is also saved: ${report.nonFitCandidatesExcludedBecauseSaved}`);
   lines.push("");
+  lines.push("Score policy of the measured jobs (match_runs.policy_version):");
+  for (const [policy, count] of Object.entries(report.scorePolicyCounts)) lines.push(`  ${policy.padEnd(48)} ${count}`);
+  if (hasMixedScorePolicies(report)) lines.push("  WARNING: MIXED SCORE POLICIES. Scores are on different scales; the figures below are not comparable.");
+  lines.push(`Gate-rejected jobs sitting in Review or Priority: ${report.rejectedInReviewOrPriority}${report.rejectedInReviewOrPriority > 0 ? "   <-- FAIL: must be 0" : ""}`);
+  lines.push("");
   lines.push(...figuresBlock("ALL", report.all));
   lines.push("");
   lines.push(...figuresBlock("FIT 80%", report.fit));
@@ -108,6 +114,9 @@ async function main(): Promise<void> {
     const candidates = await loadCandidateJobs(client, workspace.workspaceId);
     const report = buildMeasurementReport(saved, candidates);
     console.log(asJson ? JSON.stringify(report, null, 2) : formatReport(report));
+    // Fail loudly: a rejected job in Review/Priority (exit 2), or a measurement over mixed score scales (exit 3).
+    if (report.rejectedInReviewOrPriority > 0) process.exitCode = 2;
+    else if (hasMixedScorePolicies(report) && !process.argv.includes("--allow-mixed-policies")) process.exitCode = 3;
   } finally {
     await client.query("ROLLBACK").catch(() => undefined);
     await client.end();

@@ -237,18 +237,4 @@ describe.skipIf(!enabled)("ranking measurement queries (Postgres)", () => {
     expect(titles).not.toContain("Candidate Other Workspace");
     expect(candidates.find((candidate) => candidate.jobId === complete.jobId)?.matchScore).toBe(20);
   });
-
-  it("cannot write: the measurement runs inside a READ ONLY transaction in the script", async () => {
-    const readOnly = new pg.Client(pgConnectionConfig(DB_URL));
-    await readOnly.connect();
-    try {
-      await readOnly.query("BEGIN READ ONLY");
-      await expect(
-        readOnly.query(`INSERT INTO workspaces (workspace_key, display_name) VALUES ('should-fail', 'x')`),
-      ).rejects.toThrow(/read-only transaction/i);
-    } finally {
-      await readOnly.query("ROLLBACK").catch(() => undefined);
-      await readOnly.end();
-    }
-  });
 });

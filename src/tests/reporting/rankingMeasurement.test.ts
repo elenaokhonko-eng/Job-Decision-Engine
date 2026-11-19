@@ -6,6 +6,7 @@ import {
   buildMeasurementReport,
   classifyNonFitTitle,
   classifySavedObservations,
+  hasMixedScorePolicies,
   median,
   savedInTopN,
   separation,
@@ -204,5 +205,33 @@ describe("buildMeasurementReport", () => {
     expect(report.all.top10).toEqual({ saved: 3, size: 6 });
     expect(report.fit.savedCount + report.holdout.savedCount).toBe(report.all.savedCount);
     expect(report.fit.nonFitCount + report.holdout.nonFitCount).toBe(report.all.nonFitCount);
+  });
+});
+
+describe("score policy and gate-rejection checks", () => {
+  const withPolicy = (row: MeasuredJobRow, policyVersion: string | null, gateDecision: string | null = "PASS"): MeasuredJobRow => ({ ...row, policyVersion, gateDecision });
+
+  it("counts measured jobs by score policy and flags a mixed set", () => {
+    const legacy = withPolicy(job("a", "Head of AI Governance", 80), "deterministic_v2");
+    const topk = withPolicy(job("b", "C++ Developer", 20, "TRACK"), "deterministic_v2+topk_capability_semantic_v1");
+    const report = buildMeasurementReport([savedObs(legacy)], [legacy, topk]);
+    expect(report.scorePolicyCounts).toEqual({ deterministic_v2: 1, "deterministic_v2+topk_capability_semantic_v1": 1 });
+    expect(hasMixedScorePolicies(report)).toBe(true);
+  });
+
+  it("is not mixed when every measured job has the same policy, and reports a missing policy as UNKNOWN", () => {
+    const a = withPolicy(job("a", "Head of AI Governance", 80), "deterministic_v2");
+    const b = withPolicy(job("b", "C++ Developer", 20, "TRACK"), "deterministic_v2");
+    expect(hasMixedScorePolicies(buildMeasurementReport([savedObs(a)], [a, b]))).toBe(false);
+    const unknown = buildMeasurementReport([savedObs(job("c", "Head of AI Governance", 80))], [job("c", "Head of AI Governance", 80)]);
+    expect(unknown.scorePolicyCounts).toEqual({ UNKNOWN: 1 });
+  });
+
+  it("counts a gate-rejected job that sits in Review or Priority, and nothing else", () => {
+    const rejectedInReview = withPolicy(job("r1", "C++ Developer", 20, "REVIEW"), "deterministic_v2", "HARD_REJECT");
+    const rejectedSkipped = withPolicy(job("r2", "iOS Engineer", 10, "SKIP"), "deterministic_v2", "HARD_REJECT");
+    const passedInReview = withPolicy(job("p1", "Head of AI Governance", 80, "REVIEW"), "deterministic_v2", "PASS");
+    const report = buildMeasurementReport([savedObs(passedInReview)], [passedInReview, rejectedInReview, rejectedSkipped]);
+    expect(report.rejectedInReviewOrPriority).toBe(1);
   });
 });

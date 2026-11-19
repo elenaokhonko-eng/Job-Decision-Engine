@@ -203,6 +203,10 @@ export interface MeasuredJobRow {
   readonly avgSimilarity: number | null;
   readonly outcome: string | null;
   readonly eligibility: string | null;
+  /** match_runs.policy_version of the score; scores from different policies are on different scales. */
+  readonly policyVersion?: string | null;
+  /** canonical_jobs.gate_decision; a gate-rejected job must never sit in Review or Priority. */
+  readonly gateDecision?: string | null;
 }
 
 export interface SavedObservationRow extends SavedObservationState {
@@ -245,6 +249,10 @@ export interface MeasurementReport {
   /** For saved jobs with no completed match: processing_state -> job count. */
   readonly noMatchByState: Record<string, number>;
   readonly nonFitCandidatesExcludedBecauseSaved: number;
+  /** Measured jobs (saved and candidates, distinct) by match_runs.policy_version. More than one key means mixed score scales. */
+  readonly scorePolicyCounts: Record<string, number>;
+  /** Measured jobs whose latest gate result is HARD_REJECT yet whose decision is Review or Priority. Must be 0. */
+  readonly rejectedInReviewOrPriority: number;
   readonly nonFitCategoryCounts: Record<NonFitCategory, number>;
   readonly nonFitTitleSamples: Record<NonFitCategory, string[]>;
   readonly all: GroupFigures;
@@ -356,6 +364,16 @@ export function buildMeasurementReport(
     nonFitJobs.push(candidate);
   }
 
+  const measuredById = new Map<string, MeasuredJobRow>();
+  for (const row of [...savedJobs, ...candidates]) measuredById.set(row.jobId, row);
+  const scorePolicyCounts: Record<string, number> = {};
+  let rejectedInReviewOrPriority = 0;
+  for (const row of measuredById.values()) {
+    const key = row.policyVersion ?? "UNKNOWN";
+    scorePolicyCounts[key] = (scorePolicyCounts[key] ?? 0) + 1;
+    if (row.gateDecision === "HARD_REJECT" && isReviewOrPriority(row.outcome, row.eligibility)) rejectedInReviewOrPriority += 1;
+  }
+
   const bySplit = (rows: readonly MeasuredJobRow[], split: Split) => rows.filter((row) => assignSplit(row.jobId) === split);
   return {
     observationTotal: savedObservations.length,
@@ -364,10 +382,17 @@ export function buildMeasurementReport(
     jobReasonCounts,
     noMatchByState,
     nonFitCandidatesExcludedBecauseSaved: excludedBecauseSaved,
+    scorePolicyCounts,
+    rejectedInReviewOrPriority,
     nonFitCategoryCounts,
     nonFitTitleSamples,
     all: figuresFor(savedJobs, nonFitJobs),
     fit: figuresFor(bySplit(savedJobs, "FIT"), bySplit(nonFitJobs, "FIT")),
     holdout: figuresFor(bySplit(savedJobs, "HOLDOUT"), bySplit(nonFitJobs, "HOLDOUT")),
   };
+}
+
+/** True when the measured scores come from more than one scoring policy (different scales: never compare them). */
+export function hasMixedScorePolicies(report: Pick<MeasurementReport, "scorePolicyCounts">): boolean {
+  return Object.keys(report.scorePolicyCounts).length > 1;
 }

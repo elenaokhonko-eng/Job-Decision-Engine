@@ -19,6 +19,8 @@ interface JobColumns {
   decision_id: string | null;
   outcome: string | null;
   eligibility: string | null;
+  policy_version: string | null;
+  gate_decision: string | null;
 }
 
 const toNumber = (value: string | number | null): number | null => {
@@ -38,6 +40,8 @@ function toJobRow(row: JobColumns): MeasuredJobRow | null {
     avgSimilarity: toNumber(row.avg_similarity),
     outcome: row.outcome,
     eligibility: row.eligibility,
+    policyVersion: row.policy_version,
+    gateDecision: row.gate_decision,
   };
 }
 
@@ -49,6 +53,8 @@ const JOB_COLUMNS_SQL = `
     mr.id AS match_run_id,
     mr.overall_match_score AS match_score,
     mr.coverage_score AS coverage_score,
+    mr.policy_version AS policy_version,
+    cj.gate_decision AS gate_decision,
     (SELECT AVG(m.match_score) FROM requirement_evidence_matches m WHERE m.match_run_id = mr.id) AS avg_similarity,
     dd.id AS decision_id,
     dd.recommendation_outcome AS outcome,
