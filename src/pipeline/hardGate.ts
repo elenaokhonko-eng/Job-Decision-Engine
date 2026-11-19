@@ -1207,13 +1207,13 @@ export async function runHardGates(
                deterministic_match_coverage = CASE WHEN $8::boolean THEN NULL ELSE deterministic_match_coverage END,
                latest_match_run_id = CASE WHEN $8::boolean THEN NULL ELSE latest_match_run_id END,
                latest_lane_decision_id = CASE WHEN $8::boolean THEN NULL ELSE latest_lane_decision_id END,
-               latest_deterministic_decision_id = CASE WHEN $8::boolean THEN NULL ELSE latest_deterministic_decision_id END,
-               recommendation_eligibility = CASE WHEN $8::boolean THEN NULL ELSE recommendation_eligibility END,
-               recommendation_outcome = CASE WHEN $8::boolean THEN NULL ELSE recommendation_outcome END,
-               recommendation_requirement_score = CASE WHEN $8::boolean THEN NULL ELSE recommendation_requirement_score END,
-               recommendation_coverage_score = CASE WHEN $8::boolean THEN NULL ELSE recommendation_coverage_score END,
-               recommendation_evidence_completeness = CASE WHEN $8::boolean THEN NULL ELSE recommendation_evidence_completeness END,
-               recommendation_decided_at = CASE WHEN $8::boolean THEN NULL ELSE recommendation_decided_at END,
+               latest_deterministic_decision_id = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE latest_deterministic_decision_id END,
+               recommendation_eligibility = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_eligibility END,
+               recommendation_outcome = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_outcome END,
+               recommendation_requirement_score = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_requirement_score END,
+               recommendation_coverage_score = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_coverage_score END,
+               recommendation_evidence_completeness = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_evidence_completeness END,
+               recommendation_decided_at = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_decided_at END,
                updated_at         = NOW()
            WHERE workspace_id = $6
              AND id = $7
