@@ -78,6 +78,33 @@ export function topKCapabilityScore(rows: readonly RankingEvidenceRow[], k: numb
   return { score: Number((mean * 100).toFixed(6)), contributing: top.length, considered };
 }
 
+/**
+ * The ranking-evidence row the matcher records for one requirement, or null for a check type that
+ * is not ranking evidence. The semantic score is only a real similarity when embeddings were used
+ * and a best profile fact exists; otherwise it is null (never a fabricated number).
+ */
+export function rankingEvidenceRow(input: {
+  requirementType: string;
+  importance: string;
+  matchType: 'EXACT' | 'SEMANTIC' | 'NO_MATCH' | 'UNKNOWN';
+  usedEmbeddings: boolean;
+  hasBestFact: boolean;
+  bestSemantic: number;
+}): RankingEvidenceRow | null {
+  if (!isRankingRequirementType(input.requirementType)) return null;
+  return {
+    requirementType: input.requirementType,
+    importance: input.importance,
+    matchType: input.matchType,
+    semanticScore: input.usedEmbeddings && input.hasBestFact ? input.bestSemantic : null,
+  };
+}
+
+/** The score the matcher stores as match_runs.overall_match_score under the active policy. */
+export function selectOverallScore(policy: ScoringPolicy, legacyScore: number, rows: readonly RankingEvidenceRow[]): number {
+  return policy === TOPK_SCORING_POLICY ? topKCapabilityScore(rows).score : legacyScore;
+}
+
 /** MUST capability requirements with no counted match (NO_MATCH or UNKNOWN). Shown beside a job. */
 export function unmatchedMustHaves(rows: readonly RankingEvidenceRow[]): { unmatched: number; total: number } {
   const must = rows.filter((row) => isRankingRequirementType(row.requirementType) && row.importance === 'MUST');

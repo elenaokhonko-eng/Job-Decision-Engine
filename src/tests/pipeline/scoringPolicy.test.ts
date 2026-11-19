@@ -6,6 +6,8 @@ import {
   isRankingRequirementType,
   LEGACY_SCORING_POLICY,
   matcherPolicyVersionFor,
+  rankingEvidenceRow,
+  selectOverallScore,
   TOPK_K,
   TOPK_SCORING_POLICY,
   topKCapabilityScore,
@@ -156,5 +158,49 @@ describe("unmatched must-haves are reported, not scored", () => {
     const matched = [0.8, 0.7, 0.7, 0.6, 0.6, 0.5, 0.5].map((value) => row(value));
     const withGaps = [...matched, ...Array.from({ length: 10 }, () => row(0.1, { matchType: "NO_MATCH" }))];
     expect(topKCapabilityScore(withGaps).score).toBe(topKCapabilityScore(matched).score);
+  });
+});
+
+describe("what the matcher stores under each policy", () => {
+  const rows: RankingEvidenceRow[] = [row(0.9), row(0.7), row(0.5)];
+
+  it("keeps the legacy score under the default (legacy) policy, whatever the evidence says", () => {
+    expect(selectOverallScore(LEGACY_SCORING_POLICY, 42, rows)).toBe(42);
+  });
+
+  it("stores the top-K score, not the legacy one, under the top-K policy", () => {
+    // mean(0.9, 0.7, 0.5) * 100 = 70, worked out by hand
+    expect(selectOverallScore(TOPK_SCORING_POLICY, 42, rows)).toBe(70);
+  });
+
+  it("scores 0 under top-K when no row has a semantic score, instead of falling back to the legacy score", () => {
+    expect(selectOverallScore(TOPK_SCORING_POLICY, 42, [row(null), row(null)])).toBe(0);
+  });
+
+  it("follows the SCORING_POLICY flag end to end: unset is legacy, the top-K name selects top-K", () => {
+    expect(selectOverallScore(activeScoringPolicy({} as NodeJS.ProcessEnv), 42, rows)).toBe(42);
+    expect(selectOverallScore(activeScoringPolicy({ SCORING_POLICY: TOPK_SCORING_POLICY } as NodeJS.ProcessEnv), 42, rows)).toBe(70);
+  });
+
+  it("treats a k below 1 as 1 (the single best requirement)", () => {
+    expect(topKCapabilityScore([row(0.9), row(0.1)], 0).score).toBe(90);
+  });
+});
+
+describe("the ranking evidence row the matcher records", () => {
+  const base = { requirementType: "SKILL", importance: "MUST", matchType: "SEMANTIC" as const, usedEmbeddings: true, hasBestFact: true, bestSemantic: 0.8 };
+
+  it("carries the real similarity when embeddings were used and a best fact exists", () => {
+    expect(rankingEvidenceRow(base)).toEqual({ requirementType: "SKILL", importance: "MUST", matchType: "SEMANTIC", semanticScore: 0.8 });
+  });
+
+  it("carries null, never a fabricated number, without embeddings or without a best fact", () => {
+    expect(rankingEvidenceRow({ ...base, usedEmbeddings: false })?.semanticScore).toBeNull();
+    expect(rankingEvidenceRow({ ...base, hasBestFact: false })?.semanticScore).toBeNull();
+  });
+
+  it("returns nothing for a check requirement type", () => {
+    expect(rankingEvidenceRow({ ...base, requirementType: "DEGREE" })).toBeNull();
+    expect(rankingEvidenceRow({ ...base, requirementType: "WORK_MODE" })).toBeNull();
   });
 });

@@ -24,9 +24,8 @@ import {
 } from "./profileMatchCurrency.js";
 import {
   activeScoringPolicy,
-  isRankingRequirementType,
-  TOPK_SCORING_POLICY,
-  topKCapabilityScore,
+  rankingEvidenceRow,
+  selectOverallScore,
   type RankingEvidenceRow,
 } from "./scoringPolicy.js";
 
@@ -1220,14 +1219,15 @@ export async function runDeterministicMatcher(
           const isCountedMatch =
             matchType === 'EXACT' ||
             (matchType === 'SEMANTIC' && evidenceStrength >= COUNTED_SEMANTIC_MIN_EVIDENCE_STRENGTH);
-          if (isRankingRequirementType(req.requirement_type)) {
-            rankingEvidence.push({
-              requirementType: req.requirement_type,
-              importance: req.importance,
-              matchType,
-              semanticScore: usedEmbeddings && bestFact ? bestSemantic : null,
-            });
-          }
+          const rankingRow = rankingEvidenceRow({
+            requirementType: req.requirement_type,
+            importance: req.importance,
+            matchType,
+            usedEmbeddings,
+            hasBestFact: Boolean(bestFact),
+            bestSemantic,
+          });
+          if (rankingRow) rankingEvidence.push(rankingRow);
           const weightedScore = isCountedMatch ? bestScore * evidenceStrength : 0;
           weightedScoreSum += weightedScore * weight;
           if (isCountedMatch) {
@@ -1293,7 +1293,7 @@ export async function runDeterministicMatcher(
 
         const reqCount = scoredRequirements.length;
         const legacyScore = weightSum > 0 ? (weightedScoreSum / weightSum) * 100 : 0;
-        const overallScore = activeScoringPolicy() === TOPK_SCORING_POLICY ? topKCapabilityScore(rankingEvidence).score : legacyScore;
+        const overallScore = selectOverallScore(activeScoringPolicy(), legacyScore, rankingEvidence);
         const coverageScore = reqCount > 0 ? (matchedCount / reqCount) * 100 : 0;
 
         await client.query(
