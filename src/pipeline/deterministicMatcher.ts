@@ -12,6 +12,11 @@ import {
 } from "../evidence/evidenceStrengthPolicy.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement } from "./requirementComparators.js";
 import { isRequirementOptional } from "./hardGate.js";
+import {
+  isCapabilityRequirementType,
+  MIN_CONFIRMED_REQUIREMENTS,
+  requirementOwnText,
+} from "../requirements/requirementKinds.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import {
   DETERMINISTIC_MATCHER_FINGERPRINT_VERSION,
@@ -120,6 +125,8 @@ function flattenStructuredValue(value: Record<string, unknown> | null): string {
 }
 
 function buildRequirementText(req: RequirementRow): string {
+  const ownText = requirementOwnText(req);
+  if (ownText) return ownText;
   return [
     req.requirement_type,
     req.requirement_text,
@@ -159,18 +166,29 @@ function requirementWeight(importance: RequirementRow["importance"]): number {
   return 0.4;
 }
 
-const NON_CAPABILITY_REQUIREMENT_TYPES = new Set([
-  "OFFICE_DAYS",
-  "WORK_MODE",
-  "EMPLOYMENT_TYPE",
-  "TRAVEL",
-  "WORK_AUTH",
-  "ON_CALL",
-  "SHIFT_WORK",
-]);
+export { isCapabilityRequirementType };
 
-export function isCapabilityRequirementType(requirementType: string): boolean {
-  return !NON_CAPABILITY_REQUIREMENT_TYPES.has(requirementType);
+export type ProfileMatchStatus = "NO_PROFILE_MATCH" | "UNKNOWN" | "POSITIVE_MATCH";
+
+/**
+ * The job-level profile match status.
+ *
+ * Too few confirmed requirements means the posting is too thin to judge: the job needs a fuller
+ * description. That is an unknown, never a "no match". A positive match or a failed mandatory
+ * qualification is still reported as it is.
+ */
+export function decideProfileMatchStatus(input: {
+  hasMandatoryQualFailure: boolean;
+  semanticEvidenceIncomplete: boolean;
+  matchedCount: number;
+  requirementCount: number;
+  usedEmbeddings: boolean;
+}): ProfileMatchStatus {
+  if (input.hasMandatoryQualFailure) return "NO_PROFILE_MATCH";
+  if (input.semanticEvidenceIncomplete) return "UNKNOWN";
+  if (input.matchedCount > 0) return "POSITIVE_MATCH";
+  if (input.requirementCount < MIN_CONFIRMED_REQUIREMENTS) return "UNKNOWN";
+  return input.usedEmbeddings ? "NO_PROFILE_MATCH" : "UNKNOWN";
 }
 
 export function computeProficiencyFactor(fact: FactRow | null, req: RequirementRow): number {
@@ -1285,16 +1303,13 @@ export async function runDeterministicMatcher(
         );
 
         const hasMandatoryQualFailure = mandatoryQualificationFailures.length > 0;
-        const profileMatchStatus =
-          hasMandatoryQualFailure
-            ? 'NO_PROFILE_MATCH'
-            : semanticEvidenceIncomplete
-              ? 'UNKNOWN'
-              : matchedCount > 0
-                ? 'POSITIVE_MATCH'
-                : usedEmbeddings
-                  ? 'NO_PROFILE_MATCH'
-                  : 'UNKNOWN';
+        const profileMatchStatus = decideProfileMatchStatus({
+          hasMandatoryQualFailure,
+          semanticEvidenceIncomplete,
+          matchedCount,
+          requirementCount: reqCount,
+          usedEmbeddings,
+        });
 
         const canonicalUpdate = await client.query(
           `UPDATE canonical_jobs
