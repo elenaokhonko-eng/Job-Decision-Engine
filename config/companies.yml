@@ -288,7 +288,7 @@ companies:
       - HEALTH_BIO_PHARMA
       - CORE_AI_DATA
     remote_policy: hybrid_allowed
-    enabled: false # 2026-11-08 probe: 43 jobs, none Singapore/APAC/remote
+    enabled: true # re-enabled 2026-11-19 at the owner's request; board has 37 jobs (London, Cambridge MA), none APAC, so the location gates will filter most
 
   - id: biofourmis
     name: Biofourmis
