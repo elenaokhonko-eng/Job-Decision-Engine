@@ -350,8 +350,11 @@ describe.skipIf(skipReal)("pipeline worker throughput (PostgreSQL)", () => {
     // successor enqueue). They pin the per-task round-trip count so per-row
     // loops cannot creep back in unnoticed.
     expect(Object.keys(perTask)).toHaveLength(8);
+    // PUBLISH_EMBEDDING writes each new requirement input with a fixed 3 statements, so its cost grows
+    // with the number of requirements per job. `deterministic_v4` stores a posting's real requirements
+    // (about a dozen) instead of two template rows, so its ceiling is higher than the other stages.
     for (const [stage, queries] of Object.entries(perTask)) {
-      expect(queries, stage).toBeLessThanOrEqual(stage === "PUBLISH_EMBEDDING" ? 65 : 45);
+      expect(queries, stage).toBeLessThanOrEqual(stage === "PUBLISH_EMBEDDING" ? 110 : 45);
     }
     console.info("Worker queries per claimed task:", JSON.stringify(perTask));
   }, 300_000);

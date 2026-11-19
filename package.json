@@ -52,6 +52,7 @@
     "pipeline:recover-zero-manual-review": "tsx scripts/recover_zero_manual_review.ts",
     "pipeline:status": "tsx scripts/report_pipeline_status.ts",
     "measure:ranking": "tsx scripts/measure_ranking.ts",
+    "preview:requirements": "tsx scripts/preview_requirement_extraction.ts",
     "rankings:materialize": "tsx scripts/materialize_application_rankings.ts",
     "source:enrich-incomplete": "tsx scripts/enrich_incomplete_descriptions.ts",
     "e2e:retest-gate": "tsx scripts/check_e2e_retest_gate.ts",

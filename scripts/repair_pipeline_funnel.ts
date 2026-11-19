@@ -7,6 +7,7 @@ import {
   classifyRepairCategory,
   type RepairCategory,
 } from "../src/pipeline/repairClassification.js";
+import { DETERMINISTIC_EXTRACTOR_VERSION } from "../src/requirements/deterministicExtractors.js";
 import { enqueuePipelineTask } from "../src/tasks/pipelineTasks.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import { aggregateVerificationQuestions } from "../src/services/verificationQuestionService.js";
@@ -405,7 +406,7 @@ export async function applyRepair(
           context,
           candidate,
           "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-          "deterministic_v3",
+          DETERMINISTIC_EXTRACTOR_VERSION,
           { ...basePayload, reprocess: true },
           "negated-lifestyle-reextract"
         );
@@ -485,7 +486,7 @@ export async function applyRepair(
           context,
           { ...candidate, job_version_id: candidate.complete_version_id },
           "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-          "deterministic_v3",
+          DETERMINISTIC_EXTRACTOR_VERSION,
           { ...basePayload, job_version_id: candidate.complete_version_id, reprocess: true },
           "truncated-masking"
         );

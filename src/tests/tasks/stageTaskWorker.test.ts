@@ -347,8 +347,8 @@ describe("stageTaskWorker", () => {
       "ROUTE_LANE:version-1:lane_router_v1"
     );
     expect(
-      buildPipelineTaskKey("EXTRACT_DETERMINISTIC_REQUIREMENTS", "version-1", "deterministic_v3", undefined, "repair")
-    ).toBe("EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1:deterministic_v3:repair");
+      buildPipelineTaskKey("EXTRACT_DETERMINISTIC_REQUIREMENTS", "version-1", "deterministic_v4", undefined, "repair")
+    ).toBe("EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1:deterministic_v4:repair");
     expect(
       buildPipelineTaskKey("MATCH_PROFILE_EVIDENCE", "version-1", "deterministic_matcher_v1", "profile-2", "repair")
     ).toBe("MATCH_PROFILE_EVIDENCE:version-1:deterministic_matcher_v1:repair:profile:profile-2");
@@ -651,7 +651,7 @@ describe("stageTaskWorker", () => {
         (call) =>
           call.sql.includes("INSERT INTO pipeline_tasks") &&
           call.params?.[1] === "EXTRACT_DETERMINISTIC_REQUIREMENTS" &&
-          call.params?.[2] === "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1:deterministic_v3"
+          call.params?.[2] === "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1:deterministic_v4"
       )
     ).toBe(true);
   });
@@ -662,9 +662,9 @@ describe("stageTaskWorker", () => {
     const extractionIntent = createTaskIntentV2({
       workspaceId: ctx.workspaceId,
       taskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-      stageVersion: "deterministic_v3",
+      stageVersion: "deterministic_v4",
       producer: "stageTaskWorker:EXTRACT_DETERMINISTIC_REQUIREMENTS",
-      requestId: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v3",
+      requestId: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v4",
       payload: extractionPayload,
     });
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
@@ -679,7 +679,7 @@ describe("stageTaskWorker", () => {
               id: "task-empty-requirements",
               workspace_id: ctx.workspaceId,
               task_type: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-              task_key: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v3",
+              task_key: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v4",
               payload: { ...extractionPayload, task_intent: extractionIntent },
               status: "RUNNING",
               available_at: new Date().toISOString(),
@@ -1934,7 +1934,7 @@ describe("stageTaskWorker", () => {
             id: "task-forced-extraction-old-version",
             workspace_id: ctx.workspaceId,
             task_type: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-            task_key: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-old:deterministic_v3:repair",
+            task_key: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-old:deterministic_v4:repair",
             payload: {
               canonical_job_id: "job-forced-extraction",
               job_version_id: "version-old",
@@ -1998,7 +1998,7 @@ describe("stageTaskWorker", () => {
     expect(deps.runRequirementsExtraction).not.toHaveBeenCalled();
     expect(insertedTasks).toHaveLength(1);
     expect(insertedTasks[0]?.params?.[2]).toBe(
-      "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-current:deterministic_v3:repair"
+      "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-current:deterministic_v4:repair"
     );
     expect(insertedTasks[0]?.params?.[3]).toMatchObject({
       canonical_job_id: "job-forced-extraction",

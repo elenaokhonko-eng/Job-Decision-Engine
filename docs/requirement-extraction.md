@@ -1,0 +1,47 @@
+# Requirement extraction (`deterministic_v4`)
+
+Before `deterministic_v4` the extractor wrote at most one `DOMAIN` and one `FUNCTION`
+requirement per job. Their text was a fixed template sentence ("Role includes a target
+technical domain requirement."), so every job looked alike to the matcher and the embedding
+model, and the only job-specific text was a two-word quote such as "AI".
+
+`deterministic_v4` stores what the posting actually says.
+
+## What is extracted
+
+1. **Structure.** `src/requirements/postingStructure.ts` splits a posting into sections
+   (responsibilities, requirements, nice-to-have, with intro and company/benefits text
+   skipped) and items. Stored postings are usually flattened into one paragraph, so it also
+   reads inline headings ("Requirements:", "What We Are Looking For"), headings glued to the
+   next sentence, and bullet glyphs, always with offsets into the original text.
+2. **Items.** `src/requirements/postingItemRequirements.ts` turns each item into a `CUSTOM`
+   requirement. `requirement_text` and `quote_text` are the posting's exact words. Each item
+   is classed as `SKILL`, `TOOL`, `RESPONSIBILITY`, `YEARS`, `DEGREE` or `CERTIFICATE`
+   (`structured_value.item_class`), carries its section, and records alternatives ("A, B or C"
+   options, "or equivalent experience", "or related field"). Nice-to-have items are
+   `NICE_TO_HAVE`; "is valued"-style wording is `PREFERRED`.
+3. **Rules keep the structured facts.** Years, degrees and credentials are still extracted by
+   the existing rules and are not repeated as items. Workability lines (on-call, visa,
+   hybrid, benefits) and negated lines never become capability items.
+4. **Thin postings.** Fewer than 3 confirmed capability requirements is recorded as
+   `needs_description` in the extraction run payload. The matcher reports the job's profile
+   match as `UNKNOWN`, never `NO_PROFILE_MATCH` (unless a mandatory qualification failed).
+5. **AI only when rules fall short.** The quoted extractor is asked only when the rules found
+   fewer than 5 items. Quotes must be found in the posting (loose on spacing and quote marks
+   only); verified quotes are kept and the rest dropped. The AI never sets a score. A job that
+   skipped the AI step gets a completed `LLM_QUOTED` audit row (`RULES` / `AI_NOT_NEEDED`) so
+   it is not re-queued.
+6. **Matching text.** A posting item is embedded and matched as its own sentence: no type
+   label, quote prefix or JSON. Older requirements keep their previous text.
+
+## Rolling out
+
+The extractor version is a single constant, `DETERMINISTIC_EXTRACTOR_VERSION`. Changing it
+makes task keys and requirement-set identities new, so existing jobs are re-extracted by the
+normal queue; nothing is deleted. Re-extract and re-match in a replay database first and judge
+the result with `npm run measure:ranking`.
+
+## Preview on real postings (read-only)
+
+`npm run preview:requirements` runs the extractor in memory over the stored descriptions of
+the saved and non-fit jobs and prints counts only: no writes, no AI calls, no posting text.
