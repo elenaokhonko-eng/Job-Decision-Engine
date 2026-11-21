@@ -136,16 +136,16 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
 
     it("does not hard-reject technical roles without an AI/data signal (Axis 2 is not a gate)", () => {
       const result = applyGlobalGates({
-        id: "network-engineer-out-of-domain",
-        title: "Network Engineer",
-        company_name: "Telecom Systems Co",
-        raw_description: "Configure enterprise routing, switching, firewalls, and network operations.",
+        id: "billing-engineer-out-of-domain",
+        title: "Backend Software Engineer",
+        company_name: "Billing Systems Co",
+        raw_description: "Build and maintain enterprise billing services in Java and SQL.",
         location: "Singapore",
         workplace_type: "REMOTE",
         employment_type: "PERMANENT",
       } as any);
 
-      expect(isTechnicalRole("Network Engineer", "Configure enterprise routing, switching, firewalls, and network operations.").isTechnical).toBe(true);
+      expect(isTechnicalRole("Backend Software Engineer", "Build and maintain enterprise billing services in Java and SQL.").isTechnical).toBe(true);
       expect(result.status).toBe("PASS");
       expect(result.rejection_codes).not.toContain("GATE_NOT_AI_DATA");
     });
