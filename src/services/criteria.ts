@@ -84,6 +84,18 @@ export const NON_TECHNICAL_FUNCTION_TITLES: RegExp[] = [
   /\bpayroll (?:operations|specialists?|administrators?|coordinators?|officers?|managers?|leads?|associates?|analysts?|accountants?)\b/i,
   /\bsupport specialists?\b/i,
   /\b(?:graphic|visual|ux|ui|brand|motion)(?:\s*[/&,]\s*(?:graphic|visual|ux|ui|brand|motion))*\s+designers?\b/i,
+  // Owner policy (2026-11-22, blind review): the owner rejects these families outright.
+  // Hands-on infrastructure, DevOps/SRE and security roles. Program, project, risk, governance,
+  // compliance, audit and policy titles are not infrastructure roles ("Lead TPM, Infrastructure
+  // Platforms", "Tech & Cyber Risk Management"). "Platform/Cloud Infrastructure Architect" stay allowed.
+  /^(?!.*\b(?:program|programme|project|risk|governance|compliance|audit|policy)\b).*\b(?:devops|dev ops|site reliability|sre|infrastructure\s+(?:engineers?|engineering|security|operations)|network\s+(?:engineers?|security)|systems?\s+administrators?|sysadmin|reliability engineers?|(?:application |product |cloud |information |it |cyber)?security\s+(?:engineers?|engineering|architects?|operations|analysts?))\b/i,
+  // Support engineering (ticket-based customer or technical support).
+  // "Support Engineer, Data Platform" (a data platform role) stays allowed.
+  /\b(?:(?:technical|cloud|application|it|desktop|production|customer|software|product|linux|database|network)\s+support\s+(?:engineers?|analysts?|technicians?)|support\s+engineers?(?!\s*[,\-–(]\s*(?:data|ml|ai|machine learning)\b)|help\s?desk)\b/i,
+  // Testing and QA roles.
+  /\b(?:qa|quality\s+assurance|sdet|(?:test|testing)\s+(?:engineers?|analysts?|automation)|software\s+(?:development\s+)?engineers?\s+in\s+test|kernel\s+test)\b/i,
+  // Industrial and physical engineering domains.
+  /\b(?:(?:mechanical|civil|chemical|structural|aerospace|automotive|manufacturing|electrical|hardware)\s+(?:\w+\s+)?(?:engineers?|engineering|designers?)|crashworthiness|crash\s+(?:safety|simulation|analysis))\b/i,
 ];
 
 /** The matched non-technical function title phrase, or null. */
