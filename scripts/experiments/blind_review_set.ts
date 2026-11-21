@@ -1,11 +1,12 @@
 /**
  * Blind review set (read-only, replay branch): 30 jobs the user has NOT saved, ranked by the new
- * top-K score. 15 are drawn from the top of the ranking and 15 from the middle, shuffled, with no
+ * top-K score. Only live jobs that passed the hard gate and have a confirmed posting link are eligible; jobs
+ * already labelled in an earlier sheet (--exclude=<key.json>, repeatable) are left out. 15 are drawn from the top of the ranking and 15 from the middle, shuffled, with no
  * scores or ranks shown. The sheet goes to the user; the key stays in a separate file so the
  * labels can be scored afterwards.
  *
  *   SCORING_POLICY is not needed: this reads the scores the replay already wrote.
- *   npx tsx scripts/experiments/blind_review_set.ts <sheet.md> <key.json>
+ *   npx tsx scripts/experiments/blind_review_set.ts <sheet.md> <key.json> [--seed=<text>] [--exclude=<earlier key.json> ...]
  */
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -18,11 +19,19 @@ import { resolveWorkspaceContext } from '../../src/workspace/context.js';
 
 dotenv.config({ path: '.env.local' });
 
-const [sheetPath, keyPath] = process.argv.slice(2);
-if (!sheetPath || !keyPath) throw new Error('usage: blind_review_set.ts <sheet.md> <key.json>');
+const args = process.argv.slice(2);
+const [sheetPath, keyPath] = args.filter((a) => !a.startsWith('--'));
+if (!sheetPath || !keyPath) throw new Error('usage: blind_review_set.ts <sheet.md> <key.json> [--seed=<text>] [--exclude=<key.json> ...]');
+const flag = (name: string) => args.filter((a) => a.startsWith(`--${name}=`)).map((a) => a.slice(name.length + 3));
 
 const TOP_POOL = 30; // draw 15 from the best 30
-const SEED = 'blind-review-2026-11-18';
+const SEED = flag('seed')[0] ?? 'blind-review-2026-11-20';
+// Jobs the user has already labelled in an earlier sheet must not come back.
+const EXCLUDED_IDS: string[] = flag('exclude').flatMap((file) => {
+  const key = JSON.parse(fs.readFileSync(file, 'utf8')) as { items?: Array<{ id: string }> };
+  if (!key.items?.length) throw new Error(`${file} has no items to exclude`);
+  return key.items.map((item) => item.id);
+});
 const rank = (id: string) => createHash('sha256').update(`${SEED}:${id}`).digest().readUInt32BE(0);
 
 const url = process.env.REPLAY_DATABASE_URL!.trim();
@@ -34,18 +43,26 @@ try {
   requireApprovedReplayTarget(url, { databaseName: id.rows[0].d, branchId: id.rows[0].b }, process.env.REPLAY_BRANCH_ID);
   const ws = await resolveWorkspaceContext(client as never);
   const { rows } = await client.query(
-    `SELECT cj.id, cj.company_name, cj.normalized_title AS title, cj.location_summary, cj.canonical_url, cj.deterministic_match_score::float AS score,
+    `SELECT cj.id, cj.company_name, cj.normalized_title AS title, COALESCE(NULLIF(BTRIM(cj.location), ''), 'not stated') AS location, cj.canonical_url, cj.deterministic_match_score::float AS score,
             (SELECT COUNT(*) FROM requirement_evidence_matches m JOIN job_requirements r ON r.id = m.requirement_id
               WHERE m.match_run_id = cj.latest_match_run_id AND r.importance = 'MUST' AND m.match_type IN ('NO_MATCH','UNKNOWN')
                 AND r.requirement_type NOT IN ('EXPERIENCE_YEARS','DEGREE','CREDENTIAL','WORK_AUTH','OFFICE_DAYS','WORK_MODE','EMPLOYMENT_TYPE','TRAVEL','ON_CALL','SHIFT_WORK'))::int AS unmatched_must
      FROM canonical_jobs cj
      JOIN match_runs mr ON mr.id = cj.latest_match_run_id AND mr.status = 'COMPLETED' AND mr.policy_version LIKE '%topk_capability_semantic_v1'
      WHERE cj.workspace_id = $1 AND cj.archived_at IS NULL AND cj.deterministic_match_score IS NOT NULL
+       AND cj.gate_decision = 'PASS' AND cj.is_test_fixture IS NOT TRUE
+       AND COALESCE(cj.processing_state, cj.processing_status) <> 'MANUALLY_REMOVED'
+       AND cj.canonical_url ~* '^https?://'
+       AND cj.canonical_url !~* '^https?://himalayas\\.app/jobs/([0-9a-f]{16,}|api)'
+       AND NOT (cj.id = ANY($3::uuid[]))
        AND NOT EXISTS (SELECT 1 FROM raw_job_observations o JOIN job_versions v ON v.id = o.job_version_id
                        WHERE o.workspace_id = cj.workspace_id AND o.source_name = $2 AND v.canonical_job_id = cj.id)
      ORDER BY cj.deterministic_match_score DESC, cj.id`,
-    [ws.workspaceId, LINKEDIN_SAVED_SOURCE_NAME],
+    [ws.workspaceId, LINKEDIN_SAVED_SOURCE_NAME, EXCLUDED_IDS],
   );
+  // Defence in depth: nothing the filters above should have removed may be in the pool.
+  const bad = rows.filter((r) => !/^https?:\/\//i.test(String(r.canonical_url ?? '')) || EXCLUDED_IDS.includes(r.id));
+  if (bad.length > 0) throw new Error(`${bad.length} ineligible job(s) in the pool`);
   if (rows.length < 100) throw new Error(`only ${rows.length} unsaved jobs scored under the new policy; expected the replay to have written them`);
 
   const lo = Math.floor(rows.length * 0.4);
@@ -62,7 +79,7 @@ try {
     '',
     '| # | Title | Company | Location | Link | Apply? (Y/N) |',
     '|---|---|---|---|---|---|',
-    ...picked.map((j, i) => `| ${i + 1} | ${String(j.title).replace(/\|/g, '/')} | ${String(j.company_name ?? '').replace(/\|/g, '/')} | ${String(j.location_summary ?? '').replace(/\|/g, '/')} | ${j.canonical_url ?? ''} |  |`),
+    ...picked.map((j, i) => `| ${i + 1} | ${String(j.title).replace(/\|/g, '/')} | ${String(j.company_name ?? '').replace(/\|/g, '/')} | ${String(j.location ?? '').replace(/\|/g, '/')} | ${j.canonical_url ?? ''} |  |`),
     '',
   ].join('\n');
   fs.writeFileSync(sheetPath, sheet, 'utf8');
@@ -71,7 +88,7 @@ try {
     JSON.stringify({ pool: rows.length, seed: SEED, items: picked.map((j, i) => ({ n: i + 1, id: j.id, group: j.group, score: j.score, unmatchedMust: j.unmatched_must, title: j.title })) }, null, 2),
     'utf8',
   );
-  console.log(`unsaved scored pool: ${rows.length}; wrote ${picked.length} items (${top.length} top, ${middle.length} middle)`);
+  console.log(`eligible pool (live, gate-passed, linked, unsaved, not previously labelled; ${EXCLUDED_IDS.length} excluded ids): ${rows.length}; wrote ${picked.length} items (${top.length} top, ${middle.length} middle)`);
 } finally {
   await client.query('ROLLBACK');
   await client.end();
