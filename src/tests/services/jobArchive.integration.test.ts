@@ -13,6 +13,7 @@ import {
   listArchivedJobsWithOperationalStatus,
   restoreArchivedJob,
   archiveJobsAsPostingNotConfirmable,
+  findSnippetOnlyArchiveCandidates,
 } from "../../services/jobArchive.js";
 import { validatePersistedDocumentCurrentness } from "../../documents/provenanceCurrentness.js";
 import { pgConnectionConfig, isLocalPostgresConnectionString } from "../../db/pgSsl.js";
@@ -1208,5 +1209,122 @@ describe.skipIf(skipReal)("daily job archiving PostgreSQL integration", () => {
     } finally {
       client.release();
     }
+  });
+
+  describe("snippet-only alert jobs that were never fetched", () => {
+    const snippet = "Senior data engineer. Singapore. Apply now.";
+
+    async function createAlertSnippetJob(
+      context: WorkspaceContext,
+      options: { readonly lastSeen?: string; readonly fetchTask?: boolean; readonly extraSource?: string; readonly complete?: boolean } = {},
+    ): Promise<{ job: JobFixture; observationId: string }> {
+      const job = await createJobFixture(context, { observationAt: null });
+      await pool.query(
+        `UPDATE job_versions SET description_text = $2 WHERE id = $1`,
+        [job.jobVersionId, options.complete ? longDescription : snippet],
+      );
+      await pool.query(
+        `UPDATE canonical_jobs SET description_quality_status = $2, gate_decision = 'PASS' WHERE id = $1`,
+        [job.canonicalJobId, options.complete ? "COMPLETE" : "INCOMPLETE"],
+      );
+      const observationId = randomUUID();
+      await pool.query(
+        `INSERT INTO raw_job_observations (
+           id, workspace_id, source_name, source_external_id, source_url, retrieved_at,
+           company_name, title, description_raw, raw_payload, raw_payload_hash, processing_status, job_version_id
+         ) VALUES ($1, $2, 'GMAIL_ALERT', $3, $4, $5, 'Alert Co', $6, $7, '{}'::jsonb, $8, 'PROCESSED', $9)`,
+        [
+          observationId, job.workspaceId, `alert-${job.canonicalJobId}`, `https://www.linkedin.com/jobs/view/${job.canonicalJobId}`,
+          options.lastSeen ?? "2026-10-01T00:00:00.000Z", job.title, snippet, `raw-alert-${job.canonicalJobId}`, job.jobVersionId,
+        ],
+      );
+      if (options.extraSource) await addSourceObservation(job, options.extraSource);
+      if (options.fetchTask) {
+        await pool.query(
+          `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status)
+           VALUES ($1, 'FETCH_JOB_CONTENT', $2, $3::jsonb, 'COMPLETED')`,
+          [job.workspaceId, `FETCH_JOB_CONTENT:${observationId}:posting_fetch_v1:test`, JSON.stringify({ observation_id: observationId })],
+        );
+      }
+      return { job, observationId };
+    }
+
+    async function candidateIds(context: WorkspaceContext, minAgeDays = 7): Promise<Map<string, boolean>> {
+      const client = await pool.connect();
+      try {
+        const rows = await findSnippetOnlyArchiveCandidates(client, { workspaceId: context.workspaceId, minAgeDays });
+        return new Map(rows.map((row) => [row.canonicalJobId, row.protected]));
+      } finally {
+        client.release();
+      }
+    }
+
+    it("selects only old, unfetched, alert-only snippets; archives them reversibly; leaves everything else", async () => {
+      const context = await createWorkspace("snippet-only");
+      const snippetOnly = await createAlertSnippetJob(context);
+      const fetched = await createAlertSnippetJob(context, { fetchTask: true });
+      const fullText = await createAlertSnippetJob(context, { complete: true });
+      const saved = await createAlertSnippetJob(context, { extraSource: "LINKEDIN_SAVED" });
+      const recent = await createAlertSnippetJob(context, { lastSeen: new Date().toISOString() });
+      const removed = await createAlertSnippetJob(context);
+      await pool.query(
+        `UPDATE canonical_jobs SET processing_state = 'MANUALLY_REMOVED', processing_status = 'MANUALLY_REMOVED' WHERE id = $1`,
+        [removed.job.canonicalJobId],
+      );
+
+      const found = await candidateIds(context);
+      expect([...found.keys()]).toEqual([snippetOnly.job.canonicalJobId]);
+      expect(found.get(snippetOnly.job.canonicalJobId)).toBe(false);
+      for (const kept of [fetched, fullText, saved, recent, removed]) expect(found.has(kept.job.canonicalJobId)).toBe(false);
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const archived = await archiveJobsAsPostingNotConfirmable(client, {
+          workspaceId: context.workspaceId,
+          canonicalJobIds: [...found.keys()],
+          actor: "script:test",
+          details: { rule: "snippet-only-never-fetched" },
+        });
+        await client.query("COMMIT");
+        expect(archived).toEqual([snippetOnly.job.canonicalJobId]);
+        const state = await readFullArchiveState(snippetOnly.job);
+        expect(state.archived_at).not.toBeNull();
+        expect(state.archive_reason).toBe("POSTING_NOT_CONFIRMABLE");
+        // Nothing else was touched, and nothing was deleted.
+        for (const kept of [fetched, fullText, saved, recent, removed]) {
+          expect((await readFullArchiveState(kept.job)).archived_at).toBeNull();
+        }
+        expect(Number((await pool.query(`SELECT COUNT(*)::int AS n FROM canonical_jobs WHERE workspace_id = $1`, [context.workspaceId])).rows[0].n)).toBe(6);
+        // A second pass finds nothing left.
+        expect((await candidateIds(context)).size).toBe(0);
+
+        await client.query("BEGIN");
+        const restored = await restoreArchivedJob(client, {
+          workspaceId: context.workspaceId,
+          canonicalJobId: snippetOnly.job.canonicalJobId,
+          actor: `user:${context.userId}`,
+          reason: "Real posting found.",
+          context,
+        });
+        await client.query("COMMIT");
+        expect(restored).toMatchObject({ restored: true });
+        expect((await readFullArchiveState(snippetOnly.job)).archived_at).toBeNull();
+      } finally {
+        client.release();
+      }
+    });
+
+    it("flags a job with an active application as protected so the caller skips it", async () => {
+      const context = await createWorkspace("snippet-protected");
+      const { job } = await createAlertSnippetJob(context);
+      await pool.query(
+        `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status)
+         VALUES ($1, $2, $3, $4, 'APPLIED')`,
+        [context.workspaceId, context.userId, job.canonicalJobId, job.jobVersionId],
+      );
+      const found = await candidateIds(context);
+      expect(found.get(job.canonicalJobId)).toBe(true);
+    });
   });
 });
