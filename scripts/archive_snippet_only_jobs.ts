@@ -54,6 +54,7 @@ try {
   if (target === 'replay') requireApprovedReplayTarget(url, { databaseName: id.rows[0].d, branchId: id.rows[0].b }, process.env.REPLAY_BRANCH_ID);
   console.log(`target=${target} database=${id.rows[0].d} branch=${id.rows[0].b} mode=${apply ? 'APPLY' : 'DRY RUN'} min_age_days=${minAgeDays}`);
   const context = await resolveWorkspaceContext(client as unknown as pg.PoolClient);
+  console.log(`workspace=${context.workspaceId}`);
   const candidates = await findSnippetOnlyArchiveCandidates(client as unknown as pg.PoolClient, { workspaceId: context.workspaceId, minAgeDays });
   await client.query('ROLLBACK');
 
