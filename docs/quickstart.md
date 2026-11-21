@@ -86,12 +86,11 @@ ALLOW_DOCUMENTS=true
 
 ### 3. Initialize Database & Run Migrations
 ```bash
-# Run schema migrations (001 through 046)
-npm run migrate
-
-# Initialize embedding spaces and model routes
-npm run embeddings:registry:init
+# Run the full migration chain in migrations/
+npm run db:init
 ```
+
+Embedding spaces and model routes are created on first use; there is no separate command for them.
 
 ### 4. Run the Desktop Application
 ```bash
