@@ -20,6 +20,23 @@ describe('extractDeterministicRequirements', () => {
       expect(extract(text).some((r) => r.requirement_type === 'DEGREE')).toBe(true);
     });
 
+    it('keeps the whole sentence as the degree quote instead of cutting it after one word', () => {
+      const description = 'We are growing the team. A PhD with experience in applied machine learning, or equivalent practical experience, is required. Benefits include lunch.';
+      const degree = extract(description).find((r) => r.requirement_type === 'DEGREE');
+      expect(degree).toBeDefined();
+      expect(degree?.quote_text).toBe('A PhD with experience in applied machine learning, or equivalent practical experience, is required.');
+      expect(description.slice(degree!.quote_start_offset!, degree!.quote_end_offset!)).toBe(degree!.quote_text);
+      expect(degree?.structured_value).toMatchObject({ accepts_equivalent_experience: true });
+    });
+
+    it('widens a bullet to the bullet and leaves a long match as it was', () => {
+      const bullet = extract('Requirements\n- PhD in statistics\n- Strong Python').find((r) => r.requirement_type === 'DEGREE');
+      expect(bullet?.quote_text).toBe('PhD in statistics');
+      const longSentence = 'x'.repeat(400) + ' PhD ' + 'y'.repeat(10) + '.';
+      const long = extract(longSentence).find((r) => r.requirement_type === 'DEGREE');
+      expect(long?.quote_text?.length ?? 0).toBeLessThanOrEqual(300);
+    });
+
     it.each([
       ['Fellow of the Society of Actuaries', 'You are a Fellow of the Society of Actuaries (FSA) and a Member of the American Academy of Actuaries.'],
       ['FSA', 'Credential: FSA required for this role.'],

@@ -64,7 +64,14 @@ export function calculateProfessionalExperienceYears(
 }
 
 function textForRequirement(requirement: ComparableRequirement): string {
-  return [requirement.requirement_text, requirement.quote_text || "", JSON.stringify(requirement.structured_value || {})]
+  // A degree's quote is the whole sentence it was found in (so a reader sees "or equivalent",
+  // "preferred" and so on). The level and subject are read from degree_reference, the matched words,
+  // so a second degree named elsewhere in that sentence cannot change the level.
+  const quote = requirement.requirement_type === "DEGREE"
+    && typeof requirement.structured_value?.degree_reference === "string"
+    ? ""
+    : requirement.quote_text || "";
+  return [requirement.requirement_text, quote, JSON.stringify(requirement.structured_value || {})]
     .join(" ")
     .toLowerCase();
 }
@@ -730,6 +737,26 @@ export function compareStructuredRequirement(
       return {
         status: "UNKNOWN",
         rationale: `Profile degree level is present, but the required ${requiredSubject} subject cannot be verified.`,
+        fact: degreeEvidence,
+      };
+    }
+    // The posting itself offers a way around the degree ("or equivalent experience", "or a related
+    // field"). A shortfall against the degree is then not established as a block: it needs checking.
+    if (degreeEvidence && requirement.structured_value?.accepts_equivalent_experience === true) {
+      return {
+        status: "UNKNOWN",
+        rationale: "The posting accepts equivalent experience in place of the stated degree, so the degree shortfall needs verification rather than rejecting the job.",
+        fact: degreeEvidence,
+      };
+    }
+    const levelMet = facts.some((fact) => {
+      const level = degreeLevel(textForFact(fact));
+      return level !== null && level >= requiredLevel;
+    });
+    if (degreeEvidence && levelMet && requirement.structured_value?.accepts_related_field === true) {
+      return {
+        status: "UNKNOWN",
+        rationale: "The posting accepts a related field and the profile meets the degree level, so the subject needs verification rather than rejecting the job.",
         fact: degreeEvidence,
       };
     }

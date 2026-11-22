@@ -393,6 +393,26 @@ function extractExperienceRequirements(
   return { requirements, nextSequence: sequence };
 }
 
+const DEGREE_QUOTE_MAX_LENGTH = 300;
+
+/**
+ * A short degree match ("PhD") is padded by one word to reach the minimum quote length, which cut a
+ * quote off mid-sentence ("PhD with"). The reader needs the whole statement: whether it says "or
+ * equivalent experience", "preferred", a subject. So the quote is the enclosing sentence or bullet
+ * (capped), taken verbatim from the description so its offsets still point at the posting text.
+ */
+function widenDegreeQuote(description: string, degree: MatchInfo): MatchInfo {
+  const clause = findEnclosingClause(description, degree.quote_start_offset, degree.quote_end_offset);
+  const clauseMatch = trimMatch(description, clause.startOffset, clause.endOffset);
+  if (!clauseMatch) return degree;
+  // Drop a leading bullet glyph or list number so the quote starts at the words.
+  const glyph = clauseMatch.quote_text.match(/^(?:[-*•–]|\d+[.)])\s+/)?.[0].length ?? 0;
+  const wide = glyph > 0 ? trimMatch(description, clauseMatch.quote_start_offset + glyph, clauseMatch.quote_end_offset) : clauseMatch;
+  if (!wide || wide.quote_text.length > DEGREE_QUOTE_MAX_LENGTH) return degree;
+  if (wide.quote_start_offset > degree.quote_start_offset || wide.quote_end_offset < degree.quote_end_offset) return degree;
+  return wide;
+}
+
 function degreeAlternatives(description: string, degree: MatchInfo): Record<string, unknown> {
   const clause = findEnclosingClause(description, degree.quote_start_offset, degree.quote_end_offset);
   const alternatives = detectAlternatives(clause.clauseText);
@@ -483,13 +503,14 @@ export function extractDeterministicRequirements(
     /\bdegree\s+in\s+[^.;\n]{1,100}/i,
   ]);
   if (degree) {
+    const degreeQuote = widenDegreeQuote(description, degree);
     requirements.push(
       buildRequirement(
         input,
         sequence++,
         'DEGREE',
         'Role requires a degree qualification.',
-        degree,
+        degreeQuote,
         {
           degree_reference: degree.quote_text,
           ...degreeAlternatives(description, degree),
