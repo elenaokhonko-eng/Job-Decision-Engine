@@ -179,8 +179,7 @@ describe('extractDeterministicRequirements', () => {
         'Requirements',
         '- Strong SQL and Python',
         '- Experience building data pipelines in production',
-      ].join('
-');
+      ].join('\n');
       expect(importanceOf(posting, 'Lead delivery')).toBe('PREFERRED');
       expect(importanceOf(posting, 'Partner with product')).toBe('PREFERRED');
       expect(importanceOf(posting, 'Strong SQL')).toBe('MUST');
@@ -188,8 +187,7 @@ describe('extractDeterministicRequirements', () => {
     });
 
     it('keeps a duty MUST when the item itself says it is required', () => {
-      const posting = ['Responsibilities', '- You must be able to lead incident response for the platform'].join('
-');
+      const posting = ['Responsibilities', '- You must be able to lead incident response for the platform'].join('\n');
       expect(importanceOf(posting, 'You must be able')).toBe('MUST');
     });
 
@@ -206,8 +204,7 @@ describe('extractDeterministicRequirements', () => {
     });
 
     it('leaves years, degree and credential rules and the nice-to-have section as they were', () => {
-      const posting = ['Requirements', '- 8+ years of professional experience', "- Bachelor's degree", '', 'Nice to have', '- Familiarity with Snowflake'].join('
-');
+      const posting = ['Requirements', '- 8+ years of professional experience', "- Bachelor's degree", '', 'Nice to have', '- Familiarity with Snowflake'].join('\n');
       const requirements = extractDeterministicRequirements({ ...IDS, description_text: posting }).requirements;
       expect(requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS')?.importance).toBe('MUST');
       expect(requirements.find((r) => r.requirement_type === 'DEGREE')?.importance).toBe('MUST');
@@ -215,8 +212,7 @@ describe('extractDeterministicRequirements', () => {
     });
 
     it('still keeps duties in the requirement set so the matcher can score them', () => {
-      const posting = ['Responsibilities', '- Lead delivery of the enterprise data platform roadmap'].join('
-');
+      const posting = ['Responsibilities', '- Lead delivery of the enterprise data platform roadmap'].join('\n');
       const lead = extractDeterministicRequirements({ ...IDS, description_text: posting })
         .requirements.find((r) => r.requirement_text.startsWith('Lead delivery'));
       expect(lead).toBeDefined();
@@ -262,7 +258,9 @@ describe('extractDeterministicRequirements', () => {
 
     expect(byPrefix('You will lead')?.structured_value).toMatchObject({ item_class: 'RESPONSIBILITY' });
     expect(byPrefix('Experience with financial regulation')?.importance).toBe('PREFERRED');
-    expect(byPrefix('Strong stakeholder')?.importance).toBe('MUST');
+    // No headings: nothing says this is required, so it is not mandatory (deterministic_v5).
+    expect(byPrefix('Strong stakeholder')?.importance).toBe('PREFERRED');
+    expect(byPrefix('You will lead')?.importance).toBe('PREFERRED');
     expect(items.some((r) => /wellbeing/.test(r.requirement_text))).toBe(false);
   });
 

@@ -110,7 +110,7 @@ const PREFERENCE_REGEX = /\b(preferred|preference|preferable|nice\s+to\s+have|bo
 const NICE_TO_HAVE_REGEX = /\b(nice\s+to\s+have|bonus|optional)\b/i;
 const MANDATORY_OVERRIDE_REGEX = /\b(required|mandatory|must\s+have|essential|strictly\s+required)\b/i;
 /** An item that says, in its own words, that it is required. */
-const ITEM_MANDATORY_WORDING_REGEX = /(required|mandatory|must|essential|minimum)/i;
+const ITEM_MANDATORY_WORDING_REGEX = /\b(required|mandatory|must|essential|minimum)\b/i;
 export function hasMandatoryWording(text: string): boolean {
   return ITEM_MANDATORY_WORDING_REGEX.test(text);
 }
