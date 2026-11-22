@@ -119,8 +119,19 @@ def test_review_queries_read_only_scoped_read_models(name):
         "v_canonical_shortlist_scoped",
         "v_application_readiness_current",
         "v_apply_now_jobs_stage3_scoped",
+        "v_job_availability_current",
     }, tables
     assert "WHERE jobs.workspace_id = %s" in query
+
+
+def test_review_query_reads_the_single_availability_field_and_its_count_reconciles():
+    query = read_query_constant("REVIEW_JOBS_QUERY")
+    assert "JOIN v_job_availability_current" in query
+    assert "availability.availability_current" in query
+    count_query = read_query_constant("REVIEW_AWAITING_AVAILABILITY_COUNT_QUERY")
+    assert "LEFT JOIN v_job_availability_current" in count_query
+    assert "NOT COALESCE(availability.availability_current, FALSE)" in count_query
+    assert "jobs.recommendation_outcome = 'REVIEW'" in count_query
 
 
 def test_review_query_lists_every_review_decision_whatever_its_gate_or_artifact():
