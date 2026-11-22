@@ -4,6 +4,7 @@ import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { RecommendationDecisionSchema } from "../decision/contracts.js";
+import { assessAvailability } from "../decision/availability.js";
 import { evaluateDecisionPolicy } from "../policy/decisionPolicy.js";
 import { resolveWorkspacePolicySnapshot } from "../policy/policySnapshot.js";
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
@@ -648,13 +649,12 @@ export async function runRecommendationDecider(
         const availabilityExpiresAt = sourceEvidence
           ? sourceEvidence.availability.expires_at
           : asIso(job.availability_recheck_at);
-        const postingExpiry = asIso(job.source_expires_at);
-        const postingExpired = postingExpiry !== null && new Date(postingExpiry).getTime() <= now.getTime();
-        const availabilityCurrent = availabilityStatus === "OPEN"
-          && availabilityVerifiedAt !== null
-          && availabilityExpiresAt !== null
-          && new Date(availabilityExpiresAt).getTime() > now.getTime()
-          && !postingExpired;
+        const { current: availabilityCurrent, postingExpired } = assessAvailability({
+          status: availabilityStatus,
+          verifiedAt: availabilityVerifiedAt,
+          expiresAt: availabilityExpiresAt,
+          sourceExpiresAt: asIso(job.source_expires_at),
+        }, now);
         const availabilityVerificationRevision = availabilityVerifiedAt
           ? sha256Json({
               status: availabilityStatus,
