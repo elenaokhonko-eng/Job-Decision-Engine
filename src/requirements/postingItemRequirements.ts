@@ -1,4 +1,4 @@
-import { inferClauseImportance } from './clauseAnalysis.js';
+import { hasMandatoryWording, inferClauseImportance } from './clauseAnalysis.js';
 import { POSTING_ITEM_EXTRACTION } from './requirementKinds.js';
 import type { PostingItem, PostingSection } from './postingStructure.js';
 
@@ -59,6 +59,26 @@ export function detectAlternatives(text: string): ItemAlternatives {
   return { equivalent_experience: equivalent, related_field: related, options };
 }
 
+/**
+ * "MUST" is the extractor's fallback when nothing says otherwise. That is wrong for two kinds of item:
+ *  - a duty ("You will lead ...") describes the work, not an entry requirement;
+ *  - a skill in a posting with no headings has nothing that says it is required.
+ * Both become PREFERRED unless the item itself says required, mandatory, must, essential or minimum.
+ * They stay in the requirement set (the matcher still scores them); they just do not count as mandatory.
+ */
+export function settleItemImportance(
+  stated: 'MUST' | 'PREFERRED' | 'NICE_TO_HAVE',
+  itemClass: PostingItemClass,
+  section: PostingSection,
+  text: string,
+): 'MUST' | 'PREFERRED' | 'NICE_TO_HAVE' {
+  if (stated !== 'MUST') return stated;
+  if (hasMandatoryWording(text)) return 'MUST';
+  if (itemClass === 'RESPONSIBILITY') return 'PREFERRED';
+  if (section === 'UNSECTIONED') return 'PREFERRED';
+  return 'MUST';
+}
+
 export interface PostingItemRequirementDraft {
   text: string;
   start: number;
@@ -82,8 +102,9 @@ export function draftPostingItemRequirements(
     const itemClass = classifyPostingItem(text, item.section);
     const inferred = inferClauseImportance(description, item.start, item.end);
     const preferenceWording = /\b(?:is|are|would be|will be)\s+(?:highly\s+)?(?:valued|welcome|an advantage|a plus|beneficial|desirable|helpful)\b|\b(?:advantageous|desirable|ideally|preferably|nice to have)\b/i.test(text);
-    const importance =
+    const stated =
       item.section === 'NICE_TO_HAVE' ? 'NICE_TO_HAVE' : inferred === 'MUST' && preferenceWording ? 'PREFERRED' : inferred;
+    const importance = settleItemImportance(stated, itemClass, item.section, text);
     const alternatives = detectAlternatives(text);
     drafts.push({
       text,

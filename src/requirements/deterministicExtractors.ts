@@ -19,7 +19,7 @@ import { neutralizeWorkplacePerkPhrases } from '../pipeline/workplacePerkPhrases
 export { isOccurrenceNegated };
 
 /** One version for the extractor, the task keys and the currentness policy. */
-export const DETERMINISTIC_EXTRACTOR_VERSION = 'deterministic_v4';
+export const DETERMINISTIC_EXTRACTOR_VERSION = 'deterministic_v5';
 const EXTRACTOR_VERSION = DETERMINISTIC_EXTRACTOR_VERSION;
 
 export interface DeterministicExtractorInput {

@@ -178,7 +178,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
       const { enqueuePipelineTask } = await import('../../tasks/pipelineTasks.js');
       const { runPipelineStageTaskWorker } = await import('../../tasks/stageTaskWorker.js');
       const context = await resolveWorkspaceContext(client as any);
-      const sparseTaskKey = `EXTRACT_DETERMINISTIC_REQUIREMENTS:${sparseJobVersionId}:deterministic_v4`;
+      const sparseTaskKey = `EXTRACT_DETERMINISTIC_REQUIREMENTS:${sparseJobVersionId}:deterministic_v5`;
       await enqueuePipelineTask(
         {
           taskType: 'EXTRACT_DETERMINISTIC_REQUIREMENTS',
@@ -292,7 +292,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
         `SELECT payload
          FROM pipeline_tasks
          WHERE task_key = $1`,
-        [`EXTRACT_DETERMINISTIC_REQUIREMENTS:${lateJobVersionId}:deterministic_v4:repair`]
+        [`EXTRACT_DETERMINISTIC_REQUIREMENTS:${lateJobVersionId}:deterministic_v5:repair`]
       );
       expect(repairTask.rows[0].payload).toMatchObject({
         canonical_job_id: lateCanonicalJobId,
@@ -459,7 +459,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
       expect(texts.filter((text) => bullets.includes(text))).toEqual(bullets);
       for (const row of items.rows as any[]) {
         expect(row.quote_text).toBe(row.requirement_text);
-        expect(row.extractor_version).toBe('deterministic_v4');
+        expect(row.extractor_version).toBe('deterministic_v5');
         expect(sectioned).toContain(row.quote_text);
       }
       expect((items.rows as any[]).find((row) => row.requirement_text === 'Familiarity with Snowflake').importance).toBe('NICE_TO_HAVE');

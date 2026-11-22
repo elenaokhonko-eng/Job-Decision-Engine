@@ -29,7 +29,7 @@ export const MIN_CONFIRMED_REQUIREMENTS = 3;
 /** Below this many posting items the quoted (AI) extractor may be asked to help. */
 export const AI_FALLBACK_BELOW_ITEMS = 5;
 
-/** Marks a requirement taken from a posting bullet (extractor `deterministic_v4`). */
+/** Marks a requirement taken from a posting bullet (extractor `deterministic_v4` and later). */
 export const POSTING_ITEM_EXTRACTION = 'POSTING_ITEM_V1';
 
 interface OwnTextInput {

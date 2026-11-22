@@ -20,6 +20,13 @@ model, and the only job-specific text was a two-word quote such as "AI".
    (`structured_value.item_class`), carries its section, and records alternatives ("A, B or C"
    options, "or equivalent experience", "or related field"). Nice-to-have items are
    `NICE_TO_HAVE`; "is valued"-style wording is `PREFERRED`.
+   **`deterministic_v5`: duties and unheaded skills are not mandatory.** `MUST` was the fallback
+   when nothing said otherwise, which made about 40% of all `MUST` requirements job duties
+   ("You will lead ..."). A `RESPONSIBILITY` item, and any skill in a posting with no
+   headings, is now `PREFERRED` unless the item itself says required, mandatory, must,
+   essential or minimum (`settleItemImportance`). They stay in the requirement set and are
+   still scored; they just do not count as mandatory. Skills under a requirements heading stay
+   `MUST`.
 3. **Rules keep the structured facts.** Years, degrees and credentials are still extracted by
    the existing rules and are not repeated as items. Workability lines (on-call, visa,
    hybrid, benefits) and negated lines never become capability items.
