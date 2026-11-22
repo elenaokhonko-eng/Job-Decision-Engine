@@ -611,9 +611,11 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
     // Fully covered, but workability evidence completeness (0.667) is below the PRIORITY bar.
     expect(reviewA.recommendation_outcome).toBe("REVIEW");
     expect(reviewB.recommendation_outcome).toBe("REVIEW");
-    // The partially covered job (one of three requirements) falls below the REVIEW threshold and
-    // its application readiness blocks it, so the deterministic decider records SKIP.
-    expect((await jobState(jobs.trackStale)).recommendation_outcome).toBe("SKIP");
+    // The partially covered job (one of three requirements) falls below the REVIEW threshold. Its two
+    // unmatched requirements are free-text/function MUSTs with no evidence found, which no longer block
+    // application readiness (only a degree or credential the matcher found short does), so the
+    // decider records the score-based TRACK rather than SKIP. TRACK is never sent to AI.
+    expect((await jobState(jobs.trackStale)).recommendation_outcome).toBe("TRACK");
     expect(await tasksFor(jobs.trackStale, "ENQUEUE_EXPLANATION")).toEqual([]);
     expect(await activeQueueRows(jobs.trackStale)).toEqual([]);
 
@@ -640,7 +642,8 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
     expect(await tasksFor(jobs.reviewCurrent, "MATCH_PROFILE_EVIDENCE")).toEqual([]);
     expect(await tasksFor(jobs.trackCurrent, "DECIDE_RECOMMENDATION")).toEqual([]);
 
-    // The SKIP job left the eligible set; nothing needs a re-match any more.
+    // The partially covered job is a TRACK job now (not SKIP), so it stays in the eligible set; it is
+    // excluded from AI by its outcome and nothing needs a re-match any more.
     const report = await profileMatchReport();
     expect(report.REVIEW).toMatchObject({
       eligible_jobs: 3,
@@ -651,8 +654,8 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
       queued_or_evaluated_current: 2,
       enqueue_path_after_fix: 3,
     });
-    expect(report.TRACK).toMatchObject({ eligible_jobs: 1, needs_rematch: 0, excluded_from_ai_by_outcome: 1 });
-    expect(report.ALL).toMatchObject({ eligible_jobs: 4, needs_rematch: 0 });
+    expect(report.TRACK).toMatchObject({ eligible_jobs: 2, needs_rematch: 0, excluded_from_ai_by_outcome: 2 });
+    expect(report.ALL).toMatchObject({ eligible_jobs: 5, needs_rematch: 0 });
     const reseeded = await seedRecoverablePipelineTasks(db(), {
       context: ctx(),
       taskTypes: ["MATCH_PROFILE_EVIDENCE"],
