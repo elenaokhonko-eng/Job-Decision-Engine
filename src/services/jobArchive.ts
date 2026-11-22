@@ -753,6 +753,86 @@ export async function archiveJobsAsPostingNotConfirmable(
   return archived;
 }
 
+export interface SnippetOnlyArchiveCandidate {
+  canonicalJobId: string;
+  gateDecision: string | null;
+  recommendationOutcome: string | null;
+  snippetChars: number;
+  lastSeenAt: Date | null;
+  /** A protection (active application, document run, lease, manual review, hold) keeps the job out of the archive. */
+  protected: boolean;
+}
+
+/**
+ * Live jobs known only from an alert-email snippet: every observation is GMAIL_ALERT, the description never
+ * reached the completeness rule, no page fetch (FETCH_JOB_CONTENT) was ever queued for any of its observations,
+ * and nothing was seen for `minAgeDays`. Saved-export jobs and manually removed jobs are never candidates.
+ * Read only. Protected jobs are returned flagged so the caller can count them and skip them.
+ */
+export async function findSnippetOnlyArchiveCandidates(
+  client: pg.PoolClient,
+  input: { workspaceId: string; minAgeDays: number },
+): Promise<SnippetOnlyArchiveCandidate[]> {
+  uuidSchema.parse(input.workspaceId);
+  if (!Number.isInteger(input.minAgeDays) || input.minAgeDays < 1) throw new RangeError("minAgeDays must be a whole number of days, 1 or more.");
+  const capabilities = await readSchemaCapabilities(client);
+  const result = await client.query<
+    ArchiveProtectionFlags & {
+      canonical_job_id: string;
+      gate_decision: string | null;
+      recommendation_outcome: string | null;
+      snippet_chars: number;
+      last_seen_at: Date | null;
+    }
+  >(
+    `SELECT canonical.id::text AS canonical_job_id,
+            canonical.gate_decision,
+            canonical.recommendation_outcome,
+            LENGTH(COALESCE(version.description_text, ''))::int AS snippet_chars,
+            seen.last_seen_at,
+            ${protectionColumnsSql(capabilities)}
+       FROM canonical_jobs canonical
+       LEFT JOIN job_versions version ON version.id = canonical.latest_job_version_id
+       CROSS JOIN LATERAL (
+         SELECT MAX(observation.retrieved_at) AS last_seen_at
+           FROM job_versions any_version
+           JOIN raw_job_observations observation ON observation.job_version_id = any_version.id
+          WHERE any_version.canonical_job_id = canonical.id
+       ) seen
+      WHERE canonical.workspace_id = $2::uuid
+        AND canonical.archived_at IS NULL
+        AND canonical.is_test_fixture = FALSE
+        AND COALESCE(canonical.processing_state, canonical.processing_status) <> 'MANUALLY_REMOVED'
+        AND canonical.description_quality_status IS DISTINCT FROM 'COMPLETE'
+        AND seen.last_seen_at IS NOT NULL
+        AND seen.last_seen_at < $1::timestamptz - make_interval(days => $3::int)
+        AND NOT EXISTS (
+          SELECT 1 FROM job_versions v
+            JOIN raw_job_observations o ON o.job_version_id = v.id
+           WHERE v.canonical_job_id = canonical.id AND o.source_name <> 'GMAIL_ALERT'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM job_versions v
+            JOIN raw_job_observations o ON o.job_version_id = v.id
+            JOIN pipeline_tasks fetch_task
+              ON fetch_task.workspace_id = canonical.workspace_id
+             AND fetch_task.task_type = 'FETCH_JOB_CONTENT'
+             AND fetch_task.payload->>'observation_id' = o.id::text
+           WHERE v.canonical_job_id = canonical.id
+        )
+      ORDER BY canonical.id`,
+    [new Date(), input.workspaceId, input.minAgeDays],
+  );
+  return result.rows.map((row) => ({
+    canonicalJobId: row.canonical_job_id,
+    gateDecision: row.gate_decision,
+    recommendationOutcome: row.recommendation_outcome,
+    snippetChars: row.snippet_chars,
+    lastSeenAt: row.last_seen_at,
+    protected: isProtected(row),
+  }));
+}
+
 async function archiveOne(
   client: pg.PoolClient,
   capabilities: ArchiveSchemaCapabilities,
