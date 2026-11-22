@@ -12,11 +12,15 @@
  *    and never a known production host or branch.
  *  - Without --apply nothing is written: it prints the plan and the "before" measurement.
  *  - Stops if more than 5% of embedding inputs fail.
+ *  - Spend cap: REPLAY_SPEND_CAP_USD (default 5). The estimate is printed before anything runs and the script stops
+ *    (also in the read-only run) when it exceeds the cap. Extraction is deterministic_only (no model call); only embeddings cost money.
  *
  *   npm run replay:requirements            (read-only plan + before)
  *   npm run replay:requirements -- --migrate (applies pending migrations to the replay branch)
  *   npm run replay:requirements -- --apply (writes to the replay branch)
  *   npm run replay:requirements -- --apply --scope matched (also every job that already has a match)
+ *   npm run replay:requirements -- --scope live-pass   (every live, gate-passed job with a confirmed link; prints job count and cost estimate)
+ *   npm run replay:requirements -- --apply --regate --scope live-pass   (re-runs the hard gates with the current rules first)
  *   npm run replay:requirements -- --apply --rematch-only (re-match and re-decide; e.g. SCORING_POLICY=topk_capability_semantic_v1)
  */
 import dotenv from 'dotenv';
@@ -34,12 +38,27 @@ process.env.DATABASE_URL = replayUrl;
 process.env.DATABASE_URL_UNPOOLED = replayUrl;
 
 const CHUNK = 40;
+const spendCapUsd = Number(process.env.REPLAY_SPEND_CAP_USD ?? '5');
+// Upper-bound embedding price (gemini-embedding-001 list price is about US$0.15 per million input tokens).
+const EMBEDDING_USD_PER_MILLION_TOKENS = 0.15;
+// Re-extraction can find more requirements than are stored today; the estimate is doubled to stay on the safe side.
+const ESTIMATE_SAFETY_FACTOR = 2;
+
+async function estimateReplayCost(client: pg.Client, jobVersionIds: string[]): Promise<{ tokens: number; usd: number }> {
+  const { rows } = await client.query<{ chars: string }>(
+    `SELECT COALESCE(SUM(LENGTH(requirement_text)), 0)::text AS chars FROM job_requirements WHERE job_version_id = ANY($1::uuid[])`,
+    [jobVersionIds],
+  );
+  const tokens = Math.ceil((Number(rows[0]?.chars ?? 0) / 4) * ESTIMATE_SAFETY_FACTOR);
+  return { tokens, usd: (tokens / 1_000_000) * EMBEDDING_USD_PER_MILLION_TOKENS };
+}
 const MAX_EMBEDDING_FAILURE_SHARE = 0.05;
 
 async function main(): Promise<void> {
   const apply = process.argv.includes('--apply');
   // Re-match and re-decide only (requirements and embeddings already current), e.g. to apply a new scoring policy.
   const rematchOnly = process.argv.includes('--rematch-only');
+  const regate = process.argv.includes('--regate');
   const { pgConnectionConfig } = await import('../src/db/pgSsl.js');
   const { requireApprovedReplayTarget } = await import('../src/reporting/replayGuard.js');
   const { resolveWorkspaceContext } = await import('../src/workspace/context.js');
@@ -88,8 +107,38 @@ async function main(): Promise<void> {
       }
     };
 
-    const { rows } = await client.query<{ canonical_job_id: string; job_version_id: string; title: string | null; saved: boolean; matched: boolean }>(
+    // --regate (needs --apply): run the hard gates again on every live job with the current rules, before the scope is
+    // computed, so "gate-passed" means passed under today's rules. A HARD_REJECT clears the stored recommendation (#202).
+    if (regate) {
+      if (!apply) throw new Error('--regate writes gate decisions; use it with --apply.');
+      const { regateJobIds, printRegateOutcome } = await import('./regate_job_ids.js');
+      const live = await client.query<{ id: string }>(
+        `SELECT id::text AS id FROM canonical_jobs
+          WHERE workspace_id = $1 AND archived_at IS NULL AND is_test_fixture IS NOT TRUE
+            AND COALESCE(processing_state, processing_status) <> 'MANUALLY_REMOVED'`,
+        [workspace.workspaceId],
+      );
+      const before = await client.query<{ gate_decision: string | null; n: number }>(
+        `SELECT gate_decision, COUNT(*)::int AS n FROM canonical_jobs WHERE workspace_id = $1 AND archived_at IS NULL GROUP BY 1 ORDER BY 1`,
+        [workspace.workspaceId],
+      );
+      console.log(`Gate decisions before re-gate: ${JSON.stringify(before.rows)}`);
+      const outcome = await regateJobIds(pool as never, workspace, live.rows.map((row) => row.id));
+      printRegateOutcome(outcome);
+      if (!outcome.ok) throw new Error('Re-gate incomplete: stopping before the replay.');
+      const after = await client.query<{ gate_decision: string | null; n: number }>(
+        `SELECT gate_decision, COUNT(*)::int AS n FROM canonical_jobs WHERE workspace_id = $1 AND archived_at IS NULL GROUP BY 1 ORDER BY 1`,
+        [workspace.workspaceId],
+      );
+      console.log(`Gate decisions after re-gate:  ${JSON.stringify(after.rows)}`);
+    }
+
+    const { rows } = await client.query<{ canonical_job_id: string; job_version_id: string; title: string | null; saved: boolean; matched: boolean; live_pass: boolean }>(
       `SELECT cj.id AS canonical_job_id, cj.latest_job_version_id AS job_version_id, cj.normalized_title AS title,
+              (cj.gate_decision = 'PASS' AND cj.is_test_fixture IS NOT TRUE
+                 AND cj.processing_state <> 'MANUALLY_REMOVED'
+                 AND cj.canonical_url ~* '^https?://'
+                 AND cj.canonical_url !~* '^https?://himalayas\\.app/jobs/([0-9a-f]{16,}|api)') AS live_pass,
               (cj.latest_match_run_id IS NOT NULL) AS matched,
               EXISTS (SELECT 1 FROM raw_job_observations o JOIN job_versions ojv ON ojv.id = o.job_version_id
                       WHERE o.workspace_id = cj.workspace_id AND o.source_name = $2 AND ojv.canonical_job_id = cj.id) AS saved
@@ -100,8 +149,20 @@ async function main(): Promise<void> {
     // Default scope: saved jobs and non-fit titles. --scope matched: also every job that already has a match
     // (a wider, unbiased pool for blind review).
     const wide = process.argv.includes('--scope') && process.argv[process.argv.indexOf('--scope') + 1] === 'matched';
-    const scope = rows.filter((row) => row.saved || classifyNonFitTitle(row.title ?? '') !== null || (wide && row.matched));
-    console.log(`Replay scope: ${scope.filter((r) => r.saved).length} saved jobs + ${scope.filter((r) => !r.saved).length} non-fit jobs`);
+    // --scope live-pass: every live job that passed the hard gate and has a confirmed posting link (no invented Himalayas
+    // link, no test fixture, not manually removed). Saved jobs stay in so the measurement keeps its anchors.
+    const livePass = process.argv.includes('--scope') && process.argv[process.argv.indexOf('--scope') + 1] === 'live-pass';
+    const scope = livePass
+      ? rows.filter((row) => row.live_pass || row.saved)
+      : rows.filter((row) => row.saved || classifyNonFitTitle(row.title ?? '') !== null || (wide && row.matched));
+    console.log(
+      `Replay scope: ${scope.length} jobs (${scope.filter((r) => r.saved).length} saved, ${scope.filter((r) => r.live_pass && !r.saved).length} live gate-passed, ${scope.filter((r) => !r.saved && !r.live_pass).length} non-fit)`,
+    );
+    const estimate = await estimateReplayCost(client, scope.map((row) => row.job_version_id));
+    console.log(`Cost estimate (embeddings only; extraction makes no model call): ~${estimate.tokens.toLocaleString('en-US')} tokens, about US$${estimate.usd.toFixed(2)} (cap US$${spendCapUsd.toFixed(2)})`);
+    if (estimate.usd > spendCapUsd) {
+      throw new Error(`Estimated cost US$${estimate.usd.toFixed(2)} exceeds the cap US$${spendCapUsd.toFixed(2)}. Stopping before any write.`);
+    }
 
     await measure('BEFORE (current staging data)');
     if (!apply) {
@@ -114,7 +175,7 @@ async function main(): Promise<void> {
     const { runDeterministicMatcher } = await import('../src/pipeline/deterministicMatcher.js');
     const { runRecommendationDecider } = await import('../src/pipeline/recommendationDecider.js');
 
-    const totals = { extracted: 0, extractionErrors: 0, embeddingsOk: 0, embeddingsFailed: 0, matched: 0, matchErrors: 0, decisionErrors: 0 };
+    const totals = { routed: 0, extracted: 0, extractionErrors: 0, embeddingsOk: 0, embeddingsFailed: 0, matched: 0, matchErrors: 0, decisionErrors: 0 };
     for (let at = 0; at < scope.length; at += CHUNK) {
       const chunk = scope.slice(at, at + CHUNK);
       const jobVersionIds = chunk.map((row) => row.job_version_id);
@@ -142,8 +203,17 @@ async function main(): Promise<void> {
         throw new Error(`Stopping: ${totals.embeddingsFailed} of ${attempted} embedding inputs failed (limit ${MAX_EMBEDDING_FAILURE_SHARE * 100}%).`);
       }
 
+      if (regate) {
+        // A re-gate leaves jobs before lane routing; the matcher only takes routed jobs. Route again with the active lane revisions.
+        const { runLaneRouting } = await import('../src/pipeline/laneRouter.js');
+        const routing = await runLaneRouting(pool as never, { context: workspace, canonicalJobIds, limit: CHUNK, reprocessExisting: true });
+        totals.routed += routing.routed;
+      }
+
       const matching = await runDeterministicMatcher(pool as never, { context: workspace, canonicalJobIds });
       totals.matched += matching.matchedJobs;
+      // Broken-funnel guard: a first chunk that matches nothing means the jobs never reached the matcher.
+      if (at === 0 && totals.matched === 0) throw new Error('The first chunk matched 0 jobs: they did not reach the matcher. Stopping.');
       totals.matchErrors += matching.errors;
       const decisions = await runRecommendationDecider(pool as never, { context: workspace, canonicalJobIds });
       totals.decisionErrors += decisions.errors;
