@@ -96,7 +96,9 @@ describe.skipIf(skipReal)("availability rule: TypeScript and v_job_availability_
         [workspaceId, testCase.name, `https://example.test/parity/${crypto.randomUUID()}`],
       );
       const canonicalJobId = canonical.rows[0]!.id;
-      const version = await database.query<{ id: string }>(
+      const version = await database.query<{
+        id: string; availability_verified_at: Date | null; availability_recheck_at: Date | null; source_expires_at: Date | null;
+      }>(
         `INSERT INTO job_versions (
            workspace_id, canonical_job_id, version_number, content_hash, description_text, observed_at,
            availability_status, availability_verified_at, availability_recheck_at, source_expires_at
