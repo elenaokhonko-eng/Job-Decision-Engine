@@ -42,13 +42,15 @@ try {
   const id = await client.query(`SELECT current_database() AS d, current_setting('neon.branch_id', TRUE) AS b`);
   requireApprovedReplayTarget(url, { databaseName: id.rows[0].d, branchId: id.rows[0].b }, process.env.REPLAY_BRANCH_ID);
   const ws = await resolveWorkspaceContext(client as never);
-  const { rows } = await client.query(
+  const { rows: allRows } = await client.query(
     `SELECT cj.id, cj.company_name, cj.normalized_title AS title, COALESCE(NULLIF(BTRIM(cj.location), ''), 'not stated') AS location, cj.canonical_url, cj.deterministic_match_score::float AS score,
+            COALESCE(av.availability_current, FALSE) AS availability_current,
             (SELECT COUNT(*) FROM requirement_evidence_matches m JOIN job_requirements r ON r.id = m.requirement_id
               WHERE m.match_run_id = cj.latest_match_run_id AND r.importance = 'MUST' AND m.match_type IN ('NO_MATCH','UNKNOWN')
                 AND r.requirement_type NOT IN ('EXPERIENCE_YEARS','DEGREE','CREDENTIAL','WORK_AUTH','OFFICE_DAYS','WORK_MODE','EMPLOYMENT_TYPE','TRAVEL','ON_CALL','SHIFT_WORK'))::int AS unmatched_must
      FROM canonical_jobs cj
      JOIN match_runs mr ON mr.id = cj.latest_match_run_id AND mr.status = 'COMPLETED' AND mr.policy_version LIKE '%topk_capability_semantic_v1'
+     LEFT JOIN v_job_availability_current av ON av.workspace_id = cj.workspace_id AND av.canonical_job_id = cj.id AND av.job_version_id::text = cj.latest_job_version_id::text
      WHERE cj.workspace_id = $1 AND cj.archived_at IS NULL AND cj.deterministic_match_score IS NOT NULL
        AND cj.gate_decision = 'PASS' AND cj.is_test_fixture IS NOT TRUE
        AND COALESCE(cj.processing_state, cj.processing_status) <> 'MANUALLY_REMOVED'
@@ -60,10 +62,14 @@ try {
      ORDER BY cj.deterministic_match_score DESC, cj.id`,
     [ws.workspaceId, LINKEDIN_SAVED_SOURCE_NAME, EXCLUDED_IDS],
   );
+  // A posting is drawn only if the read model says it is currently open (v_job_availability_current,
+  // migration 114). This script does not decide that itself; it only counts what was left out.
+  const rows = allRows.filter((r) => r.availability_current === true);
+  console.log(`eligible jobs ${allRows.length}; currently open ${rows.length}; held back as not confirmed open ${allRows.length - rows.length}`);
   // Defence in depth: nothing the filters above should have removed may be in the pool.
   const bad = rows.filter((r) => !/^https?:\/\//i.test(String(r.canonical_url ?? '')) || EXCLUDED_IDS.includes(r.id));
   if (bad.length > 0) throw new Error(`${bad.length} ineligible job(s) in the pool`);
-  if (rows.length < 100) throw new Error(`only ${rows.length} unsaved jobs scored under the new policy; expected the replay to have written them`);
+  if (rows.length < 100) throw new Error(`only ${rows.length} unsaved jobs scored under the new policy; expected the replay to have written them and the availability refresh to have run`);
 
   const lo = Math.floor(rows.length * 0.4);
   const hi = Math.floor(rows.length * 0.6);
