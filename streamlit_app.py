@@ -595,12 +595,32 @@ REVIEW_JOBS_QUERY = """
         AND readiness.job_version_id::text = jobs.job_version_id::text
       LIMIT 1
     ) AS current_readiness ON TRUE
+    -- One read-model statement of "currently open" (migration 114). A job whose posting
+    -- is not confirmed open leaves this list and is counted by
+    -- REVIEW_AWAITING_AVAILABILITY_COUNT_QUERY, so list plus count equal every REVIEW job.
+    JOIN v_job_availability_current AS availability
+      ON availability.workspace_id = jobs.workspace_id
+     AND availability.canonical_job_id = jobs.canonical_job_id
+     AND availability.job_version_id::text = jobs.job_version_id::text
+     AND availability.availability_current
     WHERE jobs.workspace_id = %s
       AND jobs.recommendation_outcome = 'REVIEW'
     ORDER BY jobs.deterministic_match_score DESC NULLS LAST,
              jobs.recommendation_requirement_score DESC NULLS LAST,
              jobs.observed_at DESC NULLS LAST
     LIMIT 5000
+"""
+
+REVIEW_AWAITING_AVAILABILITY_COUNT_QUERY = """
+    SELECT COUNT(*)::int AS awaiting_count
+    FROM v_canonical_shortlist_scoped AS jobs
+    LEFT JOIN v_job_availability_current AS availability
+      ON availability.workspace_id = jobs.workspace_id
+     AND availability.canonical_job_id = jobs.canonical_job_id
+     AND availability.job_version_id::text = jobs.job_version_id::text
+    WHERE jobs.workspace_id = %s
+      AND jobs.recommendation_outcome = 'REVIEW'
+      AND NOT COALESCE(availability.availability_current, FALSE)
 """
 
 APPLICATIONS_READ_MODEL_QUERY = """
@@ -816,6 +836,16 @@ def fetch_review_jobs():
         connection.close()
     rows = _read_model_query(REVIEW_JOBS_QUERY, (workspace_id,))
     return _validate_workspace_rows(rows, workspace_id, validate_review_row)
+
+
+def fetch_review_awaiting_availability_count():
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(REVIEW_AWAITING_AVAILABILITY_COUNT_QUERY, (workspace_id,))
+    return int(rows[0]["awaiting_count"]) if rows else 0
 
 
 def fetch_track_jobs():
@@ -2319,6 +2349,17 @@ with tab_dashboard:
             category_count = None
             st.error(f"Archive count is unavailable: {exc}")
     st.subheader(f"{workspace_category} ({category_count if category_count is not None else 'unavailable'})")
+    if workspace_category == REVIEW_CATEGORY:
+        try:
+            awaiting_recheck = fetch_review_awaiting_availability_count()
+        except Exception as exc:
+            awaiting_recheck = None
+            st.error(f"The count of Review jobs awaiting an availability re-check is unavailable: {exc}")
+        if awaiting_recheck:
+            st.caption(
+                f"{awaiting_recheck} more Review job(s) are hidden until their posting is confirmed open again "
+                "(awaiting availability re-check)."
+            )
     page_size = PAGE_SIZE
     # One page control per category: Archive and Rejected are paged by their
     # read model (LIMIT/OFFSET) here; every other category is loaded whole and
