@@ -728,7 +728,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
          workspace_id, canonical_job_id, identity_hash, job_content_hash,
          deterministic_extractor_version, quoted_extractor_version,
          quoted_prompt_hash, normalizer_hash
-       ) VALUES ($1, $2, $3, $4, 'deterministic_v4', 'quoted_v1', 'quoted-hash', 'normalizer-hash')
+       ) VALUES ($1, $2, $3, $4, 'deterministic_v5', 'quoted_v1', 'quoted-hash', 'normalizer-hash')
        RETURNING id`,
       [getContext().workspaceId, versions.canonicalJobId, crypto.randomUUID(), contentHash],
     );
@@ -767,17 +767,17 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     };
     const forcedTaskId = await insertPendingTask({
       taskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-      taskKey: `EXTRACT_DETERMINISTIC_REQUIREMENTS:${versions.latestVersionId}:deterministic_v4:repair`,
+      taskKey: `EXTRACT_DETERMINISTIC_REQUIREMENTS:${versions.latestVersionId}:deterministic_v5:repair`,
       payload: { ...basePayload, reprocess: true },
       fingerprintTaskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-      fingerprintTaskVersion: "deterministic_v4",
+      fingerprintTaskVersion: "deterministic_v5",
     });
     const satisfiedTaskId = await insertPendingTask({
       taskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-      taskKey: `EXTRACT_DETERMINISTIC_REQUIREMENTS:${versions.latestVersionId}:deterministic_v4`,
+      taskKey: `EXTRACT_DETERMINISTIC_REQUIREMENTS:${versions.latestVersionId}:deterministic_v5`,
       payload: basePayload,
       fingerprintTaskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-      fingerprintTaskVersion: "deterministic_v4",
+      fingerprintTaskVersion: "deterministic_v5",
     });
 
     const summary = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {

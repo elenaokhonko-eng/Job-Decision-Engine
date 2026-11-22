@@ -239,6 +239,49 @@ describe("structured requirement comparators", () => {
     expect(result.status).toBe("MISMATCH");
   });
 
+  describe("a degree the posting lets you replace or widen", () => {
+    const degree = (structured: Record<string, unknown>) => ({
+      requirement_type: "DEGREE",
+      requirement_text: "Role requires a degree qualification.",
+      quote_text: "A PhD with experience in applied machine learning, or equivalent practical experience.",
+      structured_value: { degree_reference: "PhD", ...structured },
+    });
+    const bachelor = [fact("Holds a bachelor degree", { degree_level: "bachelor" })];
+
+    it("is a mismatch when the posting states the degree without an alternative", () => {
+      const result = compareStructuredRequirement(degree({ accepts_equivalent_experience: false, accepts_related_field: false }), bachelor);
+      expect(result.status).toBe("MISMATCH");
+      expect(result.qualificationCode).toBe("MATCH_QUALIFICATION_DEGREE_GAP");
+    });
+
+    it("needs verification, not a block, when the posting accepts equivalent experience", () => {
+      const result = compareStructuredRequirement(degree({ accepts_equivalent_experience: true }), bachelor);
+      expect(result.status).toBe("UNKNOWN");
+      expect(result.qualificationCode).toBeUndefined();
+    });
+
+    it("needs verification when the level is met and the posting accepts a related field", () => {
+      const requirement = {
+        requirement_type: "DEGREE",
+        requirement_text: "Role requires a degree qualification.",
+        quote_text: "Bachelor's degree in computer science or a related field.",
+        structured_value: { degree_reference: "Bachelor's degree in computer science", accepts_related_field: true },
+      };
+      const result = compareStructuredRequirement(requirement, [fact("Holds a bachelor degree in law", { degree_level: "bachelor" })]);
+      expect(result.status).toBe("UNKNOWN");
+    });
+
+    it("reads the degree level from the matched words, not from a second degree named in the sentence", () => {
+      const requirement = {
+        requirement_type: "DEGREE",
+        requirement_text: "Role requires a degree qualification.",
+        quote_text: "Bachelor's degree required; a PhD is a plus.",
+        structured_value: { degree_reference: "Bachelor's degree" },
+      };
+      expect(compareStructuredRequirement(requirement, bachelor).status).toBe("MATCH");
+    });
+  });
+
   it("keeps unverifiable work authorization unknown", () => {
     const result = compareStructuredRequirement(
       { requirement_type: "WORK_AUTH", requirement_text: "Authorized to work in the United States", quote_text: null, structured_value: null },

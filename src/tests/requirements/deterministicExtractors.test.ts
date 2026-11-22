@@ -20,6 +20,23 @@ describe('extractDeterministicRequirements', () => {
       expect(extract(text).some((r) => r.requirement_type === 'DEGREE')).toBe(true);
     });
 
+    it('keeps the whole sentence as the degree quote instead of cutting it after one word', () => {
+      const description = 'We are growing the team. A PhD with experience in applied machine learning, or equivalent practical experience, is required. Benefits include lunch.';
+      const degree = extract(description).find((r) => r.requirement_type === 'DEGREE');
+      expect(degree).toBeDefined();
+      expect(degree?.quote_text).toBe('A PhD with experience in applied machine learning, or equivalent practical experience, is required.');
+      expect(description.slice(degree!.quote_start_offset!, degree!.quote_end_offset!)).toBe(degree!.quote_text);
+      expect(degree?.structured_value).toMatchObject({ accepts_equivalent_experience: true });
+    });
+
+    it('widens a bullet to the bullet and leaves a long match as it was', () => {
+      const bullet = extract('Requirements\n- PhD in statistics\n- Strong Python').find((r) => r.requirement_type === 'DEGREE');
+      expect(bullet?.quote_text).toBe('PhD in statistics');
+      const longSentence = 'x'.repeat(400) + ' PhD ' + 'y'.repeat(10) + '.';
+      const long = extract(longSentence).find((r) => r.requirement_type === 'DEGREE');
+      expect(long?.quote_text?.length ?? 0).toBeLessThanOrEqual(300);
+    });
+
     it.each([
       ['Fellow of the Society of Actuaries', 'You are a Fellow of the Society of Actuaries (FSA) and a Member of the American Academy of Actuaries.'],
       ['FSA', 'Credential: FSA required for this role.'],
@@ -165,6 +182,61 @@ describe('extractDeterministicRequirements', () => {
     expect(byText.get('Strong SQL and Python')?.importance).toBe('MUST');
   });
 
+  describe('duties and unheaded skills are not mandatory (deterministic_v5)', () => {
+    const importanceOf = (description: string, startsWith: string) =>
+      extractDeterministicRequirements({ ...IDS, description_text: description })
+        .requirements.find((r) => r.requirement_text.startsWith(startsWith))?.importance;
+
+    it('makes a duty under a responsibilities heading PREFERRED, and keeps a skill under a requirements heading MUST', () => {
+      const posting = [
+        'Responsibilities',
+        '- Lead delivery of the enterprise data platform roadmap',
+        '- Partner with product and engineering teams to ship features',
+        '',
+        'Requirements',
+        '- Strong SQL and Python',
+        '- Experience building data pipelines in production',
+      ].join('\n');
+      expect(importanceOf(posting, 'Lead delivery')).toBe('PREFERRED');
+      expect(importanceOf(posting, 'Partner with product')).toBe('PREFERRED');
+      expect(importanceOf(posting, 'Strong SQL')).toBe('MUST');
+      expect(importanceOf(posting, 'Experience building data pipelines')).toBe('MUST');
+    });
+
+    it('keeps a duty MUST when the item itself says it is required', () => {
+      const posting = ['Responsibilities', '- You must be able to lead incident response for the platform'].join('\n');
+      expect(importanceOf(posting, 'You must be able')).toBe('MUST');
+    });
+
+    it('makes a skill in a posting with no headings PREFERRED unless it says required', () => {
+      const posting =
+        'We build data products for banks. Hands-on experience with machine learning systems. ' +
+        'Familiarity with distributed data processing frameworks. Production experience with Kubernetes is required.';
+      const requirements = extractDeterministicRequirements({ ...IDS, description_text: posting }).requirements;
+      const skills = requirements.filter((r) => r.requirement_type === 'CUSTOM');
+      expect(skills.length).toBeGreaterThan(0);
+      for (const skill of skills) {
+        expect(skill.importance, skill.requirement_text).toBe(/required/i.test(skill.requirement_text) ? 'MUST' : 'PREFERRED');
+      }
+    });
+
+    it('leaves years, degree and credential rules and the nice-to-have section as they were', () => {
+      const posting = ['Requirements', '- 8+ years of professional experience', "- Bachelor's degree", '', 'Nice to have', '- Familiarity with Snowflake'].join('\n');
+      const requirements = extractDeterministicRequirements({ ...IDS, description_text: posting }).requirements;
+      expect(requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS')?.importance).toBe('MUST');
+      expect(requirements.find((r) => r.requirement_type === 'DEGREE')?.importance).toBe('MUST');
+      expect(requirements.find((r) => r.requirement_text.startsWith('Familiarity with Snowflake'))?.importance).toBe('NICE_TO_HAVE');
+    });
+
+    it('still keeps duties in the requirement set so the matcher can score them', () => {
+      const posting = ['Responsibilities', '- Lead delivery of the enterprise data platform roadmap'].join('\n');
+      const lead = extractDeterministicRequirements({ ...IDS, description_text: posting })
+        .requirements.find((r) => r.requirement_text.startsWith('Lead delivery'));
+      expect(lead).toBeDefined();
+      expect(lead?.structured_value).toMatchObject({ item_class: 'RESPONSIBILITY' });
+    });
+  });
+
   it('records alternatives such as "A, B or C" options and "or related field"', () => {
     const result = extractDeterministicRequirements({ ...IDS, description_text: SECTIONED_POSTING });
     const cloud = result.requirements.find((r) => r.requirement_text === 'Experience with AWS, Azure or GCP');
@@ -203,7 +275,9 @@ describe('extractDeterministicRequirements', () => {
 
     expect(byPrefix('You will lead')?.structured_value).toMatchObject({ item_class: 'RESPONSIBILITY' });
     expect(byPrefix('Experience with financial regulation')?.importance).toBe('PREFERRED');
-    expect(byPrefix('Strong stakeholder')?.importance).toBe('MUST');
+    // No headings: nothing says this is required, so it is not mandatory (deterministic_v5).
+    expect(byPrefix('Strong stakeholder')?.importance).toBe('PREFERRED');
+    expect(byPrefix('You will lead')?.importance).toBe('PREFERRED');
     expect(items.some((r) => /wellbeing/.test(r.requirement_text))).toBe(false);
   });
 

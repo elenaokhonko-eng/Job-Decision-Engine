@@ -109,6 +109,11 @@ export function isOccurrenceNegated(
 const PREFERENCE_REGEX = /\b(preferred|preference|preferable|nice\s+to\s+have|bonus|plus|optional|desired|desirable|advantageous)\b/i;
 const NICE_TO_HAVE_REGEX = /\b(nice\s+to\s+have|bonus|optional)\b/i;
 const MANDATORY_OVERRIDE_REGEX = /\b(required|mandatory|must\s+have|essential|strictly\s+required)\b/i;
+/** An item that says, in its own words, that it is required. */
+const ITEM_MANDATORY_WORDING_REGEX = /\b(required|mandatory|must|essential|minimum)\b/i;
+export function hasMandatoryWording(text: string): boolean {
+  return ITEM_MANDATORY_WORDING_REGEX.test(text);
+}
 const QUALIFICATION_HEADING_REGEX = /^\s*(required|minimum|basic|preferred|nice\s+to\s+have|bonus|optional|desired)\b[^\n:]{0,80}:?\s*$/i;
 
 const SUBCLAUSE_BOUNDARY_REGEX = /(?:;\s*|\(\s*|\)\s*|,\s*(?:but|however|although|whereas|while|yet|though|except|and|or)\s+|\b(?:but|however|although|whereas|while|yet|though|except)\s+)/gi;
