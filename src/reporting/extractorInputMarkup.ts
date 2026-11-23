@@ -3,10 +3,12 @@
  * cleaner in front of the deterministic extractor. Counts only: no posting text
  * or quote text is returned, so the result is safe to print.
  */
-import type pg from "pg";
+import pg from "pg";
 
+import { pgConnectionConfig } from "../db/pgSsl.js";
 import { extractDeterministicRequirements } from "../requirements/deterministicExtractors.js";
 import { cleanPostingText } from "../security/postingText.js";
+import { resolveWorkspaceContext } from "../workspace/context.js";
 
 const ZERO_UUID = "00000000-0000-4000-8000-000000000000";
 
@@ -69,4 +71,18 @@ export async function loadLatestDescriptions(client: pg.ClientBase, workspaceId:
     [workspaceId],
   );
   return rows.map((row) => row.description_text);
+}
+
+/** Opens one READ ONLY transaction, measures, and always rolls back. Nothing is written. */
+export async function measureQuoteMarkupFromDatabase(databaseUrl: string): Promise<MarkupMeasurement> {
+  const client = new pg.Client(pgConnectionConfig(databaseUrl));
+  await client.connect();
+  try {
+    await client.query("BEGIN READ ONLY");
+    const workspace = await resolveWorkspaceContext(client);
+    return measureQuoteMarkup(await loadLatestDescriptions(client, workspace.workspaceId));
+  } finally {
+    await client.query("ROLLBACK").catch(() => undefined);
+    await client.end();
+  }
 }
