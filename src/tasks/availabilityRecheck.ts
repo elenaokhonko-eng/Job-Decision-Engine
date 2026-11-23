@@ -36,7 +36,7 @@ import {
   type RecheckReadKind,
   type RecheckReadOutcome,
 } from "../decision/availabilityRecheck.js";
-import { structuredWorkModeFromObservation } from "../decision/structuredWorkMode.js";
+import { structuredWorkModeFromObservation, workdayRemoteTypeFromPayload } from "../decision/structuredWorkMode.js";
 import { AshbyAdapter } from "../ingestion/adapters/ashbyAdapter.js";
 import type { BaseSourceAdapter } from "../ingestion/adapters/baseAdapter.js";
 import { GreenhouseAdapter } from "../ingestion/adapters/greenhouseAdapter.js";
@@ -60,6 +60,7 @@ import {
   archiveJobsAsPostingNotConfirmable,
   readAutomaticArchiveProtection,
 } from "../services/jobArchive.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import type { WorkspaceContext } from "../workspace/context.js";
 import { pipelineTaskStageVersion } from "./pipelineTaskCurrentness.js";
 import { enqueuePipelineTask } from "./pipelineTasks.js";
@@ -439,7 +440,7 @@ async function storeVerdict(
   target: { canonicalJobId: string; jobVersionId: string; observation: RecheckObservation },
   verdict: { status: "OPEN" | "CLOSED"; reasonCode: string; method: z.infer<typeof AvailabilityEvidenceSchema>["verification_method"] },
   now: Date,
-): Promise<{ readinessRecomputed: boolean }> {
+): Promise<{ readinessRecomputed: boolean; readinessError: string | null }> {
   const availability = evidenceNow(verdict.status, now, verdict.reasonCode, verdict.method);
   const current = await client.query<{ job_source_evidence: unknown }>(
     `SELECT job_source_evidence
@@ -508,9 +509,13 @@ async function storeVerdict(
       canonicalJobIds: [target.canonicalJobId],
       jobVersionIds: [target.jobVersionId],
     });
-    return { readinessRecomputed: readiness.errors === 0 };
-  } catch {
-    return { readinessRecomputed: false };
+    return {
+      readinessRecomputed: readiness.errors === 0,
+      readinessError: readiness.errors === 0 ? null : `The recommendation decider reported ${readiness.errors} error(s).`,
+    };
+  } catch (error) {
+    // Not swallowed: the public error summary goes on the event, and the stale readiness is visible as such.
+    return { readinessRecomputed: false, readinessError: publicErrorSummary(error, "pipeline") };
   }
 }
 
@@ -795,6 +800,7 @@ export async function runAvailabilityRecheck(
         status: "OPEN", reasonCode: decision.reasonCode, method: "VERIFIED_POSTING_RETRIEVAL",
       }, now);
       details.readiness_recomputed = stored.readinessRecomputed;
+      if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
       // A page that states work mode or location clearly fills or corrects the fact. A value the page does
       // not state (UNKNOWN or empty) never overwrites a known one. The before/after pair is the evidence.
       const storedMode = String(target.workplace_type ?? "").trim().toUpperCase();
@@ -819,7 +825,7 @@ export async function runAvailabilityRecheck(
       }
       if (Object.keys(applied).length > 0) {
         factsChanged = true;
-        details.facts_applied_from_page = applied;
+        details.facts_applied_from_page = { ...applied, source_name: observation.source_name, observation_id: observation.observation_id };
       }
     } else if (read.feedFactsAfter !== null) {
       const change = compareFacts(beforeFacts, read.feedFactsAfter);
@@ -840,7 +846,15 @@ export async function runAvailabilityRecheck(
           [context.workspaceId, payload.canonical_job_id, structured],
         );
         factsChanged = true;
-        details.work_mode_from_structured_field = structured;
+        // Durable provenance: the field, its stored value, the observation it came from, and the value replaced.
+        details.work_mode_from_structured_field = {
+          value: structured,
+          source_name: observation.source_name,
+          observation_id: observation.observation_id,
+          field: "detail.jobPostingInfo.remoteType",
+          remote_type_raw: workdayRemoteTypeFromPayload(observation.raw_payload),
+          replaced: storedMode === "" ? "UNKNOWN" : storedMode,
+        };
       }
     }
     // A job archived by this rule comes back once the posting is seen open again.
@@ -852,6 +866,7 @@ export async function runAvailabilityRecheck(
       method: outcome.kind === "CLOSED_BY_PAGE" ? "EXPLICIT_SOURCE_STATUS" : "EMPLOYER_ATS_LISTING",
     }, now);
     details.readiness_recomputed = stored.readinessRecomputed;
+      if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
   } else if (decision.action === "ARCHIVE_NOT_CONFIRMABLE") {
     const protection = await readAutomaticArchiveProtection(client, {
       workspaceId: context.workspaceId,

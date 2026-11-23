@@ -482,6 +482,10 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     const regate = await pendingTasks(clear, "APPLY_HARD_GATES");
     expect(regate).toHaveLength(1);
     expect(regate[0]!.payload).toMatchObject({ force_policy_recalculation: true });
+    const provenance = await db().query(`SELECT details FROM job_availability_recheck_events WHERE canonical_job_id = $1`, [clear.canonicalJobId]);
+    expect(provenance.rows[0]?.details.work_mode_from_structured_field).toMatchObject({
+      value: "ONSITE", source_name: "WORKDAY", observation_id: clear.observationId, remote_type_raw: "Fully Onsite", replaced: "UNKNOWN",
+    });
 
     const kept = await runAvailabilityRecheck(db(), ctx(), payload(ambiguous), null, readOpen(new Date()));
     expect(kept).toMatchObject({ action: "MARK_OPEN", factsChanged: false });
