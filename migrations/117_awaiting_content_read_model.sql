@@ -20,8 +20,20 @@
 -- Additive: two new views and one replaced view with the same columns. Nothing is deleted or rewritten, and
 -- the stored decisions stay on the job, so the jobs return to the lists the moment their content is complete.
 --
--- Rollback: re-run the v_canonical_shortlist_scoped definition from 093, then
---   DROP VIEW IF EXISTS v_job_awaiting_content_scoped; DROP VIEW IF EXISTS v_job_content_state;
+-- Contract (amends the migration 112 line "every non-archived job is in exactly one status bucket"): a live job
+-- is in exactly one of (a) a status bucket of v_job_status_buckets_scoped, or (b) v_job_awaiting_content_scoped.
+-- (b) holds the live jobs without complete content that carry no hard rejection and are not manually removed.
+-- A hard-rejected or removed job stays in its REJECTED / REMOVED bucket (the Rejected audit list) whatever its
+-- description, because a rejection is not a recommendation. total_jobs of v_job_status_bucket_counts_scoped plus
+-- awaiting_count of v_job_awaiting_content_counts_scoped is the number of live jobs.
+--
+-- Rollback (exact): run the CREATE OR REPLACE VIEW v_canonical_shortlist_scoped statement of
+-- migrations/093_reversible_job_archiving.sql (from "CREATE OR REPLACE VIEW v_canonical_shortlist_scoped AS"
+-- to its terminating "archived_at IS NULL;"), then
+--   DROP VIEW IF EXISTS v_job_awaiting_content_counts_scoped;
+--   DROP VIEW IF EXISTS v_job_awaiting_content_scoped;
+--   DROP VIEW IF EXISTS v_job_content_state;
+-- src/tests/ingestion/awaitingContent.integration.test.ts runs this rollback and checks the result.
 
 CREATE OR REPLACE VIEW v_job_content_state AS
 SELECT
@@ -106,11 +118,23 @@ LEFT JOIN LATERAL (
 ) fetch_task ON TRUE
 WHERE canonical.is_test_fixture = FALSE
   AND canonical.archived_at IS NULL
-  AND COALESCE(canonical.processing_state, canonical.processing_status) <> 'MANUALLY_REMOVED'
+  AND COALESCE(canonical.processing_state, canonical.processing_status) NOT IN ('MANUALLY_REMOVED', 'HARD_REJECTED')
   AND NOT state.content_complete;
 
+CREATE OR REPLACE VIEW v_job_awaiting_content_counts_scoped AS
+SELECT
+  workspace.id AS workspace_id,
+  COUNT(awaiting.canonical_job_id)::int AS awaiting_count,
+  COUNT(*) FILTER (WHERE awaiting.fetch_task_count = 0)::int AS awaiting_without_fetch_task_count
+FROM workspaces AS workspace
+LEFT JOIN v_job_awaiting_content_scoped AS awaiting ON awaiting.workspace_id = workspace.id
+GROUP BY workspace.id;
+
+COMMENT ON VIEW v_job_awaiting_content_counts_scoped IS
+  'Per workspace: live jobs waiting for their posting text, and how many of them have no FETCH_JOB_CONTENT task.';
+
 COMMENT ON VIEW v_job_awaiting_content_scoped IS
-  'Live jobs waiting for their posting text ("awaiting content"): no gate result, lane or recommendation is shown for them. fetch_task_status is the latest FETCH_JOB_CONTENT task for the job, NULL when none exists.';
+  'Live, not hard-rejected jobs waiting for their posting text ("awaiting content"): no gate result, lane or recommendation is shown for them. fetch_task_status is the latest FETCH_JOB_CONTENT task for the job, NULL when none exists.';
 
 CREATE OR REPLACE VIEW v_canonical_shortlist_scoped AS
 SELECT

@@ -3,8 +3,11 @@ import { z } from "zod";
 /**
  * Job status buckets and technical-error support actions (migration 112).
  *
- * - `v_job_status_buckets_scoped` gives every current, non-archived job exactly one status bucket.
- * - `v_job_status_bucket_counts_scoped` counts the buckets per workspace (they sum to total_jobs).
+ * - `v_job_status_buckets_scoped` gives every current, non-archived job with complete posting content, and every
+ *   hard-rejected or removed job, exactly one status bucket. A live job without complete content that carries no
+ *   hard rejection is "awaiting content" (migration 117) and is read from `v_job_awaiting_content_scoped`.
+ * - `v_job_status_bucket_counts_scoped` counts the buckets per workspace (they sum to total_jobs);
+ *   `v_job_awaiting_content_counts_scoped` counts the awaiting jobs. total_jobs + awaiting_count = live jobs.
  * - `v_application_workspace_summary_scoped` keeps `rejected_unmatched_count` and adds
  *   `rejected_count`, `unmatched_count` and `removed_count`, which sum to it.
  * - `v_job_support_issues_scoped` lists technical-error jobs per issue class with the actions the
@@ -207,3 +210,28 @@ export const JobSupportRetryAllResultSchema = z.object({
   results: z.array(JobSupportActionResultSchema),
 });
 export type JobSupportRetryAllResult = z.infer<typeof JobSupportRetryAllResultSchema>;
+
+export const AwaitingContentReasonSchema = z.enum(["DESCRIPTION_NOT_COMPLETE", "NO_RETRIEVED_POSTING_EVIDENCE"]);
+
+/** One row of `v_job_awaiting_content_scoped` (migration 117). No gate result, lane or recommendation is exposed. */
+export const AwaitingContentRowSchema = z.object({
+  workspace_id: UuidSchema,
+  canonical_job_id: UuidSchema,
+  job_version_id: UuidSchema.nullable(),
+  title: z.string().min(1),
+  company: z.string().min(1),
+  awaiting_reason: AwaitingContentReasonSchema,
+  first_seen_at: z.coerce.date().nullable(),
+  last_seen_at: z.coerce.date().nullable(),
+  fetch_task_status: z.string().nullable(),
+  fetch_task_count: CountSchema,
+});
+export type AwaitingContentRow = z.infer<typeof AwaitingContentRowSchema>;
+
+/** One row of `v_job_awaiting_content_counts_scoped`. */
+export const AwaitingContentCountsSchema = z.object({
+  workspace_id: UuidSchema,
+  awaiting_count: CountSchema,
+  awaiting_without_fetch_task_count: CountSchema,
+});
+export type AwaitingContentCounts = z.infer<typeof AwaitingContentCountsSchema>;

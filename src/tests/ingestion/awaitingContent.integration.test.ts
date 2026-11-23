@@ -5,6 +5,10 @@ import pg from "pg";
 import { classifyContentCompleteness, reportAwaitingContentOutputs } from "../../ingestion/contentCompleteness.js";
 import { sourceContentEvidencePredicate } from "../../pipeline/descriptionQuality.js";
 import { archiveJobsAsPostingNotConfirmable } from "../../services/jobArchive.js";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { AwaitingContentCountsSchema, AwaitingContentRowSchema } from "../../contracts/jobStatus.js";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
@@ -14,6 +18,9 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/
 // (v_job_content_state, migration 117); this test runs the same synthetic cases through both.
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
+if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
+  throw new Error("CI must run the awaiting-content integration tests against its PostgreSQL service.");
+}
 
 describe("classifyContentCompleteness (pure rule)", () => {
   it("is complete only with a COMPLETE description and no alert-only evidence", () => {
@@ -30,6 +37,8 @@ interface Case {
   readonly observations: readonly { readonly source: string; readonly contentStatus?: string }[];
   readonly decisions: boolean;
   readonly archived?: boolean;
+  /** The job carries a HARD_REJECTED state (it stays in the Rejected bucket, not in awaiting content). */
+  readonly hardRejected?: boolean;
   readonly expectAwaiting: boolean;
   readonly expectViolation: boolean;
 }
@@ -42,6 +51,7 @@ const CASES: readonly Case[] = [
   { name: "complete text but only a bare alert", quality: "COMPLETE", observations: [{ source: "GMAIL_ALERT" }], decisions: true, expectAwaiting: true, expectViolation: true },
   { name: "alert completed by a retrieved posting", quality: "COMPLETE", observations: [{ source: "GMAIL_ALERT", contentStatus: "COMPLETE" }], decisions: true, expectAwaiting: false, expectViolation: false },
   { name: "alert plus a later employer observation", quality: "COMPLETE", observations: [{ source: "GMAIL_ALERT" }, { source: "EMPLOYER_WEBSITE" }], decisions: true, expectAwaiting: false, expectViolation: false },
+  { name: "stale hard rejection on a snippet", quality: "INCOMPLETE", observations: [{ source: "GMAIL_ALERT" }], decisions: true, hardRejected: true, expectAwaiting: true, expectViolation: true },
   { name: "archived snippet is not live", quality: "INCOMPLETE", observations: [{ source: "GMAIL_ALERT" }], decisions: true, archived: true, expectAwaiting: true, expectViolation: false },
 ];
 
@@ -76,8 +86,8 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
            $4, $4, $5, $6, $7, $8, $9) RETURNING id`,
         [
           workspaceId, testCase.name, `https://example.test/awaiting/${crypto.randomUUID()}`,
-          testCase.decisions ? "MATCHED" : "RAW_STAGED",
-          testCase.decisions ? "PASS" : null,
+          testCase.hardRejected ? "HARD_REJECTED" : testCase.decisions ? "MATCHED" : "RAW_STAGED",
+          testCase.hardRejected ? "HARD_REJECT" : testCase.decisions ? "PASS" : null,
           testCase.decisions ? "CORE_AI_DATA" : null,
           testCase.decisions ? "ELIGIBLE" : null,
           testCase.decisions ? "REVIEW" : null,
@@ -114,8 +124,8 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
       if (testCase.decisions) {
         await client.query(
           `INSERT INTO gate_decisions (workspace_id, canonical_job_id, job_version_id, decision, rejection_codes, evidence_quotes, workability_facts)
-           VALUES ($1, $2, $3, 'PASS', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb)`,
-          [workspaceId, canonicalJobId, jobVersionId],
+           VALUES ($1, $2, $3, $4, $5::jsonb, '[]'::jsonb, '{}'::jsonb)`,
+          [workspaceId, canonicalJobId, jobVersionId, testCase.hardRejected ? "HARD_REJECT" : "PASS", JSON.stringify(testCase.hardRejected ? ["SYNTHETIC_CODE"] : [])],
         );
       }
       await client.query(
@@ -174,6 +184,10 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
       if (testCase.archived) {
         expect(shown.has(canonicalJobId), testCase.name).toBe(false);
         expect(waitingIds.has(canonicalJobId), testCase.name).toBe(false);
+      } else if (testCase.hardRejected) {
+        // A rejection is not a recommendation: it stays in the Rejected list, not in awaiting content.
+        expect(shown.has(canonicalJobId), testCase.name).toBe(false);
+        expect(waitingIds.has(canonicalJobId), testCase.name).toBe(false);
       } else if (testCase.expectAwaiting) {
         expect(shown.has(canonicalJobId), testCase.name).toBe(false);
         expect(waitingIds.has(canonicalJobId), testCase.name).toBe(true);
@@ -203,18 +217,63 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
     const expectedViolations = CASES.filter((c) => c.expectViolation).map((c) => seeded.get(c.name)!.canonicalJobId).sort();
     expect(report.violations.map((v) => v.canonicalJobId).sort()).toEqual(expectedViolations);
     expect(report.awaitingContentJobs).toBe(CASES.filter((c) => c.expectAwaiting && !c.archived).length);
-    expect(report.byOutput).toEqual({ GATE_DECISION: 3, LANE: 3, RECOMMENDATION: 3 });
+    expect(report.byOutput).toEqual({ GATE_DECISION: 4, LANE: 4, RECOMMENDATION: 4 });
     for (const violation of report.violations) expect(violation.outputs).toEqual(["GATE_DECISION", "LANE", "RECOMMENDATION"]);
   });
 
-  it("reports nothing once the stale outputs are gone", async () => {
+  it("each live job is in exactly one bucket or in awaiting content, and the counts add up", async () => {
     const database = db();
-    await database.query(
-      `UPDATE canonical_jobs SET gate_decision = NULL, primary_lane = NULL, recommendation_outcome = NULL, recommendation_eligibility = NULL
-        WHERE workspace_id = $1 AND id IN (SELECT canonical_job_id FROM v_job_content_state WHERE NOT content_complete)`,
-      [context!.workspaceId],
-    );
+    const workspaceId = context!.workspaceId;
+    const buckets = await database.query<{ canonical_job_id: string; status_bucket: string }>(
+      `SELECT canonical_job_id, status_bucket FROM v_job_status_buckets_scoped WHERE workspace_id = $1`, [workspaceId]);
+    const waiting = await database.query<{ canonical_job_id: string }>(
+      `SELECT canonical_job_id FROM v_job_awaiting_content_scoped WHERE workspace_id = $1`, [workspaceId]);
+    const bucketIds = buckets.rows.map((row) => row.canonical_job_id);
+    expect(new Set(bucketIds).size).toBe(bucketIds.length);
+    const waitingIds = waiting.rows.map((row) => row.canonical_job_id);
+    expect(bucketIds.filter((id) => waitingIds.includes(id))).toEqual([]);
+
+    const live = await database.query<{ id: string }>(
+      `SELECT id FROM canonical_jobs WHERE workspace_id = $1 AND is_test_fixture = FALSE AND archived_at IS NULL`, [workspaceId]);
+    expect([...bucketIds, ...waitingIds].sort()).toEqual(live.rows.map((row) => row.id).sort());
+
+    const hardRejected = seeded.get("stale hard rejection on a snippet")!.canonicalJobId;
+    expect(buckets.rows.find((row) => row.canonical_job_id === hardRejected)?.status_bucket).toBe("REJECTED");
+
+    const counts = await database.query(`SELECT * FROM v_job_status_bucket_counts_scoped WHERE workspace_id = $1`, [workspaceId]);
+    const waitingCounts = await database.query(`SELECT * FROM v_job_awaiting_content_counts_scoped WHERE workspace_id = $1`, [workspaceId]);
+    expect(counts.rows[0].total_jobs + waitingCounts.rows[0].awaiting_count).toBe(live.rows.length);
+    expect(AwaitingContentCountsSchema.parse(waitingCounts.rows[0]).awaiting_count).toBe(waitingIds.length);
+    const rows = await database.query(`SELECT * FROM v_job_awaiting_content_scoped WHERE workspace_id = $1`, [workspaceId]);
+    for (const row of rows.rows) AwaitingContentRowSchema.parse(row);
+  });
+
+  it("a stale output is cleared only by archiving the job through the audited archive, which leaves the live report", async () => {
+    const database = db();
+    const stale = seeded.get("alert snippet with stale decisions")!.canonicalJobId;
+    await archiveJobsAsPostingNotConfirmable(database, {
+      workspaceId: context!.workspaceId, canonicalJobIds: [stale], actor: "test:awaiting_content", details: { rule: "test" },
+    });
     const report = await reportAwaitingContentOutputs(database, context!.workspaceId);
-    expect(report.violations).toEqual([]);
+    expect(report.violations.map((v) => v.canonicalJobId)).not.toContain(stale);
+  });
+
+  it("the documented rollback restores the 093 shortlist and drops the three views", async () => {
+    const database = db();
+    const migrations = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../migrations");
+    const text = readFileSync(path.join(migrations, "093_reversible_job_archiving.sql"), "utf8").split(String.fromCharCode(13)).join("");
+    const start = text.indexOf("CREATE OR REPLACE VIEW v_canonical_shortlist_scoped AS");
+    const end = text.indexOf("AND canonical.archived_at IS NULL;", start) + "AND canonical.archived_at IS NULL;".length;
+    await database.query(text.slice(start, end));
+    await database.query("DROP VIEW IF EXISTS v_job_awaiting_content_counts_scoped");
+    await database.query("DROP VIEW IF EXISTS v_job_awaiting_content_scoped");
+    await database.query("DROP VIEW IF EXISTS v_job_content_state");
+    const views = await database.query(
+      `SELECT COUNT(*)::int AS n FROM information_schema.views WHERE table_schema = current_schema() AND table_name IN ('v_job_content_state', 'v_job_awaiting_content_scoped', 'v_job_awaiting_content_counts_scoped')`);
+    expect(views.rows[0].n).toBe(0);
+    const shortlist = await database.query<{ canonical_job_id: string }>(
+      `SELECT canonical_job_id FROM v_canonical_shortlist_scoped WHERE workspace_id = $1`, [context!.workspaceId]);
+    // The awaiting-content job (still live) is visible again under the 093 definition.
+    expect(shortlist.rows.map((row) => row.canonical_job_id)).toContain(seeded.get("alert snippet without decisions")!.canonicalJobId);
   });
 });
