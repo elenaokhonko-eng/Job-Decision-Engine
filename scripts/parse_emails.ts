@@ -70,6 +70,11 @@ interface AlertRow {
 
 export const NO_VACANCY_FUNNEL_MIN_ALERTS = 3;
 
+/** The process exit code for a run: any failed alert (including a rolled-back staging) or a broken funnel fails it. */
+export function parseEmailsExitCode(summary: Pick<ParseEmailsSummary, "failedEmails" | "noVacancyFunnelBroken">): 0 | 1 {
+  return summary.failedEmails > 0 || summary.noVacancyFunnelBroken ? 1 : 0;
+}
+
 /** A run is a broken funnel when most decoded alerts yield no vacancy link (see ParseEmailsSummary). */
 export function isNoVacancyFunnelBroken(parsedEmails: number, noVacancyEmails: number): boolean {
   return noVacancyEmails >= NO_VACANCY_FUNNEL_MIN_ALERTS && noVacancyEmails * 2 > parsedEmails + noVacancyEmails;
@@ -460,7 +465,7 @@ if (process.argv[1] && process.argv[1].includes("parse_emails")) {
   if (args) {
     void parseEmails(args)
       .then((summary) => {
-        if (summary.failedEmails > 0 || summary.noVacancyFunnelBroken) process.exitCode = 1;
+        if (parseEmailsExitCode(summary) !== 0) process.exitCode = 1;
       })
       .catch((error) => {
         console.error("Fatal email discovery failure:", error instanceof Error ? error.message : "unknown error");

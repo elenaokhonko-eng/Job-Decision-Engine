@@ -176,7 +176,7 @@ async function runIntegrityChecks() {
     }
 
     // Check 8: a job awaiting its posting text has no gate result, lane or recommendation.
-    const awaiting = await reportAwaitingContentOutputs(pool as any, ctx.workspaceId);
+    const awaiting = await reportAwaitingContentOutputs(pool, ctx.workspaceId);
     if (awaiting.violations.length > 0) {
       console.error(
         `Found ${awaiting.violations.length} live job(s) awaiting content that still carry a gate decision, lane or recommendation `
@@ -189,7 +189,7 @@ async function runIntegrityChecks() {
     }
 
     // Check 9: a live job needs complete content or a fetch task; with neither it can never become complete.
-    const coverage = await reportContentWithoutFetchTask(pool as any, ctx.workspaceId);
+    const coverage = await reportContentWithoutFetchTask(pool, ctx.workspaceId);
     if (coverage.withoutFetchTask.length > 0) {
       console.error(
         `Found ${coverage.withoutFetchTask.length} live job(s) with neither complete content nor a FETCH_JOB_CONTENT task; `

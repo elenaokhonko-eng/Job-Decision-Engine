@@ -8,16 +8,20 @@ import {
   alertFetchTaskKey,
   assertObservationsHaveFetchTask,
   enqueueAlertFetchTask,
+  ensureFetchTasksForAwaitingContent,
   reportContentWithoutFetchTask,
 } from "../../ingestion/fetchTaskCoverage.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
-import { parseEmails } from "../../../scripts/parse_emails.js";
+import { parseEmails, parseEmailsExitCode } from "../../../scripts/parse_emails.js";
 import { digestAlertRaw } from "../fixtures/gmailDigestAlerts.js";
 
 // Every alert observation gets a FETCH_JOB_CONTENT task at ingest, and reconciliation reports a live job that has
 // neither complete content nor a fetch task. Synthetic fixtures; real PostgreSQL in a private schema.
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
+if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
+  throw new Error("CI must run the fetch-task coverage integration tests against its PostgreSQL service.");
+}
 
 let pool: pg.Pool | undefined;
 let schemaPool: pg.Pool | undefined;
@@ -111,6 +115,63 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
     expect(first.inserted).toBe(true);
     expect(second.inserted).toBe(false);
     expect(second.taskId).toBe(first.taskId);
+  });
+
+  it("a staging rollback fails the run: the alert stays unprocessed and the exit code is non-zero", async () => {
+    await db().query(`
+      CREATE OR REPLACE FUNCTION drop_fetch_task() RETURNS TRIGGER AS $$
+      BEGIN
+        IF NEW.task_type = 'FETCH_JOB_CONTENT' THEN RETURN NULL; END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql`);
+    await db().query(`CREATE TRIGGER trg_drop_fetch_task BEFORE INSERT ON pipeline_tasks FOR EACH ROW EXECUTE FUNCTION drop_fetch_task()`);
+    try {
+      const before = await db().query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM raw_job_observations WHERE workspace_id = $1`, [context!.workspaceId]);
+      const inserted = await db().query<{ id: string }>(
+        `INSERT INTO raw_email_alerts (workspace_id, subject, body, gmail_message_id, processed, lifecycle_status, received_at)
+         VALUES ($1, '2 new synthetic jobs for you', $2, 'coverage-message-rollback', FALSE, 'IN_PROCESSING', NOW()) RETURNING id`,
+        [context!.workspaceId, digestAlertRaw({ digestIndex: 7, cardsPerDigest: 2 })],
+      );
+      const summary = await parseEmails({ limit: 5, concurrency: 1, maxRuntimeSeconds: 600 }, { pool: schemaPool!, log: () => undefined, now: () => 0 });
+      expect(summary.failedEmails).toBe(1);
+      expect(parseEmailsExitCode(summary)).toBe(1);
+      const after = await db().query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM raw_job_observations WHERE workspace_id = $1`, [context!.workspaceId]);
+      expect(after.rows[0]!.n).toBe(before.rows[0]!.n);
+      const alert = await db().query<{ processed: boolean }>(`SELECT processed FROM raw_email_alerts WHERE id = $1`, [inserted.rows[0]!.id]);
+      expect(alert.rows[0]!.processed).toBe(false);
+    } finally {
+      await db().query(`DROP TRIGGER IF EXISTS trg_drop_fetch_task ON pipeline_tasks`);
+      await db().query(`UPDATE raw_email_alerts SET processed = TRUE WHERE gmail_message_id = 'coverage-message-rollback'`);
+    }
+    expect(parseEmailsExitCode({ failedEmails: 0, noVacancyFunnelBroken: false })).toBe(0);
+    expect(parseEmailsExitCode({ failedEmails: 0, noVacancyFunnelBroken: true })).toBe(1);
+  });
+
+  it("an aggregator lead without a fetch task is not a coverage violation, a legacy snippet job is", async () => {
+    const lead = await seedAlertJob("lead-backed");
+    await db().query(
+      `UPDATE raw_job_observations SET processing_status = 'FETCH_BLOCKED', raw_payload = '{"lead_kind":"AGGREGATOR_LEAD"}'::jsonb WHERE id = $1`,
+      [lead.observationId]);
+    const legacy = await seedAlertJob("legacy-snippet");
+    const report = await reportContentWithoutFetchTask(db(), context!.workspaceId);
+    expect(report.withoutFetchTask).not.toContain(lead.canonicalJobId);
+    expect(report.withoutFetchTask).toContain(legacy.canonicalJobId);
+  });
+
+  it("ensureFetchTasksForAwaitingContent queues tasks additively, dry run first, and is idempotent", async () => {
+    const job = await seedAlertJob("ensure");
+    const dry = await ensureFetchTasksForAwaitingContent(db(), context!, { apply: false, producer: "test" });
+    expect(dry.candidates).toBeGreaterThanOrEqual(1);
+    expect(dry.queued).toBe(0);
+    expect((await reportContentWithoutFetchTask(db(), context!.workspaceId)).withoutFetchTask).toContain(job.canonicalJobId);
+    const applied = await ensureFetchTasksForAwaitingContent(db(), context!, { apply: true, producer: "test" });
+    expect(applied.queued).toBeGreaterThanOrEqual(1);
+    expect((await reportContentWithoutFetchTask(db(), context!.workspaceId)).withoutFetchTask).not.toContain(job.canonicalJobId);
+    const again = await ensureFetchTasksForAwaitingContent(db(), context!, { apply: true, producer: "test" });
+    expect(again.queued).toBe(0);
+    const state = await db().query<{ state: string }>(`SELECT processing_state AS state FROM canonical_jobs WHERE id = $1`, [job.canonicalJobId]);
+    expect(state.rows[0]!.state).toBe("RAW_STAGED");
   });
 
   it("reconciliation lists exactly the live jobs with neither complete content nor a fetch task", async () => {

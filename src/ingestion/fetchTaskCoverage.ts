@@ -1,4 +1,5 @@
 import type pg from "pg";
+import type { Queryable } from "./contentCompleteness.js";
 import { enqueuePipelineTask } from "../tasks/pipelineTasks.js";
 import type { WorkspaceContext } from "../workspace/context.js";
 
@@ -79,7 +80,7 @@ export interface FetchTaskCoverageReport {
 
 /** Live jobs that neither have complete content nor a fetch task. Read only; ids only. */
 export async function reportContentWithoutFetchTask(
-  client: pg.PoolClient | pg.Client,
+  client: Queryable,
   workspaceId: string,
 ): Promise<FetchTaskCoverageReport> {
   const result = await client.query<{ canonical_job_id: string; task_count: number; live_task_count: number }>(
@@ -102,6 +103,18 @@ export async function reportContentWithoutFetchTask(
             AND version.canonical_job_id = awaiting.canonical_job_id
        ) tasks ON TRUE
       WHERE awaiting.workspace_id = $1::uuid
+        -- An aggregator lead deliberately has no fetch task (FETCH_BLOCKED, see leadStaging.ts): it waits for the
+        -- employer's posting or a saved-jobs export. Such a job is not a coverage violation.
+        AND NOT EXISTS (
+          SELECT 1
+            FROM raw_job_observations lead
+            JOIN job_versions lead_version
+              ON lead_version.workspace_id = lead.workspace_id AND lead_version.id = lead.job_version_id
+           WHERE lead.workspace_id = awaiting.workspace_id
+             AND lead_version.canonical_job_id = awaiting.canonical_job_id
+             AND lead.processing_status = 'FETCH_BLOCKED'
+             AND lead.raw_payload->>'lead_kind' = 'AGGREGATOR_LEAD'
+        )
       ORDER BY awaiting.canonical_job_id`,
     [workspaceId],
   );
@@ -110,4 +123,45 @@ export async function reportContentWithoutFetchTask(
     withoutFetchTask: result.rows.filter((row) => row.task_count === 0).map((row) => row.canonical_job_id),
     fetchDeadLetteredOnly: result.rows.filter((row) => row.task_count > 0 && row.live_task_count === 0).length,
   };
+}
+
+export interface EnsureFetchTasksReport {
+  mode: "DRY_RUN" | "APPLY";
+  /** Live waiting jobs with no fetch task whose latest alert observation can be fetched. */
+  candidates: number;
+  queued: number;
+}
+
+/**
+ * Reviewed, additive path for a live job that has neither complete content nor a fetch task: queue one
+ * FETCH_JOB_CONTENT task for its latest Gmail alert observation (idempotent on the shared key). It changes no job
+ * status and no decision, and removing the task undoes it. Aggregator leads are not candidates. The caller owns the
+ * transaction; a dry run only reads.
+ */
+export async function ensureFetchTasksForAwaitingContent(
+  client: pg.PoolClient,
+  ctx: WorkspaceContext,
+  input: { apply: boolean; producer: string; limit?: number },
+): Promise<EnsureFetchTasksReport> {
+  const coverage = await reportContentWithoutFetchTask(client, ctx.workspaceId);
+  const jobIds = coverage.withoutFetchTask.slice(0, input.limit ?? 500);
+  const observations = jobIds.length === 0 ? [] : (await client.query<{ observation_id: string }>(
+    `SELECT DISTINCT ON (version.canonical_job_id) observation.id::text AS observation_id
+       FROM raw_job_observations observation
+       JOIN job_versions version
+         ON version.workspace_id = observation.workspace_id AND version.id = observation.job_version_id
+      WHERE observation.workspace_id = $1::uuid
+        AND observation.source_name = 'GMAIL_ALERT'
+        AND version.canonical_job_id = ANY($2::uuid[])
+      ORDER BY version.canonical_job_id, observation.retrieved_at DESC, observation.id DESC`,
+    [ctx.workspaceId, jobIds],
+  )).rows;
+  let queued = 0;
+  if (input.apply) {
+    for (const row of observations) {
+      const task = await enqueueAlertFetchTask(client, ctx, { observationId: row.observation_id, producer: input.producer });
+      if (task.inserted) queued += 1;
+    }
+  }
+  return { mode: input.apply ? "APPLY" : "DRY_RUN", candidates: observations.length, queued };
 }
