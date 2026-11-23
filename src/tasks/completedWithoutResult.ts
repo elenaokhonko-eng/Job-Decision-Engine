@@ -13,7 +13,7 @@ type Queryable = Pick<pg.PoolClient, "query">;
 
 /** RECHECK_AVAILABILITY joins this list once migration 115 (job_availability_recheck_events) is on main.
  * Task type -> SQL predicate (alias task, version job_version_id) that is TRUE when the result exists. */
-const RESULT_EXISTS_SQL: Readonly<Record<string, string>> = {
+export const COMPLETED_RESULT_PREDICATES: Readonly<Record<string, string>> = {
   APPLY_HARD_GATES: `EXISTS (SELECT 1 FROM gate_decisions result
                               WHERE result.workspace_id = task.workspace_id AND result.job_version_id::text = task.payload->>'job_version_id')`,
   ROUTE_LANE: `EXISTS (SELECT 1 FROM lane_decisions result
@@ -24,7 +24,12 @@ const RESULT_EXISTS_SQL: Readonly<Record<string, string>> = {
                                    WHERE result.workspace_id = task.workspace_id AND result.job_version_id::text = task.payload->>'job_version_id')`,
 };
 
-export const COMPLETED_RESULT_TASK_TYPES: readonly string[] = Object.keys(RESULT_EXISTS_SQL);
+export const COMPLETED_RESULT_TASK_TYPES: readonly string[] = Object.keys(COMPLETED_RESULT_PREDICATES);
+
+/** Process exit code for the reconciler: non-zero when any task completed without a result. */
+export function completedWithoutResultExitCode(report: Pick<CompletedWithoutResultReport, "total">): 0 | 1 {
+  return report.total > 0 ? 1 : 0;
+}
 
 export interface CompletedWithoutResultRow {
   readonly taskId: string;
@@ -46,7 +51,7 @@ export async function findTasksCompletedWithoutResult(
   options: { sampleLimit?: number } = {},
 ): Promise<CompletedWithoutResultReport> {
   const sampleLimit = Math.max(0, Math.min(options.sampleLimit ?? 20, 200));
-  const missing = Object.entries(RESULT_EXISTS_SQL)
+  const missing = Object.entries(COMPLETED_RESULT_PREDICATES)
     .map(([type, exists]) => `(task.task_type = '${type}' AND NOT ${exists})`)
     .join("\n          OR ");
   const { rows } = await client.query<{ task_id: string; task_type: string; job_version_id: string; completed_at: Date | null }>(

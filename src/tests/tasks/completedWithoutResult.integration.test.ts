@@ -4,7 +4,12 @@ import pg from "pg";
 
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
-import { findTasksCompletedWithoutResult } from "../../tasks/completedWithoutResult.js";
+import {
+  COMPLETED_RESULT_PREDICATES,
+  COMPLETED_RESULT_TASK_TYPES,
+  completedWithoutResultExitCode,
+  findTasksCompletedWithoutResult,
+} from "../../tasks/completedWithoutResult.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
 // "Task completed, no result" is reported as an error. Synthetic jobs and tasks only.
@@ -118,5 +123,61 @@ describe.skipIf(skipReal)("tasks completed without a result (PostgreSQL)", () =>
     }
     expect(report.total).toBe(2);
     expect(report.byTaskType).toEqual({ MATCH_PROFILE_EVIDENCE: 1, DECIDE_RECOMMENDATION: 1 });
+  });
+
+  it("gate and lane tasks: missing result is reported, present result is not, and a result for another version of the job does not count", async () => {
+    const withResults = await job();
+    const gateOk = await completedTask("APPLY_HARD_GATES", withResults.jobVersionId);
+    const laneOk = await completedTask("ROUTE_LANE", withResults.jobVersionId);
+    await db().query(
+      `INSERT INTO gate_decisions (canonical_job_id, job_version_id, decision, workspace_id) VALUES ($1, $2, 'PASS', $3)`,
+      [withResults.canonicalJobId, withResults.jobVersionId, ctx().workspaceId],
+    );
+    await db().query(
+      `INSERT INTO lane_decisions (workspace_id, canonical_job_id, job_version_id, decision_hash, model_version, lane_snapshot, decision_json)
+       VALUES ($1, $2, $3, $4, 'fixture', '{}'::jsonb, '{}'::jsonb)`,
+      [ctx().workspaceId, withResults.canonicalJobId, withResults.jobVersionId, `lane-${withResults.jobVersionId}`],
+    );
+
+    const none = await job();
+    const gateMissing = await completedTask("APPLY_HARD_GATES", none.jobVersionId);
+    const laneMissing = await completedTask("ROUTE_LANE", none.jobVersionId);
+
+    // The old version of this job has both results; the current version has none.
+    const moved = await job();
+    await db().query(
+      `INSERT INTO gate_decisions (canonical_job_id, job_version_id, decision, workspace_id) VALUES ($1, $2, 'PASS', $3)`,
+      [moved.canonicalJobId, moved.jobVersionId, ctx().workspaceId],
+    );
+    await db().query(
+      `INSERT INTO lane_decisions (workspace_id, canonical_job_id, job_version_id, decision_hash, model_version, lane_snapshot, decision_json)
+       VALUES ($1, $2, $3, $4, 'fixture', '{}'::jsonb, '{}'::jsonb)`,
+      [ctx().workspaceId, moved.canonicalJobId, moved.jobVersionId, `lane-${moved.jobVersionId}`],
+    );
+    const currentVersion = randomUUID();
+    await db().query(
+      `INSERT INTO job_versions (id, workspace_id, canonical_job_id, content_hash, description_text, observed_at) VALUES ($1, $2, $3, $4, 'Newer.', NOW())`,
+      [currentVersion, ctx().workspaceId, moved.canonicalJobId, `h-${currentVersion}`],
+    );
+    await db().query(`UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE id = $2`, [currentVersion, moved.canonicalJobId]);
+    const gateOnCurrent = await completedTask("APPLY_HARD_GATES", currentVersion);
+    const laneOnCurrent = await completedTask("ROUTE_LANE", currentVersion);
+
+    const reported = (await findTasksCompletedWithoutResult(db(), ctx().workspaceId, { sampleLimit: 200 })).sample.map((row) => row.taskId);
+    expect(reported).toEqual(expect.arrayContaining([gateMissing, laneMissing, gateOnCurrent, laneOnCurrent]));
+    expect(reported).not.toContain(gateOk);
+    expect(reported).not.toContain(laneOk);
+  });
+});
+
+describe("exit code and predicate map", () => {
+  it("is non-zero when any task completed without a result, zero otherwise", () => {
+    expect(completedWithoutResultExitCode({ total: 0 })).toBe(0);
+    expect(completedWithoutResultExitCode({ total: 1 })).toBe(1);
+  });
+
+  it("checks exactly the task types it has a result predicate for", () => {
+    expect([...COMPLETED_RESULT_TASK_TYPES].sort()).toEqual(Object.keys(COMPLETED_RESULT_PREDICATES).sort());
+    expect(COMPLETED_RESULT_TASK_TYPES).toEqual(["APPLY_HARD_GATES", "ROUTE_LANE", "MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION"]);
   });
 });

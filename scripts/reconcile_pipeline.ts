@@ -5,7 +5,7 @@ import {
   DEAD_LETTER_CLASSIFICATION_SQL,
   DEAD_LETTER_LINEAGE_JOINS_SQL,
 } from "../src/tasks/deadLetterPolicy.js";
-import { findTasksCompletedWithoutResult, type CompletedWithoutResultReport } from "../src/tasks/completedWithoutResult.js";
+import { completedWithoutResultExitCode, findTasksCompletedWithoutResult, type CompletedWithoutResultReport } from "../src/tasks/completedWithoutResult.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
@@ -459,7 +459,7 @@ async function run(): Promise<void> {
       console.log("PIPELINE RECONCILIATION (READ ONLY)");
       console.log(JSON.stringify(report, null, 2));
     }
-    if (report.completed_without_result.total > 0) {
+    if (completedWithoutResultExitCode(report.completed_without_result) !== 0) {
       console.error(
         `ERROR: ${report.completed_without_result.total} pipeline task(s) are COMPLETED with no result recorded ` +
         `(${JSON.stringify(report.completed_without_result.byTaskType)}).`,
