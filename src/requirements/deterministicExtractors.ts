@@ -19,7 +19,7 @@ import { neutralizeWorkplacePerkPhrases } from '../pipeline/workplacePerkPhrases
 export { isOccurrenceNegated };
 
 /** One version for the extractor, the task keys and the currentness policy. */
-export const DETERMINISTIC_EXTRACTOR_VERSION = 'deterministic_v5';
+export const DETERMINISTIC_EXTRACTOR_VERSION = 'deterministic_v6';
 const EXTRACTOR_VERSION = DETERMINISTIC_EXTRACTOR_VERSION;
 
 export interface DeterministicExtractorInput {
@@ -413,6 +413,43 @@ function widenDegreeQuote(description: string, degree: MatchInfo): MatchInfo {
   return wide;
 }
 
+const DEGREE_LEVEL_WORDS: Array<{ level: number; pattern: RegExp }> = [
+  { level: 1, pattern: /\b(?:bachelor(?:'s)?|B\.?Sc|BA|BS|B\.A|B\.S)\b/g },
+  { level: 2, pattern: /\b(?:master(?:'s)?|M\.?Sc|M\.?Eng)\b/g },
+  { level: 3, pattern: /\b(?:ph\.?\s?d\b|doctorate|doctoral|doctor\s+of\s+philosophy)/gi },
+];
+const DEGREE_ALTERNATIVE_WINDOW = 160;
+
+/**
+ * When one sentence offers several degree levels joined by "or" or "/" ("BA/BS in a quantitative field, or a PhD with
+ * 3+ years"), the requirement is the lowest level offered: the posting accepts it. The match is re-anchored on that
+ * level so the matcher compares the candidate with it, not with the highest one named first.
+ */
+function lowestAlternativeDegree(description: string, degree: MatchInfo): MatchInfo {
+  const clause = findEnclosingClause(description, degree.quote_start_offset, degree.quote_end_offset);
+  const text = description.slice(clause.startOffset, clause.endOffset);
+  const found: Array<{ level: number; start: number; end: number }> = [];
+  for (const { level, pattern } of DEGREE_LEVEL_WORDS) {
+    for (const m of text.matchAll(new RegExp(pattern.source, pattern.flags))) {
+      if (typeof m.index === 'number') found.push({ level, start: m.index, end: m.index + m[0].length });
+    }
+  }
+  const at = degree.quote_start_offset - clause.startOffset;
+  const own = found.find((f) => f.start <= at && f.end > at);
+  if (!own) return degree;
+  const lower = found
+    .filter((f) => f.level < own.level)
+    .filter((f) => {
+      const between = f.start < own.start ? text.slice(f.end, own.start) : text.slice(own.end, f.start);
+      return between.length <= DEGREE_ALTERNATIVE_WINDOW && /\bor\b|\//i.test(between) && !/\band\b/i.test(between);
+    })
+    .sort((a, b) => a.level - b.level)[0];
+  if (!lower) return degree;
+  const subject = text.slice(lower.end).match(/^(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100}(?!\w))?/)?.[0] ?? '';
+  const start = clause.startOffset + lower.start;
+  return trimMatch(description, start, start + (lower.end - lower.start) + subject.length) ?? degree;
+}
+
 function degreeAlternatives(description: string, degree: MatchInfo): Record<string, unknown> {
   const clause = findEnclosingClause(description, degree.quote_start_offset, degree.quote_end_offset);
   const alternatives = detectAlternatives(clause.clauseText);
@@ -495,13 +532,21 @@ export function extractDeterministicRequirements(
   requirements.push(...extractedExperience.requirements);
   sequence = extractedExperience.nextSequence;
 
-  const degree = findFirstMatch(description, [
-    // "Ph.D", "PhD", "Ph. D." count as degree levels, like the words below.
-    /\b(?:bachelor(?:'s)?|master(?:'s)?|ph\.?\s?d\b\.?|doctorate|doctoral|doctor\s+of\s+philosophy)(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100})?/i,
+  const firstDegree = findFirstMatch(description, [
+    // "Ph.D", "PhD", "Ph. D." count as degree levels, like the words below. A parenthetical right after the degree
+    // ("PhD (or equivalent) in ...") stays inside the match, and the subject never ends in the middle of a word.
+    /\b(?:bachelor(?:'s)?|master(?:'s)?|ph\.?\s?d\b\.?|doctorate|doctoral|doctor\s+of\s+philosophy)(?:\s+degree)?(?:\s*\([^)\n]{1,80}\))?(?:\s+in\s+[^.;\n]{1,100}(?!\w))?/i,
     // Abbreviations are case-sensitive so ordinary lowercase words are not read as degrees.
-    /\b(?:B\.?Sc|M\.?Sc|M\.?Eng)\b\.?(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100})?/,
-    /\bdegree\s+in\s+[^.;\n]{1,100}/i,
+    /\b(?:B\.?Sc|M\.?Sc|M\.?Eng|BA|BS|B\.A|B\.S)\b\.?(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100}(?!\w))?/,
+    /\bdegree\s+in\s+[^.;\n]{1,100}(?!\w)/i,
   ]);
+  // "Whether you're a PhD researcher, engineer or scientist" describes the audience, not an entry requirement.
+  const degreeIsAudience = firstDegree !== null
+    && /\bwhether\s+you(?:'|’)?(?:re|\s+are)\b/i.test(
+      findEnclosingClause(description, firstDegree.quote_start_offset, firstDegree.quote_end_offset).clauseText,
+    );
+  // "BA/BS ... or a PhD", "Master's or PhD": the posting accepts the lower degree, so that is the requirement.
+  const degree = firstDegree && !degreeIsAudience ? lowestAlternativeDegree(description, firstDegree) : null;
   if (degree) {
     const degreeQuote = widenDegreeQuote(description, degree);
     requirements.push(
