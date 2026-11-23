@@ -51,7 +51,7 @@ const CASES: readonly Case[] = [
   { name: "complete text but only a bare alert", quality: "COMPLETE", observations: [{ source: "GMAIL_ALERT" }], decisions: true, expectAwaiting: true, expectViolation: true },
   { name: "alert completed by a retrieved posting", quality: "COMPLETE", observations: [{ source: "GMAIL_ALERT", contentStatus: "COMPLETE" }], decisions: true, expectAwaiting: false, expectViolation: false },
   { name: "alert plus a later employer observation", quality: "COMPLETE", observations: [{ source: "GMAIL_ALERT" }, { source: "EMPLOYER_WEBSITE" }], decisions: true, expectAwaiting: false, expectViolation: false },
-  { name: "stale hard rejection on a snippet", quality: "INCOMPLETE", observations: [{ source: "GMAIL_ALERT" }], decisions: true, hardRejected: true, expectAwaiting: true, expectViolation: true },
+  { name: "stale hard rejection on a snippet", quality: "INCOMPLETE", observations: [{ source: "GMAIL_ALERT" }], decisions: true, hardRejected: true, expectAwaiting: true, expectViolation: false },
   { name: "archived snippet is not live", quality: "INCOMPLETE", observations: [{ source: "GMAIL_ALERT" }], decisions: true, archived: true, expectAwaiting: true, expectViolation: false },
 ];
 
@@ -216,8 +216,9 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
     const report = await reportAwaitingContentOutputs(db(), context!.workspaceId);
     const expectedViolations = CASES.filter((c) => c.expectViolation).map((c) => seeded.get(c.name)!.canonicalJobId).sort();
     expect(report.violations.map((v) => v.canonicalJobId).sort()).toEqual(expectedViolations);
-    expect(report.awaitingContentJobs).toBe(CASES.filter((c) => c.expectAwaiting && !c.archived).length);
-    expect(report.byOutput).toEqual({ GATE_DECISION: 4, LANE: 4, RECOMMENDATION: 4 });
+    // A hard rejection is not a recommendation: it stays in the Rejected list and is not counted as awaiting.
+    expect(report.awaitingContentJobs).toBe(CASES.filter((c) => c.expectAwaiting && !c.archived && !c.hardRejected).length);
+    expect(report.byOutput).toEqual({ GATE_DECISION: 3, LANE: 3, RECOMMENDATION: 3 });
     for (const violation of report.violations) expect(violation.outputs).toEqual(["GATE_DECISION", "LANE", "RECOMMENDATION"]);
   });
 

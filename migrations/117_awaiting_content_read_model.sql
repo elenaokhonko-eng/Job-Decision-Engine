@@ -100,7 +100,7 @@ CROSS JOIN LATERAL (
     AND any_version.canonical_job_id = canonical.id
 ) seen
 LEFT JOIN LATERAL (
-  SELECT (ARRAY_AGG(task.status ORDER BY task.created_at DESC))[1] AS task_status,
+  SELECT (ARRAY_AGG(task.status ORDER BY task.created_at DESC, task.id DESC))[1] AS task_status,
          COUNT(*)::int AS task_count
   FROM pipeline_tasks task
   WHERE task.workspace_id = canonical.workspace_id

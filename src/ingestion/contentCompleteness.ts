@@ -66,7 +66,7 @@ export async function reportAwaitingContentOutputs(
       WHERE canonical.workspace_id = $1::uuid
         AND canonical.is_test_fixture = FALSE
         AND canonical.archived_at IS NULL
-        AND COALESCE(canonical.processing_state, canonical.processing_status) <> 'MANUALLY_REMOVED'
+        AND COALESCE(canonical.processing_state, canonical.processing_status) NOT IN ('MANUALLY_REMOVED', 'HARD_REJECTED')
         AND NOT state.content_complete
       ORDER BY canonical.id`,
     [workspaceId],
