@@ -546,6 +546,42 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     expect(await availabilityState(job)).toBe("CLOSED");
   });
 
+  it("records the public error on the event when the readiness recompute throws, and keeps the verdict", async () => {
+    const decider = await import("../../pipeline/recommendationDecider.js");
+    const spy = vi.spyOn(decider, "runRecommendationDecider").mockRejectedValueOnce(new Error("synthetic decider failure"));
+    try {
+      const job = await createJob({ windowEndedDaysAgo: 1, board: "decider-fails" });
+      const result = await runAvailabilityRecheck(db(), ctx(), payload(job), null, deps({
+        now: at(0), fetchJobContent: async () => ({ kind: "UNAVAILABLE", reason: "The exact posting URL returned HTTP 404.", evidence: {} as never }),
+      }));
+      expect(result).toMatchObject({ action: "MARK_CLOSED" });
+      expect(await availabilityState(job)).toBe("CLOSED");
+      const event = await db().query(`SELECT details FROM job_availability_recheck_events WHERE canonical_job_id = $1`, [job.canonicalJobId]);
+      expect(event.rows[0]?.details).toMatchObject({ readiness_recomputed: false });
+      expect(typeof event.rows[0]?.details.readiness_error).toBe("string");
+      expect(event.rows[0]?.details.readiness_error.length).toBeGreaterThan(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a failure while recording rolls back the fact change, the event and the re-gate together", async () => {
+    const job = await createJob({ windowEndedDaysAgo: 1, board: "atomic", workplaceType: "UNKNOWN" });
+    // Make the event insert fail after the fact update has run.
+    await db().query(`ALTER TABLE job_availability_recheck_events ADD CONSTRAINT fail_for_test CHECK (reason_code <> 'POSTING_CONFIRMED_OPEN') NOT VALID`);
+    try {
+      await expect(runAvailabilityRecheck(db(), ctx(), payload(job), null, deps({
+        now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "HYBRID", null),
+      }))).rejects.toThrow();
+    } finally {
+      await db().query(`ALTER TABLE job_availability_recheck_events DROP CONSTRAINT fail_for_test`);
+    }
+    const row = await db().query(`SELECT workplace_type FROM canonical_jobs WHERE id = $1`, [job.canonicalJobId]);
+    expect(row.rows[0]?.workplace_type).toBe("UNKNOWN");
+    expect(await events(job)).toHaveLength(0);
+    expect(await pendingTasks(job, "APPLY_HARD_GATES")).toHaveLength(0);
+  });
+
   it("is skipped, not recorded, for a job that is archived or whose version moved on", async () => {
     const job = await createJob({ windowEndedDaysAgo: 1, board: "skip-board" });
     const stale = await runAvailabilityRecheck(db(), ctx(), { ...payload(job), job_version_id: randomUUID() }, null, deps({ now: at(0) }));

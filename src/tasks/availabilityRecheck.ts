@@ -794,6 +794,9 @@ export async function runAvailabilityRecheck(
 
   // Facts: re-evaluated from the same read. A feed match was refreshed in place; a page read is compared.
   let factsChanged = false;
+  // Fact and archive writes are collected and run together with the event, counters, next read and
+  // re-gate in ONE transaction below: a crash never leaves a changed fact without its event and re-gate.
+  const writes: Array<() => Promise<void>> = [];
   if (decision.action === "MARK_OPEN") {
     if (read.page !== null) {
       const stored = await storeVerdict(client, context, identity, {
@@ -809,18 +812,22 @@ export async function runAvailabilityRecheck(
       const pageLocation = (read.page.posting.location ?? "").trim();
       const applied: Record<string, unknown> = {};
       if (pageMode !== "UNKNOWN" && (storedUnknown || normalizeWorkMode(storedMode) !== pageMode)) {
-        await client.query(
-          `UPDATE canonical_jobs SET workplace_type = $3, updated_at = NOW() WHERE workspace_id = $1::uuid AND id = $2::uuid`,
-          [context.workspaceId, payload.canonical_job_id, pageMode],
-        );
+        writes.push(async () => {
+          await client.query(
+            `UPDATE canonical_jobs SET workplace_type = $3, updated_at = NOW() WHERE workspace_id = $1::uuid AND id = $2::uuid`,
+            [context.workspaceId, payload.canonical_job_id, pageMode],
+          );
+        });
         applied.work_mode = { before: storedMode === "" ? "UNKNOWN" : storedMode, after: pageMode };
       }
       if (pageLocation !== "" && normalizedLocation(pageLocation) !== "unknown" &&
           normalizedLocation(pageLocation) !== normalizedLocation(target.location)) {
-        await client.query(
-          `UPDATE canonical_jobs SET location = $3, updated_at = NOW() WHERE workspace_id = $1::uuid AND id = $2::uuid`,
-          [context.workspaceId, payload.canonical_job_id, pageLocation],
-        );
+        writes.push(async () => {
+          await client.query(
+            `UPDATE canonical_jobs SET location = $3, updated_at = NOW() WHERE workspace_id = $1::uuid AND id = $2::uuid`,
+            [context.workspaceId, payload.canonical_job_id, pageLocation],
+          );
+        });
         applied.territory = { before: normalizedLocation(target.location), after: normalizedLocation(pageLocation) };
       }
       if (Object.keys(applied).length > 0) {
@@ -839,12 +846,14 @@ export async function runAvailabilityRecheck(
     if (storedMode === "" || storedMode === "UNKNOWN" || storedMode === "ASSUMED_HYBRID") {
       const structured = structuredWorkModeFromObservation(observation.source_name, observation.raw_payload);
       if (structured !== "UNKNOWN") {
-        await client.query(
-          `UPDATE canonical_jobs SET workplace_type = $3, updated_at = NOW()
-            WHERE workspace_id = $1::uuid AND id = $2::uuid
-              AND UPPER(COALESCE(workplace_type, 'UNKNOWN')) IN ('UNKNOWN', '', 'ASSUMED_HYBRID')`,
-          [context.workspaceId, payload.canonical_job_id, structured],
-        );
+        writes.push(async () => {
+          await client.query(
+            `UPDATE canonical_jobs SET workplace_type = $3, updated_at = NOW()
+              WHERE workspace_id = $1::uuid AND id = $2::uuid
+                AND UPPER(COALESCE(workplace_type, 'UNKNOWN')) IN ('UNKNOWN', '', 'ASSUMED_HYBRID')`,
+            [context.workspaceId, payload.canonical_job_id, structured],
+          );
+        });
         factsChanged = true;
         // Durable provenance: the field, its stored value, the observation it came from, and the value replaced.
         details.work_mode_from_structured_field = {
@@ -880,8 +889,7 @@ export async function runAvailabilityRecheck(
       nextCheckAt = null;
       details.protection = protection.reasons;
     } else {
-      await client.query("BEGIN");
-      try {
+      writes.push(async () => {
         const archived = await archiveJobsAsPostingNotConfirmable(client, {
           workspaceId: context.workspaceId,
           canonicalJobIds: [payload.canonical_job_id],
@@ -894,43 +902,47 @@ export async function runAvailabilityRecheck(
           },
         });
         details.archived = archived.length === 1;
-        await client.query("COMMIT");
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      }
+      });
     }
   }
 
-  await recordEvent(client, context, {
-    canonicalJobId: payload.canonical_job_id,
-    jobVersionId: payload.job_version_id,
-    taskId,
-    readKind: read.readKind,
-    outcome: outcome.kind,
-    decision: action,
-    reasonCode,
-    counters: decision.counters,
-    nextCheckAt,
-    details,
-    now,
-  });
-
   let nextTaskQueued = false;
-  if (nextCheckAt !== null && (action === "WAIT_NEXT_READ" || action === "RETRY_LATER")) {
-    nextTaskQueued = await enqueueAvailabilityRecheck(client, context, {
+  await client.query("BEGIN");
+  try {
+    for (const write of writes) await write();
+    await recordEvent(client, context, {
       canonicalJobId: payload.canonical_job_id,
       jobVersionId: payload.job_version_id,
-      cycleStartedAt: decision.counters.cycleStartedAt ?? cycleStartedAt,
-      availableAt: nextCheckAt,
+      taskId,
+      readKind: read.readKind,
+      outcome: outcome.kind,
+      decision: action,
+      reasonCode,
+      counters: decision.counters,
+      nextCheckAt,
+      details,
+      now,
     });
-  }
-  if (factsChanged) {
-    await enqueueForcedRegate(client, context, {
-      canonicalJobId: payload.canonical_job_id,
-      jobVersionId: payload.job_version_id,
-      sequence: await countEvents(client, context.workspaceId, payload.canonical_job_id),
-    });
+
+    if (nextCheckAt !== null && (action === "WAIT_NEXT_READ" || action === "RETRY_LATER")) {
+      nextTaskQueued = await enqueueAvailabilityRecheck(client, context, {
+        canonicalJobId: payload.canonical_job_id,
+        jobVersionId: payload.job_version_id,
+        cycleStartedAt: decision.counters.cycleStartedAt ?? cycleStartedAt,
+        availableAt: nextCheckAt,
+      });
+    }
+    if (factsChanged) {
+      await enqueueForcedRegate(client, context, {
+        canonicalJobId: payload.canonical_job_id,
+        jobVersionId: payload.job_version_id,
+        sequence: await countEvents(client, context.workspaceId, payload.canonical_job_id),
+      });
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
   }
   return {
     status: "RECORDED",
