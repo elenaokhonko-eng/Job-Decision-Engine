@@ -6,8 +6,14 @@ import { assessRoleShape } from "../../pipeline/roleShape.js";
 describe("role shape: people management as the core of the role", () => {
   const codes = (title: string, description = "") => assessRoleShape({ title, description }).signals.map((s) => s.code);
 
-  it.each(["Head of Data Platform", "Director, Applied AI", "Engineering Manager, ML", "Vice President of Analytics"])("flags the title %s", (title) => {
-    expect(codes(title)).toEqual(["PEOPLE_MANAGEMENT_CORE"]);
+  it.each(["Head of Data Platform", "Director, Applied AI", "Engineering Manager, ML", "Vice President of Analytics", "Team Lead, Data"])("does not flag the title %s on its own", (title) => {
+    expect(codes(title)).toEqual([]);
+    expect(codes(title, "You will design data pipelines and own their quality.")).toEqual([]);
+  });
+
+  it("flags a management title together with one description cue", () => {
+    expect(codes("Head of Data Platform", "You will manage a team of eight engineers.")).toEqual(["PEOPLE_MANAGEMENT_CORE"]);
+    expect(codes("Engineering Manager, ML", "Three direct reports today.")).toEqual(["PEOPLE_MANAGEMENT_CORE"]);
   });
 
   it("flags a description that is mostly about running a team (two cues), with a quote", () => {
@@ -21,10 +27,11 @@ describe("role shape: people management as the core of the role", () => {
     expect(codes("Product Manager, Data")).toEqual([]);
     expect(codes("Program Manager", "You will mentor two junior colleagues.")).toEqual([]);
     expect(codes("Data Engineer", "Some line management experience is a plus.")).toEqual([]);
+    expect(codes("Product Manager, Data", "You will have one direct report.")).toEqual([]);
   });
 
   it("is a downrank: the penalty is below the cap and the score stays positive", () => {
-    const result = assessRoleShape({ title: "Head of Data", description: "" });
+    const result = assessRoleShape({ title: "Head of Data", description: "Direct reports and performance reviews are part of the job." });
     expect(result.total_penalty).toBeGreaterThan(0);
     expect(result.total_penalty).toBeLessThan(0.2);
   });

@@ -89,13 +89,13 @@ const PEOPLE_MANAGEMENT_CUES: RegExp[] = [
 ];
 
 export const detectPeopleManagementCore: RoleShapeDetector = ({ title, description }) => {
-  const titleHit = title.match(PEOPLE_MANAGEMENT_TITLE);
-  if (titleHit) {
-    return { code: "PEOPLE_MANAGEMENT_CORE", penalty: 0.08, source: "TITLE", quote: excerpt(title, titleHit.index ?? 0, titleHit[0].length) };
-  }
+  // A management-sounding title alone is not evidence: "Lead" and "Manager" are often individual roles. Managing a team
+  // is the core of the role only when the description says so: two separate cues, or a management title plus one cue.
   const hits = PEOPLE_MANAGEMENT_CUES.map((cue) => description.match(cue)).filter((match): match is RegExpMatchArray => match !== null);
-  if (hits.length >= 2) {
-    return { code: "PEOPLE_MANAGEMENT_CORE", penalty: 0.08, source: "DESCRIPTION", quote: excerpt(description, hits[0]!.index ?? 0, hits[0]![0].length) };
+  const titleHit = title.match(PEOPLE_MANAGEMENT_TITLE);
+  if (hits.length >= 2 || (titleHit && hits.length >= 1)) {
+    const first = hits[0]!;
+    return { code: "PEOPLE_MANAGEMENT_CORE", penalty: 0.08, source: "DESCRIPTION", quote: excerpt(description, first.index ?? 0, first[0].length) };
   }
   return null;
 };
