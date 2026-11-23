@@ -594,7 +594,7 @@ describe("Sector rules", () => {
     // The employer's sector does not make a non-technology title a product-lane title. Since
     // lane_router_v2.6.0 a leadership title may still take CORE_AI_DATA from its own technical text.
     expect(route("Transformation Manager", roleText, "TECHNICAL_PRODUCT_TRANSFORMATION").primaryLane)
-      .not.toBe("TECHNICAL_PRODUCT_TRANSFORMATION");
+      .toBe("CORE_AI_DATA");
     expect(titleNamesTechnologyWork("Digital Transformation Manager")).toBe(true);
     expect(route("Digital Transformation Manager", roleText, "TECHNICAL_PRODUCT_TRANSFORMATION").primaryLane)
       .toBe("TECHNICAL_PRODUCT_TRANSFORMATION");

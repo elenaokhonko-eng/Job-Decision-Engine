@@ -80,6 +80,28 @@ describe("lane router function waiver (lane_router_v2.6.0)", () => {
     expect(result.primaryLane).toBe("UNCLASSIFIED");
   });
 
+  it("keeps the non-technical-project veto when the title names the subject", () => {
+    const result = route("Delivery Coordination Lead, Office Fit-out", MARKETS_COORDINATION, 0.2, { INVESTMENT_MARKETS_FINTECH: 0.9 });
+    expect(result.primaryLane).toBe("UNCLASSIFIED");
+  });
+
+  it("keeps the non-technical-project veto when the role text describes building or estates work", () => {
+    const text = `${MARKETS_COORDINATION} Manage building works, facilities management and refurbishment of our offices.`;
+    const result = route("Delivery Coordination Lead", text, 0.2, { INVESTMENT_MARKETS_FINTECH: 0.9 });
+    expect(result.primaryLane).toBe("UNCLASSIFIED");
+  });
+
+  it("keeps the excluded-sector veto", () => {
+    const text = "Coordinate delivery for our trading and market data teams. Run stakeholder meetings and track milestones.";
+    const scores = { INVESTMENT_MARKETS_FINTECH: 0.9 };
+    const covered = route("Delivery Coordination Lead", text, 0.2, scores, "Example Holdings");
+    expect(covered.primaryLane).toBe("INVESTMENT_MARKETS_FINTECH");
+    expect(covered.laneConfidence).toBe("Low");
+    const excluded = route("Delivery Coordination Lead", text, 0.2, scores, "Example Freight Logistics");
+    expect(excluded.primaryLane).toBe("UNCLASSIFIED");
+    expect(excluded.laneEvidence.some((e) => e.startsWith("INVESTMENT_MARKETS_FINTECH:excluded_sector="))).toBe(true);
+  });
+
   it("keeps the negative-concept veto", () => {
     expect(config.lanes.INVESTMENT_MARKETS_FINTECH.negative_concepts).toContain("treasury");
     const scores = { INVESTMENT_MARKETS_FINTECH: 0.9 };
@@ -120,6 +142,23 @@ describe("leadership words in the CORE_AI_DATA title list", () => {
       expect(hasApprovedLaneFunction("CORE_AI_DATA", title)).toBe(true);
     },
   );
+
+  it("gives CORE_AI_DATA a function score of 0 for a leadership title whose subject is non-technical", () => {
+    const technical = "Build machine learning models in software for AI.";
+    const ok = route("Lead, Applied Machine Learning", technical, 0.2, { CORE_AI_DATA: 0.9 });
+    expect(ok.functionScores.CORE_AI_DATA).toBe(1);
+    expect(ok.primaryLane).toBe("CORE_AI_DATA");
+    const estates = route(
+      "Lead, Applied Machine Learning",
+      `${technical} Includes campus estates works: building works, facilities management and refurbishment.`,
+      0.2,
+      { CORE_AI_DATA: 0.9 },
+    );
+    expect(estates.functionScores.CORE_AI_DATA).toBe(0);
+    expect(estates.primaryLane).toBe("UNCLASSIFIED");
+    // A non-technical subject in the title is refused for the same reason.
+    expect(route("Programme Manager, Campus Estates", technical, 0.2, { CORE_AI_DATA: 0.9 }).functionScores.CORE_AI_DATA).toBe(0);
+  });
 
   it.each(["Sales Director", "Marketing Manager", "Talent Lead", "Operations Manager"])(
     "still refuses the non-technical role family %s",
