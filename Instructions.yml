@@ -34,7 +34,7 @@ first_execution_wave:
 
 hard_rules:
   - Operational failures never become career rejections.
-  - An unknown workplace model is rejected after available evidence is examined.
+  - An unknown workplace model produces NEEDS_VERIFICATION after available evidence is examined; it is not rejected.
   - Jobs outside the AI budget are deferred, not rejected.
   - Invalid or mismatched AI output is a provider failure, not success.
   - No source record may silently disappear.

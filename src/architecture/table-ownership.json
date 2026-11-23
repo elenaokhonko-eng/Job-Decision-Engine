@@ -1,0 +1,177 @@
+{
+  "note": "Every table has exactly one owner: a domain module, a platform part, or 'legacy'. Only the owner writes it. A migration that creates a table must add it here, or src/tests/architecture/boundaries.test.ts fails. 'legacy' tables are scheduled for retirement; new code neither reads nor writes them. See docs/architecture.md, section 7.",
+  "owners": {
+    "sourcing": [
+      "employer_board_resolutions",
+      "himalayas_link_repair_log",
+      "raw_email_alerts",
+      "raw_job_observations",
+      "searchapi_credit_days",
+      "searchapi_requests",
+      "source_candidate_dispositions",
+      "source_checkpoints",
+      "source_connector_accounts",
+      "source_plan_runs",
+      "source_plugin_active_revisions",
+      "source_plugin_revisions",
+      "source_plugins",
+      "source_runs"
+    ],
+    "catalog": [
+      "canonical_jobs",
+      "company_culture_observations",
+      "job_archive_events",
+      "job_archive_holds",
+      "job_archive_runs",
+      "job_confirmed_facts",
+      "job_support_actions",
+      "job_versions",
+      "verification_question_job_links",
+      "verification_questions",
+      "work_mode_enrichments"
+    ],
+    "requirements": [
+      "job_requirements",
+      "requirement_extraction_runs",
+      "requirement_set_activation_events",
+      "requirement_set_identities",
+      "requirement_set_operations",
+      "requirement_sets",
+      "taxonomy_concept_candidates",
+      "taxonomy_concepts"
+    ],
+    "profile": [
+      "candidate_profiles",
+      "evidence_edges",
+      "evidence_sources",
+      "evidence_spans",
+      "profile_concept_metric_snapshots",
+      "profile_credentials",
+      "profile_engagements",
+      "profile_fact_activation_events",
+      "profile_fact_active_revisions",
+      "profile_fact_concepts",
+      "profile_fact_evidence_sources",
+      "profile_fact_identities",
+      "profile_fact_revision_approvals",
+      "profile_fact_revisions",
+      "profile_facts",
+      "profile_update_clarifications",
+      "profile_update_extraction_attempts",
+      "profile_update_operation_approvals",
+      "profile_update_proposed_operations",
+      "profile_update_sessions",
+      "profile_version_fact_snapshots",
+      "profile_versions",
+      "workspace_user_accessibility_settings",
+      "workspace_user_preference_activation_events",
+      "workspace_user_preference_active_versions",
+      "workspace_user_preference_change_audit",
+      "workspace_user_preference_context_revisions",
+      "workspace_user_preference_contexts",
+      "workspace_user_preference_modes",
+      "workspace_user_preference_revisions"
+    ],
+    "policy": [
+      "fx_rate_observations",
+      "gate_decisions",
+      "lane_activation_events",
+      "lane_active_revisions",
+      "lane_decisions",
+      "lane_identities",
+      "lane_revisions",
+      "policy_recheck_requests",
+      "workspace_companies",
+      "workspace_company_policy_observations",
+      "workspace_lane_preferences",
+      "workspace_policy_snapshots"
+    ],
+    "matching": [
+      "embedding_batch_items",
+      "embedding_batches",
+      "embedding_inputs",
+      "embedding_spaces",
+      "match_runs",
+      "requirement_evidence_matches",
+      "semantic_embeddings"
+    ],
+    "decision": [
+      "deterministic_decisions",
+      "job_ranking_snapshots",
+      "ranking_policies"
+    ],
+    "evaluation": [
+      "ai_evaluation_budget_runs",
+      "ai_evaluation_budget_usage",
+      "ai_evaluations",
+      "evaluation_attempts",
+      "evaluation_budget_deferrals",
+      "evaluation_queue"
+    ],
+    "documents": [
+      "document_claims",
+      "document_runs",
+      "document_template_plugin_activation_events",
+      "document_template_plugin_active_revisions",
+      "document_template_plugin_revisions",
+      "document_template_plugins",
+      "manual_application_approval_contact_facts",
+      "manual_application_document_artifacts",
+      "manual_application_document_claims",
+      "manual_application_document_runs",
+      "manual_application_draft_contact_facts",
+      "manual_application_drafts",
+      "manual_application_fetch_receipts",
+      "manual_application_preparation_approvals",
+      "manual_document_generation_jobs",
+      "manual_evidence_pairings"
+    ],
+    "applications": [
+      "application_document_selections",
+      "application_events",
+      "application_records"
+    ],
+    "orchestration": [
+      "backfill_checkpoints",
+      "backfill_runs",
+      "job_version_pipeline_state",
+      "pipeline_run_reports",
+      "pipeline_stage_events",
+      "pipeline_task_attempts",
+      "pipeline_tasks",
+      "pipeline_worker_progress_snapshots"
+    ],
+    "llm": [
+      "model_route_activation_events",
+      "model_route_active_revisions",
+      "model_route_invocations",
+      "model_route_revisions",
+      "model_routes"
+    ],
+    "config": [
+      "config_activation_events",
+      "config_active_revisions",
+      "config_definitions",
+      "config_revision_approvals",
+      "config_revisions"
+    ],
+    "security": [
+      "workspace_memberships",
+      "workspace_user_consents",
+      "workspace_users",
+      "workspaces"
+    ],
+    "legacy": [
+      "agent_audit_logs",
+      "agent_tool_logs",
+      "companies",
+      "interactions_log",
+      "jobs",
+      "parity_audit_runs",
+      "quarantined_queue_records",
+      "raw_companies",
+      "raw_jobs",
+      "workspace_cutover_flags"
+    ]
+  }
+}

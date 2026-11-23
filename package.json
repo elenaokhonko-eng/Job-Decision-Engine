@@ -62,8 +62,7 @@
     "lint": "tsc --noEmit",
     "gemini:models": "tsx scripts/list_gemini_models.ts",
     "models:check": "tsx scripts/check_model_ids.ts",
-    "lint:boundaries": "depcruise src scripts --config .dependency-cruiser.cjs --ignore-known .dependency-cruiser-known-violations.json",
-    "lint:boundaries:baseline": "depcruise src scripts --config .dependency-cruiser.cjs --output-type baseline > .dependency-cruiser-known-violations.json"
+    "lint:boundaries": "vitest run src/tests/architecture"
   },
   "build": {
     "appId": "com.jobdecisionengine.desktop",
@@ -144,7 +143,6 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^26.4.1",
     "@types/pg": "^8.11.5",
-    "dependency-cruiser": "^16.10.4",
     "electron": "^44.2.0",
     "electron-builder": "^26.15.3",
     "js-yaml": "^5.2.1",
