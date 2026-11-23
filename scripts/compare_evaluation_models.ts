@@ -7,6 +7,7 @@ import pg from "pg";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { DEFAULT_GEMINI_EVALUATION_MODEL } from "../src/services/modelDefaults.js";
 import { isProfileFactModelShareable } from "../src/profile/privacy.js";
+import { checkPrimaryAnswered } from "../src/platform/llm/index.js";
 import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
@@ -287,7 +288,7 @@ export interface EvaluationExecutionLike {
 
 export function toModelRun(result: EvaluationExecutionLike, model: string): ModelRun {
   const job = result.evaluatedJob as Record<string, unknown>;
-  const answeredByModel = result.model === model;
+  const answeredByModel = checkPrimaryAnswered({ expectedModel: model, servedModel: result.model }) === null;
   return {
     ok: answeredByModel,
     nextAction: String(job.next_action ?? ""),
@@ -300,6 +301,11 @@ export function toModelRun(result: EvaluationExecutionLike, model: string): Mode
     servedPath: result.servedPath ?? null,
     ...(answeredByModel ? {} : { failureKind: "ANSWERED_BY_OTHER_MODEL" as const, error: `answered by ${result.model}` }),
   };
+}
+
+/** How many runs in a summary were answered by a model other than the one requested. */
+export function answeredByOtherModelCount(summary: { models: ReadonlyArray<{ answered_by_other_model: number }> }): number {
+  return summary.models.reduce((total, row) => total + row.answered_by_other_model, 0);
 }
 
 export function failedRun(error: unknown): ModelRun {
@@ -451,10 +457,17 @@ async function main(): Promise<void> {
       }, crypto.randomUUID(), 1, { modelOverride: model, onlyProvider: provider }),
       (line) => console.log(line),
     );
+    const summary = summarizeModelComparisons(comparisons, args.models, args.prices);
     console.log(JSON.stringify({
-      summary: summarizeModelComparisons(comparisons, args.models, args.prices),
+      summary,
       per_job: perJobReport(comparisons, args.models),
     }, null, 2));
+    // A run that another model answered measured that other model: the whole run fails.
+    const otherModel = answeredByOtherModelCount(summary);
+    if (otherModel > 0) {
+      console.error(`Evaluation model comparison failed: ${otherModel} run(s) were answered by a model other than the one requested.`);
+      process.exitCode = 1;
+    }
   } finally {
     releaseClient();
     await pool.end();
