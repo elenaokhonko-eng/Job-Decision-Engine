@@ -60,6 +60,21 @@ import {
   POLITICS_STRESS_RISK_DIMENSIONS
 } from "./criteria.ts";
 import { TARGET_LANE_KEYS } from "../policy/laneIntentContracts.js";
+import {
+  classifyGeminiErrorForBackend,
+  estimateCostUsd as estimateCostUsdFromPricing,
+  extractTokenUsage,
+  FETCH_TIMEOUT_CAUSE_CODES,
+  finiteUsageNumber,
+  geminiResponseSchema,
+  openAiStrictSchema,
+  summarizeSuccessfulUsage,
+  type GeminiErrorClassification,
+  type ModelCallUsage,
+  type ModelTokenUsage,
+} from "../platform/llm/index.js";
+export { geminiResponseSchema, openAiStrictSchema };
+export type { GeminiErrorClassification, ModelCallUsage };
 
 /**
  * Lane vocabulary for the evaluation prompts: every lane in config/lanes/registry.yml
@@ -160,69 +175,8 @@ function effectiveTimeoutMs(override: unknown): number {
   return modelRequestTimeoutMs();
 }
 
-export interface GeminiErrorClassification {
-  dailyQuota: boolean;
-  rateLimit: boolean;
-  timeout: boolean;
-  serverError: boolean;
-  retryable: boolean;
-}
-
-const GEMINI_RETRYABLE_HTTP_STATUSES = new Set([500, 502, 503, 504]);
-/** undici/Node error codes for a request that ran out of time (headers, body or connect). */
-const FETCH_TIMEOUT_CAUSE_CODES = new Set([
-  "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT", "ETIMEDOUT",
-]);
-/** undici/Node error codes for a dropped or refused connection: the service is unavailable. */
-const FETCH_CONNECTION_CAUSE_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "EPIPE", "UND_ERR_SOCKET"]);
-
-/**
- * A per-day quota metric named in a 429 body (AI Studio free tier and per-day request caps). The
- * word "quota" alone is not enough: every Gemini 429 says "check quota" or "Quota exceeded for
- * metric ...", including the per-minute limits that clear within seconds.
- */
-const GEMINI_DAILY_QUOTA_PATTERN = /PerDay|per[_ ]day|_daily|daily[_ ]limit/i;
-
-/**
- * Classifies an error thrown by `@google/genai` `models.generateContent`/`embedContent`.
- *
- * For a non-2xx response the SDK (v2.x) throws `ApiError` (name "ApiError") whose numeric
- * `status` is the HTTP status and whose `message` is the JSON error body, e.g. for a 504:
- * `{"error":{"code":504,"message":"Deadline expired before operation could complete.","status":"DEADLINE_EXCEEDED"}}`.
- *
- * - 429 / RESOURCE_EXHAUSTED is a rate limit, retried with jittered backoff (honouring RetryInfo).
- * - It is a daily quota only on the AI Studio backend and only when the body names a per-day
- *   quota metric; that will not clear within a backoff window, so it is never retried. Vertex AI
- *   has no daily request quota for pay-as-you-go traffic, so a Vertex 429 is never a daily quota.
- * - Server-side failures (5xx, DEADLINE_EXCEEDED, UNAVAILABLE, INTERNAL, "overloaded") and
- *   client-side timeouts are transient and retried.
- */
 export function classifyGeminiError(error: any, backend: GeminiBackend = currentGeminiBackend()): GeminiErrorClassification {
-  const message = String(error?.message ?? error ?? "");
-  const status = Number(error?.status);
-  const rateLimit = status === 429 || message.includes("RESOURCE_EXHAUSTED") || /"code"\s*:\s*429\b/.test(message);
-  const dailyQuota = backend === "studio" && rateLimit && GEMINI_DAILY_QUOTA_PATTERN.test(message);
-  // Node's fetch reports transport failures as TypeError("fetch failed") with the reason in `cause`.
-  const causeCode = String(error?.cause?.code ?? error?.code ?? "");
-  const timeout =
-    error?.name === "AbortError" ||
-    error?.name === "TimeoutError" ||
-    FETCH_TIMEOUT_CAUSE_CODES.has(causeCode) ||
-    /timeout|timed out|aborted/i.test(message);
-  const serverError =
-    FETCH_CONNECTION_CAUSE_CODES.has(causeCode) ||
-    GEMINI_RETRYABLE_HTTP_STATUSES.has(status) ||
-    message.includes("DEADLINE_EXCEEDED") ||
-    message.includes("UNAVAILABLE") ||
-    /\bINTERNAL\b/.test(message) ||
-    /overloaded/i.test(message);
-  return {
-    dailyQuota,
-    rateLimit: rateLimit && !dailyQuota,
-    timeout: timeout && !rateLimit,
-    serverError: serverError && !rateLimit,
-    retryable: !dailyQuota && (rateLimit || timeout || serverError),
-  };
+  return classifyGeminiErrorForBackend(error, backend);
 }
 
 function currentGeminiBackend(): GeminiBackend {
@@ -239,28 +193,6 @@ function geminiFailureKind(classification: GeminiErrorClassification): ModelFail
   if (classification.timeout) return "TIMEOUT";
   if (classification.serverError) return "SERVER_ERROR";
   return "OTHER";
-}
-
-interface ModelTokenUsage {
-  promptTokens?: number;
-  completionTokens?: number;
-  totalTokens?: number;
-  /** Reasoning/thinking tokens, when the provider reports them. */
-  reasoningTokens?: number;
-  /**
-   * True when completionTokens already includes the reasoning tokens (OpenAI); false when they
-   * are reported separately (Gemini thoughtsTokenCount).
-   */
-  reasoningIncludedInCompletion?: boolean;
-}
-
-/** Token usage of a successful call. */
-export interface ModelCallUsage {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  reasoningTokens?: number;
-  reasoningIncludedInCompletion?: boolean;
 }
 
 /** Which Gemini billing path one request used. */
@@ -284,114 +216,14 @@ interface ModelProviderAttemptTelemetry extends ModelTokenUsage {
   trafficType?: string;
 }
 
-function finiteUsageNumber(value: unknown): number | undefined {
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : undefined;
-}
-
-function finiteMoneyNumber(value: unknown): number | undefined {
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
-}
-
-function extractTokenUsage(value: any): ModelTokenUsage {
-  const usage = value?.usage || value?.usageMetadata || value?.response_metadata?.token_usage || {};
-  const promptTokens = finiteUsageNumber(
-    usage.prompt_tokens ?? usage.promptTokenCount ?? usage.input_tokens ?? usage.inputTokenCount
-  );
-  const completionTokens = finiteUsageNumber(
-    usage.completion_tokens ?? usage.candidatesTokenCount ?? usage.output_tokens ?? usage.outputTokenCount
-  );
-  const totalTokens = finiteUsageNumber(
-    usage.total_tokens ?? usage.totalTokenCount ?? usage.total_tokens_count
-  );
-  // OpenAI counts reasoning inside completion/output tokens; Gemini reports thoughts separately.
-  const openAiReasoning = finiteUsageNumber(
-    usage.completion_tokens_details?.reasoning_tokens ?? usage.output_tokens_details?.reasoning_tokens
-  );
-  const geminiThoughts = finiteUsageNumber(usage.thoughtsTokenCount);
-  if (openAiReasoning !== undefined) {
-    return { promptTokens, completionTokens, totalTokens, reasoningTokens: openAiReasoning, reasoningIncludedInCompletion: true };
-  }
-  if (geminiThoughts !== undefined) {
-    return { promptTokens, completionTokens, totalTokens, reasoningTokens: geminiThoughts, reasoningIncludedInCompletion: false };
-  }
-  return { promptTokens, completionTokens, totalTokens };
-}
-
 function recordProviderAttempt(options: any, attempt: ModelProviderAttemptTelemetry): void {
   if (Array.isArray(options?.__providerAttemptTelemetry)) {
     options.__providerAttemptTelemetry.push(attempt);
   }
 }
 
-function summarizeSuccessfulUsage(
-  attempts: ModelProviderAttemptTelemetry[],
-  provider: TextProvider,
-  model: string
-): ModelCallUsage | null {
-  const success = [...attempts]
-    .reverse()
-    .find((attempt) =>
-      attempt.status === "COMPLETED" &&
-      attempt.provider === provider &&
-      attempt.model === model
-    );
-  if (!success) return null;
-  const promptTokens = success.promptTokens ?? 0;
-  const completionTokens = success.completionTokens ?? 0;
-  const totalTokens = success.totalTokens ?? promptTokens + completionTokens;
-  if (promptTokens === 0 && completionTokens === 0 && totalTokens === 0) return null;
-  return {
-    promptTokens,
-    completionTokens,
-    totalTokens,
-    ...(success.reasoningTokens !== undefined
-      ? { reasoningTokens: success.reasoningTokens, reasoningIncludedInCompletion: success.reasoningIncludedInCompletion === true }
-      : {}),
-  };
-}
-
-function configuredModelPricing(provider: string, model: string): { inputPer1M: number; outputPer1M: number } | null {
-  const raw = process.env.MODEL_PRICING_JSON;
-  if (!raw || raw.trim() === "") return null;
-  try {
-    const parsed = JSON.parse(raw) as Record<string, any>;
-    const keys = [
-      `${provider}:${model}`,
-      model,
-      provider,
-    ];
-    for (const key of keys) {
-      const pricing = parsed[key];
-      const inputPer1M = finiteMoneyNumber(
-        pricing?.input_per_1m ?? pricing?.inputPer1M ?? pricing?.prompt_per_1m ?? pricing?.promptPer1M
-      );
-      const outputPer1M = finiteMoneyNumber(
-        pricing?.output_per_1m ?? pricing?.outputPer1M ?? pricing?.completion_per_1m ?? pricing?.completionPer1M
-      );
-      if (inputPer1M !== undefined && outputPer1M !== undefined) {
-        return { inputPer1M, outputPer1M };
-      }
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-function estimateCostUsd(
-  provider: string,
-  model: string,
-  usage: ModelCallUsage | null
-): number | null {
-  if (!usage) return null;
-  const pricing = configuredModelPricing(provider, model);
-  if (!pricing) return null;
-  const cost =
-    (usage.promptTokens / 1_000_000) * pricing.inputPer1M +
-    (usage.completionTokens / 1_000_000) * pricing.outputPer1M;
-  return Number(cost.toFixed(6));
+function estimateCostUsd(provider: string, model: string, usage: ModelCallUsage | null): number | null {
+  return estimateCostUsdFromPricing(provider, model, usage, process.env.MODEL_PRICING_JSON);
 }
 
 function embeddingRequestTimeoutMs(): number {
@@ -755,72 +587,6 @@ export async function runAgentWithFallback<T>(
   }
 
   throw new Error(`All model providers failed: ${JSON.stringify(errors)}`);
-}
-
-/**
- * The response schema as sent to Gemini. Gemini rejects schemas whose constraint state is too
- * large with 400 INVALID_ARGUMENT; an array cap such as maxItems: 25 over items with enum fields is
- * enough to trigger it. Array caps are therefore left out of the request; callers still enforce
- * them when they validate the response locally.
- */
-export function geminiResponseSchema(schema: unknown): unknown {
-  if (Array.isArray(schema)) return schema.map(geminiResponseSchema);
-  if (!schema || typeof schema !== "object") return schema;
-  return Object.fromEntries(
-    Object.entries(schema as Record<string, unknown>)
-      .filter(([key]) => key !== "maxItems")
-      .map(([key, value]) => {
-        if (key === "enum") return [key, value];
-        // Keys under "properties" are field names, so only their schemas are rewritten.
-        if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
-          return [key, Object.fromEntries(Object.entries(value).map(([name, child]) => [name, geminiResponseSchema(child)]))];
-        }
-        return [key, geminiResponseSchema(value)];
-      })
-  );
-}
-
-// OpenAI strict structured outputs reject string length bounds; callers still enforce them when
-// they validate the response locally. Array bounds, number ranges, pattern and enum are supported.
-const OPENAI_STRICT_UNSUPPORTED_KEYWORDS = new Set(["minLength", "maxLength"]);
-
-function nullableSchema(schema: unknown): unknown {
-  const record = schema && typeof schema === "object" && !Array.isArray(schema) ? schema as Record<string, unknown> : null;
-  if (record && Array.isArray(record.anyOf)) {
-    const hasNull = record.anyOf.some((option) => (option as Record<string, unknown> | null)?.type === "null");
-    return hasNull ? record : { ...record, anyOf: [...record.anyOf, { type: "null" }] };
-  }
-  return { anyOf: [schema, { type: "null" }] };
-}
-
-/**
- * The response schema as sent to OpenAI with strict: true. Strict mode requires every object to
- * list all of its properties in `required` and to forbid additional properties, so a property the
- * caller left optional is sent as required-but-nullable, and unsupported keywords are dropped.
- */
-export function openAiStrictSchema(schema: unknown): unknown {
-  if (Array.isArray(schema)) return schema.map(openAiStrictSchema);
-  if (!schema || typeof schema !== "object") return schema;
-  const source = schema as Record<string, unknown>;
-  const converted: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(source)) {
-    if (OPENAI_STRICT_UNSUPPORTED_KEYWORDS.has(key) || key === "required" || key === "properties" || key === "additionalProperties") continue;
-    converted[key] = key === "enum" ? value : openAiStrictSchema(value);
-  }
-  const properties = source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)
-    ? source.properties as Record<string, unknown>
-    : null;
-  if (properties || source.type === "object") {
-    const required = new Set(Array.isArray(source.required) ? source.required as string[] : []);
-    // Keys under "properties" are field names, so only their schemas are rewritten.
-    converted.properties = Object.fromEntries(Object.entries(properties ?? {}).map(([name, child]) => {
-      const strictChild = openAiStrictSchema(child);
-      return [name, required.has(name) ? strictChild : nullableSchema(strictChild)];
-    }));
-    converted.required = Object.keys(properties ?? {});
-    converted.additionalProperties = false;
-  }
-  return converted;
 }
 
 /** The absolute deadline for one model call: options.deadlineAt, else interactive/pipeline default. */
