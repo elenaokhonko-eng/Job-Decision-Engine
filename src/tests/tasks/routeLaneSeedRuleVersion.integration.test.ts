@@ -44,6 +44,10 @@ interface FixtureJob {
   contentHash: string;
 }
 
+if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
+  throw new Error("CI must run the ROUTE_LANE seed tests against its PostgreSQL service.");
+}
+
 let pool: pg.Pool | undefined;
 let client: pg.PoolClient | undefined;
 let schemaName = "";
