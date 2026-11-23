@@ -16,6 +16,10 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
 
+if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
+  throw new Error("CI must run the completed-without-result tests against its PostgreSQL service.");
+}
+
 let pool: pg.Pool | undefined;
 let client: pg.PoolClient | undefined;
 let schemaName = "";
@@ -168,6 +172,30 @@ describe.skipIf(skipReal)("tasks completed without a result (PostgreSQL)", () =>
     expect(reported).not.toContain(gateOk);
     expect(reported).not.toContain(laneOk);
   });
+  it("a match task with a match run is not reported; a technically deferred route is not reported", async () => {
+    const matched = await job();
+    const matchTask = await completedTask("MATCH_PROFILE_EVIDENCE", matched.jobVersionId);
+    const profile = await db().query<{ id: string }>(
+      `INSERT INTO candidate_profiles (workspace_id, profile_key, display_name) VALUES ($1, $2, 'Fixture') RETURNING id`,
+      [ctx().workspaceId, `fixture-${randomUUID()}`],
+    );
+    const version = await db().query<{ id: string }>(
+      `INSERT INTO profile_versions (workspace_id, candidate_profile_id, version_number, schema_version, source_hash, status, effective_at)
+       VALUES ($1, $2, 1, '2.2.0', $3, 'DRAFT', NOW()) RETURNING id`,
+      [ctx().workspaceId, profile.rows[0]!.id, `fixture-${randomUUID()}`],
+    );
+    await db().query(
+      `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, status, requirement_count, matched_count, policy_version, job_content_hash, context_fingerprint)
+       VALUES ($1, $2, $3, $4, 'COMPLETED', 1, 1, 'fixture', 'h', 'fp')`,
+      [ctx().workspaceId, matched.canonicalJobId, matched.jobVersionId, version.rows[0]!.id],
+    );
+    const deferred = await job();
+    const routeTask = await completedTask("ROUTE_LANE", deferred.jobVersionId);
+    await db().query(`UPDATE canonical_jobs SET processing_state = 'ROUTING_DEFERRED', processing_status = 'ROUTING_DEFERRED' WHERE id = $1`, [deferred.canonicalJobId]);
+    const reported = (await findTasksCompletedWithoutResult(db(), ctx().workspaceId, { sampleLimit: 200 })).sample.map((row) => row.taskId);
+    expect(reported).not.toContain(matchTask);
+    expect(reported).not.toContain(routeTask);
+  });
 });
 
 describe("exit code and predicate map", () => {
@@ -178,6 +206,13 @@ describe("exit code and predicate map", () => {
 
   it("checks exactly the task types it has a result predicate for", () => {
     expect([...COMPLETED_RESULT_TASK_TYPES].sort()).toEqual(Object.keys(COMPLETED_RESULT_PREDICATES).sort());
+    // Not circular: each predicate looks in the table that holds that stage's result.
+    const table: Record<string, string> = {
+      APPLY_HARD_GATES: "gate_decisions", ROUTE_LANE: "lane_decisions",
+      MATCH_PROFILE_EVIDENCE: "match_runs", DECIDE_RECOMMENDATION: "deterministic_decisions",
+    };
+    for (const [type, name] of Object.entries(table)) expect(COMPLETED_RESULT_PREDICATES[type]).toContain(`FROM ${name} result`);
+    expect(COMPLETED_RESULT_TASK_TYPES).not.toContain("RECHECK_AVAILABILITY");
     expect(COMPLETED_RESULT_TASK_TYPES).toEqual(["APPLY_HARD_GATES", "ROUTE_LANE", "MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION"]);
   });
 });

@@ -69,6 +69,8 @@ export async function findTasksCompletedWithoutResult(
         AND canonical.archived_at IS NULL
         AND canonical.is_test_fixture = FALSE
         AND COALESCE(canonical.processing_state, canonical.processing_status) <> 'MANUALLY_REMOVED'
+        -- A technically deferred route (ROUTING_DEFERRED) leaves no lane decision by design; it is its own waiting state.
+        AND NOT (task.task_type = 'ROUTE_LANE' AND COALESCE(canonical.processing_state, canonical.processing_status) = 'ROUTING_DEFERRED')
         AND (${missing})
       ORDER BY task.completed_at ASC NULLS FIRST, task.id ASC`,
     [workspaceId, [...COMPLETED_RESULT_TASK_TYPES]],
