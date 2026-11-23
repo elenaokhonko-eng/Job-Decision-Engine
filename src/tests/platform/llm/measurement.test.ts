@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { checkPrimaryAnswered, PrimaryNotServedError } from "../../../platform/llm/index.js";
-import { answeredByOtherModelCount, toModelRun } from "../../../../scripts/compare_evaluation_models.js";
+import { answeredByOtherModelCount, failedRunCount, failedRun, toModelRun } from "../../../../scripts/compare_evaluation_models.js";
 
 describe("measurement run: the requested model must answer", () => {
   it("passes when the requested model answered without fallback", () => {
@@ -26,5 +26,17 @@ describe("measurement run: the requested model must answer", () => {
     expect(other.failureKind).toBe("ANSWERED_BY_OTHER_MODEL");
     expect(answeredByOtherModelCount({ models: [{ answered_by_other_model: 0 }] })).toBe(0);
     expect(answeredByOtherModelCount({ models: [{ answered_by_other_model: 1 }, { answered_by_other_model: 2 }] })).toBe(3);
+  });
+
+  it("treats a fallback that returns the same model name as not answered by the requested model", () => {
+    const run = toModelRun({ evaluatedJob: {}, usage: null, model: "model-a", fallbackUsed: true }, "model-a");
+    expect(run.ok).toBe(false);
+    expect(run.failureKind).toBe("ANSWERED_BY_OTHER_MODEL");
+  });
+
+  it("counts thrown-error runs as failures so the run exits non-zero", () => {
+    expect(failedRun(new Error("boom")).ok).toBe(false);
+    expect(failedRunCount({ models: [{ failed: 0 }] })).toBe(0);
+    expect(failedRunCount({ models: [{ failed: 1 }, { failed: 2 }] })).toBe(3);
   });
 });

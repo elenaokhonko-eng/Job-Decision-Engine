@@ -277,6 +277,8 @@ export function classifyRunFailure(error: unknown): RunFailureKind {
 export interface EvaluationExecutionLike {
   evaluatedJob: unknown;
   model: string;
+  /** True when the gateway moved to a fallback provider or model, even if the model name matches. */
+  fallbackUsed?: boolean;
   servedPath?: string | null;
   usage?: {
     promptTokens: number;
@@ -288,7 +290,7 @@ export interface EvaluationExecutionLike {
 
 export function toModelRun(result: EvaluationExecutionLike, model: string): ModelRun {
   const job = result.evaluatedJob as Record<string, unknown>;
-  const answeredByModel = checkPrimaryAnswered({ expectedModel: model, servedModel: result.model }) === null;
+  const answeredByModel = checkPrimaryAnswered({ expectedModel: model, servedModel: result.model, fallbackUsed: result.fallbackUsed }) === null;
   return {
     ok: answeredByModel,
     nextAction: String(job.next_action ?? ""),
@@ -306,6 +308,11 @@ export function toModelRun(result: EvaluationExecutionLike, model: string): Mode
 /** How many runs in a summary were answered by a model other than the one requested. */
 export function answeredByOtherModelCount(summary: { models: ReadonlyArray<{ answered_by_other_model: number }> }): number {
   return summary.models.reduce((total, row) => total + row.answered_by_other_model, 0);
+}
+
+/** How many runs in a summary failed for any reason (thrown error, schema, provider or other model). */
+export function failedRunCount(summary: { models: ReadonlyArray<{ failed: number }> }): number {
+  return summary.models.reduce((total, row) => total + row.failed, 0);
 }
 
 export function failedRun(error: unknown): ModelRun {
@@ -462,10 +469,12 @@ async function main(): Promise<void> {
       summary,
       per_job: perJobReport(comparisons, args.models),
     }, null, 2));
-    // A run that another model answered measured that other model: the whole run fails.
+    // A run that another model answered measured that other model, and a run that failed measured
+    // nothing: either fails the whole measurement run.
     const otherModel = answeredByOtherModelCount(summary);
-    if (otherModel > 0) {
-      console.error(`Evaluation model comparison failed: ${otherModel} run(s) were answered by a model other than the one requested.`);
+    const failed = failedRunCount(summary);
+    if (failed > 0) {
+      console.error(`Evaluation model comparison failed: ${failed} run(s) failed (${otherModel} answered by a model other than the one requested).`);
       process.exitCode = 1;
     }
   } finally {
