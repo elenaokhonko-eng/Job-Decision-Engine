@@ -37,6 +37,7 @@ import { applicationReadinessViewAvailable } from "../services/currentApplicatio
 import { isRoutableWorkabilityVerification, routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
 import { isCurrentCanonicalJobVersion } from "./canonicalJobVersion.js";
 import { createTaskIntentV2, TaskIntentV2Schema } from "./taskIntent.js";
+import { runAvailabilityRecheck, seedAvailabilityRechecks, type AvailabilityRecheckDependencies } from "./availabilityRecheck.js";
 import { archivedJobForPipelineTask } from "./jobArchiveGuard.js";
 import { forcedTaskRerouteIntent, forcedTaskReroutePayload } from "./forcedTaskReroute.js";
 import { planPipelineStageRound } from "./pipelineStageScheduler.js";
@@ -95,6 +96,7 @@ export const PIPELINE_STAGE_TASK_TYPES = [
   "MATCH_PROFILE_EVIDENCE",
   "DECIDE_RECOMMENDATION",
   "ENQUEUE_EXPLANATION",
+  "RECHECK_AVAILABILITY",
 ] as const;
 
 const SEMANTIC_MATCH_REPAIR_GENERATION = "semantic_match_repair_v2";
@@ -184,6 +186,8 @@ export interface PipelineStageWorkerDependencies {
   runDeterministicMatcher: typeof defaultRunDeterministicMatcher;
   runRecommendationDecider: typeof defaultRunRecommendationDecider;
   runExplanationQueueEnqueuer: typeof defaultRunExplanationQueueEnqueuer;
+  /** Posting reads for RECHECK_AVAILABILITY; defaults to the network readers. Tests inject fakes. */
+  availabilityRecheck?: AvailabilityRecheckDependencies;
 }
 
 export interface SeedPipelineTasksSummary {
@@ -1603,6 +1607,18 @@ export async function seedRecoverablePipelineTasks(
     maxPerType,
     );
 
+    // Postings whose verified-open window ran out are re-read through the normal queue.
+    if (!enabledTypes || enabledTypes.has("RECHECK_AVAILABILITY")) {
+      const rechecks = await seedAvailabilityRechecks(client as pg.PoolClient, ctx, {
+        limit: maxPerType,
+        jobVersionIds: options.jobVersionIds,
+        includeTestFixtures,
+      });
+      summary.byType.RECHECK_AVAILABILITY = { inserted: rechecks.inserted, existing: rechecks.existing };
+      summary.inserted += rechecks.inserted;
+      summary.existing += rechecks.existing;
+    }
+
     return summary;
   } finally {
     if (ownsClient && typeof (client as any).release === "function") {
@@ -2549,6 +2565,8 @@ async function markTaskTargetProcessingError(
   errorMessage: string
 ): Promise<void> {
   const payload = (task.payload || {}) as Record<string, unknown>;
+  // A failed availability read is an operational failure, not a fact about the job.
+  if (task.taskType === "RECHECK_AVAILABILITY") return;
   if (task.taskType === "FETCH_JOB_CONTENT") {
     const observationId = requireStringPayload(task, "observation_id");
     await markGmailFetchOutcome(
@@ -2796,6 +2814,18 @@ async function executeStageTask(
   onSuccessorTaskCreated: () => void,
   onTaskRerouted: () => void,
 ): Promise<string | void> {
+  if (taskType === "RECHECK_AVAILABILITY") {
+    // The read result (verdict, counters, next read) is recorded by the task itself; it has no successor stage.
+    const ownsClient = isPool(clientOrPool);
+    const recheckClient = ownsClient ? await clientOrPool.connect() : (clientOrPool as pg.PoolClient);
+    try {
+      const outcome = await runAvailabilityRecheck(recheckClient, ctx, task.payload, task.taskId, dependencies.availabilityRecheck);
+      if (outcome.status === "SKIPPED") return;
+    } finally {
+      if (ownsClient) recheckClient.release();
+    }
+    return;
+  }
   if (taskType === "FETCH_JOB_CONTENT") {
     const observationId = requireStringPayload(task, "observation_id");
     const { rows } = await (clientOrPool as QueryClient).query<{

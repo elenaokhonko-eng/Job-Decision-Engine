@@ -233,6 +233,7 @@ A stage is a task in `pipeline_tasks`. The worker is `scripts/process_pipeline_t
 | 8 | `MATCH_PROFILE_EVIDENCE` | Matches each requirement to profile evidence | `src/pipeline/deterministicMatcher.ts` | `matching` |
 | 9 | `DECIDE_RECOMMENDATION` | Computes eligibility and the outcome | `src/pipeline/recommendationDecider.ts` | `decision` |
 | 10 | `ENQUEUE_EXPLANATION` | Puts an eligible job on the evaluation queue within the lane budget | `src/pipeline/explanationQueueEnqueuer.ts` | `evaluation` |
+| 11 | `RECHECK_AVAILABILITY` | Re-reads a posting whose 7-day availability window ran out: open or closed, work mode, hiring territory | `src/tasks/availabilityRecheck.ts` | `catalog` |
 
 Order of work:
 
