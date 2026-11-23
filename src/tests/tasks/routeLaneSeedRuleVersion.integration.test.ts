@@ -52,7 +52,7 @@ let candidateProfileId = "";
 let profileV1 = "";
 let profileV2 = "";
 let policySnapshotId = "";
-const jobs: Record<"passing" | "unknownWorkMode", FixtureJob> = {} as never;
+const jobs: Record<"prequalified" | "routableVerification" | "unmatched" | "deferred", FixtureJob> = {} as never;
 
 function db(): pg.PoolClient {
   if (!client) throw new Error("The integration test database client is not initialized.");
@@ -249,10 +249,20 @@ describe.skipIf(skipReal)("ROUTE_LANE seed key follows the router rule version",
     candidateProfileId = profile.rows[0].id;
     profileV1 = await insertProfileVersion(1, "ACTIVE");
     const requirement = "Zebra telemetry platform engineering experience";
-    jobs.passing = await seedRoutableJob("passing", [requirement], { workplaceType: "REMOTE", location: "Remote" });
-    jobs.unknownWorkMode = await seedRoutableJob("unknown-mode", [requirement], { workplaceType: "UNKNOWN", location: "Singapore" });
+    jobs.prequalified = await seedRoutableJob("prequalified", [requirement]);
+    jobs.routableVerification = await seedRoutableJob("routable-nv", [requirement], { workplaceType: "UNKNOWN", location: "Singapore" });
+    jobs.unmatched = await seedRoutableJob("unmatched", [requirement]);
+    jobs.deferred = await seedRoutableJob("deferred", [requirement]);
     // Embeddings for the jobs, requirements and lane prototypes exist before the re-gate, as in production.
     await publishEmbeddings();
+    // States are set after publication: embeddings are only published for jobs that are still PREQUALIFIED.
+    await db().query(
+      `UPDATE canonical_jobs SET gate_decision = 'NEEDS_VERIFICATION', rejection_reason = 'GATE_UNKNOWN_WORK_MODE',
+              processing_state = 'NEEDS_VERIFICATION', processing_status = 'NEEDS_VERIFICATION' WHERE id = $1`, [jobs.routableVerification.canonicalJobId]);
+    await db().query(
+      `UPDATE canonical_jobs SET processing_state = 'UNMATCHED', processing_status = 'UNMATCHED', routing_disposition = 'POLICY_NO_MATCH' WHERE id = $1`, [jobs.unmatched.canonicalJobId]);
+    await db().query(
+      `UPDATE canonical_jobs SET processing_state = 'ROUTING_DEFERRED', processing_status = 'ROUTING_DEFERRED', routing_disposition = 'TECHNICAL_DEFERRED' WHERE id = $1`, [jobs.deferred.canonicalJobId]);
   }, 180_000);
 
   afterAll(async () => {
@@ -273,31 +283,78 @@ describe.skipIf(skipReal)("ROUTE_LANE seed key follows the router rule version",
     }
   });
 
-  it("a router rule-version change reopens a job whose older ROUTE_LANE task is COMPLETED; an unchanged version enqueues nothing", async () => {
-    const seed = () => seedRecoverablePipelineTasks(db(), {
-      context: ctx(), taskTypes: ["ROUTE_LANE"], includeTestFixtures: true,
-      jobVersionIds: [jobs.passing.jobVersionId, jobs.unknownWorkMode.jobVersionId], routingDeferredReplayVersion: "seed-test",
-    });
-    const routeTasks = async () => (await db().query<{ task_key: string; status: string }>(
-      `SELECT task_key, status FROM pipeline_tasks WHERE workspace_id = $1 AND task_type = 'ROUTE_LANE' ORDER BY task_key`,
-      [ctx().workspaceId],
-    )).rows;
+  const allVersions = () => Object.values(jobs).map((job) => job.jobVersionId);
+  const seed = (extra: { maxSeedPerType?: number; jobVersionIds?: string[] } = {}) => seedRecoverablePipelineTasks(db(), {
+    context: ctx(), taskTypes: ["ROUTE_LANE"], includeTestFixtures: true,
+    jobVersionIds: extra.jobVersionIds ?? allVersions(), routingDeferredReplayVersion: "seed-test",
+    ...(extra.maxSeedPerType ? { maxSeedPerType: extra.maxSeedPerType } : {}),
+  });
+  const routeKeys = async () => (await db().query<{ task_key: string; payload: { job_version_id: string } }>(
+    `SELECT task_key, payload FROM pipeline_tasks WHERE workspace_id = $1 AND task_type = 'ROUTE_LANE' ORDER BY task_key`,
+    [ctx().workspaceId],
+  )).rows;
+  const completeAll = () => db().query(
+    `UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE workspace_id = $1 AND task_type = 'ROUTE_LANE'`, [ctx().workspaceId]);
 
+  it("first deploy: a COMPLETED task under the old key (no rule-version suffix) does not block; each selected state is seeded once", async () => {
+    // The old key shape, as production holds it today.
+    const old = jobs.prequalified;
+    await db().query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, completed_at)
+       VALUES ($1, 'ROUTE_LANE', $2, $3::jsonb, 'COMPLETED', NOW())`,
+      [ctx().workspaceId, `ROUTE_LANE:${old.jobVersionId}:lane_router_v1:repair-seed-test`, JSON.stringify({ canonical_job_id: old.canonicalJobId, job_version_id: old.jobVersionId })],
+    );
     const first = await seed();
-    expect(first.byType.ROUTE_LANE?.inserted).toBeGreaterThan(0);
-    const firstCount = (await routeTasks()).length;
-    // An older task finished for the job: it must not block a re-run under a new rule version.
-    await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE workspace_id = $1 AND task_type = 'ROUTE_LANE'`, [ctx().workspaceId]);
+    // One new task per selected job: prequalified, routable verification, unmatched, deferred.
+    const got = (await routeKeys()).map((row) => row.task_key.split(":")[1]);
+    expect(first.byType.ROUTE_LANE?.inserted, JSON.stringify(Object.entries(jobs).map(([name, job]) => [name, got.includes(job.jobVersionId)]))).toBe(4);
+    const keys = await routeKeys();
+    for (const job of Object.values(jobs)) {
+      expect(keys.filter((row) => row.payload.job_version_id === job.jobVersionId && row.task_key.endsWith("@lane_router_test_v1"))).toHaveLength(1);
+    }
+  });
 
-    const unchanged = await seed();
-    expect(unchanged.byType.ROUTE_LANE?.inserted ?? 0).toBe(0);
-    expect((await routeTasks()).length).toBe(firstCount);
+  it("same version enqueues zero; version B enqueues exactly one new task per job; jobs already at B are not re-seeded", async () => {
+    await completeAll();
+    expect((await seed()).byType.ROUTE_LANE?.inserted ?? 0).toBe(0);
+    const before = (await routeKeys()).length;
 
     ruleVersion.value = "lane_router_test_v2";
+    // One job is moved to B first, then the full seed runs: that job is not seeded again.
+    const alreadyAtB = jobs.prequalified.jobVersionId;
+    expect((await seed({ jobVersionIds: [alreadyAtB] })).byType.ROUTE_LANE?.inserted).toBe(1);
     const bumped = await seed();
-    expect(bumped.byType.ROUTE_LANE?.inserted).toBe(firstCount);
-    const keys = (await routeTasks()).map((task) => task.task_key);
-    expect(keys.filter((key) => key.includes("seed-test@lane_router_test_v2"))).toHaveLength(firstCount);
-    expect(keys.filter((key) => key.includes("seed-test@lane_router_test_v1"))).toHaveLength(firstCount);
+    expect(bumped.byType.ROUTE_LANE?.inserted).toBe(3);
+    const keys = await routeKeys();
+    expect(keys.length).toBe(before + 4);
+    for (const job of Object.values(jobs)) {
+      expect(keys.filter((row) => row.payload.job_version_id === job.jobVersionId && row.task_key.endsWith("@lane_router_test_v2"))).toHaveLength(1);
+    }
+    // And once at B, the seed is quiet again.
+    await completeAll();
+    expect((await seed()).byType.ROUTE_LANE?.inserted ?? 0).toBe(0);
   });
+
+  it("respects the per-type cap", async () => {
+    ruleVersion.value = "lane_router_test_v3";
+    const capped = await seed({ maxSeedPerType: 2 });
+    expect(capped.byType.ROUTE_LANE?.inserted).toBe(2);
+    const rest = await seed();
+    expect(rest.byType.ROUTE_LANE?.inserted).toBe(2);
+  });
+});
+
+describe("task keys carry each stage's rule version", () => {
+  it.each(["APPLY_HARD_GATES", "EXTRACT_DETERMINISTIC_REQUIREMENTS", "MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION", "ROUTE_LANE"] as const)(
+    "%s: a new stage version is a new key, so a completed older task never blocks the re-run",
+    async (taskType) => {
+      const { buildPipelineTaskKey } = await import("../../tasks/stageTaskWorker.js");
+      const { pipelineTaskStageVersion } = await import("../../tasks/pipelineTaskCurrentness.js");
+      const current = pipelineTaskStageVersion(taskType);
+      expect(current).toBeTruthy();
+      const keyNow = buildPipelineTaskKey(taskType, "job-version-1", current!);
+      expect(keyNow).toContain(`:${current}`);
+      expect(buildPipelineTaskKey(taskType, "job-version-1", `${current}_next`)).not.toBe(keyNow);
+    },
+  );
 });
