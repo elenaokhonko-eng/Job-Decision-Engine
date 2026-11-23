@@ -618,8 +618,9 @@ export async function runRecommendationDecider(
           job.profile_match_status === "POSITIVE_MATCH" &&
           coverageScore !== null &&
           coverageScore >= 1.0 &&
-          requirementScore !== null &&
-          requirementScore >= 0.9;
+          rawRequirementScore !== null &&
+          // The raw score: a role-shape downrank must not decide whether a job is fully satisfied.
+          rawRequirementScore >= 0.9;
         if (
           !exactFullySatisfied &&
           (!adjustedSemanticReady || job.profile_match_status === "UNKNOWN") &&
@@ -653,7 +654,7 @@ export async function runRecommendationDecider(
           adjustedOutcome = trackCappedOutcome;
         }
 
-        for (const signal of shape.signals) adjustedNotes.push(`role_shape:${signal.code}`);
+        for (const signal of shape.signals) adjustedNotes.push(`role_downrank:${signal.code}`);
         if (fxRateFailure) adjustedNotes.push("FX_RATE_RETRIEVAL_INCOMPLETE");
         if (compensationAssessment?.is_hard_reject) {
           adjustedEligibility = "INELIGIBLE";
@@ -1042,7 +1043,7 @@ export async function runRecommendationDecider(
             fx_rate_observation_id: fxRateObservationId,
             qualification_comparator_version: QUALIFICATION_COMPARATOR_VERSION,
             career_track: careerTrack,
-            role_shape: {
+            role_downrank: {
               policy_version: shape.policy_version,
               raw_requirement_score: rawRequirementScore,
               total_penalty: shape.total_penalty,
@@ -1080,8 +1081,8 @@ export async function runRecommendationDecider(
             workability_policy_hash: workabilityPolicyResolution.policyHash,
             career_track_policy_version: CAREER_TRACK_POLICY_VERSION,
             career_track_assessment_hash: sha256Json(careerTrack),
-            role_shape_policy_version: ROLE_SHAPE_POLICY_VERSION,
-            role_shape_assessment_hash: roleShapeFingerprint(shape),
+            role_downrank_policy_version: ROLE_SHAPE_POLICY_VERSION,
+            role_downrank_assessment_hash: roleShapeFingerprint(shape),
             ...(confirmedFactsHash ? { confirmed_job_facts_hash: confirmedFactsHash } : {}),
           },
         });

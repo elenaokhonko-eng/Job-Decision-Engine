@@ -177,10 +177,10 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     await q(`UPDATE canonical_jobs SET normalized_title = 'Forward Deployed Engineer' WHERE id = $1`, [JOB_ID]);
     expect((await runRecommendationDecider(client)).errors).toBe(0);
     const shaped = await latest();
-    expect(shaped.trace.role_shape.policy_version).toBe("role_shape_v1");
-    expect(shaped.trace.role_shape.signals.map((signal: { code: string }) => signal.code)).toContain("CUSTOMER_FACING_DELIVERY");
-    expect(shaped.trace.role_shape.total_penalty).toBeGreaterThan(0);
-    expect(shaped.trace.notes).toContain("role_shape:CUSTOMER_FACING_DELIVERY");
+    expect(shaped.trace.role_downrank.policy_version).toBe("role_shape_v1");
+    expect(shaped.trace.role_downrank.signals.map((signal: { code: string }) => signal.code)).toContain("CUSTOMER_FACING_DELIVERY");
+    expect(shaped.trace.role_downrank.total_penalty).toBeGreaterThan(0);
+    expect(shaped.trace.notes).toContain("role_downrank:CUSTOMER_FACING_DELIVERY");
     expect(shaped.outputs.outcome).not.toBe("REJECTED");
     const stored = await q(`SELECT recommendation_outcome FROM canonical_jobs WHERE id = $1`, [JOB_ID]);
     expect(stored.rows[0].recommendation_outcome).toBe(shaped.outputs.outcome);
@@ -190,7 +190,7 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     const again = await runRecommendationDecider(client);
     expect(again.errors).toBe(0);
     expect(again.decisionsInserted).toBe(1);
-    expect((await latest()).trace.role_shape).toMatchObject({ total_penalty: 0, signals: [] });
+    expect((await latest()).trace.role_downrank).toMatchObject({ total_penalty: 0, signals: [] });
   });
 
   it("records the career-track assessment from the active profile's experience_by_track", async () => {

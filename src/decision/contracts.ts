@@ -110,7 +110,7 @@ export const RecommendationDecisionTraceSchema = z.object({
   fx_rate_observation_id: z.string().uuid().nullable().optional(),
   qualification_comparator_version: z.string().min(1).nullable().optional(),
   career_track: CareerTrackAssessmentSchema.optional(),
-  role_shape: RoleShapeTraceSchema.optional(),
+  role_downrank: RoleShapeTraceSchema.optional(),
   notes: z.array(z.string()).default([]),
 });
 
