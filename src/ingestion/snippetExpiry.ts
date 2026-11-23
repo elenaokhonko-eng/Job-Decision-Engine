@@ -12,7 +12,7 @@ const uuidSchema = z.string().uuid();
 
 /** A snippet-only job whose fetch has not succeeded expires this many days after it was last seen ... */
 export const SNIPPET_EXPIRY_LAST_SEEN_DAYS = 7;
-/** ... and in any case this many days after it was first seen. */
+/** ... or this many days after it was first seen, unless a fetch is still within its retry budget. */
 export const SNIPPET_EXPIRY_FIRST_SEEN_DAYS = 21;
 
 export type SnippetExpiryTrigger = "LAST_SEEN" | "FIRST_SEEN";
@@ -114,7 +114,7 @@ export async function findExpiredSnippetOnlyJobs(
 
 /**
  * Automatic expiry of snippet-only jobs. A job known only from an alert snippet, whose posting fetch has not
- * succeeded, is archived POSTING_NOT_CONFIRMABLE 7 days after it was last seen and in any case 21 days after it
+ * succeeded, is archived POSTING_NOT_CONFIRMABLE 7 days after it was last seen or 21 days after it
  * was first seen. "Not confirmable" is not "closed": the posting's state is unknown, the archive is reversible
  * through restoreArchivedJob, and a reappearing posting is restored. Jobs with an active application, document
  * run, lease, manual review or archive hold are skipped and counted. Nothing is deleted.

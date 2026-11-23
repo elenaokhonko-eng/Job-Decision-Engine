@@ -17,7 +17,8 @@
  *     --confirm-workspace=<workspace uuid> --restore-point=<Neon restore point / branch id>
  *
  * EXPIRY RULE (--rule=expiry, src/ingestion/snippetExpiry.ts): a snippet-only job whose fetch has not succeeded
- * is archived 7 days after it was last seen, and in any case 21 days after it was first seen (a pending fetch
+ * is archived 7 days after it was last seen, or 21 days after it was first seen, unless a fetch is still within its
+ * retry budget (a pending fetch
  * task still within its retry budget defers the archive; once the task is exhausted, parked or dead-lettered the
  * job expires). Same guards, same reversibility, idempotent. Manual and env-gated: nothing schedules this script.
  * --restore-point is an audit label recorded on the archive run (the owner takes the Neon restore point first; the

@@ -9,7 +9,7 @@ import { createArchiveHold, restoreArchivedJob } from "../../services/jobArchive
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
 // A snippet-only job whose fetch has not succeeded is archived POSTING_NOT_CONFIRMABLE 7 days after it was last
-// seen and in any case 21 days after it was first seen. Synthetic fixtures; real PostgreSQL in a private schema.
+// seen or 21 days after it was first seen, unless a fetch is still within its retry budget. Synthetic fixtures; real PostgreSQL in a private schema.
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
 if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
