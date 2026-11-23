@@ -41,6 +41,7 @@ import { AshbyAdapter } from "../ingestion/adapters/ashbyAdapter.js";
 import type { BaseSourceAdapter } from "../ingestion/adapters/baseAdapter.js";
 import { GreenhouseAdapter } from "../ingestion/adapters/greenhouseAdapter.js";
 import { LeverAdapter } from "../ingestion/adapters/leverAdapter.js";
+import { WorkdayAdapter } from "../ingestion/adapters/workdayAdapter.js";
 import {
   fetchJobContent,
   type JobContentResult,
@@ -91,7 +92,7 @@ export interface AvailabilityRecheckDependencies {
   readonly fetchJobContent: typeof fetchJobContent;
   readonly pageFetcherDependencies?: PostingFetcherDependencies;
   readonly refreshSourceEvidence: typeof refreshCanonicalJobSourceEvidence;
-  readonly createFeedAdapter: (sourcePluginKey: string, sourceUrl: string) => BaseSourceAdapter | null;
+  readonly createFeedAdapter: (sourcePluginKey: string, sourceUrl: string, posting?: FeedPostingContext) => BaseSourceAdapter | null;
   readonly requestsPerMinute: (sourcePluginKey: string | null) => Promise<number | null>;
   readonly throttle: HostThrottle;
   readonly now: () => Date;
@@ -145,8 +146,51 @@ async function loadManifestRequestsPerMinute(sourcePluginKey: string | null): Pr
   }
 }
 
+/** What the stored posting says about itself; the Workday listing is rebuilt from it. */
+export interface FeedPostingContext {
+  readonly rawPayload: unknown;
+  readonly companyName: string;
+  readonly title: string;
+}
+
+function workdayTenantFromPayload(rawPayload: unknown): { host: string; tenant: string; site: string } | null {
+  if (rawPayload === null || typeof rawPayload !== "object" || Array.isArray(rawPayload)) return null;
+  const workday = (rawPayload as Record<string, unknown>).workday;
+  if (workday === null || typeof workday !== "object" || Array.isArray(workday)) return null;
+  const record = workday as Record<string, unknown>;
+  const { host, tenant, site } = record;
+  return typeof host === "string" && typeof tenant === "string" && typeof site === "string" ? { host, tenant, site } : null;
+}
+
+/**
+ * The employer's Workday listing, searched for this posting's own title, using the tenant stored with
+ * the posting. A bounded listing: it is trusted for absence only when its last page was not cut short
+ * (see workdayListingComplete).
+ */
+export function createWorkdayListingAdapter(posting: FeedPostingContext): WorkdayAdapter | null {
+  const tenant = workdayTenantFromPayload(posting.rawPayload);
+  if (!tenant || posting.title.trim() === "" || posting.companyName.trim() === "") return null;
+  try {
+    return new WorkdayAdapter({
+      config: { ...tenant, companyName: posting.companyName },
+      searchTerms: [posting.title],
+      limits: { searchTermsPerRun: 1, maxPagesPerTerm: 5 },
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** True when the listing was read to its end: not stopped for budget and no search term cut short. */
+export function workdayListingComplete(adapter: BaseSourceAdapter): boolean {
+  if (!(adapter instanceof WorkdayAdapter)) return true;
+  const stats = adapter.lastRunStats;
+  return stats !== null && !stats.stoppedForBudget && stats.truncatedTerms.length === 0;
+}
+
 /** Official ATS board feeds this task can read without a login. Same rules as the scoped pilot. */
-export function createFeedAdapterForPosting(sourcePluginKey: string, sourceUrl: string): BaseSourceAdapter | null {
+export function createFeedAdapterForPosting(sourcePluginKey: string, sourceUrl: string, posting?: FeedPostingContext): BaseSourceAdapter | null {
+  if (sourcePluginKey.trim().toLowerCase() === "workday") return posting ? createWorkdayListingAdapter(posting) : null;
   let url: URL;
   try {
     url = new URL(sourceUrl);
@@ -655,7 +699,9 @@ async function readOnce(
   const host = hostOf(sourceUrl) ?? "unknown-host";
 
   const adapter = observation.source_plugin_key && sourceUrl
-    ? deps.createFeedAdapter(observation.source_plugin_key, sourceUrl)
+    ? deps.createFeedAdapter(observation.source_plugin_key, sourceUrl, {
+      rawPayload: observation.raw_payload, companyName: target.companyForIdentity, title: target.titleForIdentity,
+    })
     : null;
   if (adapter) {
     await deps.throttle.acquire(host, interval);
@@ -664,7 +710,11 @@ async function readOnce(
       jobVersionId: target.jobVersionId,
       observationId: observation.observation_id,
     }, { adapter, context, now: deps.now });
-    const outcome = outcomeFromFeedRefresh(refreshed);
+    let outcome = outcomeFromFeedRefresh(refreshed);
+    // A listing that was cut short cannot prove absence: it is cannot-tell, never a count towards closing.
+    if (outcome !== "STALE" && outcome.kind === "FEED_ABSENT" && !workdayListingComplete(adapter)) {
+      outcome = { kind: "CANNOT_TELL", reason: "INCOMPLETE_FEED" };
+    }
     let feedFactsAfter: { workplaceTypeRaw: string | null; locationRaw: string | null } | null = null;
     if (outcome !== "STALE" && outcome.kind === "OPEN") {
       const after = await loadObservation(client, context.workspaceId, target.jobVersionId);
@@ -745,14 +795,31 @@ export async function runAvailabilityRecheck(
         status: "OPEN", reasonCode: decision.reasonCode, method: "VERIFIED_POSTING_RETRIEVAL",
       }, now);
       details.readiness_recomputed = stored.readinessRecomputed;
-      const change = compareFacts(beforeFacts, {
-        workplaceTypeRaw: read.page.posting.workplaceType,
-        locationRaw: read.page.posting.location,
-      });
-      if (change.workMode || change.territory) {
-        details.facts_changed = change;
-        details.facts_changed_applied = false;
-        details.facts_changed_note = "Page read found different facts; recorded for review, not written to the posting.";
+      // A page that states work mode or location clearly fills or corrects the fact. A value the page does
+      // not state (UNKNOWN or empty) never overwrites a known one. The before/after pair is the evidence.
+      const storedMode = String(target.workplace_type ?? "").trim().toUpperCase();
+      const storedUnknown = storedMode === "" || storedMode === "UNKNOWN" || storedMode === "ASSUMED_HYBRID";
+      const pageMode = normalizeWorkMode(read.page.posting.workplaceType);
+      const pageLocation = (read.page.posting.location ?? "").trim();
+      const applied: Record<string, unknown> = {};
+      if (pageMode !== "UNKNOWN" && (storedUnknown || normalizeWorkMode(storedMode) !== pageMode)) {
+        await client.query(
+          `UPDATE canonical_jobs SET workplace_type = $3, updated_at = NOW() WHERE workspace_id = $1::uuid AND id = $2::uuid`,
+          [context.workspaceId, payload.canonical_job_id, pageMode],
+        );
+        applied.work_mode = { before: storedMode === "" ? "UNKNOWN" : storedMode, after: pageMode };
+      }
+      if (pageLocation !== "" && normalizedLocation(pageLocation) !== "unknown" &&
+          normalizedLocation(pageLocation) !== normalizedLocation(target.location)) {
+        await client.query(
+          `UPDATE canonical_jobs SET location = $3, updated_at = NOW() WHERE workspace_id = $1::uuid AND id = $2::uuid`,
+          [context.workspaceId, payload.canonical_job_id, pageLocation],
+        );
+        applied.territory = { before: normalizedLocation(target.location), after: normalizedLocation(pageLocation) };
+      }
+      if (Object.keys(applied).length > 0) {
+        factsChanged = true;
+        details.facts_applied_from_page = applied;
       }
     } else if (read.feedFactsAfter !== null) {
       const change = compareFacts(beforeFacts, read.feedFactsAfter);

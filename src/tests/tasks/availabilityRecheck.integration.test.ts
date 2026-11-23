@@ -15,8 +15,10 @@ import {
   archiveJobsAsPostingNotConfirmable,
   restoreAvailabilityArchivedJob,
 } from "../../services/jobArchive.js";
+import { WorkdayAdapter } from "../../ingestion/adapters/workdayAdapter.js";
 import {
   HostThrottle,
+  createWorkdayListingAdapter,
   compareFacts,
   createFeedAdapterForPosting,
   outcomeFromFeedRefresh,
@@ -486,6 +488,58 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     const unknown = await db().query(`SELECT workplace_type FROM canonical_jobs WHERE id = $1`, [ambiguous.canonicalJobId]);
     expect(unknown.rows[0]?.workplace_type).toBe("UNKNOWN");
     expect(await pendingTasks(ambiguous, "APPLY_HARD_GATES")).toHaveLength(0);
+  });
+
+  it("a page that states work mode and location clearly fills them and queues a re-gate; an unstated value never overwrites", async () => {
+    const stated = await createJob({ windowEndedDaysAgo: 1, board: "facts-stated", workplaceType: "UNKNOWN", location: "Singapore" });
+    const result = await runAvailabilityRecheck(db(), ctx(), payload(stated), null, deps({
+      now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "HYBRID", "London, United Kingdom"),
+    }));
+    expect(result).toMatchObject({ action: "MARK_OPEN", factsChanged: true });
+    const row = await db().query(`SELECT workplace_type, location FROM canonical_jobs WHERE id = $1`, [stated.canonicalJobId]);
+    expect(row.rows[0]).toMatchObject({ workplace_type: "HYBRID", location: "London, United Kingdom" });
+    expect(await pendingTasks(stated, "APPLY_HARD_GATES")).toHaveLength(1);
+    const evidence = await db().query(`SELECT details FROM job_availability_recheck_events WHERE canonical_job_id = $1`, [stated.canonicalJobId]);
+    expect(evidence.rows[0]?.details.facts_applied_from_page).toMatchObject({ work_mode: { before: "UNKNOWN", after: "HYBRID" } });
+
+    const known = await createJob({ windowEndedDaysAgo: 1, board: "facts-unstated", workplaceType: "ONSITE", location: "Singapore" });
+    const quiet = await runAvailabilityRecheck(db(), ctx(), payload(known), null, deps({
+      now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "UNKNOWN", null),
+    }));
+    expect(quiet).toMatchObject({ action: "MARK_OPEN", factsChanged: false });
+    const kept = await db().query(`SELECT workplace_type, location FROM canonical_jobs WHERE id = $1`, [known.canonicalJobId]);
+    expect(kept.rows[0]).toMatchObject({ workplace_type: "ONSITE", location: "Singapore" });
+    expect(await pendingTasks(known, "APPLY_HARD_GATES")).toHaveLength(0);
+  });
+
+  it("Workday: the employer listing is the feed reading; absence counts only from a complete listing, twice in a row", async () => {
+    const stored = { workday: { host: "synth.wd5.myworkdayjobs.com", tenant: "synth", site: "ext", external_path: "/job/X_R1" } };
+    const job = await createJob({ windowEndedDaysAgo: 1, board: "wd-feed", sourceName: "WORKDAY", pluginKey: "workday", rawPayload: stored });
+    const built = createWorkdayListingAdapter({ rawPayload: stored, companyName: "SYNTH", title: "synthetic platform engineer" });
+    expect(built?.sourceName).toBe("WORKDAY");
+    expect(createWorkdayListingAdapter({ rawPayload: {}, companyName: "SYNTH", title: "t" })).toBeNull();
+
+    const listing = new WorkdayAdapter({ config: { host: "synth.wd5.myworkdayjobs.com", tenant: "synth", site: "ext", companyName: "SYNTH" }, searchTerms: ["synthetic platform engineer"] });
+    const stats = (over: Partial<NonNullable<WorkdayAdapter["lastRunStats"]>>) => ({
+      facet: null, searchRequests: 1, detailRequests: 0, termsCompleted: 1, truncatedTerms: [], hitsSeen: 0, notSingapore: 0, detailsGone: 0, stoppedForBudget: false, ...over,
+    });
+    const absentDeps = (now: Date) => deps({
+      now,
+      createFeedAdapter: () => listing,
+      refreshSourceEvidence: async (_c, request) => ({ ...request, status: "UNAVAILABLE" as const }),
+    });
+
+    listing.lastRunStats = stats({ stoppedForBudget: true });
+    const cut = await runAvailabilityRecheck(db(), ctx(), payload(job), null, absentDeps(at(0)));
+    expect(cut).toMatchObject({ outcome: "CANNOT_TELL", action: "RETRY_LATER" });
+    expect((await events(job)).at(-1)).toMatchObject({ absent: 0 });
+
+    listing.lastRunStats = stats({});
+    const first = await runAvailabilityRecheck(db(), ctx(), payload(job), null, absentDeps(at(1)));
+    expect(first).toMatchObject({ readKind: "FEED", outcome: "FEED_ABSENT", action: "WAIT_NEXT_READ" });
+    const second = await runAvailabilityRecheck(db(), ctx(), payload(job), null, absentDeps(at(2)));
+    expect(second).toMatchObject({ outcome: "FEED_ABSENT", action: "MARK_CLOSED" });
+    expect(await availabilityState(job)).toBe("CLOSED");
   });
 
   it("is skipped, not recorded, for a job that is archived or whose version moved on", async () => {
