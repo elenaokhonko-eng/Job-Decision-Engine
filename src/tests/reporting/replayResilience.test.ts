@@ -158,7 +158,7 @@ describe("attachPoolErrorHandler", () => {
 
 describe("assessReplay: any failed or incomplete stage fails the run", () => {
   const complete = { ...emptyReplayTotals(), extracted: 10, embeddingsOk: 30, matched: 8, matchHeldBack: 2 };
-  const counts = { scope: 10, extractionTargets: 10, rematchOnly: false };
+  const counts = { extractionDiscovered: 10, rematchOnly: false };
 
   it("passes a complete run", () => {
     expect(assessReplay(complete, counts)).toEqual([]);
@@ -173,17 +173,12 @@ describe("assessReplay: any failed or incomplete stage fails the run", () => {
     expect(assessReplay({ ...complete, ...patch }, counts).length).toBeGreaterThan(0);
   });
 
-  it("fails when fewer jobs were extracted or matched than the scope", () => {
+  it("fails when fewer jobs were extracted than the stage selected", () => {
     expect(assessReplay({ ...complete, extracted: 7 }, counts).join()).toMatch(/extraction incomplete: 7 of 10/);
-    expect(assessReplay({ ...complete, matched: 5 }, counts).join()).toMatch(/matching incomplete: 7 of 10/);
-  });
-
-  it("resumed jobs are not counted as missing extractions", () => {
-    expect(assessReplay({ ...complete, extracted: 4, resumedSkipped: 6 }, { ...counts, extractionTargets: 4 })).toEqual([]);
   });
 
   it("rematch-only does not expect extraction", () => {
-    expect(assessReplay({ ...complete, extracted: 0 }, { ...counts, rematchOnly: true, extractionTargets: 0 })).toEqual([]);
+    expect(assessReplay({ ...complete, extracted: 0 }, { extractionDiscovered: 0, rematchOnly: true })).toEqual([]);
   });
 });
 

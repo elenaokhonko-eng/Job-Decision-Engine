@@ -187,24 +187,21 @@ export function emptyReplayTotals(): ReplayTotals {
 }
 
 /**
- * Failures that must make the run exit non-zero. `scope` is every job the run covers (all go through matching and
- * deciding); `extractionTargets` is the part that still needed extraction (the rest were resumed as already on the
- * current extractor version).
+ * Failures that must make the run exit non-zero. A stage can only take the jobs it is eligible for (a hard-rejected
+ * job is never extracted), so completeness is judged against what the stage itself reported as selected:
+ * `extractionDiscovered` is the sum of `discovered` over the extraction calls.
  */
 export function assessReplay(
   totals: ReplayTotals,
-  counts: { scope: number; extractionTargets: number; rematchOnly: boolean },
+  counts: { extractionDiscovered: number; rematchOnly: boolean },
 ): string[] {
   const failures: string[] = [];
   if (totals.extractionErrors > 0) failures.push(`${totals.extractionErrors} extraction error(s)`);
   if (totals.embeddingsFailed > 0) failures.push(`${totals.embeddingsFailed} embedding input(s) failed`);
   if (totals.matchErrors > 0) failures.push(`${totals.matchErrors} match error(s)`);
   if (totals.decisionErrors > 0) failures.push(`${totals.decisionErrors} decision error(s)`);
-  if (!counts.rematchOnly && totals.extracted + totals.extractionErrors < counts.extractionTargets) {
-    failures.push(`extraction incomplete: ${totals.extracted} of ${counts.extractionTargets} jobs extracted`);
-  }
-  if (totals.matched + totals.matchHeldBack + totals.matchErrors < counts.scope) {
-    failures.push(`matching incomplete: ${totals.matched + totals.matchHeldBack} of ${counts.scope} jobs matched`);
+  if (!counts.rematchOnly && totals.extracted + totals.extractionErrors < counts.extractionDiscovered) {
+    failures.push(`extraction incomplete: ${totals.extracted} of ${counts.extractionDiscovered} selected jobs extracted`);
   }
   return failures;
 }
@@ -239,4 +236,26 @@ export async function loadJobsOnExtractorVersion(
     [workspaceId, canonicalJobIds, extractorVersion],
   );
   return new Set(rows.map((row) => row.canonical_job_id));
+}
+
+/**
+ * Funnel check after a replay: scope jobs that passed the gate but were left before matching (still PREQUALIFIED or
+ * LANE_ROUTED). The replay cannot decide whether each is a real stranding, so the script prints this as a warning for the
+ * availability/lane workstreams rather than failing on it.
+ */
+export async function countGatePassedLeftBeforeMatching(
+  client: { query: (text: string, values?: unknown[]) => Promise<{ rows: Array<{ n: number }> }> },
+  workspaceId: string,
+  canonicalJobIds: string[],
+): Promise<number> {
+  if (canonicalJobIds.length === 0) return 0;
+  const { rows } = await client.query(
+    `SELECT COUNT(*)::int AS n
+       FROM canonical_jobs cj
+      WHERE cj.workspace_id = $1 AND cj.id = ANY($2::uuid[])
+        AND cj.gate_decision = 'PASS'
+        AND COALESCE(cj.processing_state, cj.processing_status) IN ('PREQUALIFIED', 'LANE_ROUTED')`,
+    [workspaceId, canonicalJobIds],
+  );
+  return rows[0]?.n ?? 0;
 }

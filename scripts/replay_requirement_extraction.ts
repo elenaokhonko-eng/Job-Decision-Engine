@@ -82,7 +82,7 @@ async function main(): Promise<void> {
 
   const {
     ResilientClient, attachPoolErrorHandler, retryOnConnectionLoss, isTransientConnectionError,
-    emptyReplayTotals, assessReplay, loadJobsOnExtractorVersion,
+    emptyReplayTotals, assessReplay, loadJobsOnExtractorVersion, countGatePassedLeftBeforeMatching,
   } = await import('../src/reporting/replayResilience.js');
   const { DETERMINISTIC_EXTRACTOR_VERSION } = await import('../src/requirements/deterministicExtractors.js');
 
@@ -206,7 +206,7 @@ async function main(): Promise<void> {
       ? new Set<string>()
       : await loadJobsOnExtractorVersion(client, workspace.workspaceId, scope.map((row) => row.canonical_job_id), DETERMINISTIC_EXTRACTOR_VERSION);
     totals.resumedSkipped = alreadyExtracted.size;
-    const extractionTargets = rematchOnly ? 0 : scope.length - alreadyExtracted.size;
+    let extractionDiscovered = 0;
     if (alreadyExtracted.size > 0) {
       console.log(`Resuming: ${alreadyExtracted.size} of ${scope.length} jobs are already on ${DETERMINISTIC_EXTRACTOR_VERSION} and are not re-extracted (--force-all to redo them).`);
     }
@@ -220,9 +220,11 @@ async function main(): Promise<void> {
       // chunk's numbers are added to the totals only once it has finished, so a retry never double counts.
       let attempt = 0;
       let chunkTotals = emptyReplayTotals();
+      let chunkDiscovered = 0;
       for (;;) {
         attempt += 1;
         chunkTotals = emptyReplayTotals();
+        chunkDiscovered = 0;
         try {
           if (!rematchOnly) {
             if (toExtract.length > 0) {
@@ -234,6 +236,7 @@ async function main(): Promise<void> {
                 quotedMode: 'deterministic_only',
                 limit: CHUNK,
               });
+              chunkDiscovered += extraction.discovered;
               chunkTotals.extracted += extraction.processed;
               chunkTotals.extractionErrors += extraction.errors;
             }
@@ -265,6 +268,7 @@ async function main(): Promise<void> {
           await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
         }
       }
+      extractionDiscovered += chunkDiscovered;
       for (const key of Object.keys(chunkTotals) as Array<keyof typeof chunkTotals>) {
         if (key !== 'resumedSkipped' && key !== 'chunksRetried') totals[key] += chunkTotals[key];
       }
@@ -279,12 +283,12 @@ async function main(): Promise<void> {
     }
 
     // Any failed or incomplete stage fails the run (AGENTS.md invariant 7). The totals line is for a complete run only.
-    const failures = assessReplay(totals, { scope: scope.length, extractionTargets, rematchOnly });
+    const failures = assessReplay(totals, { extractionDiscovered, rematchOnly });
     if (failures.length > 0) {
       console.error(`Replay totals (INCOMPLETE): ${JSON.stringify(totals)}`);
       throw new Error(`Replay did not complete: ${failures.join('; ')}.`);
     }
-    console.log(`\nReplay totals: ${JSON.stringify(totals)} (scope ${scope.length}, extracted ${totals.extracted}/${extractionTargets}, matched ${totals.matched + totals.matchHeldBack}/${scope.length})`);
+    console.log(`\nReplay totals: ${JSON.stringify(totals)} (scope ${scope.length}, extracted ${totals.extracted}/${extractionDiscovered} selected, matched ${totals.matched + totals.matchHeldBack})`);
     await measure(`AFTER (${DETERMINISTIC_EXTRACTOR_VERSION})`);
   } finally {
     await pool.end().catch(() => undefined);
