@@ -11,6 +11,9 @@ import { isUnknownEmployerName } from "./postingIdentity.js";
  * only what is already stored (no network, no write): the employer board cache, the posting content that was
  * attached, and the availability evidence. It answers "how far has each current lead got", in counts only.
  *
+ * Library-only: there is no command. A caller opens its own read-only transaction on an approved replay target and
+ * calls reportAggregatorLeadResolution; a thin script would be a new database-opening script (rule F3).
+ *
  * "Current": retrieved within `windowDays`, or linked to a live job. Never prints a title, employer or URL.
  */
 
@@ -109,6 +112,8 @@ export async function reportAggregatorLeadResolution(
     [input.workspaceId, now, windowDays],
   );
 
+  // employer_board_resolutions is a global cache keyed by employer (migration 100, no workspace_id): one resolution
+  // per employer is shared by every workspace, and the report reads only its status, never a name or board token.
   const board = await client.query<{ employer_key: string; status: "FOUND" | "NOT_FOUND" }>(
     `SELECT employer_key, status FROM employer_board_resolutions`,
   );

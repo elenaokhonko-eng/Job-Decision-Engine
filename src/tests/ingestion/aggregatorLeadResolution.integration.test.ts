@@ -4,6 +4,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
+import { employerKey } from "../../ingestion/employerBoardLookup.js";
+import { aggregatorHostOf } from "../../ingestion/aggregatorHosts.js";
 import { alertLinkHost, reportAggregatorLeadResolution } from "../../ingestion/aggregatorLeadResolution.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
@@ -11,9 +13,25 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/
 // private schema; read-only report.
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
+if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
+  throw new Error("CI must run the lead resolution integration tests against its PostgreSQL service.");
+}
 
 const DAY = 24 * 3_600_000;
-const NOW = new Date("2026-11-23T12:00:00.000Z");
+// Real clock: the availability view compares with the database NOW(), so fixture times are relative to the same moment.
+const NOW = new Date();
+
+describe("aggregatorHostOf", () => {
+  it("matches the apex and subdomains of an aggregator, never a lookalike or an employer", () => {
+    expect(aggregatorHostOf("linkedin.com")).toBe("linkedin.com");
+    expect(aggregatorHostOf("sg.linkedin.com")).toBe("linkedin.com");
+    expect(aggregatorHostOf("WWW.LinkedIn.com")).toBe("linkedin.com");
+    expect(aggregatorHostOf("sg.indeed.com")).toBe("indeed.com");
+    expect(aggregatorHostOf("notlinkedin.com")).toBeNull();
+    expect(aggregatorHostOf("linkedin.com.example.org")).toBeNull();
+    expect(aggregatorHostOf("careers.example.com")).toBeNull();
+  });
+});
 
 describe("alertLinkHost", () => {
   it("reads the destination host through SES click tracking and rejects a malformed link", () => {
@@ -65,7 +83,7 @@ async function seedLiveJob(label: string, availabilityOpen: boolean): Promise<st
       workspaceId, canonical.rows[0]!.id, `lead-${randomUUID()}`, "e".repeat(64),
       availabilityOpen ? "OPEN" : "UNKNOWN",
       JSON.stringify({ status: availabilityOpen ? "OPEN" : "UNKNOWN", verification_method: "TEST_FIXTURE", reason_code: "SOURCE_CONFIRMED", evidence: [] }),
-      new Date(Date.now() + (availabilityOpen ? 5 * DAY : -DAY)),
+      new Date(NOW.getTime() + (availabilityOpen ? 5 * DAY : -DAY)),
     ],
   );
   await db().query(`UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE workspace_id = $2 AND id = $3`, [version.rows[0]!.id, workspaceId, canonical.rows[0]!.id]);
@@ -73,7 +91,7 @@ async function seedLiveJob(label: string, availabilityOpen: boolean): Promise<st
 }
 
 async function cacheBoard(company: string, status: "FOUND" | "NOT_FOUND"): Promise<void> {
-  const key = company.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const key = employerKey(company);
   await db().query(
     `INSERT INTO employer_board_resolutions (employer_key, employer_name, status, provider, board_token, resolution_method, resolver_version, resolved_at, expires_at)
      VALUES ($1, $2, $3, $4, $5, $6, 'test', NOW(), NOW() + INTERVAL '7 days')`,
