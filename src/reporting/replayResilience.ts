@@ -127,7 +127,7 @@ export class ResilientClient {
     if (this.inTransaction && this.broken) {
       this.inTransaction = false;
       await this.reconnect();
-      if (endsTransaction) return { rows: [], rowCount: 0, command: keyword, oid: 0, fields: [] } as pg.QueryResult<R>;
+      if (endsTransaction) return this.endLostTransaction<R>(keyword);
       throw new Error('Connection terminated: the connection was lost inside a transaction.');
     }
     try {
@@ -141,7 +141,7 @@ export class ResilientClient {
       if (this.inTransaction) {
         this.inTransaction = false;
         await this.reconnect();
-        if (endsTransaction) return { rows: [], rowCount: 0, command: keyword, oid: 0, fields: [] } as pg.QueryResult<R>;
+        if (endsTransaction) return this.endLostTransaction<R>(keyword);
         throw error;
       }
       await this.reconnect();
@@ -153,6 +153,18 @@ export class ResilientClient {
       if (startsTransaction) this.inTransaction = true;
       return result;
     }
+  }
+
+  /**
+   * The server rolled the transaction back with the connection. A ROLLBACK is therefore already done and reports success;
+   * a COMMIT did not happen and must never look as if it did. This client is for read-only transactions
+   * (the replay's BEGIN READ ONLY measurement); a unit that writes inside a transaction must use its own connection.
+   */
+  private endLostTransaction<R extends pg.QueryResultRow>(keyword: string): pg.QueryResult<R> {
+    if (keyword === 'COMMIT' || keyword === 'END') {
+      throw new Error('Connection terminated: the connection was lost inside a transaction, so the COMMIT did not happen.');
+    }
+    return { rows: [], rowCount: 0, command: keyword, oid: 0, fields: [] } as pg.QueryResult<R>;
   }
 
   async end(): Promise<void> {

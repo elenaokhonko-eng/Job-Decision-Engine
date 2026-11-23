@@ -201,6 +201,22 @@ describe("ResilientClient: a connection lost inside a transaction", () => {
   });
 });
 
+describe("ResilientClient: COMMIT after a lost transaction never looks successful", () => {
+  it("throws for COMMIT and reports ROLLBACK as done", async () => {
+    const { client, fakes } = clientOver(["ok"], ["ok"]);
+    await client.connect();
+    await client.query("BEGIN");
+    fakes[0].emit("error", new Error("Connection terminated unexpectedly"));
+    await expect(client.query("COMMIT")).rejects.toThrow(/COMMIT did not happen/);
+
+    const second = clientOver(["ok"], ["ok"]);
+    await second.client.connect();
+    await second.client.query("BEGIN");
+    second.fakes[0].emit("error", new Error("Connection terminated unexpectedly"));
+    await expect(second.client.query("ROLLBACK")).resolves.toMatchObject({ command: "ROLLBACK" });
+  });
+});
+
 describe("assessReplay: matchHeldBack semantics", () => {
   it("held-back matches are not failures", () => {
     const totals = { ...emptyReplayTotals(), extracted: 5, matched: 3, matchHeldBack: 2 };
