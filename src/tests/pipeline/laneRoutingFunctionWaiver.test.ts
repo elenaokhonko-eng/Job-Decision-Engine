@@ -81,10 +81,13 @@ describe("lane router function waiver (lane_router_v2.6.0)", () => {
   });
 
   it("keeps the negative-concept veto", () => {
-    const negative = config.lanes.INVESTMENT_MARKETS_FINTECH.negative_concepts?.[0];
-    if (!negative) return; // lane defines no negative concepts
-    const result = route("Delivery Coordination Lead", `${MARKETS_COORDINATION} ${negative.replace(/_/g, " ")}.`, 0.9, {}, "Example Holdings");
-    expect(result.primaryLane).not.toBe("INVESTMENT_MARKETS_FINTECH");
+    expect(config.lanes.INVESTMENT_MARKETS_FINTECH.negative_concepts).toContain("treasury");
+    const scores = { INVESTMENT_MARKETS_FINTECH: 0.9 };
+    const clean = route("Delivery Coordination Lead", MARKETS_COORDINATION, 0.2, scores);
+    expect(clean.primaryLane).toBe("INVESTMENT_MARKETS_FINTECH");
+    expect(clean.laneConfidence).toBe("Low");
+    const vetoed = route("Delivery Coordination Lead", `${MARKETS_COORDINATION} Support the treasury function.`, 0.2, scores);
+    expect(vetoed.primaryLane).toBe("UNCLASSIFIED");
   });
 
   it("never waives the function of INVESTIGATIONS_ENFORCEMENT", () => {
