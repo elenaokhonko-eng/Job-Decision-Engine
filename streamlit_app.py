@@ -520,20 +520,20 @@ VERIFY_THEN_APPLY_JOBS_QUERY = """
 """
 
 TRACK_JOBS_QUERY = """
-    SELECT workspace_id, canonical_job_id, job_version_id, title, company,
-           canonical_url, source, location, workplace_type, employment_type,
-           description, gate_status, rejection_codes, gate_evidence_quotes,
-           workability_facts, processing_state, primary_lane, secondary_lanes,
-           lane_confidence, deterministic_match_score, deterministic_match_coverage,
-           recommendation_eligibility, recommendation_outcome,
-           recommendation_requirement_score, recommendation_coverage_score,
-           recommendation_evidence_completeness, nd_friendly_score,
-           politics_stress_score, sensory_overload_index, next_action,
-           evaluation_summary, eval_provider, eval_is_fallback, observed_at,
-           version_mismatch,
-           current_artifact_status, current_artifact_reason, blocked_task_count,
-           deterministic_decision_id, deterministic_context_fingerprint,
-           deterministic_trace_notes, current_readiness.application_readiness,
+    SELECT jobs.workspace_id, jobs.canonical_job_id, jobs.job_version_id, jobs.title, jobs.company,
+           jobs.canonical_url, jobs.source, jobs.location, jobs.workplace_type, jobs.employment_type,
+           jobs.description, jobs.gate_status, jobs.rejection_codes, jobs.gate_evidence_quotes,
+           jobs.workability_facts, jobs.processing_state, jobs.primary_lane, jobs.secondary_lanes,
+           jobs.lane_confidence, jobs.deterministic_match_score, jobs.deterministic_match_coverage,
+           jobs.recommendation_eligibility, jobs.recommendation_outcome,
+           jobs.recommendation_requirement_score, jobs.recommendation_coverage_score,
+           jobs.recommendation_evidence_completeness, jobs.nd_friendly_score,
+           jobs.politics_stress_score, jobs.sensory_overload_index, jobs.next_action,
+           jobs.evaluation_summary, jobs.eval_provider, jobs.eval_is_fallback, jobs.observed_at,
+           jobs.version_mismatch,
+           jobs.current_artifact_status, jobs.current_artifact_reason, jobs.blocked_task_count,
+           jobs.deterministic_decision_id, jobs.deterministic_context_fingerprint,
+           jobs.deterministic_trace_notes, current_readiness.application_readiness,
            current_readiness.readiness_status,
            current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
            current_readiness.readiness_reason_codes, current_readiness.availability_status,
@@ -548,9 +548,28 @@ TRACK_JOBS_QUERY = """
         AND readiness.job_version_id::text = jobs.job_version_id::text
       LIMIT 1
     ) AS current_readiness ON TRUE
+    -- Same single read-model statement of "currently open" as Review (migration 114). A Track job
+    -- whose posting is not confirmed open leaves this list and is counted by
+    -- TRACK_AWAITING_AVAILABILITY_COUNT_QUERY, so list plus count equal every TRACK job.
+    JOIN v_job_availability_current AS availability
+      ON availability.workspace_id = jobs.workspace_id
+     AND availability.canonical_job_id = jobs.canonical_job_id
+     AND availability.job_version_id::text = jobs.job_version_id::text
+     AND availability.availability_current
     WHERE jobs.workspace_id = %s
-    ORDER BY deterministic_match_score DESC NULLS LAST, observed_at DESC NULLS LAST
+    ORDER BY jobs.deterministic_match_score DESC NULLS LAST, jobs.observed_at DESC NULLS LAST
     LIMIT 5000
+"""
+
+TRACK_AWAITING_AVAILABILITY_COUNT_QUERY = """
+    SELECT COUNT(*)::int AS awaiting_count
+    FROM v_track_jobs_scoped AS jobs
+    LEFT JOIN v_job_availability_current AS availability
+      ON availability.workspace_id = jobs.workspace_id
+     AND availability.canonical_job_id = jobs.canonical_job_id
+     AND availability.job_version_id::text = jobs.job_version_id::text
+    WHERE jobs.workspace_id = %s
+      AND NOT COALESCE(availability.availability_current, FALSE)
 """
 
 # Every current REVIEW decision, including the ones Apply Now leaves out: an
@@ -856,6 +875,16 @@ def fetch_track_jobs():
         connection.close()
     rows = _read_model_query(TRACK_JOBS_QUERY, (workspace_id,))
     return _validate_workspace_rows(rows, workspace_id, validate_track_row)
+
+
+def fetch_track_awaiting_availability_count():
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(TRACK_AWAITING_AVAILABILITY_COUNT_QUERY, (workspace_id,))
+    return int(rows[0]["awaiting_count"]) if rows else 0
 
 
 def fetch_applications_from_read_model(limit=250):
@@ -2327,12 +2356,18 @@ with tab_dashboard:
             review_jobs = fetch_review_jobs()
         except Exception as exc:
             st.error(f"Review decisions are unavailable from the canonical read model: {exc}")
+    track_jobs = None
+    if workspace_category == "Track":
+        try:
+            track_jobs = fetch_track_jobs()
+        except Exception as exc:
+            st.error(f"Track decisions are unavailable from the canonical read model: {exc}")
     category_counts = {
         "Top 10": application_workspace_summary.get("top_ten_ready_count"),
         "Apply Now": application_workspace_summary.get("apply_now_count"),
         VERIFY_THEN_APPLY_CATEGORY: len(verification_jobs) if verification_jobs is not None else None,
         REVIEW_CATEGORY: len(review_jobs) if review_jobs is not None else None,
-        "Track": application_workspace_summary.get("track_count"),
+        "Track": len(track_jobs) if track_jobs is not None else None,
         "Processing": application_workspace_summary.get("processing_count"),
         "Applied": application_workspace_summary.get("applied_count"),
         "Skip": application_workspace_summary.get("skip_count"),
@@ -2358,6 +2393,17 @@ with tab_dashboard:
         if awaiting_recheck:
             st.caption(
                 f"{awaiting_recheck} more Review job(s) are hidden until their posting is confirmed open again "
+                "(awaiting availability re-check)."
+            )
+    if workspace_category == "Track":
+        try:
+            track_awaiting_recheck = fetch_track_awaiting_availability_count()
+        except Exception as exc:
+            track_awaiting_recheck = None
+            st.error(f"The count of Track jobs awaiting an availability re-check is unavailable: {exc}")
+        if track_awaiting_recheck:
+            st.caption(
+                f"{track_awaiting_recheck} more Track job(s) are hidden until their posting is confirmed open again "
                 "(awaiting availability re-check)."
             )
     page_size = PAGE_SIZE
@@ -2387,7 +2433,7 @@ with tab_dashboard:
         elif workspace_category == REVIEW_CATEGORY:
             category_rows = review_jobs
         elif workspace_category == "Track":
-            category_rows = fetch_track_jobs()
+            category_rows = track_jobs
         elif workspace_category == "Applied":
             category_rows = None if application_records is None else [
                 record for record in application_records
