@@ -271,4 +271,72 @@ describe.skipIf(skipReal)('Pipeline Stage: Deterministic Matcher (real PostgreSQ
       deterministic_match_coverage: null,
     });
   });
+
+  it('a completed extraction with zero requirements is an unknown, unscored fit: the decider gives TRACK, never SKIP, and the Track view reads NULL', async () => {
+    if (!context) throw new Error('Integration test fixture context is not initialized.');
+    await query(`UPDATE embedding_spaces SET active = TRUE WHERE workspace_id = $1`, [context.workspaceId]);
+    const stamp = `${Date.now()}-zero`;
+    const job = await query<{ id: string }>(
+      `INSERT INTO canonical_jobs (workspace_id, company_name, normalized_title, canonical_url, location_summary, workplace_type,
+                                   employment_type, primary_lane, processing_state, processing_status, gate_decision)
+       VALUES ($1, 'Zero Requirement Fixture', 'Data Scientist', $2, 'Remote', 'REMOTE', 'FULL_TIME', 'CORE_AI_DATA', 'LANE_ROUTED', 'LANE_ROUTED', 'PASS')
+       RETURNING id`,
+      [context.workspaceId, `https://example.test/zero-${stamp}`],
+    );
+    const jobId = job.rows[0].id;
+    const version = await query<{ id: string }>(
+      `INSERT INTO job_versions (workspace_id, canonical_job_id, version_number, content_hash, description_text, observed_at)
+       VALUES ($1, $2, 1, $3, $4, NOW()) RETURNING id`,
+      [context.workspaceId, jobId, `zero-${stamp}`, COMPLETE_TEST_POSTING_DESCRIPTION],
+    );
+    const versionId = version.rows[0].id;
+    await query(`UPDATE canonical_jobs SET latest_job_version_id = $2 WHERE id = $1`, [jobId, versionId]);
+    await insertCompletePostingEvidence(client!, {
+      workspaceId: context.workspaceId, jobVersionId: versionId, companyName: 'Zero Requirement Fixture', title: 'Data Scientist',
+      sourceUrl: `https://example.test/zero-${stamp}`, description: COMPLETE_TEST_POSTING_DESCRIPTION,
+    });
+    const identity = await query<{ id: string }>(
+      `INSERT INTO requirement_set_identities (workspace_id, canonical_job_id, identity_hash, job_content_hash, deterministic_extractor_version,
+                                               quoted_extractor_version, quoted_prompt_hash, normalizer_hash, quoted_enabled)
+       VALUES ($1, $2, $3, 'h', 'deterministic-v1', 'quoted-v1', 'p', 'n', FALSE) RETURNING id`,
+      [context.workspaceId, jobId, `zero-identity-${stamp}`],
+    );
+    const set = await query<{ id: string }>(
+      `INSERT INTO requirement_sets (workspace_id, requirement_identity_id, canonical_job_id, job_version_id, revision_number, source_type)
+       VALUES ($1, $2, $3, $4, 1, 'EXTRACTED') RETURNING id`,
+      [context.workspaceId, identity.rows[0].id, jobId, versionId],
+    );
+    await query(`UPDATE job_versions SET active_requirement_set_id = $2 WHERE id = $1`, [versionId, set.rows[0].id]);
+    await query(
+      `INSERT INTO requirement_extraction_runs (workspace_id, canonical_job_id, job_version_id, requirement_set_id, run_type, status, requirements_extracted, completed_at)
+       VALUES ($1, $2, $3, $4, 'DETERMINISTIC', 'COMPLETED', 0, NOW())`,
+      [context.workspaceId, jobId, versionId, set.rows[0].id],
+    );
+    await query(
+      `INSERT INTO job_version_pipeline_state (workspace_id, canonical_job_id, job_version_id, current_stage, stage_status)
+       VALUES ($1, $2, $3, 'REQUIREMENTS_EXTRACTED', 'COMPLETED')`,
+      [context.workspaceId, jobId, versionId],
+    );
+
+    const matched = await runDeterministicMatcher(getClient(), { context, canonicalJobIds: [jobId] });
+    expect(matched.errors).toBe(0);
+    const canonical = await query(
+      `SELECT profile_match_status, deterministic_match_score, deterministic_match_coverage FROM canonical_jobs WHERE id = $1`,
+      [jobId],
+    );
+    expect(canonical.rows[0]).toEqual({ profile_match_status: 'UNKNOWN', deterministic_match_score: null, deterministic_match_coverage: null });
+    const run = await query(`SELECT status, requirement_count FROM match_runs WHERE canonical_job_id = $1 ORDER BY started_at DESC LIMIT 1`, [jobId]);
+    expect(run.rows[0]).toMatchObject({ status: 'COMPLETED', requirement_count: 0 });
+
+    const { runRecommendationDecider } = await import('../../pipeline/recommendationDecider.js');
+    expect((await runRecommendationDecider(getClient(), { context, canonicalJobIds: [jobId] })).errors).toBe(0);
+    const decided = await query(`SELECT recommendation_outcome, recommendation_requirement_score FROM canonical_jobs WHERE id = $1`, [jobId]);
+    expect(decided.rows[0].recommendation_outcome).toBe('TRACK');
+    expect(decided.rows[0].recommendation_outcome).not.toBe('SKIP');
+    expect(decided.rows[0].recommendation_requirement_score).toBeNull();
+
+    // The Track read model reads the NULL score without error; when the view lists the job, its score is NULL.
+    const track = await query(`SELECT * FROM v_track_jobs_scoped WHERE canonical_job_id = $1`, [jobId]);
+    for (const row of track.rows) expect(row.recommendation_requirement_score ?? null).toBeNull();
+  });
 });
