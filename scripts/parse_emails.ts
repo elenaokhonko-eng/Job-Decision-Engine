@@ -10,7 +10,7 @@ import {
   type EmailLinkSummary,
 } from "../src/ingestion/emailAlertExtractor.js";
 import { ExtractedJobSchema, SCHEMA_VERSION } from "../src/contracts/index.js";
-import { enqueuePipelineTask } from "../src/tasks/pipelineTasks.js";
+import { assertObservationsHaveFetchTask, enqueueAlertFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import {
@@ -167,6 +167,7 @@ async function stageEmail(
   try {
     await client.query("BEGIN");
     const observationIds: string[] = [];
+    const observationsNeedingFetch: string[] = [];
     for (const card of cards) {
       const messageIdentity = String(email.gmail_message_id || alertId);
       const sourceExternalId = "gmail-" + messageIdentity + "-" + stableLinkId(card.sourceUrl);
@@ -240,21 +241,12 @@ async function stageEmail(
       }
       observationIds.push(staged.observationId);
 
-      const taskKey = "FETCH_JOB_CONTENT:" + staged.observationId + ":posting_fetch_v1";
-      await enqueuePipelineTask(
-        {
-          taskType: "FETCH_JOB_CONTENT",
-          taskKey,
-          payload: { observation_id: staged.observationId },
-          maxAttempts: 8,
-          producer: "parse_emails",
-          stageVersion: "posting_fetch_v1",
-          requestId: taskKey,
-        },
-        client,
-        { context: ctx },
-      );
+      const fetchTask = await enqueueAlertFetchTask(client, ctx, { observationId: staged.observationId, producer: "parse_emails" });
+      // An archived job takes no new work; every other observation must have its fetch task.
+      if (!fetchTask.skippedBecauseArchived) observationsNeedingFetch.push(staged.observationId);
     }
+    // A staged observation without its fetch task could never become a complete posting: roll the alert back.
+    await assertObservationsHaveFetchTask(client, ctx.workspaceId, observationsNeedingFetch);
 
     // One status update per alert instead of one database round trip per card.
     const distinctIds = [...new Set(observationIds)];

@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { reportAwaitingContentOutputs } from "../src/ingestion/contentCompleteness.js";
+import { reportContentWithoutFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -185,6 +186,21 @@ async function runIntegrityChecks() {
       errors++;
     } else {
       console.log(`OK: No awaiting-content job (${awaiting.awaitingContentJobs}) carries a gate decision, lane or recommendation.`);
+    }
+
+    // Check 9: a live job needs complete content or a fetch task; with neither it can never become complete.
+    const coverage = await reportContentWithoutFetchTask(pool as any, ctx.workspaceId);
+    if (coverage.withoutFetchTask.length > 0) {
+      console.error(
+        `Found ${coverage.withoutFetchTask.length} live job(s) with neither complete content nor a FETCH_JOB_CONTENT task; `
+        + `first ids: ${coverage.withoutFetchTask.slice(0, 5).join(", ")}`,
+      );
+      errors++;
+    } else {
+      console.log(
+        `OK: Every live job has complete content or a fetch task (${coverage.awaitingContentJobs} waiting, `
+        + `${coverage.fetchDeadLetteredOnly} with only a dead-lettered fetch).`,
+      );
     }
 
     if (errors === 0) {
