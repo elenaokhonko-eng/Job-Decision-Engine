@@ -21,6 +21,7 @@
 -- Rollback (nothing else depends on these tables):
 --   DROP TABLE IF EXISTS job_availability_recheck_events;
 --   DROP TABLE IF EXISTS job_availability_recheck_state;
+--   DROP FUNCTION IF EXISTS job_availability_recheck_events_append_only();
 
 CREATE TABLE IF NOT EXISTS job_availability_recheck_state (
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
@@ -67,3 +68,21 @@ COMMENT ON TABLE job_availability_recheck_state IS
   'Per-job counters for RECHECK_AVAILABILITY: consecutive successful feed reads without the posting, and reads that could not tell.';
 COMMENT ON TABLE job_availability_recheck_events IS
   'Append-only audit of every availability re-check read: outcome, decision and counters after the read.';
+
+-- The events table is append-only: a read that was recorded is never changed or removed.
+CREATE OR REPLACE FUNCTION job_availability_recheck_events_append_only()
+RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION 'job_availability_recheck_events is append-only; record a new event instead.';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS job_availability_recheck_events_append_only ON job_availability_recheck_events;
+CREATE TRIGGER job_availability_recheck_events_append_only
+  BEFORE UPDATE OR DELETE ON job_availability_recheck_events
+  FOR EACH ROW EXECUTE FUNCTION job_availability_recheck_events_append_only();
+
+DROP TRIGGER IF EXISTS job_availability_recheck_events_no_truncate ON job_availability_recheck_events;
+CREATE TRIGGER job_availability_recheck_events_no_truncate
+  BEFORE TRUNCATE ON job_availability_recheck_events
+  FOR EACH STATEMENT EXECUTE FUNCTION job_availability_recheck_events_append_only();

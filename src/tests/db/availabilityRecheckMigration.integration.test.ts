@@ -10,6 +10,10 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
 
+if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
+  throw new Error("CI must run the availability re-check migration tests against its PostgreSQL service.");
+}
+
 let pool: pg.Pool | undefined;
 let client: pg.PoolClient | undefined;
 let context: WorkspaceContext | undefined;
@@ -74,11 +78,25 @@ describe.skipIf(skipReal)("migration 115: availability re-check state (PostgreSQ
     await expect(insert("FEED_ABSENT", "DELETE_JOB")).rejects.toThrow();
   });
 
+  it("the event log cannot be updated, deleted or truncated", async () => {
+    const jobId = await insertJob();
+    await db().query(
+      `INSERT INTO job_availability_recheck_events (workspace_id, canonical_job_id, read_kind, outcome, decision, reason_code,
+         consecutive_absent_reads_after, cannot_tell_attempts_after)
+       VALUES ($1, $2, 'FEED', 'FEED_ABSENT', 'WAIT_NEXT_READ', 'TEST', 1, 0)`,
+      [context!.workspaceId, jobId],
+    );
+    await expect(db().query(`UPDATE job_availability_recheck_events SET reason_code = 'X' WHERE canonical_job_id = $1`, [jobId])).rejects.toThrow(/append-only/);
+    await expect(db().query(`DELETE FROM job_availability_recheck_events WHERE canonical_job_id = $1`, [jobId])).rejects.toThrow(/append-only/);
+    await expect(db().query(`TRUNCATE job_availability_recheck_events`)).rejects.toThrow(/append-only/);
+  });
+
   it("is additive: the rollback statements remove only the two new tables", async () => {
     await db().query("BEGIN");
     try {
       await db().query("DROP TABLE IF EXISTS job_availability_recheck_events");
       await db().query("DROP TABLE IF EXISTS job_availability_recheck_state");
+      await db().query("DROP FUNCTION IF EXISTS job_availability_recheck_events_append_only()");
       const left = await db().query<{ present: boolean }>(
         `SELECT to_regclass('canonical_jobs') IS NOT NULL AS present`,
       );
