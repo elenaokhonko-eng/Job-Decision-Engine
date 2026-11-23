@@ -81,8 +81,9 @@ async function main(): Promise<void> {
   const { formatReport } = await import('./measure_ranking.js');
 
   const {
-    ResilientClient, attachPoolErrorHandler, retryOnConnectionLoss, isTransientConnectionError,
+    ResilientClient, attachPoolErrorHandler, retryOnConnectionLoss,
     emptyReplayTotals, assessReplay, loadJobsOnExtractorVersion, countGatePassedLeftBeforeMatching,
+    runReplayChunk, addChunkTotals, assertFirstChunkReachedMatcher,
   } = await import('../src/reporting/replayResilience.js');
   const { DETERMINISTIC_EXTRACTOR_VERSION } = await import('../src/requirements/deterministicExtractors.js');
 
@@ -216,69 +217,35 @@ async function main(): Promise<void> {
       const canonicalJobIds = chunk.map((row) => row.canonical_job_id);
       const toExtract = chunk.filter((row) => !alreadyExtracted.has(row.canonical_job_id));
 
-      // One chunk is a unit of work. A dropped connection re-runs the whole chunk (every stage is idempotent) and the
-      // chunk's numbers are added to the totals only once it has finished, so a retry never double counts.
-      let attempt = 0;
-      let chunkTotals = emptyReplayTotals();
-      let chunkDiscovered = 0;
-      for (;;) {
-        attempt += 1;
-        chunkTotals = emptyReplayTotals();
-        chunkDiscovered = 0;
-        try {
-          if (!rematchOnly) {
-            if (toExtract.length > 0) {
-              const extraction = await runRequirementsExtraction(pool as never, {
-                context: workspace,
-                jobVersionIds: toExtract.map((row) => row.job_version_id),
-                reprocess: true,
-                ignoreRetryWindow: true,
-                quotedMode: 'deterministic_only',
-                limit: CHUNK,
-              });
-              chunkDiscovered += extraction.discovered;
-              chunkTotals.extracted += extraction.processed;
-              chunkTotals.extractionErrors += extraction.errors;
-            }
-            // Idempotent: only inputs without an embedding cost anything, so resumed jobs are free here.
-            const embeddings = await runEmbeddingBatchWithFallback(2000, pool as never, {
-              context: workspace,
-              jobVersionIds: chunk.map((row) => row.job_version_id),
-            });
-            chunkTotals.embeddingsOk += embeddings.primary.succeeded;
-            chunkTotals.embeddingsFailed += embeddings.primary.failed;
-          }
-          if (regate) {
-            // A re-gate leaves jobs before lane routing; the matcher only takes routed jobs. Route again with the active lane revisions.
-            const { runLaneRouting } = await import('../src/pipeline/laneRouter.js');
-            const routing = await runLaneRouting(pool as never, { context: workspace, canonicalJobIds, limit: CHUNK, reprocessExisting: true });
-            chunkTotals.routed += routing.routed;
-          }
-          const matching = await runDeterministicMatcher(pool as never, { context: workspace, canonicalJobIds });
-          chunkTotals.matched += matching.matchedJobs;
-          chunkTotals.matchHeldBack += matching.skippedJobs;
-          chunkTotals.matchErrors += matching.errors;
-          const decisions = await runRecommendationDecider(pool as never, { context: workspace, canonicalJobIds });
-          chunkTotals.decisionErrors += decisions.errors;
-          break;
-        } catch (error) {
-          if (!isTransientConnectionError(error) || attempt > MAX_CHUNK_RETRIES) throw error;
-          totals.chunksRetried += 1;
-          console.error(`Chunk at ${at} lost its connection (${error instanceof Error ? error.message : String(error)}); retrying (${attempt}/${MAX_CHUNK_RETRIES}).`);
-          await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
-        }
-      }
-      extractionDiscovered += chunkDiscovered;
-      for (const key of Object.keys(chunkTotals) as Array<keyof typeof chunkTotals>) {
-        if (key !== 'resumedSkipped' && key !== 'chunksRetried') totals[key] += chunkTotals[key];
-      }
+      const { runLaneRouting } = await import('../src/pipeline/laneRouter.js');
+      const result = await runReplayChunk(
+        {
+          extract: (ids) => runRequirementsExtraction(pool as never, {
+            context: workspace,
+            jobVersionIds: ids,
+            reprocess: true,
+            ignoreRetryWindow: true,
+            quotedMode: 'deterministic_only',
+            limit: CHUNK,
+          }),
+          embed: async (ids) => (await runEmbeddingBatchWithFallback(2000, pool as never, { context: workspace, jobVersionIds: ids })).primary,
+          // A re-gate leaves jobs before lane routing; the matcher only takes routed jobs. Route again with the active lane revisions.
+          route: regate ? (ids) => runLaneRouting(pool as never, { context: workspace, canonicalJobIds: ids, limit: CHUNK, reprocessExisting: true }) : undefined,
+          match: (ids) => runDeterministicMatcher(pool as never, { context: workspace, canonicalJobIds: ids }),
+          decide: (ids) => runRecommendationDecider(pool as never, { context: workspace, canonicalJobIds: ids }),
+        },
+        { canonicalJobIds, jobVersionIds: chunk.map((row) => row.job_version_id), extractJobVersionIds: toExtract.map((row) => row.job_version_id) },
+        { rematchOnly, maxRetries: MAX_CHUNK_RETRIES },
+      );
+      totals.chunksRetried += result.retries;
+      extractionDiscovered += result.extractionDiscovered;
+      addChunkTotals(totals, result.totals);
 
       const attempted = totals.embeddingsOk + totals.embeddingsFailed;
       if (attempted > 0 && totals.embeddingsFailed / attempted > MAX_EMBEDDING_FAILURE_SHARE) {
         throw new Error(`Stopping: ${totals.embeddingsFailed} of ${attempted} embedding inputs failed (limit ${MAX_EMBEDDING_FAILURE_SHARE * 100}%).`);
       }
-      // Broken-funnel guard: a first chunk that matches nothing means the jobs never reached the matcher.
-      if (at === 0 && totals.matched + totals.matchHeldBack === 0) throw new Error('The first chunk matched 0 jobs: they did not reach the matcher. Stopping.');
+      assertFirstChunkReachedMatcher(totals, at === 0);
       console.error(`Replayed ${Math.min(at + CHUNK, scope.length)}/${scope.length}`);
     }
 
@@ -288,6 +255,8 @@ async function main(): Promise<void> {
       console.error(`Replay totals (INCOMPLETE): ${JSON.stringify(totals)}`);
       throw new Error(`Replay did not complete: ${failures.join('; ')}.`);
     }
+    const leftBehind = await countGatePassedLeftBeforeMatching(client, workspace.workspaceId, scope.map((row) => row.canonical_job_id));
+    if (leftBehind > 0) console.error(`WARNING: ${leftBehind} gate-passed job(s) in scope were left before matching (PREQUALIFIED or LANE_ROUTED); not a replay failure, but they have no match.`);
     console.log(`\nReplay totals: ${JSON.stringify(totals)} (scope ${scope.length}, extracted ${totals.extracted}/${extractionDiscovered} selected, matched ${totals.matched + totals.matchHeldBack})`);
     await measure(`AFTER (${DETERMINISTIC_EXTRACTOR_VERSION})`);
   } finally {

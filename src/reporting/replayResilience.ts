@@ -259,3 +259,84 @@ export async function countGatePassedLeftBeforeMatching(
   );
   return rows[0]?.n ?? 0;
 }
+
+/** The stage functions one replay chunk runs. Injected so the chunk logic is tested without a database. */
+export interface ReplayStages {
+  extract: (jobVersionIds: string[]) => Promise<{ discovered: number; processed: number; errors: number }>;
+  embed: (jobVersionIds: string[]) => Promise<{ succeeded: number; failed: number }>;
+  /** Only when the run re-gated: a re-gate leaves jobs before lane routing. */
+  route?: (canonicalJobIds: string[]) => Promise<{ routed: number }>;
+  match: (canonicalJobIds: string[]) => Promise<{ matchedJobs: number; skippedJobs: number; errors: number }>;
+  decide: (canonicalJobIds: string[]) => Promise<{ errors: number }>;
+}
+
+export interface ReplayChunkInput {
+  canonicalJobIds: string[];
+  jobVersionIds: string[];
+  /** The part of the chunk that still needs extraction (the rest were resumed). */
+  extractJobVersionIds: string[];
+}
+
+export interface ReplayChunkResult {
+  totals: ReplayTotals;
+  extractionDiscovered: number;
+  /** How many times the chunk was re-run after a dropped connection. */
+  retries: number;
+}
+
+/**
+ * One chunk is a unit of work. A dropped connection re-runs the whole chunk (every stage is idempotent). Totals are
+ * built fresh on every attempt and returned only for the attempt that finished, so a retry never double counts.
+ * A non-connection error, or running out of retries, is thrown.
+ */
+export async function runReplayChunk(
+  stages: ReplayStages,
+  chunk: ReplayChunkInput,
+  options: { rematchOnly: boolean; maxRetries: number; sleep?: (ms: number) => Promise<void>; log?: (message: string) => void },
+): Promise<ReplayChunkResult> {
+  const sleep = options.sleep ?? defaultSleep;
+  let retries = 0;
+  for (;;) {
+    const totals = emptyReplayTotals();
+    let extractionDiscovered = 0;
+    try {
+      if (!options.rematchOnly) {
+        if (chunk.extractJobVersionIds.length > 0) {
+          const extraction = await stages.extract(chunk.extractJobVersionIds);
+          extractionDiscovered += extraction.discovered;
+          totals.extracted += extraction.processed;
+          totals.extractionErrors += extraction.errors;
+        }
+        const embeddings = await stages.embed(chunk.jobVersionIds);
+        totals.embeddingsOk += embeddings.succeeded;
+        totals.embeddingsFailed += embeddings.failed;
+      }
+      if (stages.route) totals.routed += (await stages.route(chunk.canonicalJobIds)).routed;
+      const matching = await stages.match(chunk.canonicalJobIds);
+      totals.matched += matching.matchedJobs;
+      totals.matchHeldBack += matching.skippedJobs;
+      totals.matchErrors += matching.errors;
+      totals.decisionErrors += (await stages.decide(chunk.canonicalJobIds)).errors;
+      return { totals, extractionDiscovered, retries };
+    } catch (error) {
+      if (!isTransientConnectionError(error) || retries >= options.maxRetries) throw error;
+      retries += 1;
+      (options.log ?? console.error)(`Chunk lost its connection (${error instanceof Error ? error.message : String(error)}); retrying (${retries}/${options.maxRetries}).`);
+      await sleep(2000 * retries);
+    }
+  }
+}
+
+/** Add a finished chunk to the run totals (the resume and retry counters are kept by the caller). */
+export function addChunkTotals(into: ReplayTotals, chunk: ReplayTotals): void {
+  for (const key of Object.keys(chunk) as Array<keyof ReplayTotals>) {
+    if (key !== 'resumedSkipped' && key !== 'chunksRetried') into[key] += chunk[key];
+  }
+}
+
+/** Broken-funnel guard: a first chunk that matched or held back nothing means the jobs never reached the matcher. */
+export function assertFirstChunkReachedMatcher(totals: ReplayTotals, isFirstChunk: boolean): void {
+  if (isFirstChunk && totals.matched + totals.matchHeldBack === 0) {
+    throw new Error('The first chunk matched 0 jobs: they did not reach the matcher. Stopping.');
+  }
+}

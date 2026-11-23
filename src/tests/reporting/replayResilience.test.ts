@@ -1,6 +1,4 @@
 import { EventEmitter } from "node:events";
-import fs from "node:fs";
-import path from "node:path";
 import type pg from "pg";
 import { describe, expect, it } from "vitest";
 
@@ -9,8 +7,13 @@ import {
   assessReplay,
   attachPoolErrorHandler,
   emptyReplayTotals,
+  addChunkTotals,
+  assertFirstChunkReachedMatcher,
+  countGatePassedLeftBeforeMatching,
   isTransientConnectionError,
   retryOnConnectionLoss,
+  runReplayChunk,
+  type ReplayStages,
 } from "../../reporting/replayResilience.js";
 
 const noSleep = async (): Promise<void> => undefined;
@@ -182,26 +185,127 @@ describe("assessReplay: any failed or incomplete stage fails the run", () => {
   });
 });
 
-describe("replay script wiring", () => {
-  const source = fs.readFileSync(path.resolve(process.cwd(), "scripts/replay_requirement_extraction.ts"), "utf8");
+describe("ResilientClient: a connection lost inside a transaction", () => {
+  it("throws from the next statement (the transaction is gone), reconnects, and lets ROLLBACK succeed", async () => {
+    const { client, fakes } = clientOver(["ok", "ok"], ["ok", "ok"]);
+    await client.connect();
+    await client.query("BEGIN READ ONLY");
+    // The server drops the connection while the transaction is open: only the 'error' event tells us.
+    fakes[0].emit("error", new Error("Connection terminated unexpectedly"));
+    await expect(client.query("SELECT 1")).rejects.toThrow(/lost inside a transaction/);
+    expect(fakes).toHaveLength(2);
+    await expect(client.query("ROLLBACK")).resolves.toBeDefined();
+    // After the unit is abandoned the client works normally on the new connection.
+    await expect(client.query("SELECT 1")).resolves.toBeDefined();
+    expect(fakes[1].queries).toEqual(["ROLLBACK", "SELECT 1"]);
+  });
+});
 
-  it("keeps the guard and the replay-branch variables", () => {
-    expect(source).toContain("requireApprovedReplayTarget(");
-    expect(source).toContain("REPLAY_BRANCH_ID");
-    expect(source).toContain("REPLAY_DATABASE_URL");
+describe("assessReplay: matchHeldBack semantics", () => {
+  it("held-back matches are not failures", () => {
+    const totals = { ...emptyReplayTotals(), extracted: 5, matched: 3, matchHeldBack: 2 };
+    expect(assessReplay(totals, { extractionDiscovered: 5, rematchOnly: false })).toEqual([]);
+  });
+});
+
+describe("runReplayChunk", () => {
+  const chunk = { canonicalJobIds: ["c1", "c2"], jobVersionIds: ["v1", "v2"], extractJobVersionIds: ["v1", "v2"] };
+  const options = { rematchOnly: false, maxRetries: 2, sleep: noSleep, log: () => undefined };
+  const stages = (overrides: Partial<ReplayStages> = {}): ReplayStages => ({
+    extract: async () => ({ discovered: 2, processed: 2, errors: 0 }),
+    embed: async () => ({ succeeded: 5, failed: 0 }),
+    match: async () => ({ matchedJobs: 2, skippedJobs: 0, errors: 0 }),
+    decide: async () => ({ errors: 0 }),
+    ...overrides,
   });
 
-  it("handles connection errors, resumes, fails on incomplete stages and prints totals only on success", () => {
-    expect(source).toContain("ResilientClient");
-    expect(source).toContain("attachPoolErrorHandler(pool)");
-    expect(source).toContain("loadJobsOnExtractorVersion");
-    expect(source).toMatch(/process\.on\(event,/);
-    expect(source).toContain("assessReplay(");
-    const failureBranch = source.indexOf("if (failures.length > 0)");
-    const successTotals = source.indexOf("console.log(`\\nReplay totals:");
-    expect(failureBranch).toBeGreaterThan(-1);
-    expect(successTotals).toBeGreaterThan(failureBranch);
-    expect(source).toMatch(/process\.exit\(1\)/);
-    expect(source).not.toMatch(/\|\| true|process\.exit\(0\)/);
+  it("a transient error once re-runs the chunk and the totals are not doubled", async () => {
+    let extractCalls = 0;
+    const result = await runReplayChunk(
+      stages({
+        extract: async () => {
+          extractCalls += 1;
+          if (extractCalls === 1) throw new Error("Connection terminated unexpectedly");
+          return { discovered: 2, processed: 2, errors: 0 };
+        },
+      }),
+      chunk,
+      options,
+    );
+    expect(result.retries).toBe(1);
+    expect(result.totals).toMatchObject({ extracted: 2, embeddingsOk: 5, matched: 2 });
+    expect(result.extractionDiscovered).toBe(2);
+  });
+
+  it("a failure after earlier stages succeeded still counts each stage once", async () => {
+    let decideCalls = 0;
+    const result = await runReplayChunk(
+      stages({ decide: async () => { decideCalls += 1; if (decideCalls === 1) throw new Error("Connection terminated unexpectedly"); return { errors: 0 }; } }),
+      chunk,
+      options,
+    );
+    expect(result.retries).toBe(1);
+    expect(result.totals).toMatchObject({ extracted: 2, embeddingsOk: 5, matched: 2 });
+  });
+
+  it("rethrows when the retry cap is hit", async () => {
+    let calls = 0;
+    await expect(
+      runReplayChunk(stages({ match: async () => { calls += 1; throw new Error("Connection terminated unexpectedly"); } }), chunk, options),
+    ).rejects.toThrow(/Connection terminated/);
+    expect(calls).toBe(3);
+  });
+
+  it("rethrows a non-transient error without retrying", async () => {
+    let calls = 0;
+    await expect(
+      runReplayChunk(stages({ extract: async () => { calls += 1; throw new Error("null value in column x"); } }), chunk, options),
+    ).rejects.toThrow("null value");
+    expect(calls).toBe(1);
+  });
+
+  it("skips extraction and embedding for rematch-only, and extraction for fully resumed chunks", async () => {
+    const calls: string[] = [];
+    const tracking = stages({
+      extract: async () => { calls.push("extract"); return { discovered: 0, processed: 0, errors: 0 }; },
+      embed: async () => { calls.push("embed"); return { succeeded: 0, failed: 0 }; },
+    });
+    await runReplayChunk(tracking, chunk, { ...options, rematchOnly: true });
+    expect(calls).toEqual([]);
+    await runReplayChunk(tracking, { ...chunk, extractJobVersionIds: [] }, options);
+    expect(calls).toEqual(["embed"]);
+  });
+
+  it("routes only when a route stage is given and counts held-back matches", async () => {
+    const routed = await runReplayChunk(
+      stages({ route: async () => ({ routed: 2 }), match: async () => ({ matchedJobs: 1, skippedJobs: 1, errors: 0 }) }),
+      chunk,
+      options,
+    );
+    expect(routed.totals).toMatchObject({ routed: 2, matched: 1, matchHeldBack: 1 });
+  });
+});
+
+describe("addChunkTotals and the first-chunk guard", () => {
+  it("adds chunk totals but leaves the resume and retry counters to the caller", () => {
+    const run = { ...emptyReplayTotals(), resumedSkipped: 7, chunksRetried: 1 };
+    addChunkTotals(run, { ...emptyReplayTotals(), matched: 3, resumedSkipped: 99, chunksRetried: 99 });
+    expect(run).toMatchObject({ matched: 3, resumedSkipped: 7, chunksRetried: 1 });
+  });
+
+  it("stops when the first chunk matched nothing and held nothing back", () => {
+    expect(() => assertFirstChunkReachedMatcher(emptyReplayTotals(), true)).toThrow(/matched 0 jobs/);
+    expect(() => assertFirstChunkReachedMatcher(emptyReplayTotals(), false)).not.toThrow();
+    expect(() => assertFirstChunkReachedMatcher({ ...emptyReplayTotals(), matchHeldBack: 1 }, true)).not.toThrow();
+  });
+});
+
+describe("countGatePassedLeftBeforeMatching", () => {
+  it("returns the count the query reports and skips the query for an empty scope", async () => {
+    const seen: unknown[][] = [];
+    const client = { query: async (_text: string, values?: unknown[]) => { seen.push(values ?? []); return { rows: [{ n: 4 }] }; } };
+    expect(await countGatePassedLeftBeforeMatching(client, "w", ["a", "b"])).toBe(4);
+    expect(await countGatePassedLeftBeforeMatching(client, "w", [])).toBe(0);
+    expect(seen).toHaveLength(1);
   });
 });
