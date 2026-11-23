@@ -74,13 +74,13 @@ export const detectCustomerFacingDelivery: RoleShapeDetector = ({ title, descrip
 
 const DETECTORS: RoleShapeDetector[] = [detectCustomerFacingDelivery];
 
-export function assessRoleShape(input: RoleShapeInput): RoleShapeAssessment {
+export function assessRoleShape(input: RoleShapeInput, detectors: RoleShapeDetector[] = DETECTORS): RoleShapeAssessment {
   const normalized = {
     title: String(input.title ?? ""),
     description: String(input.description ?? ""),
     employmentType: String(input.employmentType ?? ""),
   };
-  const signals = DETECTORS.map((detect) => detect(normalized)).filter((signal): signal is RoleShapeSignal => signal !== null);
+  const signals = detectors.map((detect) => detect(normalized)).filter((signal): signal is RoleShapeSignal => signal !== null);
   const total = Math.min(ROLE_SHAPE_MAX_TOTAL_PENALTY, signals.reduce((sum, signal) => sum + signal.penalty, 0));
   return { policy_version: ROLE_SHAPE_POLICY_VERSION, signals, total_penalty: Number(total.toFixed(4)) };
 }

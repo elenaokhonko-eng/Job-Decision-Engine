@@ -5,6 +5,7 @@ import {
   applyRoleShapePenalty,
   assessRoleShape,
   roleShapeFingerprint,
+  type RoleShapeDetector,
 } from "../../pipeline/roleShape.js";
 
 // Synthetic titles and sentences only.
@@ -45,8 +46,14 @@ describe("role shape: penalty is a downrank, never a rejection", () => {
     expect(applyRoleShapePenalty(0.7, assessShapeNone())).toBe(0.7);
   });
 
-  it("never removes more than the cap", () => {
-    expect(ROLE_SHAPE_MAX_TOTAL_PENALTY).toBeLessThanOrEqual(0.2);
+  it("caps the combined penalty of several signals at ROLE_SHAPE_MAX_TOTAL_PENALTY", () => {
+    const signal = (code: string, penalty: number): RoleShapeDetector => () => ({ code, penalty, source: "TITLE", quote: code });
+    const three = assessRoleShape({ title: "x", description: "y" }, [signal("A", 0.08), signal("B", 0.08), signal("C", 0.08)]);
+    expect(three.signals).toHaveLength(3);
+    expect(three.total_penalty).toBe(ROLE_SHAPE_MAX_TOTAL_PENALTY);
+    expect(applyRoleShapePenalty(1, three)).toBeCloseTo(1 - ROLE_SHAPE_MAX_TOTAL_PENALTY, 3);
+    const two = assessRoleShape({ title: "x", description: "y" }, [signal("A", 0.05), signal("B", 0.04)]);
+    expect(two.total_penalty).toBe(0.09);
   });
 
   it("is deterministic and fingerprints the assessment", () => {
