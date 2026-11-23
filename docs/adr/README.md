@@ -50,4 +50,4 @@ Each alternative and why it was not chosen.
 
 | No. | Title | Status |
 |---|---|---|
-| [0001](0001-modular-monolith-with-enforced-boundaries.md) | Modular monolith with enforced boundaries | Proposed |
+| [0001](0001-modular-monolith-with-enforced-boundaries.md) | Modular monolith with enforced boundaries | Accepted |

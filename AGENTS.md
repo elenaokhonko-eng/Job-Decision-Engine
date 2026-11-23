@@ -54,7 +54,7 @@ The names above are conceptual. The values stored in `canonical_jobs.processing_
 
 ## Architecture boundaries
 
-`docs/architecture.md` defines the layers, the modules, the owner of every table and the boundary rules. `src/tests/architecture/` checks them and runs with `npm test`. A violation fails the build.
+`docs/architecture.md` defines the layers, the modules, the owner of every table and the boundary rules. `src/tests/architecture/` checks them and runs with `npm test` and `npm run lint:boundaries`. A violation fails the build. Current assignments are in `docs/delivery-plan.md`.
 
 - Put new code in a domain module (`src/modules/<name>/`) or a platform part (`src/platform/<part>/`). Add no file to `src/services/`. `src/services/agent.ts` may only shrink.
 - Reach another module only through its `index.ts`, and only a module that comes earlier in the module order.
@@ -77,9 +77,6 @@ The names above are conceptual. The values stored in `canonical_jobs.processing_
 - Never suppress an error with `|| true`, unconditional `process.exit(0)`, empty-array fallbacks, random vectors, or zero-vector substitutions.
 - Record assumptions, changed contracts, commands run, results, and remaining risks in the handoff.
 - Do not mark work complete merely because TypeScript compiles or a GitHub Action is green.
-- No new code in `src/services/agent.ts`; new model-call code goes in a new module (the file is being retired).
-- Nothing new in `src/services/`; new code goes in the module that owns the job (for example `src/pipeline/`, `src/requirements/`, `src/embeddings/`).
-- No SQL in new scripts under `scripts/`; a script calls a function in `src/`, and the function owns the query.
 
 ## Merge gates
 

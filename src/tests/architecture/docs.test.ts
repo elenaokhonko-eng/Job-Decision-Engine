@@ -18,7 +18,7 @@ const ROOT = path.resolve(__dirname, "../../..");
 const ARCHITECTURE = "docs/architecture.md";
 const ADR_DIR = "docs/adr";
 /** Documents whose links and repository paths must resolve. */
-const CHECKED_DOCUMENTS = [ARCHITECTURE, "AGENTS.md", "README.md", "CONTRIBUTING.md", `${ADR_DIR}/README.md`];
+const CHECKED_DOCUMENTS = [ARCHITECTURE, "docs/delivery-plan.md", "AGENTS.md", "README.md", "CONTRIBUTING.md", `${ADR_DIR}/README.md`];
 /** Folders of the target layout. Paths under them are plans until code moves there. */
 const TARGET_LAYOUT = ["src/modules/", "src/platform/", "src/interfaces/", "src/app/"];
 const PATH_ROOTS = ["src", "scripts", "config", "migrations", "docs", "desktop", "tests", ".agents", ".github"];

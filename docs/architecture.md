@@ -7,7 +7,7 @@ This document says how Job Decision Engine is structured, which part owns what, 
 
 The document is kept true by `src/tests/architecture/`. If a lane, pipeline stage, job state, table or rule changes in the code and not here, the test fails. See [Keeping this document true](#16-keeping-this-document-true).
 
-Related documents: [`AGENTS.md`](../AGENTS.md) (operating contract and invariants), [`.agents/DATA-FLOW-CONTRACT.md`](../.agents/DATA-FLOW-CONTRACT.md) (what each boundary must prove), [`docs/data-contracts.md`](data-contracts.md) (runtime schemas and gate codes), [`docs/adr/`](adr/README.md) (decision records).
+Related documents: [`AGENTS.md`](../AGENTS.md) (operating contract and invariants), [`.agents/DATA-FLOW-CONTRACT.md`](../.agents/DATA-FLOW-CONTRACT.md) (what each boundary must prove), [`docs/data-contracts.md`](data-contracts.md) (runtime schemas and gate codes), [`docs/adr/`](adr/README.md) (decision records), [`docs/delivery-plan.md`](delivery-plan.md) (who is building what now), [`docs/architecture-review-2026-11-19.md`](architecture-review-2026-11-19.md) (the review behind this design).
 
 ## 1. What the system does
 
@@ -167,7 +167,7 @@ The code that exists today breaks these rules in known places. Those places are 
 
 ### How the check works
 
-- The rules are in [`src/architecture/boundaries.ts`](../src/architecture/boundaries.ts). The test is [`src/tests/architecture/boundaries.test.ts`](../src/tests/architecture/boundaries.test.ts). It runs with `npm test`, so it runs in CI on every pull request.
+- There is one check and one baseline. The rules are in [`src/architecture/boundaries.ts`](../src/architecture/boundaries.ts). The test is [`src/tests/architecture/boundaries.test.ts`](../src/tests/architecture/boundaries.test.ts). It runs with `npm test`, so it runs in CI on every pull request.
 - A new violation fails with its key. Fix the code. Do not edit the baseline to make the test pass.
 - When a recorded violation is fixed, the test asks for the baseline to be pruned: `ARCH_BASELINE=prune npx vitest run src/tests/architecture/boundaries.test.ts`. Pruning only removes entries.
 - Adding a baseline entry is a hand edit and an exception. Each added entry and its reason go at the top of the pull request description, so the owner sees it before merging.
@@ -213,7 +213,7 @@ Matching needs a shared vocabulary: a requirement is about a concept, and a prof
 | No database in the gateway | B5 | The audited call path in `src/services/agent.ts` takes a database client |
 | Model IDs in one place | `src/platform/config/` only; checked against the providers with `npm run models:check` | The evaluation default is in `src/services/modelDefaults.ts`. Other defaults are still spread across `src/services/agent.ts`, `src/services/openAiModelRoles.ts`, scripts and environment variables |
 | Versioned prompts | Each stored output records prompt id, prompt version and model | Prompts are built inline. Only the quoted-requirement prompt records a hash |
-| Advice only | An evaluation is stored in `ai_evaluations` and never changes a gate, a score or an outcome | Holds for the queue evaluator. The older `runAgent` function in `src/services/agent.ts` still writes model output to rows of the legacy `jobs` table, through `src/db/db.ts`, and is to be deleted |
+| Advice only | An evaluation is stored in `ai_evaluations` and never changes a gate, a score or an outcome | Holds. The legacy `eval:run` scripts are removed and `runAgent` no longer writes to the database. `runAgent` itself is still in `src/services/agent.ts` and goes with Phase 1 |
 | Cleaned input | Posting text is cleaned and delimited before any model sees it | The posting is placed in the same message as the instructions, with no cleaning step |
 | Bounded spend | Lane budgets and deferrals are recorded per run | In place: `ai_evaluation_budget_runs`, `evaluation_budget_deferrals` |
 
@@ -291,6 +291,33 @@ The owner sees one bucket per job. The view `v_job_status_buckets_scoped` comput
 
 `APPLY_NOW`, `REVIEW_AWAITING_AI`, `REVIEW_EVALUATED_NOT_READY`, `TRACK`, `NEEDS_VERIFICATION`, `PROCESSING`, `SKIP`, `TECHNICAL_ERROR`, `REJECTED`, `UNMATCHED`, `REMOVED`.
 
+### Availability
+
+Whether a posting is currently open is decided in one place: `assessAvailability` in `src/decision/availability.ts`. The view `v_job_availability_current` states the same rule in SQL, and a parity test fails if the two differ. Every list reads that view's `availability_current` field. No list or script works it out for itself.
+
+| Moment | What happens |
+|---|---|
+| Seen in the employer's feed, or its page shows the posting | Open, valid for 7 days. Each sighting extends it |
+| Day 7 passes with no sighting | Hidden from every list and counted as "awaiting re-check". A re-check task is queued |
+| Re-check finds the posting | Open for 7 more days |
+| Re-check gets a clear closure: the page says not found or no longer accepting, or the feed was read successfully and the job is absent twice in a row | Archived the same day as closed |
+| Re-check cannot tell: timeout, server error, paywall, login | Retried up to 3 times over 3 days, then archived as not confirmable |
+
+An expired window is "unknown", never "closed". Saved, applied and held jobs are never archived automatically, and an archived job that reappears is restored. The rule and the list filtering are built; the automatic re-check and archive are in progress.
+
+### Unknown facts
+
+A job with an unknown workability fact (work mode, hiring territory, office days, travel) is not stopped and not rejected.
+
+1. The fact is resolved automatically where the data exists: structured feed fields, or the posting text re-read by the availability re-check.
+2. If it stays unknown, the job continues to matching and decision with the question left open.
+3. A question is raised to the owner only when the job ranks in the top 20.
+4. A job that is unresolved for 28 days and never reaches the top 20 is archived as not confirmable. This is reversible and is not a rejection.
+
+### What blocks a job
+
+A mandatory requirement blocks a job only when it is a degree or credential that the matcher compared with the profile and found short, and the posting does not accept an equivalent. A free-text requirement with no supporting evidence does not block: it lowers coverage. Job duties, and skills in a posting with no section headings, are not mandatory unless the item itself says so.
+
 Task status (pending, retrying, failed) and job status (rejected, review, priority) are different things. Task status belongs to `orchestration`. A failed task never changes a job's decision.
 
 ## 11. Lanes
@@ -363,30 +390,30 @@ The code predates the target layout. No file lives under `src/modules/`, `src/pl
 
 ### Known violations
 
-Counted on 19 November 2026, when the check was introduced. The live list is the baseline file.
+Counted on 23 November 2026, when the check was merged. The live list is the baseline file.
 
 | Rule | Count | What it shows |
 |---|---|---|
 | F1 | 1 | `src/services/agent.ts` and `src/services/llmFallback.ts` import each other |
 | F2 | 11 | Pairs of areas that import each other; `src/pipeline` is in six of them |
-| F3 | 94 | 88 scripts and 6 API files open their own database connection |
-| F4 | 27 | 17 importers of `src/services/agent.ts`, 10 of `src/db/db.ts` |
+| F3 | 98 | 92 scripts and 6 API files open their own database connection |
+| F4 | 25 | 16 importers of `src/services/agent.ts`, 9 of `src/db/db.ts` |
 | F5 | 33 | Files in `src/services/` |
 | F6 | 46 | Writers of job status columns: `processing_state` from 14 files, `recommendation_outcome` from 6 |
-| F7 | 162 | Table and area pairs; 30 tables are written from more than one area |
+| F7 | 163 | Table and area pairs; 30 tables are written from more than one area |
 | F8 | 5 | Tables that `streamlit_app.py` reads directly |
 | F9 | 1 | `src/pipeline/laneRouter.ts` imports the task queue |
 | F10, F11 | 0 | Clean today; the rules keep them so |
 
-Two files concentrate the problem. `src/services/agent.ts` (3,365 lines) holds model configuration, provider calls, cost accounting, prompts, parsing, embeddings and a legacy evaluator. `src/tasks/stageTaskWorker.ts` (4,012 lines) holds the queue and the logic that links every stage.
+Two files concentrate the problem. `src/services/agent.ts` (3,328 lines) holds model configuration, provider calls, cost accounting, prompts, parsing, embeddings and a legacy evaluator. `src/tasks/stageTaskWorker.ts` (4,014 lines) holds the queue and the logic that links every stage.
 
 ## 15. Migration order
 
-Each phase is a series of small pull requests merged to `main`. Behaviour does not change unless a phase says so.
+Each phase is a series of small pull requests merged to `main`. Behaviour does not change unless a phase says so. Who is doing what this week, and which work can run in parallel, is in [`docs/delivery-plan.md`](delivery-plan.md).
 
 | Phase | Goal | Done when |
 |---|---|---|
-| 0 | Stop new damage | This check runs in CI; `runAgent` no longer writes to the legacy `jobs` table |
+| 0 | Stop new damage. **Done.** | This check runs in CI; `runAgent` no longer writes to the legacy `jobs` table |
 | 1 | Model gateway out of `src/services/agent.ts` | The file is deleted; F1 and its F4 entries are gone |
 | 2 | Prompt registry and `evaluation` module | Every stored evaluation records a prompt version |
 | 3 | One writer per decision | F6 shows one writer per status column |
