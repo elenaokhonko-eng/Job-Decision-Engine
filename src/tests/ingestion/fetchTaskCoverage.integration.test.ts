@@ -162,11 +162,11 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
   it("ensureFetchTasksForAwaitingContent queues tasks additively, dry run first, and is idempotent", async () => {
     const job = await seedAlertJob("ensure");
     const dry = await ensureFetchTasksForAwaitingContent(db(), context!, { apply: false, producer: "test" });
-    expect(dry.candidates).toBeGreaterThanOrEqual(1);
+    expect(dry.candidates).toBe(2);
     expect(dry.queued).toBe(0);
     expect((await reportContentWithoutFetchTask(db(), context!.workspaceId)).withoutFetchTask).toContain(job.canonicalJobId);
     const applied = await ensureFetchTasksForAwaitingContent(db(), context!, { apply: true, producer: "test" });
-    expect(applied.queued).toBeGreaterThanOrEqual(1);
+    expect(applied.queued).toBe(2);
     expect((await reportContentWithoutFetchTask(db(), context!.workspaceId)).withoutFetchTask).not.toContain(job.canonicalJobId);
     const again = await ensureFetchTasksForAwaitingContent(db(), context!, { apply: true, producer: "test" });
     expect(again.queued).toBe(0);
@@ -189,7 +189,7 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
     expect(report.withoutFetchTask).toContain(withoutTask.canonicalJobId);
     expect(report.withoutFetchTask).not.toContain(withTask.canonicalJobId);
     expect(report.withoutFetchTask).not.toContain(deadLettered.canonicalJobId);
-    expect(report.fetchDeadLetteredOnly).toBeGreaterThanOrEqual(1);
+    expect(report.fetchDeadLetteredOnly).toBe(1);
 
     // Complete content clears the job from the report even with no task.
     await db().query(`UPDATE canonical_jobs SET description_quality_status = 'COMPLETE' WHERE id = $1`, [withoutTask.canonicalJobId]);
