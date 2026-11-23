@@ -335,8 +335,18 @@ describe.skipIf(skipReal)('Pipeline Stage: Deterministic Matcher (real PostgreSQ
     expect(decided.rows[0].recommendation_outcome).not.toBe('SKIP');
     expect(decided.rows[0].recommendation_requirement_score).toBeNull();
 
-    // The Track read model reads the NULL score without error; when the view lists the job, its score is NULL.
-    const track = await query(`SELECT * FROM v_track_jobs_scoped WHERE canonical_job_id = $1`, [jobId]);
-    for (const row of track.rows) expect(row.recommendation_requirement_score ?? null).toBeNull();
+    // The read models take the gate status from gate_decisions; record the PASS the gate stage would have written.
+    await query(
+      `INSERT INTO gate_decisions (workspace_id, canonical_job_id, job_version_id, decision, gate_version)
+       VALUES ($1, $2, $3, 'PASS', 'fixture')`,
+      [context.workspaceId, jobId, versionId],
+    );
+    // The Track read model lists the job (so the view test is not vacuous) and reads its NULL score.
+    const shortlist = await query(`SELECT gate_status, current_artifact_status, recommendation_outcome FROM v_canonical_shortlist_scoped WHERE canonical_job_id = $1`, [jobId]);
+    expect(shortlist.rows).toEqual([expect.objectContaining({ gate_status: 'PASS', recommendation_outcome: 'TRACK' })]);
+    const track = await query(`SELECT recommendation_outcome, recommendation_requirement_score FROM v_track_jobs_scoped WHERE canonical_job_id = $1`, [jobId]);
+    expect(track.rows).toHaveLength(1);
+    expect(track.rows[0].recommendation_outcome).toBe('TRACK');
+    expect(track.rows[0].recommendation_requirement_score).toBeNull();
   });
 });
