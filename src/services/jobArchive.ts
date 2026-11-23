@@ -72,7 +72,7 @@ const archiveHoldDatabaseRowSchema = z.object({
   release_reason: z.string().nullable(),
 });
 
-interface ArchiveSchemaCapabilities {
+export interface ArchiveSchemaCapabilities {
   readonly archiveColumns: boolean;
   readonly archiveRunTable: boolean;
   readonly archiveHoldTable: boolean;
@@ -229,7 +229,7 @@ function parseVersions(value: unknown): JobArchiveVersionEvidence[] {
  * running pipeline/evaluation lease, manual review, and an active archive hold. `$1` is the run
  * start time; `canonical` is the canonical_jobs alias.
  */
-function protectionColumnsSql(capabilities: ArchiveSchemaCapabilities): string {
+export function protectionColumnsSql(capabilities: ArchiveSchemaCapabilities): string {
   const holdExists = capabilities.archiveHoldTable
     ? `EXISTS (
         SELECT 1 FROM job_archive_holds hold
@@ -360,7 +360,7 @@ function candidateSelectSql(capabilities: ArchiveSchemaCapabilities, whereClause
   `;
 }
 
-async function readSchemaCapabilities(client: pg.PoolClient): Promise<ArchiveSchemaCapabilities> {
+export async function readSchemaCapabilities(client: pg.PoolClient): Promise<ArchiveSchemaCapabilities> {
   const result = await client.query<{
     archive_columns: boolean;
     archive_run_table: boolean;
@@ -397,7 +397,7 @@ async function readSchemaCapabilities(client: pg.PoolClient): Promise<ArchiveSch
   };
 }
 
-type ArchiveProtectionFlags = Pick<CandidateRow,
+export type ArchiveProtectionFlags = Pick<CandidateRow,
   | "has_active_application"
   | "has_active_document_run"
   | "has_active_document_task"
@@ -406,7 +406,7 @@ type ArchiveProtectionFlags = Pick<CandidateRow,
   | "has_manual_review"
   | "has_active_archive_hold">;
 
-function isProtected(row: ArchiveProtectionFlags): boolean {
+export function isProtected(row: ArchiveProtectionFlags): boolean {
   return row.has_active_application || row.has_active_document_run ||
     row.has_active_document_task || row.has_running_pipeline_lease ||
     row.has_running_evaluation_lease || row.has_manual_review || row.has_active_archive_hold;
@@ -828,88 +828,6 @@ export async function findSnippetOnlyArchiveCandidates(
     gateDecision: row.gate_decision,
     recommendationOutcome: row.recommendation_outcome,
     snippetChars: row.snippet_chars,
-    lastSeenAt: row.last_seen_at,
-    protected: isProtected(row),
-  }));
-}
-
-/** A snippet-only job whose fetch has not succeeded expires this many days after it was last seen ... */
-export const SNIPPET_EXPIRY_LAST_SEEN_DAYS = 7;
-/** ... and in any case this many days after it was first seen. */
-export const SNIPPET_EXPIRY_FIRST_SEEN_DAYS = 21;
-
-export type SnippetExpiryTrigger = "LAST_SEEN" | "FIRST_SEEN";
-
-export interface ExpiredSnippetCandidate {
-  canonicalJobId: string;
-  trigger: SnippetExpiryTrigger;
-  firstSeenAt: Date;
-  lastSeenAt: Date;
-  /** A protection (active application, document run, lease, manual review, hold) keeps the job out of the archive. */
-  protected: boolean;
-}
-
-/**
- * Live snippet-only jobs whose content never arrived and whose time is up: every observation is a bare Gmail
- * alert (nothing from an employer page or a saved-jobs export), the job has no complete content
- * (v_job_content_state), and either nothing was seen for `lastSeenDays` or the first sighting is `firstSeenDays`
- * old. Manually removed jobs are never candidates. Read only; protected jobs are returned flagged so the caller
- * can count and skip them. A fetch task that is still pending does not extend the time: the rule is about
- * content that has not arrived.
- */
-export async function findExpiredSnippetOnlyJobs(
-  client: pg.PoolClient,
-  input: { workspaceId: string; now?: Date; lastSeenDays?: number; firstSeenDays?: number },
-): Promise<ExpiredSnippetCandidate[]> {
-  uuidSchema.parse(input.workspaceId);
-  const lastSeenDays = input.lastSeenDays ?? SNIPPET_EXPIRY_LAST_SEEN_DAYS;
-  const firstSeenDays = input.firstSeenDays ?? SNIPPET_EXPIRY_FIRST_SEEN_DAYS;
-  for (const days of [lastSeenDays, firstSeenDays]) {
-    if (!Number.isInteger(days) || days < 1) throw new RangeError("Snippet expiry days must be whole numbers, 1 or more.");
-  }
-  if (firstSeenDays < lastSeenDays) throw new RangeError("The first-seen limit cannot be shorter than the last-seen limit.");
-  const capabilities = await readSchemaCapabilities(client);
-  const result = await client.query<
-    ArchiveProtectionFlags & { canonical_job_id: string; first_seen_at: Date; last_seen_at: Date; last_seen_expired: boolean }
-  >(
-    `SELECT canonical.id::text AS canonical_job_id,
-            seen.first_seen_at,
-            seen.last_seen_at,
-            (seen.last_seen_at <= $1::timestamptz - make_interval(days => $3::int)) AS last_seen_expired,
-            ${protectionColumnsSql(capabilities)}
-       FROM canonical_jobs canonical
-       JOIN v_job_content_state content_state
-         ON content_state.workspace_id = canonical.workspace_id AND content_state.canonical_job_id = canonical.id
-       CROSS JOIN LATERAL (
-         SELECT MIN(observation.retrieved_at) AS first_seen_at, MAX(observation.retrieved_at) AS last_seen_at
-           FROM job_versions any_version
-           JOIN raw_job_observations observation
-             ON observation.workspace_id = any_version.workspace_id AND observation.job_version_id = any_version.id
-          WHERE any_version.workspace_id = canonical.workspace_id AND any_version.canonical_job_id = canonical.id
-       ) seen
-      WHERE canonical.workspace_id = $2::uuid
-        AND canonical.archived_at IS NULL
-        AND canonical.is_test_fixture = FALSE
-        AND COALESCE(canonical.processing_state, canonical.processing_status) <> 'MANUALLY_REMOVED'
-        AND NOT content_state.content_complete
-        AND seen.first_seen_at IS NOT NULL
-        AND (
-          seen.last_seen_at <= $1::timestamptz - make_interval(days => $3::int)
-          OR seen.first_seen_at <= $1::timestamptz - make_interval(days => $4::int)
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM job_versions v
-            JOIN raw_job_observations o ON o.workspace_id = v.workspace_id AND o.job_version_id = v.id
-           WHERE v.workspace_id = canonical.workspace_id AND v.canonical_job_id = canonical.id
-             AND o.source_name <> 'GMAIL_ALERT'
-        )
-      ORDER BY canonical.id`,
-    [input.now ?? new Date(), input.workspaceId, lastSeenDays, firstSeenDays],
-  );
-  return result.rows.map((row) => ({
-    canonicalJobId: row.canonical_job_id,
-    trigger: row.last_seen_expired ? "LAST_SEEN" : "FIRST_SEEN",
-    firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
     protected: isProtected(row),
   }));

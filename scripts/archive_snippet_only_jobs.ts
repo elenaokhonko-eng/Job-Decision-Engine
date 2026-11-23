@@ -18,11 +18,14 @@
  *
  * EXPIRY RULE (--rule=expiry, src/ingestion/snippetExpiry.ts): a snippet-only job whose fetch has not succeeded
  * is archived 7 days after it was last seen, and in any case 21 days after it was first seen (a pending fetch
- * task does not extend either limit). Same guards, same reversibility, idempotent. A scheduled run needs the
- * orchestrator to add the workflow step and the owner to approve the first apply.
+ * task still within its retry budget defers the archive; once the task is exhausted, parked or dead-lettered the
+ * job expires). Same guards, same reversibility, idempotent. Manual and env-gated: nothing schedules this script.
+ * --restore-point is an audit label recorded on the archive run (the owner takes the Neon restore point first; the
+ * script cannot verify it exists, so it only requires a non-empty value).
  *
  *   npx tsx scripts/archive_snippet_only_jobs.ts --target replay --rule=expiry                        # dry run
- *   SNIPPET_EXPIRY_APPLY_ALLOWED=true npx tsx scripts/archive_snippet_only_jobs.ts --target production --rule=expiry --apply  *     --confirm-workspace=<workspace uuid> --restore-point=<Neon restore point / branch id>
+ *   SNIPPET_EXPIRY_APPLY_ALLOWED=true npx tsx scripts/archive_snippet_only_jobs.ts --target production --rule=expiry --apply \
+ *     --confirm-workspace=<workspace uuid> --restore-point=<Neon restore point / branch id>
  *
  * Output prints counts and job ids only; no employer names or titles.
  */

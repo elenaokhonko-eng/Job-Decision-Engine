@@ -12,6 +12,9 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/
 // seen and in any case 21 days after it was first seen. Synthetic fixtures; real PostgreSQL in a private schema.
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
+if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
+  throw new Error("CI must run the snippet expiry integration tests against its PostgreSQL service.");
+}
 
 const DAY = 24 * 3_600_000;
 const NOW = new Date("2026-11-23T12:00:00.000Z");
@@ -33,7 +36,9 @@ interface JobOptions {
   readonly quality?: "COMPLETE" | "INCOMPLETE";
   readonly alertContentStatus?: string;
   readonly extraSource?: string;
-  readonly fetchTask?: "PENDING" | "COMPLETED";
+  readonly fetchTask?: "PENDING" | "COMPLETED" | "RETRY_WAIT" | "BLOCKED_DEPENDENCY";
+  /** Attempts already made by the fetch task (its budget is 8). */
+  readonly fetchAttempts?: number;
   readonly state?: string;
 }
 
@@ -80,9 +85,9 @@ async function seedJob(label: string, options: JobOptions): Promise<string> {
   }
   if (options.fetchTask) {
     await db().query(
-      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status)
-       VALUES ($1, 'FETCH_JOB_CONTENT', $2, $3::jsonb, $4)`,
-      [workspaceId, `FETCH_JOB_CONTENT:${firstObservation}:posting_fetch_v1`, JSON.stringify({ observation_id: firstObservation }), options.fetchTask],
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, attempt_count, max_attempts)
+       VALUES ($1, 'FETCH_JOB_CONTENT', $2, $3::jsonb, $4, $5, 8)`,
+      [workspaceId, `FETCH_JOB_CONTENT:${firstObservation}:posting_fetch_v1`, JSON.stringify({ observation_id: firstObservation }), options.fetchTask, options.fetchAttempts ?? 0],
     );
   }
   return canonicalJobId;
@@ -111,7 +116,9 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
     ids.lastSeen6 = await seedJob("last-seen-6-days", { seen: [6 * DAY] });
     ids.resighted22 = await seedJob("first-seen-22-days-resighted", { seen: [22 * DAY, DAY] });
     ids.resighted20 = await seedJob("first-seen-20-days-resighted", { seen: [20 * DAY, DAY] });
-    ids.pendingFetch = await seedJob("pending-fetch-still-expires", { seen: [9 * DAY], fetchTask: "PENDING" });
+    ids.pendingFetch = await seedJob("fetch-within-budget-deferred", { seen: [9 * DAY], fetchTask: "RETRY_WAIT", fetchAttempts: 3 });
+    ids.exhaustedFetch = await seedJob("fetch-budget-exhausted-expires", { seen: [9 * DAY], fetchTask: "RETRY_WAIT", fetchAttempts: 8 });
+    ids.parkedFetch = await seedJob("fetch-parked-expires", { seen: [9 * DAY], fetchTask: "BLOCKED_DEPENDENCY" });
     ids.applied = await seedJob("has-application", { seen: [30 * DAY] });
     ids.held = await seedJob("has-hold", { seen: [30 * DAY] });
     ids.saved = await seedJob("saved-export", { seen: [30 * DAY], extraSource: "LINKEDIN_SAVED" });
@@ -149,30 +156,31 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
   it("a dry run reports the candidates and writes nothing", async () => {
     const report = await run(false);
     expect(report.mode).toBe("DRY_RUN");
-    expect(report.candidates).toBe(6);
-    expect(report.toArchive).toBe(4);
+    expect(report.candidates).toBe(8);
+    expect(report.toArchive).toBe(5);
     expect(report.protectedSkipped).toBe(2);
-    expect(report.byTrigger).toEqual({ LAST_SEEN: 3, FIRST_SEEN: 1 });
+    expect(report.deferredFetchInFlight).toBe(1);
+    expect(report.byTrigger).toEqual({ LAST_SEEN: 4, FIRST_SEEN: 1 });
     expect(report.archived).toBe(0);
     for (const id of Object.values(ids)) expect((await archiveState(id)).archived).toBe(false);
   });
 
   it("applying archives exactly the expired, unprotected snippet-only jobs, as not confirmable", async () => {
     const report = await run(true);
-    expect(report.archived).toBe(4);
-    const expected = [ids.lastSeen8, ids.lastSeenExactly7, ids.resighted22, ids.pendingFetch].sort();
+    expect(report.archived).toBe(5);
+    const expected = [ids.lastSeen8, ids.lastSeenExactly7, ids.resighted22, ids.exhaustedFetch, ids.parkedFetch].sort();
     expect([...report.archivedJobIds].sort()).toEqual(expected);
     for (const id of expected) expect(await archiveState(id)).toEqual({ archived: true, reason: "POSTING_NOT_CONFIRMABLE" });
 
     // Kept: seen too recently, protected, saved, complete, removed.
-    for (const key of ["lastSeen6", "resighted20", "applied", "held", "saved", "complete", "removed"]) {
+    for (const key of ["pendingFetch", "lastSeen6", "resighted20", "applied", "held", "saved", "complete", "removed"]) {
       expect((await archiveState(ids[key]!)).archived, key).toBe(false);
     }
     // Nothing was deleted, and every archive left an audit event.
     const total = await db().query(`SELECT COUNT(*)::int AS n FROM canonical_jobs WHERE workspace_id = $1`, [context!.workspaceId]);
-    expect(Number(total.rows[0].n)).toBe(11);
+    expect(Number(total.rows[0].n)).toBe(13);
     const events = await db().query(`SELECT COUNT(*)::int AS n FROM job_archive_events WHERE canonical_job_id = ANY($1::uuid[])`, [expected]);
-    expect(Number(events.rows[0].n)).toBe(4);
+    expect(Number(events.rows[0].n)).toBe(5);
   });
 
   it("is idempotent: a second run finds only the protected jobs and archives nothing", async () => {
@@ -180,6 +188,7 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
     expect(report.archived).toBe(0);
     expect(report.toArchive).toBe(0);
     expect(report.protectedSkipped).toBe(2);
+    expect(report.deferredFetchInFlight).toBe(1);
   });
 
   it("is reversible: an archived job is restored and is live again", async () => {
