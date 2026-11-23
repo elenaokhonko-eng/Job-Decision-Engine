@@ -38,7 +38,7 @@ const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 // v2.5.0: HEALTH_BIO_PHARMA sector requirement (job scope or employer description, a matched
 // sector counts as domain evidence), benefits-clause stripping, industry-list stripping and the
 // uncovered-sector exclusion with covered-sector override and AI/data exemption.
-const LANE_ROUTER_RULE_VERSION = "lane_router_v2.5.0";
+export const LANE_ROUTER_RULE_VERSION = "lane_router_v2.5.0";
 
 
 // ── Cosine similarity ─────────────────────────────────────────────────────────
