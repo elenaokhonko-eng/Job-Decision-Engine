@@ -11,6 +11,7 @@ import {
 } from "../src/ingestion/emailAlertExtractor.js";
 import { ExtractedJobSchema, SCHEMA_VERSION } from "../src/contracts/index.js";
 import { enqueuePipelineTask } from "../src/tasks/pipelineTasks.js";
+import { blockLeadObservations } from "../src/ingestion/leadStaging.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import {
@@ -282,23 +283,7 @@ async function stageEmail(
         `Gmail discovery marked ${pending.rowCount ?? 0} of ${distinctIds.length} observations FETCH_PENDING.`,
       );
     }
-    if (leadIds.size > 0) {
-      const blocked = await client.query(
-        `UPDATE raw_job_observations
-            SET processing_status = 'FETCH_BLOCKED',
-                error_history = COALESCE(error_history, '[]'::jsonb) || jsonb_build_array($3::jsonb)
-          WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
-        [ctx.workspaceId, [...leadIds], JSON.stringify({
-          stage: "FETCH_JOB_CONTENT",
-          processing_status: "FETCH_BLOCKED",
-          error: "AGGREGATOR_LEAD: an aggregator alert is a lead; it needs the employer's own posting or a saved-jobs export before it can become a job.",
-          occurred_at: new Date().toISOString(),
-        })],
-      );
-      if ((blocked.rowCount ?? 0) !== leadIds.size) {
-        throw new Error(`Gmail discovery marked ${blocked.rowCount ?? 0} of ${leadIds.size} lead observations FETCH_BLOCKED.`);
-      }
-    }
+    await blockLeadObservations(client, ctx.workspaceId, [...leadIds]);
 
     await client.query(
       "UPDATE raw_email_alerts SET processed = TRUE, lifecycle_status = 'SOURCE_PENDING', last_error = NULL WHERE workspace_id = $1 AND id = $2",

@@ -446,6 +446,8 @@ describe("company alerts versus aggregator leads", () => {
     expect(kinds["boards.greenhouse.io"]).toBe("COMPANY_POSTING");
     expect(kinds["www.linkedin.com"]).toBe("AGGREGATOR_LEAD");
     expect(kinds["www.mycareersfuture.gov.sg"]).toBe("AGGREGATOR_LEAD");
+    expect(kinds["sg.indeed.com"]).toBe("AGGREGATOR_LEAD");
+    expect(Object.keys(kinds)).toHaveLength(5);
     expect(links.leadCards).toBe(cards.filter((card) => card.leadKind === "AGGREGATOR_LEAD").length);
     expect(links.linksSeen).toBe(links.jobCards + links.nonJobLinksSkipped + links.duplicateLinksCollapsed);
   });
@@ -461,7 +463,8 @@ describe("company alerts versus aggregator leads", () => {
     ].join("");
     const { cards, links } = await extractEmailJobCardsWithLinkSummary(htmlRaw(html));
     expect(cards).toEqual([]);
-    expect(links.nonJobLinksSkipped).toBeGreaterThanOrEqual(5);
+    // Each of the six anchors is seen twice (HTML plus the generated text alternative); every one is skipped.
+    expect(links).toEqual({ linksSeen: 12, jobCards: 0, leadCards: 0, nonJobLinksSkipped: 12, duplicateLinksCollapsed: 0 });
   });
 
   it("isFullPostingUrl needs an identifier, an ATS company board path, or a slug below a jobs segment", () => {
@@ -472,6 +475,10 @@ describe("company alerts versus aggregator leads", () => {
     expect(full("https://example.wd3.myworkdayjobs.com/en-US/Careers/job/Singapore/Analyst_R-1234")).toBe(true);
     expect(full("https://careers.example.com/jobs")).toBe(false);
     expect(full("https://careers.example.com/jobs/search")).toBe(false);
+    expect(full("https://careers.example.com/jobs/en")).toBe(false);
+    expect(full("https://careers.example.com/en-US/")).toBe(false);
+    expect(full("https://careers.example.com/apply?requisition_id=R12345")).toBe(true);
+    expect(full("https://careers.example.com/apply?utm_source=alert")).toBe(false);
     expect(full("https://jobs.lever.co/examplecorp")).toBe(false);
     expect(full("https://careers.example.com/")).toBe(false);
   });

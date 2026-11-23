@@ -125,6 +125,7 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
 
   beforeEach(async () => {
     await db().query("DROP TRIGGER IF EXISTS trg_fail_synthetic_card ON raw_job_observations");
+    await db().query("DROP TRIGGER IF EXISTS trg_skip_lead_block ON raw_job_observations");
     await db().query("DELETE FROM pipeline_tasks");
     await db().query("DELETE FROM raw_job_observations");
     await db().query("DELETE FROM raw_email_alerts");
@@ -444,9 +445,66 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
     ]);
     // The landing page left no observation: nothing to fetch, nothing to lose.
     expect(rows).toHaveLength(2);
+    // The lead is durable evidence: error history, payload kind, and the Gmail message stays staged (invariant 2, 10).
+    const lead = await db().query<{ history: number; kind: string | null }>(
+      `SELECT jsonb_array_length(error_history)::int AS history, raw_payload->>'lead_kind' AS kind
+         FROM raw_job_observations WHERE workspace_id = $1 AND processing_status = 'FETCH_BLOCKED'`, [workspaceId()]);
+    expect(lead.rows).toEqual([{ history: 1, kind: "AGGREGATOR_LEAD" }]);
+    const alert = await db().query<{ processed: boolean; lifecycle_status: string; last_error: string | null }>(
+      "SELECT processed, lifecycle_status, last_error FROM raw_email_alerts WHERE workspace_id = $1", [workspaceId()]);
+    expect(alert.rows).toEqual([{ processed: true, lifecycle_status: "SOURCE_PENDING", last_error: null }]);
     // Neither the lead nor the company card is a job yet: no canonical job exists before the posting is fetched.
     const canonical = await db().query<{ n: number }>("SELECT COUNT(*)::int AS n FROM canonical_jobs WHERE workspace_id = $1", [workspaceId()]);
     expect(canonical.rows[0]?.n).toBe(0);
+  });
+
+  it("rolls the whole alert back when a lead cannot be marked FETCH_BLOCKED (count mismatch)", async () => {
+    const html = [
+      '<table><tr><td><a href="https://careers.example.com/jobs/4900000011">Synthetic Company Role</a></td></tr></table>',
+      '<table><tr><td><a href="https://www.linkedin.com/comm/jobs/view/4900000012/">Synthetic Aggregator Role</a></td></tr></table>',
+    ].join("");
+    const body = Buffer.from(
+      ["MIME-Version: 1.0", 'Content-Type: text/html; charset="UTF-8"', "", html].join(String.fromCharCode(13, 10)),
+      "utf8",
+    ).toString("base64url");
+    const [alertId] = await seedDigests(1, 1, () => body);
+    await db().query(`
+      CREATE OR REPLACE FUNCTION skip_lead_block() RETURNS TRIGGER AS $$
+      BEGIN
+        IF NEW.processing_status = 'FETCH_BLOCKED' THEN RETURN NULL; END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql`);
+    await db().query(`CREATE TRIGGER trg_skip_lead_block BEFORE UPDATE ON raw_job_observations
+      FOR EACH ROW EXECUTE FUNCTION skip_lead_block()`);
+
+    const summary = await parseEmails({ limit: 20 }, { pool: stagingPool(), log: () => undefined, now: () => 0 });
+
+    expect(summary).toMatchObject({ parsedEmails: 0, extractedJobs: 0, failedEmails: 1, remainingBacklog: 1 });
+    expect(await stagingState()).toMatchObject({ observations: 0, fetchTasks: 0, fetchPending: 0, processedAlerts: 0 });
+    const alert = await db().query<{ processed: boolean; last_error: string | null }>(
+      "SELECT processed, last_error FROM raw_email_alerts WHERE id = $1", [alertId]);
+    expect(alert.rows[0]?.processed).toBe(false);
+    expect(alert.rows[0]?.last_error).toMatch(/0 of 1 lead observations FETCH_BLOCKED/);
+  });
+
+  it("an email whose only links are not full posting links is recorded as SOURCE_BLOCKED and trips the funnel guard when most alerts are like it", async () => {
+    const landing = Buffer.from(
+      ["MIME-Version: 1.0", 'Content-Type: text/html; charset="UTF-8"', "",
+        '<a href="https://careers.example.com/">Apply now</a><a href="https://careers.example.com/jobs">See the job</a>'].join(String.fromCharCode(13, 10)),
+      "utf8",
+    ).toString("base64url");
+    const alertIds = await seedDigests(3, 1, () => landing);
+
+    const summary = await parseEmails({ limit: 20 }, { pool: stagingPool(), log: () => undefined, now: () => 0 });
+
+    expect(summary).toMatchObject({ parsedEmails: 0, extractedJobs: 0, noVacancyEmails: 3, noVacancyFunnelBroken: true });
+    const alerts = await db().query<{ processed: boolean; lifecycle_status: string; last_error: string }>(
+      "SELECT processed, lifecycle_status, last_error FROM raw_email_alerts WHERE id = ANY($1::uuid[])", [alertIds]);
+    for (const alert of alerts.rows) {
+      expect(alert).toMatchObject({ processed: true, lifecycle_status: "SOURCE_BLOCKED" });
+      expect(alert.last_error).toMatch(/^MISSING_POSTING_URL: /);
+    }
   });
 
   it("records a navigation-only email as SOURCE_BLOCKED without failing the run, with counts but no URLs in the error", async () => {
