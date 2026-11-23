@@ -12,6 +12,7 @@ import { JobRequirementSchema, REQUIREMENTS_SCHEMA_VERSION } from '../requiremen
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 import { sourceContentEvidencePredicate } from './descriptionQuality.js';
 import { publicErrorSummary } from '../security/publicErrorSummary.js';
+import { cleanPostingText } from '../security/postingText.js';
 import { isRateLimitedFailure } from '../services/modelCallResilience.js';
 
 dotenv.config();
@@ -829,7 +830,8 @@ export async function runRequirementsExtraction(
           const deterministic = extractDeterministicRequirements({
             canonical_job_id: job.canonical_job_id,
             job_version_id: job.job_version_id,
-            description_text: job.description_text,
+            // Escaped or real markup is removed before the rules run, so it cannot end up inside a quote.
+            description_text: cleanPostingText(job.description_text).text,
           });
 
           const deterministicRequirements = deterministic.requirements.map((req) =>
