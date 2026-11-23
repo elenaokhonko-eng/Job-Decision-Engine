@@ -92,7 +92,7 @@ afterEach(() => {
 describe('OpenAI model role chains', () => {
   it('resolves role variable, then OPENAI_MODEL, then the default; empty values fall through', async () => {
     const { evaluationOpenAiModel, documentOpenAiModel } = await import('../../services/openAiModelRoles.js');
-    expect(evaluationOpenAiModel({})).toBe('gpt-4o-mini');
+    expect(evaluationOpenAiModel({})).toBe('gpt-5.6-luna');
     expect(evaluationOpenAiModel({ OPENAI_MODEL: 'shared' })).toBe('shared');
     expect(evaluationOpenAiModel({ OPENAI_MODEL: 'shared', EVALUATION_FALLBACK_MODEL: 'eval' })).toBe('eval');
     // An unset GitHub variable arrives as '' and must not hide OPENAI_MODEL.

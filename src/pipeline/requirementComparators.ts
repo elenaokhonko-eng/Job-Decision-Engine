@@ -64,7 +64,14 @@ export function calculateProfessionalExperienceYears(
 }
 
 function textForRequirement(requirement: ComparableRequirement): string {
-  return [requirement.requirement_text, requirement.quote_text || "", JSON.stringify(requirement.structured_value || {})]
+  // A degree's quote is the whole sentence it was found in (so a reader sees "or equivalent",
+  // "preferred" and so on). The level and subject are read from degree_reference, the matched words,
+  // so a second degree named elsewhere in that sentence cannot change the level.
+  const quote = requirement.requirement_type === "DEGREE"
+    && typeof requirement.structured_value?.degree_reference === "string"
+    ? ""
+    : requirement.quote_text || "";
+  return [requirement.requirement_text, quote, JSON.stringify(requirement.structured_value || {})]
     .join(" ")
     .toLowerCase();
 }
@@ -459,8 +466,8 @@ function matchesExperienceScope(
 }
 
 function degreeLevel(text: string): number | null {
-  if (/\b(phd|doctorate|doctoral)\b/i.test(text)) return 3;
-  if (/\b(master'?s?|msc|ma|mba)\b/i.test(text)) return 2;
+  if (/\b(ph\.?\s?d|doctorate|doctoral|doctor\s+of\s+philosophy)\b/i.test(text)) return 3;
+  if (/\b(master'?s?|m\.?\s?sc|ma|mba)\b/i.test(text)) return 2;
   if (/\b(bachelor'?s?|undergraduate|bsc|ba)\b/i.test(text)) return 1;
   return null;
 }
@@ -495,7 +502,7 @@ function requirementCredentialIdentifier(requirement: ComparableRequirement): st
   ].find((value) => typeof value === "string" && value.trim().length > 0);
   const source = String(structuredCandidate || requirement.quote_text || requirement.requirement_text || "");
   const normalized = normalizeComparableText(source);
-  const known = normalized.match(/\b(aws certified [a-z0-9 .+#-]+|cissp|cfa|cpa|pmp|prince2|scrum master|kubernetes|terraform|azure certified [a-z0-9 .+#-]+|google cloud [a-z0-9 .+#-]+)\b/i);
+  const known = normalized.match(/\b(aws certified [a-z0-9 .+#-]+|cissp|cfa|cpa|pmp|fsa|asa|fcas|acas|maaa|acca|frm|cfp|cisa|cism|caia|fellow of the society of actuaries|prince2|scrum master|kubernetes|terraform|azure certified [a-z0-9 .+#-]+|google cloud [a-z0-9 .+#-]+)\b/i);
   if (known) return normalizeComparableText(known[1]);
   const genericRemoved = normalized
     .replace(/\b(required|required certification|preferred|certification|certificate|credential|license|licence|holder|must have|or equivalent)\b/g, " ")
@@ -730,6 +737,26 @@ export function compareStructuredRequirement(
       return {
         status: "UNKNOWN",
         rationale: `Profile degree level is present, but the required ${requiredSubject} subject cannot be verified.`,
+        fact: degreeEvidence,
+      };
+    }
+    // The posting itself offers a way around the degree ("or equivalent experience", "or a related
+    // field"). A shortfall against the degree is then not established as a block: it needs checking.
+    if (degreeEvidence && requirement.structured_value?.accepts_equivalent_experience === true) {
+      return {
+        status: "UNKNOWN",
+        rationale: "The posting accepts equivalent experience in place of the stated degree, so the degree shortfall needs verification rather than rejecting the job.",
+        fact: degreeEvidence,
+      };
+    }
+    const levelMet = facts.some((fact) => {
+      const level = degreeLevel(textForFact(fact));
+      return level !== null && level >= requiredLevel;
+    });
+    if (degreeEvidence && levelMet && requirement.structured_value?.accepts_related_field === true) {
+      return {
+        status: "UNKNOWN",
+        rationale: "The posting accepts a related field and the profile meets the degree level, so the subject needs verification rather than rejecting the job.",
         fact: degreeEvidence,
       };
     }

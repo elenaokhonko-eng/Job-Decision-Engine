@@ -91,7 +91,8 @@
             "GENUINE_REPOST_DATE",
             "AUTHORITATIVE_PUBLICATION_DATE",
             "OBSERVED_AGE_PUBLICATION_UNKNOWN",
-            "HARD_REJECTED_DECISION"
+            "HARD_REJECTED_DECISION",
+            "POSTING_LINK_UNVERIFIABLE"
           ]
         },
         "archive_reference_at": {

@@ -83,6 +83,57 @@ describe("non-target title families in the hard gates", () => {
   });
 });
 
+// Owner policy (2026-11-22): infrastructure/DevOps/security, support engineering, testing/QA and
+// industrial or physical engineering titles are rejected outright, with the role-family code.
+describe("owner-rejected role families (2026-11-22)", () => {
+  it.each([
+    "Sr. Engineer, Infrastructure Security",
+    "Senior DevOps Engineer",
+    "DevOps Engineering Lead (Vice President)",
+    "Site Reliability Engineer",
+    "Senior Security Engineer",
+    "AI Security Architect - Associate Director",
+    "Cloud Support Engineer",
+    "Technical Support Engineer (GPU Clusters)",
+    "Database Support Engineer (APAC)",
+    "QA Engineer",
+    "Quality Assurance Analyst",
+    "Ubuntu Linux Kernel Test Engineer",
+    "Software Development Engineer in Test",
+    "AI Scientist - Domain Expert, Crashworthiness",
+    "Mechanical Design Engineer",
+    "Senior Electrical Engineer",
+  ])("rejects %j as NON_TARGET_ROLE_FAMILY", (title) => {
+    expect(nonTechnicalFunctionTitle(title)).not.toBeNull();
+    const { persisted, global } = gates(title);
+    for (const result of [persisted, global]) {
+      expect(result.status).toBe("HARD_REJECT");
+      expect(result.rejection_codes).toEqual(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"]);
+    }
+  });
+
+  it.each([
+    // Program, project, risk and governance titles are not infrastructure roles.
+    "Lead Technical Program Manager, International Infrastructure Platforms",
+    "VP/SVP - Tech & Cyber Risk Management",
+    "Infrastructure Project Manager",
+    "Security Governance and Compliance Lead",
+    // Existing owner decisions that stay allowed.
+    "Support Engineer, Data Platform",
+    "Platform Infrastructure Architect",
+    // Not testing or QA roles.
+    "Data Quality Engineer",
+    "ML Evaluation Lead",
+    "Research Engineer, Model Evaluation",
+    // Not industrial or physical engineering.
+    "Hardware-Aware ML Engineer",
+    "Data Engineer, Manufacturing Analytics",
+    "Senior Software Engineer",
+  ])("does not reject %j", (title) => {
+    expect(nonTechnicalFunctionTitle(title), title).toBeNull();
+  });
+});
+
 // Owner policy (gate-2026-11.5): a pre-sales title is a high-interaction reject for any title,
 // even when the description reads like an engineering role.
 describe("pre-sales titles in the hard gates", () => {

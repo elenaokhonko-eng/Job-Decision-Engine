@@ -7,14 +7,20 @@ import { z } from 'zod';
 import {
   isOccurrenceNegated,
   inferClauseImportance,
+  findEnclosingClause,
   findFirstNonNegatedMatch,
   findAllMatches,
 } from './clauseAnalysis.js';
+import { parsePosting } from './postingStructure.js';
+import { detectAlternatives, draftPostingItemRequirements } from './postingItemRequirements.js';
+import { isCapabilityRequirementType, MIN_CONFIRMED_REQUIREMENTS } from './requirementKinds.js';
 import { neutralizeWorkplacePerkPhrases } from '../pipeline/workplacePerkPhrases.js';
 
 export { isOccurrenceNegated };
 
-const EXTRACTOR_VERSION = 'deterministic_v3';
+/** One version for the extractor, the task keys and the currentness policy. */
+export const DETERMINISTIC_EXTRACTOR_VERSION = 'deterministic_v5';
+const EXTRACTOR_VERSION = DETERMINISTIC_EXTRACTOR_VERSION;
 
 export interface DeterministicExtractorInput {
   canonical_job_id: string;
@@ -30,6 +36,13 @@ export type DeterministicRequirement = Omit<
 export interface DeterministicExtractorResult {
   requirements: DeterministicRequirement[];
   warnings: string[];
+  /** Capability requirements confirmed from the posting text (structured facts plus posting items). */
+  confirmedRequirementCount: number;
+  /** Fewer than the minimum confirmed requirements: the job needs a fuller description. Never a "no match". */
+  needsDescription: boolean;
+  hasRequirementsSection: boolean;
+  /** Capability items found in the posting by the rules (including years and degrees), before overlap with structured facts is removed. */
+  postingItemCount: number;
 }
 
 interface MatchInfo {
@@ -380,6 +393,61 @@ function extractExperienceRequirements(
   return { requirements, nextSequence: sequence };
 }
 
+const DEGREE_QUOTE_MAX_LENGTH = 300;
+
+/**
+ * A short degree match ("PhD") is padded by one word to reach the minimum quote length, which cut a
+ * quote off mid-sentence ("PhD with"). The reader needs the whole statement: whether it says "or
+ * equivalent experience", "preferred", a subject. So the quote is the enclosing sentence or bullet
+ * (capped), taken verbatim from the description so its offsets still point at the posting text.
+ */
+function widenDegreeQuote(description: string, degree: MatchInfo): MatchInfo {
+  const clause = findEnclosingClause(description, degree.quote_start_offset, degree.quote_end_offset);
+  const clauseMatch = trimMatch(description, clause.startOffset, clause.endOffset);
+  if (!clauseMatch) return degree;
+  // Drop a leading bullet glyph or list number so the quote starts at the words.
+  const glyph = clauseMatch.quote_text.match(/^(?:[-*•–]|\d+[.)])\s+/)?.[0].length ?? 0;
+  const wide = glyph > 0 ? trimMatch(description, clauseMatch.quote_start_offset + glyph, clauseMatch.quote_end_offset) : clauseMatch;
+  if (!wide || wide.quote_text.length > DEGREE_QUOTE_MAX_LENGTH) return degree;
+  if (wide.quote_start_offset > degree.quote_start_offset || wide.quote_end_offset < degree.quote_end_offset) return degree;
+  return wide;
+}
+
+function degreeAlternatives(description: string, degree: MatchInfo): Record<string, unknown> {
+  const clause = findEnclosingClause(description, degree.quote_start_offset, degree.quote_end_offset);
+  const alternatives = detectAlternatives(clause.clauseText);
+  return {
+    accepts_equivalent_experience: alternatives.equivalent_experience,
+    accepts_related_field: alternatives.related_field,
+  };
+}
+
+function buildPostingItemRequirement(
+  input: DeterministicExtractorInput,
+  sequence: number,
+  text: string,
+  start: number,
+  end: number,
+  importance: 'MUST' | 'PREFERRED' | 'NICE_TO_HAVE',
+  structuredValue: Record<string, unknown>,
+): DeterministicRequirement {
+  return JobRequirementSchema.parse({
+    canonical_job_id: input.canonical_job_id,
+    job_version_id: input.job_version_id,
+    requirement_key: `R-${String(sequence).padStart(3, '0')}`,
+    requirement_type: 'CUSTOM',
+    importance,
+    requirement_text: text,
+    quote_text: text,
+    quote_start_offset: start,
+    quote_end_offset: end,
+    structured_value: structuredValue,
+    extractor_type: 'DETERMINISTIC',
+    extractor_version: EXTRACTOR_VERSION,
+    confidence: 0.9,
+  });
+}
+
 export function extractDeterministicRequirements(
   input: DeterministicExtractorInput
 ): DeterministicExtractorResult {
@@ -428,24 +496,33 @@ export function extractDeterministicRequirements(
   sequence = extractedExperience.nextSequence;
 
   const degree = findFirstMatch(description, [
-    /\b(?:bachelor(?:'s)?|master(?:'s)?|phd|doctorate|doctoral)(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100})?/i,
+    // "Ph.D", "PhD", "Ph. D." count as degree levels, like the words below.
+    /\b(?:bachelor(?:'s)?|master(?:'s)?|ph\.?\s?d\b\.?|doctorate|doctoral|doctor\s+of\s+philosophy)(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100})?/i,
+    // Abbreviations are case-sensitive so ordinary lowercase words are not read as degrees.
+    /\b(?:B\.?Sc|M\.?Sc|M\.?Eng)\b\.?(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100})?/,
     /\bdegree\s+in\s+[^.;\n]{1,100}/i,
   ]);
   if (degree) {
+    const degreeQuote = widenDegreeQuote(description, degree);
     requirements.push(
       buildRequirement(
         input,
         sequence++,
         'DEGREE',
         'Role requires a degree qualification.',
-        degree,
-        { degree_reference: degree.quote_text }
+        degreeQuote,
+        {
+          degree_reference: degree.quote_text,
+          ...degreeAlternatives(description, degree),
+        }
       )
     );
   }
 
   const credential = findFirstMatch(description, [
     /\b(CFA|CPA|CISSP|PMP|AWS\s+Certified|certification\s+required|license\s+required)\b/i,
+    // Professional designations named by a regulated body (actuarial, audit, risk, financial planning).
+    /\b(?:Fellow|Associate)\s+of\s+the\s+(?:Society\s+of\s+Actuaries|Casualty\s+Actuarial\s+Society|Institute\s+and\s+Faculty\s+of\s+Actuaries)\b|\bMember\s+of\s+the\s+American\s+Academy\s+of\s+Actuaries\b|\b(?:FSA|ASA|FCAS|ACAS|MAAA|FIA|ACCA|FRM|CFP|CISA|CISM|CAIA)\b/,
   ]);
   if (credential) {
     requirements.push(
@@ -540,52 +617,40 @@ export function extractDeterministicRequirements(
     );
   }
 
-  const technicalFunctionPatterns = [
-    /\b(?:director|head|vp|vice\s+president)\s+of\s+(?:engineering|technology|software|data(?:\s+(?:science|engineering|platform|analytics|architecture))?|analytics?|ai|ml|platform|cloud|systems?|digital|transformation|research|science)\b/i,
-    /\b(?:engineering|technology|software|data|analytics?|ai|ml|digital|transformation)\s+(?:program|programme|project|portfolio|delivery|transformation)\s+(?:manager|director|lead|head|officer|vp|vice\s+president)\b/i,
-    /\b(?:engineering|technology|software|data(?:\s+(?:science|engineering|platform|analytics|architecture))?|analytics?|ai|ml|platform|cloud|systems?|digital|transformation|research|science)\s+(?:manager|director|lead|head|officer|vp|vice\s+president)\b/i,
-    /\b(?:machine\s+learning\s+engineer|ml\s+engineer|data\s+engineer|data\s+(?:pipeline|platform|warehouse|etl)\s+(?:engineer|developer|architect|associate|analyst|specialist)|(?:sql\s+)?etl\s+(?:engineer|developer|associate|analyst|specialist)|data\s+warehouse\s+(?:engineer|developer|associate|analyst|specialist)|platform\s+engineer|software\s+engineer|ai\s+engineer|research\s+scientist|(?:data|ai|ml|lead|principal|chief)\s+scientist|quant(?:itative)?\s+(?:engineer|developer|researcher)|bioinformatics\s+engineer|systems\s+architect|ai\s+architect|software\s+developer|full[\s-]stack\s+developer|backend\s+developer|frontend\s+developer|data\s+scientist|data\s+architect|research\s+engineer|research\s+software\s+engineer)\b/i,
-  ];
-  let functionRequirement = findFirstMatch(description, technicalFunctionPatterns);
-  if (!functionRequirement && /\b(?:project|program|programme|portfolio|delivery)\s+(?:manager|director|lead|head)\b/i.test(description) && /\b(?:software|data|analytics?|ai|ml|machine\s+learning|technology|technical|engineering|platform|cloud|digital|transformation|systems?)\b/i.test(description)) {
-    functionRequirement = findFirstMatch(description, [
-      /\b(?:project|program|programme|portfolio|delivery)\s+(?:manager|director|lead|head)\b/i,
-    ]);
-  }
-  if (functionRequirement) {
-    const normalized = functionRequirement.quote_text.toUpperCase().replace(/\s+/g, '_');
+  // Real requirements: every bullet or sentence in the posting's requirement,
+  // responsibility and nice-to-have sections, with its exact quote. Years, degrees
+  // and credentials above come from rules and are not repeated here.
+  const posting = parsePosting(description);
+  const structuredSpans = requirements.map((req) => ({
+    start: req.quote_start_offset ?? -1,
+    end: req.quote_end_offset ?? -1,
+  }));
+  const allItemDrafts = draftPostingItemRequirements(description, posting.items);
+  const itemDrafts = allItemDrafts.filter(
+    (draft) => !structuredSpans.some((span) => span.start >= 0 && draft.start < span.end && span.start < draft.end),
+  );
+  for (const draft of itemDrafts) {
     requirements.push(
-      buildRequirement(
-        input,
-        sequence++,
-        'FUNCTION',
-        'Role includes a technical function requirement.',
-        functionRequirement,
-        { function_key: normalized }
-      )
+      buildPostingItemRequirement(input, sequence++, draft.text, draft.start, draft.end, draft.importance, draft.structured_value),
     );
   }
 
-  const domainRequirement = findFirstMatch(description, [
-    /\b(machine\s+learning|artificial\s+intelligence|ai\b|llm|nlp|data\s+platform|data\s+pipeline|data\s+engineering|data\s+warehouse|sql\s+etl|etl|regtech|legaltech|compliance\s+automation|bioinformatics|genomics|biotech|pharma|quant(?:itative)?|trading|fintech|market\s+data)\b/i,
-  ]);
-  if (domainRequirement) {
-    const normalized = domainRequirement.quote_text.toUpperCase().replace(/\s+/g, '_');
-    requirements.push(
-      buildRequirement(
-        input,
-        sequence++,
-        'DOMAIN',
-        'Role includes a target technical domain requirement.',
-        domainRequirement,
-        { domain_key: normalized }
-      )
-    );
+  const confirmedRequirementCount = requirements.filter((req) => isCapabilityRequirementType(req.requirement_type)).length;
+  const needsDescription = confirmedRequirementCount < MIN_CONFIRMED_REQUIREMENTS;
+  if (needsDescription) {
+    warnings.push(`NEEDS_DESCRIPTION: ${confirmedRequirementCount} confirmed requirements (minimum ${MIN_CONFIRMED_REQUIREMENTS}).`);
   }
 
   if (requirements.length === 0) {
     warnings.push('No deterministic requirements identified.');
   }
 
-  return { requirements, warnings };
+  return {
+    requirements,
+    warnings,
+    confirmedRequirementCount,
+    needsDescription,
+    hasRequirementsSection: posting.hasRequirementsSection,
+    postingItemCount: allItemDrafts.length,
+  };
 }

@@ -100,6 +100,9 @@ jobs:
     - name: Run linter checks
       run: npm run lint
 
+    - name: Import boundaries (new violations fail)
+      run: npm run lint:boundaries
+
     - name: Verify generated contract schemas
       run: npm run contracts:check
 

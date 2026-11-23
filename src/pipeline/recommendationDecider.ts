@@ -4,6 +4,7 @@ import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { RecommendationDecisionSchema } from "../decision/contracts.js";
+import { assessAvailability } from "../decision/availability.js";
 import { evaluateDecisionPolicy } from "../policy/decisionPolicy.js";
 import { resolveWorkspacePolicySnapshot } from "../policy/policySnapshot.js";
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
@@ -216,6 +217,54 @@ function asIso(value: Date | string | null): string | null {
   if (value === null) return null;
   const date = value instanceof Date ? value : new Date(value);
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+export interface MandatoryQualificationCounts {
+  total_mandatory: number | string;
+  matched_mandatory: number | string;
+  blocked_mandatory: number | string;
+  unresolved_mandatory: number | string;
+}
+
+/**
+ * Counts a job's MUST requirements against its current match run.
+ *
+ * NO_MATCH is the matcher's starting value: it means "no supporting evidence was found", not "the
+ * evidence contradicts the requirement". Only a degree or credential that the matcher compared
+ * against the profile and found short (it records a qualification code) counts as blocked. A
+ * free-text MUST with no evidence lowers coverage instead; counting it here as well would punish it
+ * twice. Optional credentials (PREFERRED_CERT_GAP) never block.
+ */
+export async function loadMandatoryQualificationCounts(
+  client: Pick<pg.PoolClient, "query">,
+  args: { workspaceId: string; canonicalJobId: string; matchRunId: string; jobVersionId: string; requirementSetId: string },
+): Promise<MandatoryQualificationCounts[]> {
+  const { rows } = await client.query<MandatoryQualificationCounts>(
+    `SELECT COUNT(jr.id) AS total_mandatory,
+                   COUNT(jr.id) FILTER (WHERE current_match.match_type IN ('EXACT', 'SEMANTIC')) AS matched_mandatory,
+                    COUNT(jr.id) FILTER (
+                      WHERE current_match.match_type = 'NO_MATCH'
+                        AND jr.requirement_type IN ('DEGREE', 'CREDENTIAL')
+                        AND COALESCE(current_match.qualification_code, '') <> 'MATCH_QUALIFICATION_PREFERRED_CERT_GAP'
+                    ) AS blocked_mandatory,
+                   COUNT(jr.id) FILTER (WHERE current_match.match_type IS DISTINCT FROM 'EXACT' AND current_match.match_type IS DISTINCT FROM 'SEMANTIC' AND current_match.match_type IS DISTINCT FROM 'NO_MATCH') AS unresolved_mandatory
+             FROM job_requirements jr
+             LEFT JOIN LATERAL (
+               SELECT rem.match_type, rem.evidence->>'match_qualification_code' AS qualification_code
+               FROM requirement_evidence_matches rem
+               WHERE rem.workspace_id = jr.workspace_id
+                 AND rem.match_run_id = $3
+                 AND rem.requirement_id = jr.id
+               ORDER BY rem.created_at DESC, rem.id DESC
+               LIMIT 1
+             ) current_match ON TRUE
+             WHERE jr.workspace_id = $1 AND jr.canonical_job_id = $2
+               AND jr.job_version_id = $4 AND jr.requirement_set_id = $5
+               AND jr.importance = 'MUST'
+               AND jr.requirement_type NOT IN ('OFFICE_DAYS', 'WORK_MODE', 'EMPLOYMENT_TYPE', 'TRAVEL', 'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK')`,
+    [args.workspaceId, args.canonicalJobId, args.matchRunId, args.jobVersionId, args.requirementSetId],
+  );
+  return rows;
 }
 
 export async function runRecommendationDecider(
@@ -648,13 +697,12 @@ export async function runRecommendationDecider(
         const availabilityExpiresAt = sourceEvidence
           ? sourceEvidence.availability.expires_at
           : asIso(job.availability_recheck_at);
-        const postingExpiry = asIso(job.source_expires_at);
-        const postingExpired = postingExpiry !== null && new Date(postingExpiry).getTime() <= now.getTime();
-        const availabilityCurrent = availabilityStatus === "OPEN"
-          && availabilityVerifiedAt !== null
-          && availabilityExpiresAt !== null
-          && new Date(availabilityExpiresAt).getTime() > now.getTime()
-          && !postingExpired;
+        const { current: availabilityCurrent, postingExpired } = assessAvailability({
+          status: availabilityStatus,
+          verifiedAt: availabilityVerifiedAt,
+          expiresAt: availabilityExpiresAt,
+          sourceExpiresAt: asIso(job.source_expires_at),
+        }, now);
         const availabilityVerificationRevision = availabilityVerifiedAt
           ? sha256Json({
               status: availabilityStatus,
@@ -838,32 +886,13 @@ export async function runRecommendationDecider(
             { reasonCode: "CURRENT_MATCH_PENDING" },
           );
         } else {
-          const { rows: qualificationRows } = await client.query<{
-            total_mandatory: number | string;
-            matched_mandatory: number | string;
-            blocked_mandatory: number | string;
-            unresolved_mandatory: number | string;
-          }>(
-            `SELECT COUNT(jr.id) AS total_mandatory,
-                   COUNT(jr.id) FILTER (WHERE current_match.match_type IN ('EXACT', 'SEMANTIC')) AS matched_mandatory,
-                    COUNT(jr.id) FILTER (WHERE current_match.match_type = 'NO_MATCH') AS blocked_mandatory,
-                   COUNT(jr.id) FILTER (WHERE current_match.match_type IS DISTINCT FROM 'EXACT' AND current_match.match_type IS DISTINCT FROM 'SEMANTIC' AND current_match.match_type IS DISTINCT FROM 'NO_MATCH') AS unresolved_mandatory
-             FROM job_requirements jr
-             LEFT JOIN LATERAL (
-               SELECT rem.match_type
-               FROM requirement_evidence_matches rem
-               WHERE rem.workspace_id = jr.workspace_id
-                 AND rem.match_run_id = $3
-                 AND rem.requirement_id = jr.id
-               ORDER BY rem.created_at DESC, rem.id DESC
-               LIMIT 1
-             ) current_match ON TRUE
-             WHERE jr.workspace_id = $1 AND jr.canonical_job_id = $2
-               AND jr.job_version_id = $4 AND jr.requirement_set_id = $5
-               AND jr.importance = 'MUST'
-               AND jr.requirement_type NOT IN ('OFFICE_DAYS', 'WORK_MODE', 'EMPLOYMENT_TYPE', 'TRAVEL', 'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK')`,
-            [ctx.workspaceId, job.canonical_job_id, job.latest_match_run_id, job.job_version_id, job.active_requirement_set_id],
-          );
+          const qualificationRows = await loadMandatoryQualificationCounts(client, {
+            workspaceId: ctx.workspaceId,
+            canonicalJobId: job.canonical_job_id,
+            matchRunId: job.latest_match_run_id,
+            jobVersionId: job.job_version_id,
+            requirementSetId: job.active_requirement_set_id,
+          });
           const qualificationSummary = qualificationRows[0];
           const totalMandatory = asNumber(qualificationSummary?.total_mandatory) ?? 0;
           const blockedMandatory = asNumber(qualificationSummary?.blocked_mandatory) ?? 0;
@@ -871,10 +900,10 @@ export async function runRecommendationDecider(
           mandatoryQualificationCheck = totalMandatory === 0
             ? readinessCheck("MANDATORY_QUALIFICATIONS", "NOT_APPLICABLE", "The current requirement set contains no MUST qualifications.", readinessAssessedAt, { policyReference: `requirement_set:${job.active_requirement_set_id}` })
             : blockedMandatory > 0
-              ? readinessCheck("MANDATORY_QUALIFICATIONS", "BLOCKED", `${blockedMandatory} mandatory qualification(s) have supported mismatching evidence.`, readinessAssessedAt, { reasonCode: "MANDATORY_QUALIFICATION_MISMATCH" })
+              ? readinessCheck("MANDATORY_QUALIFICATIONS", "BLOCKED", `${blockedMandatory} mandatory degree or credential requirement(s) are not met by the profile evidence.`, readinessAssessedAt, { reasonCode: "MANDATORY_QUALIFICATION_MISMATCH" })
               : unresolvedMandatory > 0
                 ? readinessCheck("MANDATORY_QUALIFICATIONS", "NEEDS_VERIFICATION", `${unresolvedMandatory} mandatory qualification(s) remain unknown or unresolved.`, readinessAssessedAt, { reasonCode: "MANDATORY_QUALIFICATION_UNKNOWN" })
-                : readinessCheck("MANDATORY_QUALIFICATIONS", "MET", `${totalMandatory} mandatory qualification(s) have matching evidence.`, readinessAssessedAt);
+                : readinessCheck("MANDATORY_QUALIFICATIONS", "MET", `No mandatory degree or credential is unmet; ${asNumber(qualificationSummary?.matched_mandatory) ?? 0} of ${totalMandatory} mandatory requirement(s) have matching evidence.`, readinessAssessedAt);
         }
         readinessChecks.push(mandatoryQualificationCheck);
 

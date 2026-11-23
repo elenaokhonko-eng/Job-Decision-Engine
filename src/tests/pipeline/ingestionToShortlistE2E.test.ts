@@ -77,9 +77,9 @@ describe('End-to-End Funnel & Gate Verification Suite', () => {
       'Remote'
     );
     expect(qaResult.passed).toBe(false);
-    // The QA-coordinator title family is a deterministic non-target exclusion;
+    // QA and testing titles are a deterministic non-target role-family exclusion (owner policy 2026-11-22);
     // the generic Axis-1 technical check is no longer a hard gate.
-    expect(qaResult.reasonCode).toBe('GATE_OUT_OF_SCOPE_DOMAIN');
+    expect(qaResult.reasonCode).toBe('NON_TARGET_ROLE_FAMILY');
   });
 
   it('should reject sales engineer / presales roles that lack hands-on building', () => {

@@ -77,6 +77,9 @@ The names above are conceptual. The values stored in `canonical_jobs.processing_
 - Never suppress an error with `|| true`, unconditional `process.exit(0)`, empty-array fallbacks, random vectors, or zero-vector substitutions.
 - Record assumptions, changed contracts, commands run, results, and remaining risks in the handoff.
 - Do not mark work complete merely because TypeScript compiles or a GitHub Action is green.
+- No new code in `src/services/agent.ts`; new model-call code goes in a new module (the file is being retired).
+- Nothing new in `src/services/`; new code goes in the module that owns the job (for example `src/pipeline/`, `src/requirements/`, `src/embeddings/`).
+- No SQL in new scripts under `scripts/`; a script calls a function in `src/`, and the function owns the query.
 
 ## Merge gates
 

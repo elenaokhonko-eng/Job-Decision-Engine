@@ -17,6 +17,43 @@ export interface QuoteValidationResult {
 
 export const MAX_QUOTED_REQUIREMENTS = 25;
 
+/** Normalisation for AI quotes: curly quotes become straight and whitespace runs collapse. */
+function normalizeLoosely(text: string): { normalized: string; origin: number[] } {
+  let normalized = '';
+  const origin: number[] = [];
+  let previousWasSpace = false;
+  for (let index = 0; index < text.length; index += 1) {
+    let char = text[index];
+    if (/\s/.test(char)) {
+      if (previousWasSpace) continue;
+      char = ' ';
+      previousWasSpace = true;
+    } else {
+      previousWasSpace = false;
+      if (char === '\u2018' || char === '\u2019') char = "'";
+      else if (char === '\u201c' || char === '\u201d') char = '"';
+    }
+    normalized += char;
+    origin.push(index);
+  }
+  return { normalized, origin };
+}
+
+/**
+ * Finds a quote that differs from the posting only in spacing or quote marks. Returns the
+ * span in the original text, so the stored quote is always the posting's own wording.
+ */
+export function locateQuoteLoosely(descriptionText: string, quoteText: string): { start: number; end: number } | null {
+  const needle = normalizeLoosely(quoteText).normalized.trim();
+  if (needle.length === 0) return null;
+  const haystack = normalizeLoosely(descriptionText);
+  const at = haystack.normalized.indexOf(needle);
+  if (at < 0) return null;
+  const start = haystack.origin[at];
+  const end = haystack.origin[at + needle.length - 1] + 1;
+  return { start, end };
+}
+
 export function locateQuoteOffset(descriptionText: string, quoteText: string): number {
   return descriptionText.indexOf(quoteText);
 }
@@ -65,24 +102,28 @@ export function validateQuotedRequirements(
     let start = typeof existingStart === 'number' ? existingStart : locateQuoteOffset(descriptionText, requirement.quote_text);
     let end = typeof existingEnd === 'number' ? existingEnd : start + requirement.quote_text.length;
 
-    if (start < 0) {
-      issues.push({
-        requirement_key: requirement.requirement_key,
-        message: `Quote not found in description: ${requirement.quote_text}`,
-      });
-      continue;
-    }
-
-    if (!validateQuoteOffsets(descriptionText, requirement.quote_text, start, end)) {
-      issues.push({
-        requirement_key: requirement.requirement_key,
-        message: `Quote offsets do not match quote text at [${start}, ${end}).`,
-      });
-      continue;
+    let quoteText = requirement.quote_text;
+    const exactOk = start >= 0 && validateQuoteOffsets(descriptionText, quoteText, start, end);
+    if (!exactOk) {
+      const loose = locateQuoteLoosely(descriptionText, quoteText);
+      if (!loose) {
+        issues.push({
+          requirement_key: requirement.requirement_key,
+          message:
+            start < 0
+              ? `Quote not found in description: ${requirement.quote_text}`
+              : `Quote offsets do not match quote text at [${start}, ${end}).`,
+        });
+        continue;
+      }
+      start = loose.start;
+      end = loose.end;
+      quoteText = descriptionText.slice(start, end);
     }
 
     normalizedRequirements.push({
       ...requirement,
+      quote_text: quoteText,
       quote_start_offset: start,
       quote_end_offset: end,
     });
