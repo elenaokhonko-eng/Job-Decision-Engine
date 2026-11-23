@@ -45,6 +45,40 @@ describe('extractDeterministicRequirements', () => {
       expect(extract(text).some((r) => r.requirement_type === 'CREDENTIAL')).toBe(true);
     });
 
+    describe('degree reference shapes (synthetic sentences)', () => {
+      const degreeOf = (text: string) => extract(text).find((r) => r.requirement_type === 'DEGREE');
+      const reference = (text: string) => (degreeOf(text)?.structured_value as { degree_reference?: string } | undefined)?.degree_reference;
+
+      it('takes the lowest degree when the sentence offers lower levels with "or"', () => {
+        expect(reference('Requirements\n- BA/BS in a quantitative field with 5+ years of experience, or a PhD with 3+ years of experience')).toMatch(/^B[AS]/);
+        expect(reference('Requirements\n- Master\'s or PhD in a numerate subject')).toMatch(/^Master/i);
+        expect(reference('Requirements\n- MSc or PhD in statistics, physics or a related field')).toMatch(/^MSc/);
+      });
+
+      it('keeps the higher degree when the lower one is not an alternative', () => {
+        expect(reference('Requirements\n- Bachelor\'s degree in any subject. Separately, we run a PhD programme for staff.')).toMatch(/^Bachelor/i);
+        expect(reference('Requirements\n- A PhD in statistics, and a Bachelor\'s degree in any field')).toMatch(/^PhD/);
+      });
+
+      it('keeps a parenthetical and the subject whole', () => {
+        const ref = reference('You hold a PhD (or expect to complete one shortly) in Computer Science or a closely related discipline.');
+        expect(ref).toContain('(or expect to complete one shortly)');
+        expect(ref).toContain('Computer Science');
+      });
+
+      it('never ends the subject in the middle of a word', () => {
+        const long = `Requirements\n- PhD in ${'Alpha Beta, Gamma Delta, Epsilon Zeta, Eta Theta, Iota Kappa, Lambda Sigma, '}Engineering or related fields`;
+        const ref = reference(long) ?? '';
+        expect(ref.length).toBeLessThanOrEqual(130);
+        expect(/\w$/.test(ref) ? long.includes(ref + ' ') || long.includes(ref + ',') || long.endsWith(ref) : true).toBe(true);
+      });
+
+      it('does not treat an audience description as a degree requirement', () => {
+        expect(degreeOf('Whether you are a PhD researcher, engineer or scientist, your knowledge will shape the product.')).toBeUndefined();
+        expect(degreeOf("Whether you're a PhD researcher or an engineer, you will fit in.")).toBeUndefined();
+      });
+    });
+
     it('does not read ordinary words as degrees or credentials', () => {
       const types = extract('We value asa tree-like structure, the msc folder and a phdr library; nothing formal is required.').map((r) => r.requirement_type);
       expect(types).not.toContain('DEGREE');
@@ -182,7 +216,7 @@ describe('extractDeterministicRequirements', () => {
     expect(byText.get('Strong SQL and Python')?.importance).toBe('MUST');
   });
 
-  describe('duties and unheaded skills are not mandatory (deterministic_v5)', () => {
+  describe('duties and unheaded skills are not mandatory (deterministic_v6)', () => {
     const importanceOf = (description: string, startsWith: string) =>
       extractDeterministicRequirements({ ...IDS, description_text: description })
         .requirements.find((r) => r.requirement_text.startsWith(startsWith))?.importance;
@@ -275,7 +309,7 @@ describe('extractDeterministicRequirements', () => {
 
     expect(byPrefix('You will lead')?.structured_value).toMatchObject({ item_class: 'RESPONSIBILITY' });
     expect(byPrefix('Experience with financial regulation')?.importance).toBe('PREFERRED');
-    // No headings: nothing says this is required, so it is not mandatory (deterministic_v5).
+    // No headings: nothing says this is required, so it is not mandatory (deterministic_v6).
     expect(byPrefix('Strong stakeholder')?.importance).toBe('PREFERRED');
     expect(byPrefix('You will lead')?.importance).toBe('PREFERRED');
     expect(items.some((r) => /wellbeing/.test(r.requirement_text))).toBe(false);
