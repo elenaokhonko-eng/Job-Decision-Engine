@@ -139,6 +139,7 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
     expect(summary).toEqual({
       parsedEmails: 5,
       extractedJobs: 15,
+      leadObservations: 0,
       failedEmails: 0,
       noVacancyEmails: 0,
       noVacancyFunnelBroken: false,
@@ -234,6 +235,7 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
     expect(first).toEqual({
       parsedEmails: 2,
       extractedJobs: 6,
+      leadObservations: 0,
       failedEmails: 0,
       noVacancyEmails: 0,
       noVacancyFunnelBroken: false,
@@ -352,7 +354,7 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
     expect(recovered.rows[0]).toEqual({ last_error: null, lifecycle_status: "SOURCE_PENDING" });
   });
 
-  it("stages one canonical observation per LinkedIn job and records the email's link accounting", async () => {
+  it("stages one lead observation per LinkedIn job (no fetch task, FETCH_BLOCKED) and records the email's link accounting", async () => {
     const alertIds = await seedDigests(2, 3, linkedInDigestAlertRaw);
     const { lines, log } = recordingLog();
 
@@ -361,19 +363,29 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
     expect(summary).toMatchObject({
       parsedEmails: 2,
       extractedJobs: 6,
+      leadObservations: 6,
       failedEmails: 0,
       linksSeen: 50,
       nonJobLinksSkipped: 26,
       duplicateLinksCollapsed: 18,
     });
+    // An aggregator alert is a lead: durable observation, no fetch task, never FETCH_PENDING.
     expect(await stagingState()).toEqual({
       observations: 6,
       distinctSources: 6,
-      fetchPending: 6,
-      fetchTasks: 6,
+      fetchPending: 0,
+      fetchTasks: 0,
       orphanTasks: 0,
       processedAlerts: 2,
     });
+    const blockedLeads = await db().query<{ n: number; with_history: number; with_kind: number }>(
+      `SELECT COUNT(*)::int AS n,
+              COUNT(*) FILTER (WHERE error_history->0->>'error' LIKE 'AGGREGATOR_LEAD:%')::int AS with_history,
+              COUNT(*) FILTER (WHERE raw_payload->>'lead_kind' = 'AGGREGATOR_LEAD')::int AS with_kind
+         FROM raw_job_observations WHERE workspace_id = $1 AND processing_status = 'FETCH_BLOCKED'`,
+      [workspaceId()],
+    );
+    expect(blockedLeads.rows[0]).toEqual({ n: 6, with_history: 6, with_kind: 6 });
     const staged = await db().query<{ source_url: string; canonical_apply_url: string; title: string; raw_payload: Record<string, unknown> }>(
       `SELECT source_url, canonical_apply_url, title, raw_payload
        FROM raw_job_observations WHERE workspace_id = $1 AND raw_email_alert_id = $2 ORDER BY source_url`,
@@ -401,6 +413,40 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
     expect(lines.join(" ")).not.toContain("linkedin.com");
     expect(lines.filter((line) => line.includes("[25 link(s) seen, 3 job card(s), 13 non-job skipped, 9 duplicate(s) collapsed]")))
       .toHaveLength(2);
+  });
+
+  it("ingests only company alerts with a full posting link as jobs; an aggregator card is a lead and a landing page is skipped", async () => {
+    const html = [
+      '<table><tr><td><a href="https://careers.example.com/jobs/4900000001">Synthetic Company Role</a><p>Company: Example Analytics</p></td></tr></table>',
+      '<table><tr><td><a href="https://www.linkedin.com/comm/jobs/view/4900000002/">Synthetic Aggregator Role</a><p>Example Org &middot; Example City</p></td></tr></table>',
+      '<a href="https://careers.example.com/careers">See all open roles</a>',
+    ].join("");
+    const body = Buffer.from(
+      ["MIME-Version: 1.0", 'Content-Type: text/html; charset="UTF-8"', "", html].join(String.fromCharCode(13, 10)),
+      "utf8",
+    ).toString("base64url");
+    await seedDigests(1, 1, () => body);
+
+    const summary = await parseEmails({ limit: 20 }, { pool: stagingPool(), log: () => undefined, now: () => 0 });
+
+    expect(summary).toMatchObject({ parsedEmails: 1, extractedJobs: 2, leadObservations: 1, failedEmails: 0 });
+    const { rows } = await db().query<{ source_url: string; processing_status: string; has_task: boolean }>(
+      `SELECT observation.source_url, observation.processing_status,
+              EXISTS (SELECT 1 FROM pipeline_tasks task WHERE task.workspace_id = observation.workspace_id
+                        AND task.task_type = 'FETCH_JOB_CONTENT' AND task.payload->>'observation_id' = observation.id::text) AS has_task
+         FROM raw_job_observations observation WHERE observation.workspace_id = $1 AND observation.source_name = 'GMAIL_ALERT'
+        ORDER BY observation.source_url`,
+      [workspaceId()],
+    );
+    expect(rows).toEqual([
+      { source_url: "https://careers.example.com/jobs/4900000001", processing_status: "FETCH_PENDING", has_task: true },
+      { source_url: "https://www.linkedin.com/jobs/view/4900000002", processing_status: "FETCH_BLOCKED", has_task: false },
+    ]);
+    // The landing page left no observation: nothing to fetch, nothing to lose.
+    expect(rows).toHaveLength(2);
+    // Neither the lead nor the company card is a job yet: no canonical job exists before the posting is fetched.
+    const canonical = await db().query<{ n: number }>("SELECT COUNT(*)::int AS n FROM canonical_jobs WHERE workspace_id = $1", [workspaceId()]);
+    expect(canonical.rows[0]?.n).toBe(0);
   });
 
   it("records a navigation-only email as SOURCE_BLOCKED without failing the run, with counts but no URLs in the error", async () => {
@@ -479,7 +525,7 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
     for (const link of LINKEDIN_ALERT_MANAGEMENT_LINKS) {
       expect(rows.map((row) => row.source_url)).not.toContain(link.url);
     }
-    expect(await stagingState()).toMatchObject({ observations: 2, fetchTasks: 2, orphanTasks: 0, processedAlerts: 1 });
+    expect(await stagingState()).toMatchObject({ observations: 2, fetchTasks: 0, fetchPending: 0, orphanTasks: 0, processedAlerts: 1 });
   });
 
   it("never lets an empty employer reach canonical_jobs: cards stay out of normalization and postings must name one", async () => {
@@ -491,10 +537,10 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
       "SELECT company_name, processing_status, job_version_id FROM raw_job_observations WHERE workspace_id = $1 AND source_name = 'GMAIL_ALERT'",
       [workspaceId()],
     );
-    expect(card.rows).toEqual([{ company_name: "", processing_status: "FETCH_PENDING", job_version_id: null }]);
+    expect(card.rows).toEqual([{ company_name: "", processing_status: "FETCH_BLOCKED", job_version_id: null }]);
 
     // Guard 1: the normalizer reads only PENDING observations; a discovery card is FETCH_PENDING
-    // from the transaction that stages it, so it is never normalized.
+    // (company posting) or FETCH_BLOCKED (aggregator lead) from the transaction that stages it, so it is never normalized.
     const normalized = await runNormalization(db(), { context: context! });
     expect(normalized.totalDiscovered).toBe(0);
 
