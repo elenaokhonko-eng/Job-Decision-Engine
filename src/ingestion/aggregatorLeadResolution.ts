@@ -93,7 +93,7 @@ export async function reportAggregatorLeadResolution(
               SELECT 1 FROM raw_job_observations employer_observation
                WHERE employer_observation.workspace_id = observation.workspace_id
                  AND employer_observation.job_version_id = observation.job_version_id
-                 AND employer_observation.source_name IN ('GREENHOUSE', 'LEVER', 'ASHBY', 'EMPLOYER_WEBSITE')
+                 AND employer_observation.source_name IN ('GREENHOUSE', 'LEVER', 'ASHBY', 'WORKDAY', 'SMARTRECRUITERS', 'WORKABLE', 'EMPLOYER_WEBSITE')
             ) AS employer_sourced,
             availability.availability_current
        FROM raw_job_observations observation
