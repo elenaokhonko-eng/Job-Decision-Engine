@@ -1,0 +1,230 @@
+{
+  "fixture_notice": "Synthetic data only. Ids, scores and outcomes are fictional and hand-set to overlap; no real jobs, employers, salaries or profile data.",
+  "version": 1,
+  "jobs": [
+    {
+      "id": "bench-fit-01",
+      "label": "FIT",
+      "matchScore": 88,
+      "coverageScore": 84,
+      "outcome": "PRIORITY",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-02",
+      "label": "FIT",
+      "matchScore": 84,
+      "coverageScore": 84,
+      "outcome": "PRIORITY",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-03",
+      "label": "FIT",
+      "matchScore": 81,
+      "coverageScore": 85,
+      "outcome": "PRIORITY",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-04",
+      "label": "FIT",
+      "matchScore": 79,
+      "coverageScore": 75,
+      "outcome": "PRIORITY",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-05",
+      "label": "FIT",
+      "matchScore": 77,
+      "coverageScore": 77,
+      "outcome": "PRIORITY",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-06",
+      "label": "FIT",
+      "matchScore": 74,
+      "coverageScore": 78,
+      "outcome": "PRIORITY",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-07",
+      "label": "FIT",
+      "matchScore": 71,
+      "coverageScore": 67,
+      "outcome": "PRIORITY",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-08",
+      "label": "FIT",
+      "matchScore": 68,
+      "coverageScore": 68,
+      "outcome": "REVIEW",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-09",
+      "label": "FIT",
+      "matchScore": 63,
+      "coverageScore": 67,
+      "outcome": "REVIEW",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-10",
+      "label": "FIT",
+      "matchScore": 58,
+      "coverageScore": 54,
+      "outcome": "REVIEW",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-11",
+      "label": "FIT",
+      "matchScore": 52,
+      "coverageScore": 52,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-12",
+      "label": "FIT",
+      "matchScore": 47,
+      "coverageScore": 51,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-13",
+      "label": "FIT",
+      "matchScore": 41,
+      "coverageScore": 37,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-fit-14",
+      "label": "FIT",
+      "matchScore": 35,
+      "coverageScore": 35,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-01",
+      "label": "NON_FIT",
+      "matchScore": 76,
+      "coverageScore": 76,
+      "outcome": "PRIORITY",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-02",
+      "label": "NON_FIT",
+      "matchScore": 69,
+      "coverageScore": 66,
+      "outcome": "REVIEW",
+      "eligibility": "NEEDS_VERIFICATION"
+    },
+    {
+      "id": "bench-nonfit-03",
+      "label": "NON_FIT",
+      "matchScore": 64,
+      "coverageScore": 58,
+      "outcome": "REVIEW",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-04",
+      "label": "NON_FIT",
+      "matchScore": 57,
+      "coverageScore": 57,
+      "outcome": "REVIEW",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-05",
+      "label": "NON_FIT",
+      "matchScore": 51,
+      "coverageScore": 48,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-06",
+      "label": "NON_FIT",
+      "matchScore": 46,
+      "coverageScore": 40,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-07",
+      "label": "NON_FIT",
+      "matchScore": 42,
+      "coverageScore": 42,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-08",
+      "label": "NON_FIT",
+      "matchScore": 38,
+      "coverageScore": 35,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-09",
+      "label": "NON_FIT",
+      "matchScore": 33,
+      "coverageScore": 27,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-10",
+      "label": "NON_FIT",
+      "matchScore": 29,
+      "coverageScore": 29,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-11",
+      "label": "NON_FIT",
+      "matchScore": 24,
+      "coverageScore": 21,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-12",
+      "label": "NON_FIT",
+      "matchScore": 19,
+      "coverageScore": 13,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-13",
+      "label": "NON_FIT",
+      "matchScore": 14,
+      "coverageScore": 14,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    },
+    {
+      "id": "bench-nonfit-14",
+      "label": "NON_FIT",
+      "matchScore": 9,
+      "coverageScore": 6,
+      "outcome": "SKIP",
+      "eligibility": "ELIGIBLE"
+    }
+  ]
+}
