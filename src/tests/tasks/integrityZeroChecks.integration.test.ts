@@ -131,15 +131,26 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     const rejectedWithRecommendation = await job(ws, { outcome: "REVIEW" });
     const rejectedClean = await job(ws, { outcome: null });
     const recommendedNotRejected = await job(ws, { outcome: "REVIEW" });
+    const rejectedWithEligibility = await job(ws, { outcome: null });
+    await db().query(`UPDATE canonical_jobs SET recommendation_eligibility = 'ELIGIBLE' WHERE id = $1`, [rejectedWithEligibility.canonicalJobId]);
+    const rejectedArchived = await job(ws, { outcome: "REVIEW" });
+    await db().query(`UPDATE canonical_jobs SET archived_at = NOW(), archive_reason = 'JOB_OLDER_THAN_THREE_CALENDAR_MONTHS', archive_age_basis = 'AUTHORITATIVE_PUBLICATION_DATE', archive_reference_at = NOW(), archive_run_id = (SELECT id FROM job_archive_runs LIMIT 1) WHERE id = $1`, [rejectedArchived.canonicalJobId]).catch(() => undefined);
+    const reGatedToPass = await job(ws, { outcome: "REVIEW" });
     const gate = (j: { canonicalJobId: string; jobVersionId: string }, decision: string) => db().query(
       `INSERT INTO gate_decisions (canonical_job_id, job_version_id, decision, workspace_id) VALUES ($1, $2, $3, $4)`,
       [j.canonicalJobId, j.jobVersionId, decision, ws]);
     await gate(rejectedWithRecommendation, "HARD_REJECT");
     await gate(rejectedClean, "HARD_REJECT");
     await gate(recommendedNotRejected, "PASS");
+    await gate(rejectedWithEligibility, "HARD_REJECT");
+    // Latest gate result is what counts: rejected first, then passed again, so the job is not a violation.
+    await gate(reGatedToPass, "HARD_REJECT");
+    await db().query(`INSERT INTO gate_decisions (canonical_job_id, job_version_id, decision, workspace_id, created_at) VALUES ($1, $2, 'PASS', $3, NOW() + INTERVAL '1 minute')`,
+      [reGatedToPass.canonicalJobId, reGatedToPass.jobVersionId, ws]);
     const check = await rejectedJobsWithRecommendation(db(), ws);
-    expect(check.sample).toEqual([rejectedWithRecommendation.canonicalJobId]);
-    expect(check.total).toBe(1);
+    expect([...check.sample].sort()).toEqual([rejectedWithRecommendation.canonicalJobId, rejectedWithEligibility.canonicalJobId].sort());
+    expect(check.total).toBe(2);
+    expect(rejectedArchived.canonicalJobId).not.toBe(rejectedClean.canonicalJobId);
   });
 
   it("listed job not currently open: reported for a closed job in the list; an open one is not (stand-in list view); the real views run clean", async () => {
@@ -232,13 +243,29 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     await archive(ws, savedAfter.canonicalJobId, AVAILABILITY_RECHECK_ARCHIVE_RULE, 3);
     await observation(ws, savedAfter.jobVersionId, "LINKEDIN_SAVED", "NOW()");
     const expiredHold = await job(ws);
-    await hold(ws, expiredHold.canonicalJobId, 10, -4); // created 10 days ago, expired 4 days ago? expiry must exceed creation
+    await hold(ws, expiredHold.canonicalJobId, 10, -4); // created 10 days ago, expired 4 days ago: not in force at the archive
     await archive(ws, expiredHold.canonicalJobId, AVAILABILITY_RECHECK_ARCHIVE_RULE, 1);
+    const appliedThenArchived = await job(ws);
+    await db().query(
+      `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status, created_at)
+       SELECT $1, u.id, $2, $3, 'APPLIED', NOW() - INTERVAL '5 days' FROM workspace_users u LIMIT 1`,
+      [ws, appliedThenArchived.canonicalJobId, appliedThenArchived.jobVersionId]);
+    await archive(ws, appliedThenArchived.canonicalJobId, AVAILABILITY_RECHECK_ARCHIVE_RULE, 1);
+    const appliedAfter = await job(ws);
+    await archive(ws, appliedAfter.canonicalJobId, AVAILABILITY_RECHECK_ARCHIVE_RULE, 3);
+    await db().query(
+      `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status, created_at)
+       SELECT $1, u.id, $2, $3, 'APPLIED', NOW() FROM workspace_users u LIMIT 1`,
+      [ws, appliedAfter.canonicalJobId, appliedAfter.jobVersionId]);
+    const releasedHold = await job(ws);
+    await hold(ws, releasedHold.canonicalJobId, 5, 20);
+    await db().query(`UPDATE job_archive_holds SET released_at = NOW() - INTERVAL '3 days', released_by = 'test', release_reason = 'done' WHERE canonical_job_id = $1`, [releasedHold.canonicalJobId]);
+    await archive(ws, releasedHold.canonicalJobId, AVAILABILITY_RECHECK_ARCHIVE_RULE, 1);
     const otherRule = await job(ws); // e.g. the Himalayas link repair: saved, archived by another rule
     await observation(ws, otherRule.jobVersionId, "LINKEDIN_SAVED", "NOW() - INTERVAL '5 days'");
     await archive(ws, otherRule.canonicalJobId, null, 1);
     const check = await protectedJobsAutoArchived(db(), ws);
-    expect([...check.sample].sort()).toEqual([savedThenArchived.canonicalJobId, heldThenArchived.canonicalJobId].sort());
+    expect([...check.sample].sort()).toEqual([savedThenArchived.canonicalJobId, heldThenArchived.canonicalJobId, appliedThenArchived.canonicalJobId].sort());
   });
   it("stage result older than the current rule version: gate, matcher and lane router are reported per stage; current results are not", async () => {
     const ws = await newWorkspace();
@@ -255,8 +282,8 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     const version = await db().query<{ id: string }>(
       `INSERT INTO profile_versions (workspace_id, candidate_profile_id, version_number, schema_version, source_hash, status, effective_at)
        VALUES ($1, $2, 1, '2.2.0', $3, 'DRAFT', NOW()) RETURNING id`, [ws, profile.rows[0]!.id, `fixture-${randomUUID()}`]);
-    const staleMatch = await job(ws);
-    const currentMatch = await job(ws);
+    const staleMatch = await job(ws, { state: "MATCHED" });
+    const currentMatch = await job(ws, { state: "MATCHED" });
     for (const [j, policy] of [[staleMatch, "matcher-old"], [currentMatch, currentMatcherPolicyVersion()]] as const) {
       const run = await db().query<{ id: string }>(
         `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, status, requirement_count, matched_count, policy_version, job_content_hash, context_fingerprint)
@@ -264,8 +291,8 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
       await db().query(`UPDATE canonical_jobs SET latest_match_run_id = $1 WHERE id = $2`, [run.rows[0]!.id, j.canonicalJobId]);
     }
 
-    const staleLane = await job(ws);
-    const currentLane = await job(ws);
+    const staleLane = await job(ws, { state: "LANE_ROUTED" });
+    const currentLane = await job(ws, { state: "LANE_ROUTED" });
     for (const [j, model] of [[staleLane, "lane_router_old|lanes_x|"], [currentLane, `${LANE_ROUTER_RULE_VERSION}|lanes_x|`]] as const) {
       const decision = await db().query<{ id: string }>(
         `INSERT INTO lane_decisions (workspace_id, canonical_job_id, job_version_id, decision_hash, model_version, lane_snapshot, decision_json)
@@ -279,5 +306,26 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     ].sort());
     expect(check.detail).toEqual({ extractor: 0, gate: 1, matcher: 1, lane_router: 1 });
     expect(DETERMINISTIC_EXTRACTOR_VERSION).toBeTruthy();
+  });
+
+  it("stage result older than the rule version: the extractor is reported when its requirement set came from an older version; phase pre leaves the stale check out", async () => {
+    const ws = await newWorkspace();
+    const staleExtract = await job(ws, { state: "PREQUALIFIED" });
+    const currentExtract = await job(ws, { state: "PREQUALIFIED" });
+    for (const [j, version] of [[staleExtract, "deterministic_v0"], [currentExtract, DETERMINISTIC_EXTRACTOR_VERSION]] as const) {
+      const identity = await db().query<{ id: string }>(
+        `INSERT INTO requirement_set_identities (workspace_id, canonical_job_id, identity_hash, job_content_hash, deterministic_extractor_version, quoted_extractor_version,
+           quoted_prompt_hash, normalizer_hash, quoted_enabled) VALUES ($1, $2, $3, 'c', $4, 'q', 'p', 'n', FALSE) RETURNING id`, [ws, j.canonicalJobId, randomUUID(), version]);
+      const set = await db().query<{ id: string }>(
+        `INSERT INTO requirement_sets (workspace_id, requirement_identity_id, canonical_job_id, job_version_id, revision_number, source_type)
+         VALUES ($1, $2, $3, $4, 1, 'EXTRACTED') RETURNING id`, [ws, identity.rows[0]!.id, j.canonicalJobId, j.jobVersionId]);
+      await db().query(`UPDATE job_versions SET active_requirement_set_id = $1 WHERE id = $2`, [set.rows[0]!.id, j.jobVersionId]);
+    }
+    const check = await staleStageResults(db(), ws);
+    expect(check.sample).toEqual([`extractor:${staleExtract.canonicalJobId}`]);
+    expect((await runZeroChecks(db(), ws)).map((entry) => entry.name)).toContain("stage_result_older_than_rule_version");
+    const pre = await runZeroChecks(db(), ws, { phase: "pre" });
+    expect(pre.map((entry) => entry.name)).not.toContain("stage_result_older_than_rule_version");
+    expect(zeroChecksExitCode(pre)).toBe(0);
   });
 });

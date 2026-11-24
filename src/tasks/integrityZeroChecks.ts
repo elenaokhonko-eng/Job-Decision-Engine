@@ -162,6 +162,8 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
               JOIN requirement_sets rs ON rs.workspace_id = jv.workspace_id AND rs.id = jv.active_requirement_set_id
               JOIN requirement_set_identities ri ON ri.workspace_id = rs.workspace_id AND ri.id = rs.requirement_identity_id
              WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+               AND COALESCE(c.processing_state, c.processing_status) IN
+                   ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'ROUTING_DEFERRED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED')
                AND ri.deterministic_extractor_version IS DISTINCT FROM $2`,
       params: [DETERMINISTIC_EXTRACTOR_VERSION],
     },
@@ -181,7 +183,10 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
               FROM canonical_jobs c
               JOIN match_runs mr ON mr.workspace_id = c.workspace_id AND mr.id = c.latest_match_run_id
              WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
-               AND mr.policy_version IS DISTINCT FROM $2`,
+               AND mr.policy_version IS DISTINCT FROM $2
+               -- The states the matcher re-seed covers (routed, eligible jobs); not terminal or never-routed ones.
+               AND COALESCE(c.processing_state, c.processing_status) IN
+                   ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED', 'DEFERRED_BUDGET')`,
       params: [currentMatcherPolicyVersion()],
     },
     lane_router: {
@@ -189,6 +194,11 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
               FROM canonical_jobs c
               JOIN lane_decisions ld ON ld.workspace_id = c.workspace_id AND ld.id = c.latest_lane_decision_id
              WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+               -- Only the states the lane seeds reopen: the routing pool and the routed/matched jobs the
+               -- superseded-routing seed covers. Terminal states (hard rejected, manual review) are not re-routed.
+               AND (COALESCE(c.processing_state, c.processing_status) IN
+                      ('PREQUALIFIED', 'ROUTING_DEFERRED', 'UNMATCHED', 'LANE_ROUTED', 'MATCHED', 'DEFERRED_BUDGET')
+                    OR ${routableWorkabilityVerificationSql("c")})
                AND LEFT(ld.model_version, LENGTH($2)) IS DISTINCT FROM $2`,
       params: [LANE_ROUTER_RULE_VERSION],
     },
@@ -203,14 +213,24 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
   return result("stage_result_older_than_rule_version", ids, detail);
 }
 
-export async function runZeroChecks(db: Queryable, workspaceId: string): Promise<ZeroCheckResult[]> {
+/**
+ * `phase` "pre" is for a run BEFORE a drain: it leaves out the stale-stage check, which is non-zero by design
+ * right after a rule-version change until the reopen seeds have drained. The default, "post", is strict
+ * and runs every check.
+ */
+export async function runZeroChecks(
+  db: Queryable,
+  workspaceId: string,
+  options: { phase?: "pre" | "post" } = {},
+): Promise<ZeroCheckResult[]> {
+  const stale = options.phase === "pre" ? [] : [await staleStageResults(db, workspaceId)];
   return [
     await rejectedJobsWithRecommendation(db, workspaceId),
     await listedJobsNotCurrentlyOpen(db, workspaceId),
     await completedTasksWithoutResult(db, workspaceId),
     await routableVerificationJobsStranded(db, workspaceId),
     await protectedJobsAutoArchived(db, workspaceId),
-    await staleStageResults(db, workspaceId),
+    ...stale,
   ];
 }
 

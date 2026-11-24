@@ -61,8 +61,10 @@ function parseArgs(argv: string[]): {
   workspaceKey?: string;
   userKey?: string;
   json: boolean;
+  /** "pre" (before a drain) leaves out the stale-stage check; the default "post" is strict. */
+  phase: "pre" | "post";
 } {
-  const out: { workspaceKey?: string; userKey?: string; json: boolean } = { json: false };
+  const out: { workspaceKey?: string; userKey?: string; json: boolean; phase: "pre" | "post" } = { json: false, phase: "post" };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--workspace-key" && argv[i + 1]) {
@@ -71,6 +73,10 @@ function parseArgs(argv: string[]): {
       out.userKey = String(argv[++i]).trim();
     } else if (arg === "--json") {
       out.json = true;
+    } else if (arg === "--phase=pre" || arg === "--phase=post") {
+      out.phase = arg === "--phase=pre" ? "pre" : "post";
+    } else if (arg.startsWith("--phase=")) {
+      throw new Error("--phase must be pre or post.");
     }
   }
   return out;
@@ -458,7 +464,7 @@ async function run(): Promise<void> {
       task_states: taskStates,
       evaluation_queue_states: evaluationQueueStates,
       funnel: { ...funnel.rows[0] },
-      zero_checks: await runZeroChecks(client, ctx.workspaceId),
+      zero_checks: await runZeroChecks(client, ctx.workspaceId, { phase: args.phase }),
       content_completeness: {
         awaiting_content_jobs: awaitingOutputs.awaitingContentJobs,
         awaiting_with_gate_lane_or_recommendation: awaitingOutputs.violations.length,
