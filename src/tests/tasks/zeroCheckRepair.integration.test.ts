@@ -264,9 +264,10 @@ describe.skipIf(skipReal)("zero-check repair (PostgreSQL)", () => {
   it("a decision row exists but latest_deterministic_decision_id is NULL: reported, repaired by a forced decide, and no job loses a result or a protected status", async () => {
     const job = await s().seedRoutableJob("decision-id-null");
     const protectedJob = await s().seedRoutableJob("protected");
-    for (const j of [job, protectedJob]) await markComplete(j);
+    const closedByRouter = await s().seedRoutableJob("closed-by-router");
+    for (const j of [job, protectedJob, closedByRouter]) await markComplete(j);
     await s().publishEmbeddings();
-    for (const j of [job, protectedJob]) await startPipeline(j, "decision-id");
+    for (const j of [job, protectedJob, closedByRouter]) await startPipeline(j, "decision-id");
     expect((await runWorker()).failed).toBe(0);
     await s().db.query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE workspace_id = $1 AND status <> 'COMPLETED'`, [s().ctx.workspaceId]);
     // A protected job: the owner applied to it and holds it.
@@ -277,6 +278,10 @@ describe.skipIf(skipReal)("zero-check repair (PostgreSQL)", () => {
       `INSERT INTO job_archive_holds (workspace_id, canonical_job_id, hold_reason, hold_type, created_by, expires_at)
        VALUES ($1, $2, 'owner keeps it', 'USER_PRESERVE', 'test', NOW() + INTERVAL '30 days')`,
       [s().ctx.workspaceId, protectedJob.canonicalJobId]);
+    // An UNMATCHED job the router closed with SKIP never carries a decision id, by design: not drift.
+    await s().db.query(
+      `UPDATE canonical_jobs SET processing_state = 'UNMATCHED', processing_status = 'UNMATCHED', routing_disposition = 'POLICY_NO_MATCH',
+              recommendation_outcome = 'SKIP', latest_deterministic_decision_id = NULL WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, closedByRouter.canonicalJobId]);
     // Only the copy column is lost: the outcome stays, the decision row exists.
     await s().db.query(`UPDATE canonical_jobs SET latest_deterministic_decision_id = NULL WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, job.canonicalJobId]);
     expect((await totals()).canonical_copy_columns_drift).toBe(1);

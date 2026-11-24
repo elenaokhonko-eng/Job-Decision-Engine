@@ -131,7 +131,7 @@ export async function routableVerificationJobsStranded(db: Queryable, workspaceI
 
 /**
  * A live job whose canonical copy columns lag its stage results: a decision row exists for its current job version, and
- * either latest_deterministic_decision_id is NULL, or it sits in PREQUALIFIED, LANE_ROUTED or MATCHED with no
+ * either latest_deterministic_decision_id is NULL (never on an UNMATCHED job, which the router and matcher close themselves), or it sits in PREQUALIFIED, LANE_ROUTED or MATCHED with no
  * recommendation outcome; nothing is queued for it. A
  * re-gate that resets the copy columns while the version-keyed successor tasks are already COMPLETED leaves it so:
  * every stage task reads done, the job reads unfinished.
@@ -148,7 +148,11 @@ export async function canonicalCopyColumnsDrift(db: Queryable, workspaceId: stri
         AND EXISTS (SELECT 1 FROM deterministic_decisions d WHERE d.workspace_id = c.workspace_id AND d.job_version_id = c.latest_job_version_id)
         AND (
           (COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'LANE_ROUTED', 'MATCHED') AND c.recommendation_outcome IS NULL)
-          OR c.latest_deterministic_decision_id IS NULL
+          -- A missing decision id is drift except where it is by design: the router writes SKIP on an UNMATCHED job itself and
+          -- the matcher writes UNMATCHED, so those jobs never carry latest_deterministic_decision_id (a decide recompute could
+          -- also turn their SKIP into TRACK); a removed job is not live.
+          OR (c.latest_deterministic_decision_id IS NULL
+              AND COALESCE(c.processing_state, c.processing_status) NOT IN ('UNMATCHED', 'MANUALLY_REMOVED'))
         )
         AND NOT EXISTS (SELECT 1 FROM active a WHERE a.canonical_job_id = c.id::text)
         AND NOT EXISTS (SELECT 1 FROM active a WHERE a.job_version_id = c.latest_job_version_id::text)
