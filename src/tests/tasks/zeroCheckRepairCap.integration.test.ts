@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { isLocalPostgresConnectionString } from "../../db/pgSsl.js";
 import { findTasksCompletedWithoutResult } from "../../tasks/completedWithoutResult.js";
 import { applyZeroCheckRepairs, planZeroCheckRepairs } from "../../tasks/zeroCheckRepair.js";
+import { insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
 import { openPipelineStack, type PipelineStack } from "../fixtures/pipelineStackFixture.js";
 
 // The reporting sample of the completed-without-result check is clamped to 200 rows; the repair must see every
@@ -24,8 +25,8 @@ async function routedJobWithCompletedMatch(): Promise<{ canonicalJobId: string; 
   const jobVersionId = randomUUID();
   const { db, ctx } = s();
   await db.query(
-    `INSERT INTO canonical_jobs (id, workspace_id, company_name, normalized_title, canonical_url, processing_state, processing_status)
-     VALUES ($1, $2, 'Cap Fixture Co', 'fixture role', $3, 'LANE_ROUTED', 'LANE_ROUTED')`,
+    `INSERT INTO canonical_jobs (id, workspace_id, company_name, normalized_title, canonical_url, processing_state, processing_status, description_quality_status)
+     VALUES ($1, $2, 'Cap Fixture Co', 'fixture role', $3, 'LANE_ROUTED', 'LANE_ROUTED', 'COMPLETE')`,
     [canonicalJobId, ctx.workspaceId, `https://example.test/cap/${canonicalJobId}`],
   );
   await db.query(
@@ -33,6 +34,10 @@ async function routedJobWithCompletedMatch(): Promise<{ canonicalJobId: string; 
     [jobVersionId, ctx.workspaceId, canonicalJobId, `h-${jobVersionId}`],
   );
   await db.query(`UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE id = $2`, [jobVersionId, canonicalJobId]);
+  await insertCompletePostingEvidence(db, {
+    workspaceId: ctx.workspaceId, jobVersionId, companyName: "Cap Fixture Co", title: "fixture role",
+    sourceUrl: `https://example.test/cap/${jobVersionId}`, description: "Synthetic decidable posting text.",
+  });
   await db.query(
     `INSERT INTO pipeline_tasks (id, workspace_id, task_type, task_key, payload, status, completed_at)
      VALUES ($1, $2, 'MATCH_PROFILE_EVIDENCE', $3, $4::jsonb, 'COMPLETED', NOW())`,

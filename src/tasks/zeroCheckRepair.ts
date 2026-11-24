@@ -81,6 +81,14 @@ export interface ZeroCheckRepairPlan {
   readonly repairedButStillViolating: { readonly count: number; readonly ids: readonly string[] };
 }
 
+/**
+ * The router, matcher and decider select only a job version with a complete description and source content evidence. For
+ * a version without them the stage task cannot succeed, so the job is reported as awaiting content instead of enqueued (never a dead letter).
+ */
+function needsDecidableVersion(entry: RepairEntryTaskType): boolean {
+  return entry !== "PUBLISH_EMBEDDING";
+}
+
 /** Default cap on tasks one apply run inserts. */
 export const DEFAULT_MAX_REPAIR_TASKS = 200;
 
@@ -192,25 +200,25 @@ export async function planZeroCheckRepairs(db: Queryable, workspaceId: string): 
 
   // A decision cannot be written for a version the decider cannot select (incomplete description or no source
   // evidence): the job is awaiting content, reported as unrepairable here instead of queueing attempts that cannot succeed.
-  const decideItems = orderedAll.filter((item) => item.entry === "DECIDE_RECOMMENDATION");
+  const guardedItems = orderedAll.filter((item) => needsDecidableVersion(item.entry));
   const undecidable = new Set<string>();
-  if (decideItems.length > 0) {
+  if (guardedItems.length > 0) {
     const { rows } = await db.query<{ id: string }>(
       `SELECT v.id::text AS id FROM job_versions v JOIN canonical_jobs c ON c.workspace_id = v.workspace_id AND c.id = v.canonical_job_id
         WHERE v.workspace_id = $1::uuid AND v.id = ANY($2::uuid[]) AND ${decidableJobVersionSql("c", "v")}`,
-      [workspaceId, decideItems.map((item) => item.jobVersionId)],
+      [workspaceId, guardedItems.map((item) => item.jobVersionId)],
     );
     const decidable = new Set(rows.map((row) => row.id));
-    for (const item of decideItems) if (!decidable.has(item.jobVersionId)) undecidable.add(item.jobVersionId);
+    for (const item of guardedItems) if (!decidable.has(item.jobVersionId)) undecidable.add(item.jobVersionId);
   }
   const awaiting = new Map<string, string[]>();
-  for (const item of orderedAll) if (undecidable.has(item.jobVersionId) && item.entry === "DECIDE_RECOMMENDATION") {
+  for (const item of orderedAll) if (undecidable.has(item.jobVersionId) && needsDecidableVersion(item.entry)) {
     (awaiting.get(item.kind) ?? awaiting.set(item.kind, []).get(item.kind)!).push(item.canonicalJobId);
   }
   for (const [kind, ids] of awaiting) {
     unrepairable.push({ check: kind, reason: "awaiting content: the current version is not decidable", count: ids.length, ids: ids.slice(0, 10) });
   }
-  const ordered = orderedAll.filter((item) => !(item.entry === "DECIDE_RECOMMENDATION" && undecidable.has(item.jobVersionId)));
+  const ordered = orderedAll.filter((item) => !(needsDecidableVersion(item.entry) && undecidable.has(item.jobVersionId)));
 
   // A job that already has an active task of the entry stage, or a repair of that stage queued for the same rule
   // version under any kind, gets nothing more: two kinds on one job never queue two forced tasks.
