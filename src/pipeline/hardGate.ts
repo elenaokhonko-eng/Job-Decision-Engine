@@ -899,18 +899,31 @@ export function evaluateHardGatesForJob(input: {
 }
 
 /**
- * True when the stored gate decision for this job version has the same decision and the same set of codes as the gate result
- * just computed (the canonical gate_decision must agree too). Used by the version-refresh path.
+ * How a version-refresh re-gate relates to the stored gate decision of this job version.
+ *  - STAMP: same decision and same set of codes (the canonical gate_decision must agree too).
+ *  - CLEAR_FLAG: the stored decision is a flagNeedsVerification flag (facts_conflict present) and the gate now passes: the flag is
+ *    cleared like a stamp, without resetting downstream state.
+ *  - RESET: anything else; the normal reset path runs.
+ * Compared: decision and code set. NOT compared: evidence quotes, workability facts and the policy hash (the stamp refreshes the
+ * gate-owned canonical columns from the new result) and workplace_type (the work-mode enrichment writes it before the gate runs,
+ * from the posting text; it is not downstream state and is not part of the gate outcome).
  */
-async function gateOutcomeUnchanged(
+type GateRefreshKind = "STAMP" | "CLEAR_FLAG" | "RESET";
+interface GateRefreshClassification {
+  kind: GateRefreshKind;
+  storedFacts: Record<string, unknown> | null;
+  storedQuotes: string[];
+}
+
+async function classifyGateRefresh(
   client: { query: (text: string, values?: unknown[]) => Promise<{ rows: any[] }> },
   workspaceId: string,
   jobId: string,
   jobVersionId: string,
   result: { status: string; rejection_codes: readonly string[] },
-): Promise<boolean> {
+): Promise<GateRefreshClassification> {
   const { rows } = await client.query(
-    `SELECT gd.decision, gd.rejection_codes, c.gate_decision
+    `SELECT gd.decision, gd.rejection_codes, c.gate_decision, c.workability_facts, c.gate_evidence_quotes
        FROM canonical_jobs c
        JOIN LATERAL (
          SELECT decision, rejection_codes FROM gate_decisions
@@ -921,9 +934,18 @@ async function gateOutcomeUnchanged(
     [workspaceId, jobId, jobVersionId],
   );
   const stored = rows[0];
-  if (!stored || stored.decision !== result.status || stored.gate_decision !== result.status) return false;
+  const reset: GateRefreshClassification = { kind: "RESET", storedFacts: null, storedQuotes: [] };
+  if (!stored || stored.gate_decision !== stored.decision) return reset;
+  const storedFacts = (stored.workability_facts ?? null) as Record<string, unknown> | null;
+  const storedQuotes = Array.isArray(stored.gate_evidence_quotes) ? stored.gate_evidence_quotes.map(String) : [];
   const codes = (value: unknown): string => (Array.isArray(value) ? [...new Set(value.map(String))].sort().join("|") : "");
-  return codes(stored.rejection_codes) === codes(result.rejection_codes);
+  if (stored.decision === result.status && codes(stored.rejection_codes) === codes(result.rejection_codes)) {
+    return { kind: "STAMP", storedFacts, storedQuotes };
+  }
+  if (stored.decision === "NEEDS_VERIFICATION" && result.status === "PASS" && storedFacts && storedFacts.facts_conflict) {
+    return { kind: "CLEAR_FLAG", storedFacts, storedQuotes };
+  }
+  return reset;
 }
 
 export async function runHardGates(
@@ -952,13 +974,14 @@ export async function runHardGates(
     /** Alias retained for direct callers that already use the shorter name. */
     answerContext?: VerificationAnswerContext | null;
   }
-): Promise<{ passed: number; hardRejected: number; needsVerification: number; errors: number }> {
+): Promise<{ passed: number; hardRejected: number; needsVerification: number; errors: number; /** Jobs whose version-refresh re-gate only stamped the audit row (outcome unchanged or flag cleared). */ stamped?: number }> {
   console.log("Starting Hard Gate engine on RAW_STAGED canonical jobs...");
   const pool = clientOrPool || defaultPool;
 
   let passedCount = 0;
   let rejectedCount = 0;
   let needsVerificationCount = 0;
+  let stampedCount = 0;
   let errorCount = 0;
 
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
@@ -1233,11 +1256,39 @@ export async function runHardGates(
         }
 
         // Version refresh with an unchanged outcome: stamp the new gate_version in the audit row only.
-        const stampOnly = options?.versionRefresh === true
-          && await gateOutcomeUnchanged(client as any, ctx.workspaceId, job.id, job.job_version_id, gateResult);
+        const refresh: GateRefreshClassification = options?.versionRefresh === true
+          ? await classifyGateRefresh(client as any, ctx.workspaceId, job.id, job.job_version_id, gateResult)
+          : { kind: "RESET", storedFacts: null, storedQuotes: [] };
+        const stampOnly = refresh.kind !== "RESET";
 
         // Update canonical job with gate outcome + structured workability facts + evidence
-        const canonicalUpdate = stampOnly ? { rowCount: 1 } : await client.query(
+        // A stamp refreshes the gate-OWNED columns only (quotes, facts, rejection reason); a cleared flag also takes the new PASS and, for a
+        // job still waiting at the gate, moves it on. Lane, match, decision, score, the ranking columns and evaluations stay as they are.
+        const keepFlagConflict = refresh.kind === "STAMP" && refresh.storedFacts?.facts_conflict
+          ? { facts_conflict: refresh.storedFacts.facts_conflict }
+          : {};
+        const stampFacts = { ...gateResult.workability_facts, ...keepFlagConflict };
+        const stampQuotes = refresh.kind === "STAMP" && refresh.storedFacts?.facts_conflict
+          ? [...new Set([...refresh.storedQuotes, ...gateResult.evidence_quotes])]
+          : gateResult.evidence_quotes;
+        const canonicalUpdate = stampOnly
+          ? await client.query(
+            `UPDATE canonical_jobs
+                SET gate_evidence_quotes = $3::jsonb,
+                    workability_facts = $4::jsonb,
+                    rejection_reason = $5,
+                    gate_decision = CASE WHEN $6::boolean THEN 'PASS' ELSE gate_decision END,
+                    processing_state = CASE WHEN $6::boolean AND COALESCE(processing_state, processing_status) = 'NEEDS_VERIFICATION' THEN 'PREQUALIFIED' ELSE processing_state END,
+                    processing_status = CASE WHEN $6::boolean AND COALESCE(processing_state, processing_status) = 'NEEDS_VERIFICATION' THEN 'PREQUALIFIED' ELSE processing_status END,
+                    updated_at = NOW()
+              WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL`,
+            [
+              ctx.workspaceId, job.id, JSON.stringify(stampQuotes), JSON.stringify(stampFacts),
+              gateResult.rejection_codes.length > 0 ? gateResult.rejection_codes.join(", ") : null,
+              refresh.kind === "CLEAR_FLAG",
+            ],
+          )
+          : await client.query(
           `UPDATE canonical_jobs
            SET gate_decision      = $1::varchar,
                processing_state   = $2,
@@ -1296,8 +1347,8 @@ export async function runHardGates(
           workability_policy_hash: policyResolution.policyHash,
           status: gateResult.status,
           rejection_codes: gateResult.rejection_codes,
-          evidence_quotes: gateResult.evidence_quotes,
-          workability_facts: gateResult.workability_facts,
+          evidence_quotes: stampOnly ? stampQuotes : gateResult.evidence_quotes,
+          workability_facts: stampOnly ? stampFacts : gateResult.workability_facts,
           evaluated_at: new Date().toISOString(),
         });
 
@@ -1307,8 +1358,8 @@ export async function runHardGates(
              workspace_id,
              canonical_job_id, job_version_id, pipeline_run_id, gate_version, workability_policy_hash,
              decision, rejection_codes, evidence_quotes, workability_facts,
-             preference_user_id, preference_context_id
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+             preference_user_id, preference_context_id, created_at
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, clock_timestamp())`,
           [
             ctx.workspaceId,
             persistedGateDecision.canonical_job_id,
@@ -1326,6 +1377,7 @@ export async function runHardGates(
         );
 
         await client.query("COMMIT");
+        if (stampOnly) stampedCount++;
 
         const codeStr = gateResult.rejection_codes.length ? ` [${gateResult.rejection_codes.join(", ")}]` : "";
         // Job ids only: Actions logs are public, so employer names and titles are not logged.
@@ -1350,6 +1402,7 @@ export async function runHardGates(
     hardRejected: rejectedCount,
     needsVerification: needsVerificationCount,
     errors: errorCount,
+    stamped: stampedCount,
   };
 }
 
@@ -1367,7 +1420,8 @@ export async function runHardGates(
  *    row carry the flag and the decider treats the job as NEEDS_VERIFICATION. Earlier states move to NEEDS_VERIFICATION.
  *  - A later normal re-gate writes its own result; the flag is replaced only when the gate itself no longer needs verification.
  *
- * The caller owns the transaction (the availability recheck calls this inside its own).
+ * The caller owns the transaction: the row lock (FOR UPDATE) and the two writes (canonical_jobs, gate_decisions) must commit together.
+ * The availability recheck calls this inside its own transaction.
  */
 type Queryable = Pick<pg.PoolClient, "query">;
 
@@ -1393,7 +1447,7 @@ export type FlagNeedsVerificationResult =
   | { applied: false; reason: "NOT_FOUND" | "ARCHIVED" | "HARD_REJECTED" | "MANUALLY_REMOVED" | "RAW_STAGED" | "NO_JOB_VERSION" | "ALREADY_FLAGGED" };
 
 /** States past matching: the flag is recorded but the processing state is left alone. */
-const STATES_KEPT = new Set(["QUEUED_FOR_AI", "EVALUATING", "AI_EVALUATED", "EVALUATED", "DEFERRED_BUDGET", "NEEDS_MANUAL_REVIEW"]);
+const STATES_KEPT = new Set(["QUEUED_FOR_AI", "EVALUATING", "RETRY_WAIT", "AI_EVALUATED", "EVALUATED", "DEFERRED_BUDGET", "NEEDS_MANUAL_REVIEW"]);
 
 function uniqueStrings(values: readonly unknown[]): string[] {
   return [...new Set(values.filter((value): value is string => typeof value === "string" && value.trim() !== ""))];
@@ -1478,22 +1532,44 @@ export async function flagNeedsVerification(
       WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL`,
     [input.workspaceId, input.jobId, codes.join(", "), JSON.stringify(quotes), JSON.stringify(facts), stateKept],
   );
+  // The same policy identity a gate run records: the workability policy hash in force and the preference context it used.
+  const flagContext = await resolveWorkspaceContext(client as any);
+  if (flagContext.workspaceId !== input.workspaceId) throw new Error("flagNeedsVerification: the workspace does not match the resolved workspace context.");
+  const flagPreferences = await resolveWorkspacePreferenceContext(client as pg.PoolClient, flagContext, ["stage3"]);
+  const flagPolicy = await resolveEffectiveWorkabilityPolicy(client as any, { context: flagContext, stage3: flagPreferences.stage3 ?? {} });
+  const envelope = PersistedGateDecisionSchema.parse({
+    schema_version: SCHEMA_VERSION,
+    canonical_job_id: input.jobId,
+    job_version_id: job.latest_job_version_id,
+    pipeline_run_id: crypto.randomUUID(),
+    gate_version: GATE_VERSION,
+    workability_policy_hash: flagPolicy.policyHash,
+    status: "NEEDS_VERIFICATION",
+    rejection_codes: codes,
+    evidence_quotes: quotes,
+    workability_facts: facts,
+    evaluated_at: new Date().toISOString(),
+  });
+  // created_at = clock_timestamp(): within one transaction NOW() is constant, so a flag and a gate row written together would tie
+  // and order by random id; the latest-decision readers order by created_at DESC.
   const audit = await client.query<{ id: string }>(
     `INSERT INTO gate_decisions (
        workspace_id, canonical_job_id, job_version_id, pipeline_run_id, gate_version, workability_policy_hash,
-       decision, rejection_codes, evidence_quotes, workability_facts
-     ) VALUES ($1, $2, $3, $4, $5, $6, 'NEEDS_VERIFICATION', $7::jsonb, $8::jsonb, $9::jsonb)
+       decision, rejection_codes, evidence_quotes, workability_facts, preference_user_id, preference_context_id, created_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, 'NEEDS_VERIFICATION', $7::jsonb, $8::jsonb, $9::jsonb, $10, $11, clock_timestamp())
      RETURNING id`,
     [
       input.workspaceId,
-      input.jobId,
-      job.latest_job_version_id,
-      crypto.randomUUID(),
-      GATE_VERSION,
-      previous?.workability_policy_hash ?? null,
-      JSON.stringify(codes),
-      JSON.stringify(quotes),
-      JSON.stringify(facts),
+      envelope.canonical_job_id,
+      envelope.job_version_id,
+      envelope.pipeline_run_id,
+      envelope.gate_version,
+      envelope.workability_policy_hash,
+      JSON.stringify(envelope.rejection_codes),
+      JSON.stringify(envelope.evidence_quotes),
+      JSON.stringify(envelope.workability_facts),
+      flagPreferences.contextId ? flagContext.userId : null,
+      flagPreferences.contextId,
     ],
   );
   return { applied: true, stateKept, gateDecisionId: audit.rows[0]!.id };

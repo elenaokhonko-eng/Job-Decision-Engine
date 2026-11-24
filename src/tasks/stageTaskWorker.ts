@@ -3112,8 +3112,11 @@ async function executeStageTask(
   if (taskType === "APPLY_HARD_GATES") {
     const payload = (task.payload || {}) as Record<string, unknown>;
     const verificationAnswerRevisionId = optionalStringPayload(task, "verification_answer_revision_id");
+    // A gate-version refresh: re-evaluate, and when the outcome is unchanged only stamp the audit row (see runHardGates).
+    const versionRefresh = payload.version_refresh === true;
     const reprocess = payload.force_policy_recalculation === true ||
       payload.reprocess === true ||
+      versionRefresh ||
       verificationAnswerRevisionId !== undefined;
     const currentState = await lookupJobState(clientOrPool, ctx, jobVersionId);
 
@@ -3148,6 +3151,7 @@ async function executeStageTask(
       jobVersionIds: [jobVersionId],
       limit: 1,
       reprocess,
+      ...(versionRefresh ? { versionRefresh: true } : {}),
       verificationJobVersionId: jobVersionId,
       ...(verificationAnswerRevisionId
         ? { verificationAnswerRevisionId }
@@ -3155,6 +3159,10 @@ async function executeStageTask(
     });
     if (summary.errors > 0) {
       throw new Error(`Hard gate failed for job_version_id=${jobVersionId}.`);
+    }
+    if (versionRefresh && (summary.stamped ?? 0) > 0) {
+      // Stamp-only re-gate: the job keeps its state and its downstream work. Nothing to enqueue and nothing to verify.
+      return;
     }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (!["PREQUALIFIED", "HARD_REJECTED", "NEEDS_VERIFICATION"].includes(state.processingState || "")) {

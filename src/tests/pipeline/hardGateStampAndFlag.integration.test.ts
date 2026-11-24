@@ -6,6 +6,8 @@ import { GATE_VERSION } from "../../contracts/version.js";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { runHardGates, flagNeedsVerification, FLAGGABLE_REASON_CODES } from "../../pipeline/hardGate.js";
+import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
+import { runPipelineStageTaskWorker } from "../../tasks/stageTaskWorker.js";
 import { aggregateVerificationQuestions, getPendingVerificationQuestions } from "../../services/verificationQuestionService.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
@@ -51,6 +53,14 @@ async function seedJob(state: string, options: { gateDecision?: string | null } 
     workspaceId: ctx().workspaceId, jobVersionId: versionId, companyName: "Gate Flag Fixture", title: "Machine Learning Engineer",
     sourceUrl: url, description: COMPLETE_TEST_POSTING_DESCRIPTION,
   });
+  // Real gate facts: flagNeedsVerification validates the audit envelope, so the job must carry a complete workability_facts object.
+  // Run the gate once to produce it, drop that audit row, then put the job in the state and gate decision the test wants.
+  if (state !== "RAW_STAGED" && state !== "HARD_REJECTED") {
+    await db().query(`UPDATE canonical_jobs SET processing_state = 'RAW_STAGED', processing_status = 'RAW_STAGED', gate_decision = NULL WHERE id = $1`, [jobId]);
+    await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId] });
+    await db().query(`DELETE FROM gate_decisions WHERE canonical_job_id = $1`, [jobId]);
+    await db().query(`UPDATE canonical_jobs SET processing_state = $2, processing_status = $2, gate_decision = $3 WHERE id = $1`, [jobId, state, options.gateDecision === undefined ? "PASS" : options.gateDecision]);
+  }
   return { jobId, versionId };
 }
 
@@ -221,6 +231,108 @@ describe.skipIf(skipReal)("hard gate: version-refresh stamp and flagNeedsVerific
       expect(rows[1]!.decision).not.toBe("HARD_REJECT");
       const job = (await db().query(`SELECT gate_decision FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
       expect(job.gate_decision).toBe(rows[1]!.decision);
+    });
+  });
+
+  describe("version refresh details", () => {
+    async function gate(jobId: string, options: { reprocess?: boolean; versionRefresh?: boolean } = {}) {
+      return runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId], ...options });
+    }
+
+    it("a stamp refreshes the gate-owned columns (quotes, facts, rejection reason) and leaves downstream state alone", async () => {
+      const { jobId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await gate(jobId);
+      await db().query(`UPDATE canonical_jobs SET gate_evidence_quotes = '["old quote"]'::jsonb, workability_facts = '{"stale":true}'::jsonb, processing_state = 'MATCHED', processing_status = 'MATCHED', primary_lane = 'CORE_AI_DATA' WHERE id = $1`, [jobId]);
+      const summary = await gate(jobId, { reprocess: true, versionRefresh: true });
+      expect(summary.stamped).toBe(1);
+      const job = (await db().query(`SELECT gate_evidence_quotes, workability_facts, processing_state, primary_lane FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
+      expect(JSON.stringify(job.gate_evidence_quotes)).not.toContain("old quote");
+      expect(job.workability_facts.stale).toBeUndefined();
+      expect(job).toMatchObject({ processing_state: "MATCHED", primary_lane: "CORE_AI_DATA" });
+    });
+
+    it("a changed workability policy hash with the same decision is stamped with the new hash", async () => {
+      const { jobId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await gate(jobId);
+      await db().query(`UPDATE gate_decisions SET workability_policy_hash = $2 WHERE canonical_job_id = $1`, [jobId, "a".repeat(64)]);
+      await db().query(`UPDATE canonical_jobs SET processing_state = 'MATCHED', processing_status = 'MATCHED' WHERE id = $1`, [jobId]);
+      expect((await gate(jobId, { reprocess: true, versionRefresh: true })).stamped).toBe(1);
+      const hashes = (await db().query(`SELECT workability_policy_hash FROM gate_decisions WHERE canonical_job_id = $1 ORDER BY created_at, id`, [jobId])).rows.map((row) => row.workability_policy_hash);
+      expect(hashes).toHaveLength(2);
+      expect(hashes[1]).not.toBe("a".repeat(64));
+    });
+
+    it("code order and duplicates in the stored row do not make an unchanged outcome look changed", async () => {
+      const { jobId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await gate(jobId);
+      const first = (await auditRows(jobId))[0]!;
+      const reordered = [...first.rejection_codes, ...first.rejection_codes].reverse();
+      await db().query(`UPDATE gate_decisions SET rejection_codes = $2::jsonb WHERE canonical_job_id = $1`, [jobId, JSON.stringify(reordered)]);
+      await db().query(`UPDATE canonical_jobs SET processing_state = 'MATCHED', processing_status = 'MATCHED' WHERE id = $1`, [jobId]);
+      expect((await gate(jobId, { reprocess: true, versionRefresh: true })).stamped).toBe(1);
+    });
+
+    it("a hard-rejected job is stamped too (nothing downstream to keep or reset)", async () => {
+      const { jobId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await db().query(`UPDATE canonical_jobs SET workplace_type = 'ONSITE', location = 'London' WHERE id = $1`, [jobId]);
+      await gate(jobId);
+      const first = (await auditRows(jobId))[0]!;
+      const summary = await gate(jobId, { reprocess: true, versionRefresh: true });
+      expect(summary.stamped).toBe(1);
+      const rows = await auditRows(jobId);
+      expect(rows).toHaveLength(2);
+      expect(rows[1]!.decision).toBe(first.decision);
+    });
+
+    it("a flag cleared by a passing re-gate is stamped, not reset: an EVALUATED job keeps its state and downstream", async () => {
+      const { jobId } = await seedJob("EVALUATED");
+      await db().query(`UPDATE canonical_jobs SET primary_lane = 'CORE_AI_DATA', recommendation_outcome = 'REVIEW', recommendation_requirement_score = 0.6 WHERE id = $1`, [jobId]);
+      await flagNeedsVerification(db(), { workspaceId: ctx().workspaceId, jobId, reasonCode: "GATE_UNKNOWN_WORK_MODE", evidence: { quote: "The page says hybrid." } });
+      expect((await db().query(`SELECT gate_decision FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0].gate_decision).toBe("NEEDS_VERIFICATION");
+      const summary = await gate(jobId, { reprocess: true, versionRefresh: true });
+      expect(summary.stamped).toBe(1);
+      const job = (await db().query(`SELECT gate_decision, processing_state, primary_lane, recommendation_outcome, recommendation_requirement_score::float AS score, workability_facts FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
+      expect(job).toMatchObject({ gate_decision: "PASS", processing_state: "EVALUATED", primary_lane: "CORE_AI_DATA", recommendation_outcome: "REVIEW", score: 0.6 });
+      expect(job.workability_facts.facts_conflict).toBeUndefined();
+    });
+
+    it("a changed outcome resets exactly the downstream columns and nothing is stamped", async () => {
+      const { jobId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await gate(jobId);
+      await db().query(`UPDATE canonical_jobs SET processing_state = 'MATCHED', processing_status = 'MATCHED', primary_lane = 'CORE_AI_DATA', deterministic_match_score = 70, recommendation_outcome = 'REVIEW', recommendation_score_policy = 'p', recommendation_role_signals = '[{"code":"X"}]'::jsonb, workplace_type = 'ONSITE', location = 'London' WHERE id = $1`, [jobId]);
+      const summary = await gate(jobId, { reprocess: true, versionRefresh: true });
+      expect(summary.stamped).toBe(0);
+      const job = (await db().query(`SELECT processing_state, primary_lane, deterministic_match_score, recommendation_outcome, recommendation_score_policy, recommendation_role_signals FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
+      expect(job).toMatchObject({ primary_lane: null, deterministic_match_score: null, recommendation_outcome: null, recommendation_score_policy: null, recommendation_role_signals: [] });
+      expect(job.processing_state).not.toBe("MATCHED");
+    });
+
+    it("flagNeedsVerification inside the callers transaction commits or rolls back the lock, the job update and the audit row together", async () => {
+      const { jobId } = await seedJob("PREQUALIFIED");
+      await db().query("BEGIN");
+      const result = await flagNeedsVerification(db(), { workspaceId: ctx().workspaceId, jobId, reasonCode: "NEEDS_VERIFICATION_LOCATION_DETAIL", evidence: { quote: "Office in a different city than listed." } });
+      expect(result).toMatchObject({ applied: true });
+      await db().query("ROLLBACK");
+      expect((await db().query(`SELECT gate_decision FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0].gate_decision).toBe("PASS");
+      expect(await auditRows(jobId)).toHaveLength(0);
+    });
+
+    it("the APPLY_HARD_GATES handler accepts version_refresh: a stamped MATCHED job keeps its state and gets no downstream task", async () => {
+      const { jobId, versionId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await gate(jobId);
+      await db().query(`UPDATE canonical_jobs SET processing_state = 'MATCHED', processing_status = 'MATCHED', primary_lane = 'CORE_AI_DATA' WHERE id = $1`, [jobId]);
+      const task = await enqueuePipelineTask({
+        taskType: "APPLY_HARD_GATES",
+        taskKey: `APPLY_HARD_GATES:${versionId}:gate-refresh-test`,
+        payload: { canonical_job_id: jobId, job_version_id: versionId, version_refresh: true },
+      }, db(), { context: ctx() });
+      const run = await runPipelineStageTaskWorker(db(), { context: ctx(), seed: false, reconcileStalePending: false, taskTypes: ["APPLY_HARD_GATES"], maxTasks: 1, heartbeatSeconds: 0 });
+      expect(run).toMatchObject({ claimed: 1, completed: 1, failed: 0 });
+      expect((await db().query(`SELECT status FROM pipeline_tasks WHERE id = $1`, [task.taskId])).rows[0].status).toBe("COMPLETED");
+      expect((await db().query(`SELECT processing_state, primary_lane FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0]).toEqual({ processing_state: "MATCHED", primary_lane: "CORE_AI_DATA" });
+      const successors = await db().query(`SELECT task_type FROM pipeline_tasks WHERE payload->>'job_version_id' = $1 AND id <> $2`, [versionId, task.taskId]);
+      expect(successors.rows).toEqual([]);
+      expect(await auditRows(jobId)).toHaveLength(2);
     });
   });
 });
