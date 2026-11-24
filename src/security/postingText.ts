@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 
 import { decodeHtmlEntities } from "./sanitize.js";
+import { TrackedBuilder, replaceTracked, trackedFrom, trimTracked, type TrackedText } from "./trackedText.js";
 
 /** Characters that render as nothing or reorder text: zero-width, bidi, soft hyphen, BOM, tag characters. */
 const INVISIBLE_CHARS =
@@ -110,26 +111,6 @@ export interface CleanedPosting {
   readonly report: PostingCleaningReport;
 }
 
-function countMatches(text: string, pattern: RegExp): number {
-  return (text.match(pattern) ?? []).length;
-}
-
-function collapseWhitespace(text: string): string {
-  return text
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ 	\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+/g, " ")
-    .replace(/ ?\n ?/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-/** Length of a known tag starting at `index`, or 0 when the text there is not a known tag. */
-export function matchKnownTagAt(text: string, index: number): number {
-  TAG_AT.lastIndex = index;
-  const match = TAG_AT.exec(text);
-  return match && match[0].length <= MAX_TAG_CHARS && KNOWN_TAGS.has(match[2]!.toLowerCase()) ? match[0].length : 0;
-}
-
 interface MarkupCounters {
   scriptStyle: number;
   comments: number;
@@ -141,31 +122,35 @@ interface MarkupCounters {
  * Removes known tags, comments and script/style blocks in one left-to-right scan.
  * Every step moves forward, and a search that found no closer is not repeated, so the
  * work is linear in the input (no regular expression is run over the rest of the text).
+ * Every replacement keeps the raw span it stands for; dropped blocks are marked hidden.
  */
-function stripMarkup(text: string, counters: MarkupCounters): { text: string; changed: boolean } {
-  const parts: string[] = [];
+function stripMarkup(source: TrackedText, counters: MarkupCounters): { tracked: TrackedText; changed: boolean } {
+  const { text } = source;
+  const builder = new TrackedBuilder();
   const noCloser = new Set<string>();
+  const span = (from: number, to: number): [number, number] => [source.start[from]!, source.end[to - 1]!];
   let changed = false;
   let i = 0;
   while (i < text.length) {
     const lt = text.indexOf("<", i);
     if (lt === -1) {
-      parts.push(text.slice(i));
+      builder.copy(source, i, text.length);
       break;
     }
-    parts.push(text.slice(i, lt));
+    builder.copy(source, i, lt);
 
     if (text.startsWith("<!--", lt)) {
       const end = noCloser.has("comment") ? -1 : text.indexOf("-->", lt + 4);
       if (end === -1) {
         noCloser.add("comment");
         counters.unterminated += 1;
-        parts.push("<!--");
+        builder.copy(source, lt, lt + 4);
         i = lt + 4;
       } else {
         counters.comments += 1;
         changed = true;
-        parts.push(" ");
+        const [s, e] = span(lt, end + 3);
+        builder.put(" ", s, e, true);
         i = end + 3;
       }
       continue;
@@ -176,31 +161,34 @@ function stripMarkup(text: string, counters: MarkupCounters): { text: string; ch
     const name = match ? match[2]!.toLowerCase() : "";
     if (match && match[0].length <= MAX_TAG_CHARS && KNOWN_TAGS.has(name)) {
       changed = true;
-      i = lt + match[0].length;
+      const tagEnd = lt + match[0].length;
+      const [tagStart, tagStop] = span(lt, tagEnd);
+      i = tagEnd;
       if (match[1] !== "/" && (name === "script" || name === "style")) {
         const closer = noCloser.has(name) ? -1 : indexOfClosingTag(text, name, i);
         if (closer === -1) {
           noCloser.add(name);
           counters.unterminated += 1;
-          parts.push(" ");
+          builder.put(" ", tagStart, tagStop, false);
         } else {
           counters.scriptStyle += 1;
-          parts.push(" ");
+          const [s, e] = span(lt, closer);
+          builder.put(" ", s, e, true);
           i = closer;
         }
         continue;
       }
-      parts.push(BLOCK_TAGS.has(name) ? "\n" : " ");
+      builder.put(BLOCK_TAGS.has(name) ? "\n" : " ", tagStart, tagStop, false);
       continue;
     }
 
     const next = text.charCodeAt(lt + 1);
     const looksLikeTag = next === 47 || (next >= 65 && next <= 90) || (next >= 97 && next <= 122);
     if (looksLikeTag) counters.tagLike += 1;
-    parts.push("<");
+    builder.copy(source, lt, lt + 1);
     i = lt + 1;
   }
-  return { text: parts.join(""), changed };
+  return { tracked: builder.build(), changed };
 }
 
 /** Index just after the closing tag for `name` at or after `from`, or -1. Case-insensitive, one forward scan. */
@@ -219,6 +207,16 @@ function indexOfClosingTag(text: string, name: string, from: number): number {
   return -1;
 }
 
+const BLANK_RUN = /[ \t\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+/g;
+
+function collapseWhitespace(source: TrackedText): TrackedText {
+  let t = replaceTracked(source, /\r\n?/g, () => "\n");
+  t = replaceTracked(t, BLANK_RUN, () => " ");
+  t = replaceTracked(t, / ?\n ?/g, () => "\n");
+  t = replaceTracked(t, /\n{3,}/g, () => "\n\n");
+  return trimTracked(t);
+}
+
 /**
  * Detects instruction-like content. Exposed for tests and for callers that want
  * to log a flag without cleaning.
@@ -227,48 +225,82 @@ export function detectPostingInjectionFlags(text: string): PostingInjectionFlag[
   return FLAG_PATTERNS.filter(({ pattern }) => pattern.test(text)).map(({ flag }) => flag);
 }
 
-/** Cleans posting text. Non-string input is treated as an empty posting. */
-export function cleanPostingText(raw: unknown): CleanedPosting {
-  const original = typeof raw === "string" ? raw : "";
-  const truncatedChars = Math.max(0, original.length - MAX_POSTING_CHARS);
-  const input = truncatedChars > 0 ? original.slice(0, MAX_POSTING_CHARS) : original;
-  let invisible = countMatches(input, INVISIBLE_CHARS);
-  let control = countMatches(input, CONTROL_CHARS);
+export interface CleanedPostingWithOffsets extends CleanedPosting {
+  /** Where every code unit of `text` came from in the raw input. See trackedText.ts. */
+  readonly origin: TrackedText;
+}
 
-  let text = input.replace(INVISIBLE_CHARS, "").replace(CONTROL_CHARS, "");
-  // Canonical composition only. NFKC would rewrite characters such as the
-  // ligature or fraction forms, which can change a fact.
-  text = text.normalize("NFC");
+/** Cuts at the cap without splitting a surrogate pair. */
+function cutAtCap(input: string): string {
+  if (input.length <= MAX_POSTING_CHARS) return input;
+  let cut = MAX_POSTING_CHARS;
+  const last = input.charCodeAt(cut - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut -= 1;
+  return input.slice(0, cut);
+}
+
+/**
+ * Cleans posting text and keeps, for every code unit of the result, the span of the raw
+ * input it came from. Non-string input is treated as an empty posting.
+ */
+export function cleanPostingTextWithOffsets(raw: unknown): CleanedPostingWithOffsets {
+  const original = typeof raw === "string" ? raw : "";
+  const input = cutAtCap(original);
+  const truncatedChars = original.length - input.length;
+  let invisible = 0;
+  let control = 0;
+
+  const removeHidden = (t: TrackedText): TrackedText => {
+    const withoutInvisible = replaceTracked(t, INVISIBLE_CHARS, () => {
+      invisible += 1;
+      return "";
+    });
+    return replaceTracked(withoutInvisible, CONTROL_CHARS, () => {
+      control += 1;
+      return "";
+    });
+  };
+
+  let tracked = removeHidden(trackedFrom(input));
+  // Canonical composition of a base character with its combining marks only. NFKC would rewrite
+  // characters such as ligatures or fractions, which can change a fact.
+  tracked = replaceTracked(tracked, /[^\p{M}]\p{M}+/gu, (match) => match[0].normalize("NFC"));
 
   // Markup can hide a forged fence or role marker, so look before stripping too.
-  const preStripFlags = detectPostingInjectionFlags(text);
+  const preStripFlags = detectPostingInjectionFlags(tracked.text);
   const counters: MarkupCounters = { scriptStyle: 0, comments: 0, unterminated: 0, tagLike: 0 };
   let htmlStripped = false;
   const strip = (): void => {
-    const result = stripMarkup(text, counters);
-    text = result.text;
+    const result = stripMarkup(tracked, counters);
+    tracked = result.tracked;
     htmlStripped = htmlStripped || result.changed;
+  };
+  const decode = (): void => {
+    tracked = replaceTracked(tracked, /&([a-zA-Z0-9#x]+);/g, (match) => {
+      const decoded = decodeHtmlEntities(match[0]);
+      return decoded === match[0] ? null : decoded;
+    });
   };
 
   strip();
-  text = decodeHtmlEntities(text);
+  decode();
   // Escaped markup (&lt;li&gt;) becomes real markup once decoded. Decode again only while the
   // text still holds escaped known tags, so a literal "&amp;lt;" in prose stays visible text.
   // Bounded: a feed that escapes twice needs a third pass; deeper nesting is left as text.
   for (let pass = 0; pass < 3; pass += 1) {
     strip();
-    if (!ESCAPED_KNOWN_TAG.test(text)) break;
-    text = decodeHtmlEntities(text);
+    if (!ESCAPED_KNOWN_TAG.test(tracked.text)) break;
+    decode();
   }
   strip();
   // Entities can decode to invisible or control characters, so clean again.
-  invisible += countMatches(text, INVISIBLE_CHARS);
-  control += countMatches(text, CONTROL_CHARS);
-  text = collapseWhitespace(text.replace(INVISIBLE_CHARS, "").replace(CONTROL_CHARS, ""));
+  tracked = collapseWhitespace(removeHidden(tracked));
 
+  const text = tracked.text;
   const finalFlags = detectPostingInjectionFlags(text);
   return {
     text,
+    origin: tracked,
     report: {
       inputLength: original.length,
       outputLength: text.length,
@@ -283,6 +315,12 @@ export function cleanPostingText(raw: unknown): CleanedPosting {
       flags: FLAG_ORDER.filter((flag) => preStripFlags.includes(flag) || finalFlags.includes(flag)),
     },
   };
+}
+
+/** Cleans posting text. Non-string input is treated as an empty posting. */
+export function cleanPostingText(raw: unknown): CleanedPosting {
+  const { text, report } = cleanPostingTextWithOffsets(raw);
+  return { text, report };
 }
 
 /**
