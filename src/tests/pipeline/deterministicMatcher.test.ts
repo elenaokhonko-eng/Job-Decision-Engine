@@ -440,7 +440,7 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
     expect(canonicalUpdate?.[0]).toContain("latest_deterministic_decision_id = CASE WHEN $8::boolean THEN NULL ELSE latest_deterministic_decision_id END");
   });
 
-  it('records a completed zero-coverage match when deterministic extraction completed with no requirements', async () => {
+  it('records a completed match with an UNKNOWN, unscored fit when deterministic extraction completed with no requirements', async () => {
     (mPool.query as any).mockImplementation(async (sql: string) => {
       if (sql.includes("FROM profile_versions") && sql.includes("pv.status = 'ACTIVE'")) {
         return { rows: [{ id: '11111111-1111-4111-8111-111111111111' }] };
@@ -507,7 +507,8 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
         (call: any[]) =>
           typeof call[0] === 'string' &&
           call[0].includes("processing_status = 'MATCHED'") &&
-          call[0].includes('deterministic_match_score = 0')
+          call[0].includes('deterministic_match_score = NULL') &&
+          call[0].includes("profile_match_status = 'UNKNOWN'")
       )
     ).toBe(true);
   });

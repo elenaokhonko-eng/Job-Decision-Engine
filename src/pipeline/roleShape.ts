@@ -72,7 +72,35 @@ export const detectCustomerFacingDelivery: RoleShapeDetector = ({ title, descrip
   return null;
 };
 
-const DETECTORS: RoleShapeDetector[] = [detectCustomerFacingDelivery];
+// ---------------------------------------------------------------------------------------------------------------
+// People management as the core of the role: the job is to run a team, not to do the work.
+// ---------------------------------------------------------------------------------------------------------------
+
+const PEOPLE_MANAGEMENT_TITLE =
+  /\b(?:head of|director|vp|vice president|chief|engineering manager|team lead|people manager|group manager|manager of)\b/i;
+const PEOPLE_MANAGEMENT_CUES: RegExp[] = [
+  /\bdirect reports?\b/i,
+  /\bline[- ]manag(?:e|er|ement|ing)\b/i,
+  /\bpeople[- ]manag(?:e|er|ement|ing)\b/i,
+  /\b(?:manage|lead|build|grow) (?:and (?:lead|develop|grow) )?a (?:global |distributed )?team of\b/i,
+  /\b(?:hire|hiring) and (?:develop|mentor|coach|retain)\b/i,
+  /\bperformance reviews?\b/i,
+  /\bcareer (?:development|growth) of (?:your|the) (?:team|reports)\b/i,
+];
+
+export const detectPeopleManagementCore: RoleShapeDetector = ({ title, description }) => {
+  // A management-sounding title alone is not evidence: "Lead" and "Manager" are often individual roles. Managing a team
+  // is the core of the role only when the description says so: two separate cues, or a management title plus one cue.
+  const hits = PEOPLE_MANAGEMENT_CUES.map((cue) => description.match(cue)).filter((match): match is RegExpMatchArray => match !== null);
+  const titleHit = title.match(PEOPLE_MANAGEMENT_TITLE);
+  if (hits.length >= 2 || (titleHit && hits.length >= 1)) {
+    const first = hits[0]!;
+    return { code: "PEOPLE_MANAGEMENT_CORE", penalty: 0.08, source: "DESCRIPTION", quote: excerpt(description, first.index ?? 0, first[0].length) };
+  }
+  return null;
+};
+
+const DETECTORS: RoleShapeDetector[] = [detectCustomerFacingDelivery, detectPeopleManagementCore];
 
 export function assessRoleShape(input: RoleShapeInput, detectors: RoleShapeDetector[] = DETECTORS): RoleShapeAssessment {
   const normalized = {

@@ -51,8 +51,9 @@ const JOB_COLUMNS_SQL = `
     cj.processing_state AS processing_state,
     (cj.archived_at IS NOT NULL) AS archived,
     mr.id AS match_run_id,
-    mr.overall_match_score AS match_score,
-    mr.coverage_score AS coverage_score,
+    -- A run with no requirement compared nothing: its stored 0 is not a score and stays out of score statistics.
+    CASE WHEN mr.requirement_count = 0 THEN NULL ELSE mr.overall_match_score END AS match_score,
+    CASE WHEN mr.requirement_count = 0 THEN NULL ELSE mr.coverage_score END AS coverage_score,
     mr.policy_version AS policy_version,
     cj.gate_decision AS gate_decision,
     (SELECT AVG(m.match_score) FROM requirement_evidence_matches m WHERE m.match_run_id = mr.id) AS avg_similarity,
