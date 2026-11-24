@@ -223,7 +223,7 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
   return result("stage_result_older_than_rule_version", ids, detail);
 }
 
-/** More than one active non-fallback embedding space (or none while inputs exist): the primary space is ambiguous. */
+/** More than one active non-fallback embedding space, or one that is not the configured primary. No non-fallback space (fresh or fallback-only) is not a violation. */
 export async function activeEmbeddingSpaceNotExactlyOne(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
   const preflight = await embeddingSpacePreflight(db, workspaceId);
   const ids = preflight.violation ? preflight.activeNonFallback.map((row) => row.id) : [];
