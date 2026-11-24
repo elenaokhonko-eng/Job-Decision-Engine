@@ -15,7 +15,7 @@ import { runRequirementsExtraction as defaultRunRequirementsExtraction } from ".
 import { runHardGates as defaultRunHardGates } from "../pipeline/hardGate.js";
 import { runEmbeddingBatchWithFallback as defaultRunEmbeddingBatchWithFallback } from "../embeddings/batchCoordinator.js";
 import { getEmbeddingSpaceRegistryConfiguration } from "../embeddings/spaceRegistry.js";
-import { runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
+import { LANE_ROUTER_RULE_VERSION, runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/laneRoutingCurrency.js";
 import {
@@ -1234,6 +1234,7 @@ export async function seedRecoverablePipelineTasks(
     maxPerType,
     );
 
+    const routeSeedVariant = `${routingDeferredReplayVersion}@${LANE_ROUTER_RULE_VERSION}`;
     await selectAndEnqueue(
       client as any,
       ctx,
@@ -1283,20 +1284,16 @@ export async function seedRecoverablePipelineTasks(
          AND ${notBlockedOnJobContentSql("ROUTE_LANE")}
        ORDER BY jv.observed_at ASC
        LIMIT $4`,
-      [ctx.workspaceId, includeRoutingDeferred, routingDeferredReplayVersion, maxPerType],
+      [ctx.workspaceId, includeRoutingDeferred, routeSeedVariant, maxPerType],
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
         payload: {
           canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
           job_version_id: requiredSeedValue(row, "job_version_id"),
           ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
-          ...(
-            includeRoutingDeferred &&
-            typeof row.processing_state === "string" &&
-            ["ROUTING_DEFERRED", "UNMATCHED"].includes(row.processing_state)
-              ? { routing_deferred_replay_version: routingDeferredReplayVersion }
-              : {}
-          ),
+          // Every routed state carries the router rule version in its task key, so a rule change
+          // reopens jobs whose earlier ROUTE_LANE task is COMPLETED; an unchanged version enqueues nothing.
+          routing_deferred_replay_version: routeSeedVariant,
         },
       }),
       enabledTypes,
