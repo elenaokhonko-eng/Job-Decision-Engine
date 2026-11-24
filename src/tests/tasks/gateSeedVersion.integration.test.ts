@@ -312,18 +312,21 @@ describe.skipIf(skipReal)("APPLY_HARD_GATES seed follows the gate version", () =
     context: ctx(), taskTypes: ["APPLY_HARD_GATES"], includeTestFixtures: true,
     jobVersionIds: Object.values(jobs).map((job) => job.jobVersionId),
   });
-  const gateTasks = async () => (await db().query<{ task_key: string; payload: { job_version_id: string; force_policy_recalculation?: boolean } }>(
+  const gateTasks = async () => (await db().query<{ task_key: string; payload: { job_version_id: string; force_policy_recalculation?: boolean; version_refresh?: boolean; gate_rule_version?: string } }>(
     `SELECT task_key, payload FROM pipeline_tasks WHERE workspace_id = $1 AND task_type = 'APPLY_HARD_GATES' ORDER BY task_key`,
     [ctx().workspaceId],
   )).rows;
 
-  it("first deploy: only the live job gated under an older gate version is reopened, once, with a forced recalculation", async () => {
+  it("first deploy: only the live job gated under an older gate version is reopened, once, as a version refresh (never a forced recalculation)", async () => {
     // The raw-staged job is the normal first-gate seed's, not this one: it is counted separately.
     const first = await seed();
     const rows = await gateTasks();
     const forStale = rows.filter((row) => row.payload.job_version_id === jobs.stale.jobVersionId);
     expect(forStale).toHaveLength(1);
-    expect(forStale[0]!.payload.force_policy_recalculation).toBe(true);
+    // A version refresh is a stamp-only re-gate: it must never ask for the destructive forced recalculation.
+    expect(forStale[0]!.payload.version_refresh).toBe(true);
+    expect(forStale[0]!.payload.force_policy_recalculation).toBeUndefined();
+    expect(forStale[0]!.payload.gate_rule_version).toBe(GATE_VERSION);
     expect(forStale[0]!.task_key).toContain(`gate-${GATE_VERSION}`);
     expect(rows.filter((row) => row.payload.job_version_id === jobs.current.jobVersionId)).toHaveLength(0);
     expect(rows.filter((row) => row.payload.job_version_id === jobs.archived.jobVersionId)).toHaveLength(0);
@@ -366,5 +369,59 @@ describe.skipIf(skipReal)("APPLY_HARD_GATES seed follows the gate version", () =
     await db().query(`DELETE FROM pipeline_tasks WHERE workspace_id = $1 AND task_type = 'APPLY_HARD_GATES' AND payload->>'job_version_id' = $2`, [ctx().workspaceId, jobs.held.jobVersionId]);
     await seed();
     expect((await gateTasks()).filter((row) => row.payload.job_version_id === jobs.held.jobVersionId)).toHaveLength(0);
+  });
+
+  // ---- version ordering, overflow, fixtures ----
+  const stampedJob = async (key: string, version: string, observedDaysAgo?: number) => {
+    const job = await seedRoutableJob(key, ["Zebra telemetry platform engineering experience"]);
+    await db().query(
+      `INSERT INTO gate_decisions (workspace_id, canonical_job_id, job_version_id, gate_version, decision) VALUES ($1, $2, $3, $4, 'PASS')`,
+      [ctx().workspaceId, job.canonicalJobId, job.jobVersionId, version]);
+    if (observedDaysAgo !== undefined) {
+      await db().query(`UPDATE job_versions SET observed_at = NOW() - ($2 || ' days')::interval WHERE id = $1`, [job.jobVersionId, String(observedDaysAgo)]);
+    }
+    return job;
+  };
+  const seedFor = (ids: string[], extra: { includeTestFixtures?: boolean; maxSeedPerType?: number } = {}) =>
+    seedRecoverablePipelineTasks(db(), { context: ctx(), timeBudgetMs: 60_000, taskTypes: ["APPLY_HARD_GATES"], includeTestFixtures: extra.includeTestFixtures ?? true, jobVersionIds: ids, maxSeedPerType: extra.maxSeedPerType });
+  const seededFor = async (ids: string[]) => (await gateTasks()).filter((row) => ids.includes(row.payload.job_version_id)).map((row) => row.payload.job_version_id);
+  // Neighbours of the running version, derived so a gate-version bump keeps the matrix valid.
+  const segments = GATE_VERSION.replace(/^gate-/, "").split(/[-.]/).map(Number);
+  const withLast = (delta: number) => `gate-${GATE_VERSION.replace(/^gate-/, "").replace(/\d+$/, String(segments.at(-1)! + delta))}`;
+
+  it("version ordering: older and legacy and unparseable versions are reopened; the same, newer and very large versions are not; a long digit segment does not abort the query", async () => {
+    const older = await stampedJob("v-older", withLast(-1));
+    const legacyA = await stampedJob("v-legacy-a", "2.2.0");
+    const legacyB = await stampedJob("v-legacy-b", "2.3.0");
+    const garbage = await stampedJob("v-garbage", "not-a-version");
+    const tooLong = await stampedJob("v-too-long", "gate-123456789012345678901"); // beyond the digit cap: unparseable, counts as older
+    const same = await stampedJob("v-same", GATE_VERSION);
+    const newer = await stampedJob("v-newer", withLast(1));
+    const timestampLike = await stampedJob("v-timestamp", "gate-20260101123456"); // fits the cap, numerically newer
+    const all = [older, legacyA, legacyB, garbage, tooLong, same, newer, timestampLike];
+    const ids = all.map((job) => job.jobVersionId);
+    await seedFor(ids);
+    const seeded = new Set(await seededFor(ids));
+    for (const job of [older, legacyA, legacyB, garbage, tooLong]) expect(seeded.has(job.jobVersionId), "older or unparseable").toBe(true);
+    for (const job of [same, newer, timestampLike]) expect(seeded.has(job.jobVersionId), "same or newer").toBe(false);
+  });
+
+  it("a job with no gate_decisions row is never seeded by the version seed (inner join): the first-gate seed owns it", async () => {
+    const job = await seedRoutableJob("no-gate-row", ["Zebra telemetry platform engineering experience"]);
+    await seedFor([job.jobVersionId]);
+    expect(await seededFor([job.jobVersionId])).toHaveLength(0);
+  });
+
+  it("test fixtures are excluded in SQL before the cap, so a fixture cannot consume the only slot", async () => {
+    const fixture = await stampedJob("fx-fixture", "gate-old-version", 50);
+    await db().query(`UPDATE canonical_jobs SET is_test_fixture = TRUE WHERE id = $1`, [fixture.canonicalJobId]);
+    const real = await stampedJob("fx-real", "gate-old-version", 40);
+    const realLater = await stampedJob("fx-real-later", "gate-old-version", 30);
+    await seedFor([fixture.jobVersionId, real.jobVersionId, realLater.jobVersionId], { includeTestFixtures: false, maxSeedPerType: 1 });
+    expect(await seededFor([fixture.jobVersionId])).toHaveLength(0);
+    expect(await seededFor([real.jobVersionId])).toHaveLength(1); // the cap went to the oldest REAL job
+    expect(await seededFor([realLater.jobVersionId])).toHaveLength(0);
+    await seedFor([fixture.jobVersionId], { includeTestFixtures: true });
+    expect(await seededFor([fixture.jobVersionId])).toHaveLength(1);
   });
 });

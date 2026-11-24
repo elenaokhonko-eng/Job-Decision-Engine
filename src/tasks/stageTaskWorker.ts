@@ -1088,7 +1088,7 @@ export async function seedRecoverablePipelineTasks(
     maxPerType,
     );
 
-    // Jobs last gated under an older gate version are gated again (forced recalculation), bounded by
+    // Jobs last gated under an older gate version get a stamp-only version refresh, bounded by
     // the per-type cap. The task key carries the gate version, so an unchanged version enqueues nothing.
     await selectAndEnqueue(
       client as any,
@@ -1112,16 +1112,20 @@ export async function seedRecoverablePipelineTasks(
        ) latest_gate ON TRUE
        WHERE c.workspace_id = $1
          AND c.archived_at IS NULL
+         AND ($4::boolean OR c.is_test_fixture IS NOT TRUE)
          AND COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'MANUALLY_REMOVED')
          -- The gate skips a job whose posting is incomplete or has no source content; selecting it would only
          -- refill the cap every run.
          AND c.description_quality_status = 'COMPLETE'
          AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
          -- "Older than", not "different from": a job a newer worker (desktop, rollback target) gated under a
-         -- newer version is never reopened. A version that does not parse as a dotted number counts as older.
-         AND CASE WHEN latest_gate.gate_version ~ '^(gate-)?[0-9]+([-.][0-9]+)*$'
-             THEN regexp_split_to_array(regexp_replace(latest_gate.gate_version, '^gate-', ''), '[-.]')::int[]
-                  < regexp_split_to_array(regexp_replace($3::text, '^gate-', ''), '[-.]')::int[]
+         -- newer version is never reopened. A stored version that does not parse as a dotted number (segments of
+         -- 1 to 17 digits, so the bigint cast cannot overflow) counts as older. The running version must parse,
+         -- or nothing is selected (fail closed).
+         AND $3::text ~ '^(gate-)?[0-9]{1,17}([-.][0-9]{1,17})*$'
+         AND CASE WHEN latest_gate.gate_version ~ '^(gate-)?[0-9]{1,17}([-.][0-9]{1,17})*$'
+             THEN regexp_split_to_array(regexp_replace(latest_gate.gate_version, '^gate-', ''), '[-.]')::bigint[]
+                  < regexp_split_to_array(regexp_replace($3::text, '^gate-', ''), '[-.]')::bigint[]
              ELSE TRUE END
          -- One forced gate per job version: skip a job that already has a gate task in flight (for example the
          -- successor of a forced re-extraction).
@@ -1132,13 +1136,15 @@ export async function seedRecoverablePipelineTasks(
               AND inflight.payload->>'job_version_id' = jv.id::text)
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
-      [ctx.workspaceId, maxPerType, GATE_VERSION],
+      [ctx.workspaceId, maxPerType, GATE_VERSION, includeTestFixtures],
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
         payload: {
           canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
           job_version_id: requiredSeedValue(row, "job_version_id"),
-          force_policy_recalculation: true,
+          // Stamp-only refresh: the handler (gate 11.6, #275) records the new gate version without clearing
+          // lane, match, decision or ranking state. Never force_policy_recalculation here.
+          version_refresh: true,
           gate_rule_version: GATE_VERSION,
         },
       }),
