@@ -5,14 +5,13 @@ import { pgPoolConfig } from '../db/pgSsl.js';
 import { shouldRequestAiFallback } from '../requirements/requirementKinds.js';
 import {
   DETERMINISTIC_EXTRACTOR_VERSION,
-  extractDeterministicRequirements,
 } from '../requirements/deterministicExtractors.js';
 import { validateQuotedRequirements } from '../requirements/quotedRequirementExtractor.js';
 import { JobRequirementSchema, REQUIREMENTS_SCHEMA_VERSION } from '../requirements/contracts.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 import { sourceContentEvidencePredicate } from './descriptionQuality.js';
 import { publicErrorSummary } from '../security/publicErrorSummary.js';
-import { cleanPostingText } from '../security/postingText.js';
+import { extractDeterministicRequirementsFromPosting } from '../requirements/cleanedInputExtraction.js';
 import { isRateLimitedFailure } from '../services/modelCallResilience.js';
 
 dotenv.config();
@@ -827,11 +826,11 @@ export async function runRequirementsExtraction(
             );
           }
         } else {
-          const deterministic = extractDeterministicRequirements({
+          const deterministic = extractDeterministicRequirementsFromPosting({
             canonical_job_id: job.canonical_job_id,
             job_version_id: job.job_version_id,
-            // Escaped or real markup is removed before the rules run, so it cannot end up inside a quote.
-            description_text: cleanPostingText(job.description_text).text,
+            // Cleaned for the rules; quotes are re-anchored to this stored text (cleanedInputExtraction.ts).
+            description_text: job.description_text,
           });
 
           const deterministicRequirements = deterministic.requirements.map((req) =>

@@ -652,7 +652,7 @@ describe("stageTaskWorker", () => {
         (call) =>
           call.sql.includes("INSERT INTO pipeline_tasks") &&
           call.params?.[1] === "EXTRACT_DETERMINISTIC_REQUIREMENTS" &&
-          call.params?.[2] === "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1:deterministic_v6"
+          call.params?.[2] === "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1:deterministic_v7"
       )
     ).toBe(true);
   });
@@ -663,9 +663,9 @@ describe("stageTaskWorker", () => {
     const extractionIntent = createTaskIntentV2({
       workspaceId: ctx.workspaceId,
       taskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-      stageVersion: "deterministic_v6",
+      stageVersion: "deterministic_v7",
       producer: "stageTaskWorker:EXTRACT_DETERMINISTIC_REQUIREMENTS",
-      requestId: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v6",
+      requestId: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v7",
       payload: extractionPayload,
     });
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
@@ -680,7 +680,7 @@ describe("stageTaskWorker", () => {
               id: "task-empty-requirements",
               workspace_id: ctx.workspaceId,
               task_type: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-              task_key: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v6",
+              task_key: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v7",
               payload: { ...extractionPayload, task_intent: extractionIntent },
               status: "RUNNING",
               available_at: new Date().toISOString(),
@@ -1999,7 +1999,7 @@ describe("stageTaskWorker", () => {
     expect(deps.runRequirementsExtraction).not.toHaveBeenCalled();
     expect(insertedTasks).toHaveLength(1);
     expect(insertedTasks[0]?.params?.[2]).toBe(
-      "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-current:deterministic_v6:repair"
+      "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-current:deterministic_v7:repair"
     );
     expect(insertedTasks[0]?.params?.[3]).toMatchObject({
       canonical_job_id: "job-forced-extraction",

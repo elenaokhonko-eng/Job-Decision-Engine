@@ -1,4 +1,4 @@
-import { extractDeterministicRequirements } from '../requirements/deterministicExtractors.js';
+import { extractDeterministicRequirementsFromPosting } from '../requirements/cleanedInputExtraction.js';
 import { parsePosting } from '../requirements/postingStructure.js';
 
 /**
@@ -43,7 +43,7 @@ export function previewExtraction(jobs: readonly PreviewJob[]): ExtractionPrevie
   let itemsWithoutRequirementsHeading = 0;
 
   for (const job of jobs) {
-    const result = extractDeterministicRequirements({
+    const result = extractDeterministicRequirementsFromPosting({
       canonical_job_id: ZERO_UUID,
       job_version_id: ZERO_UUID,
       description_text: job.descriptionText,
