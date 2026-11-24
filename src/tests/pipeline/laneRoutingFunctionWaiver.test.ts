@@ -1,0 +1,169 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  FUNCTION_WAIVER_MARGIN,
+  hasApprovedLaneFunction,
+  loadLanesConfig,
+  routeLaneCandidates,
+} from "../../pipeline/laneRouter.js";
+
+const config = loadLanesConfig();
+
+/** Every lane scores `base`; `overrides` set individual lanes. Fixtures are synthetic. */
+function route(
+  title: string,
+  description: string,
+  base: number,
+  overrides: Record<string, number> = {},
+  companyName = "Example Holdings",
+) {
+  return routeLaneCandidates({
+    config,
+    title,
+    descriptionText: description,
+    companyName,
+    semanticScore: (laneKey) => overrides[laneKey] ?? base,
+  });
+}
+
+// Asset-management and capital-markets work with no engineering, quantitative or data function
+// phrase: the INVESTMENT_MARKETS_FINTECH domain is present and its function concept is absent.
+const MARKETS_COORDINATION =
+  "Coordinate the delivery of reporting for our asset management and capital markets business. " +
+  "Run stakeholder meetings, track milestones and prepare status updates for senior management.";
+
+describe("lane router function waiver (lane_router_v2.6.0)", () => {
+  it("grants a lane at Low confidence when only the function score is zero and the semantic score is clearly above the bar", () => {
+    const result = route("Delivery Coordination Lead", MARKETS_COORDINATION, 0.55);
+    expect(result.processingStatus).toBe("LANE_ROUTED");
+    expect(result.primaryLane).toBe("INVESTMENT_MARKETS_FINTECH");
+    expect(result.laneConfidence).toBe("Low");
+    expect(result.functionScores.INVESTMENT_MARKETS_FINTECH).toBe(0);
+    expect(result.laneEvidence.some((e) => e.startsWith("INVESTMENT_MARKETS_FINTECH:function_waived;semantic_margin="))).toBe(true);
+  });
+
+  it("does not grant the lane when the semantic score is inside the margin", () => {
+    const threshold = config.lanes.INVESTMENT_MARKETS_FINTECH.semantic_threshold ?? 0.35;
+    const result = route("Delivery Coordination Lead", MARKETS_COORDINATION, 0.2, {
+      INVESTMENT_MARKETS_FINTECH: threshold + FUNCTION_WAIVER_MARGIN - 0.01,
+    });
+    expect(result.processingStatus).toBe("UNMATCHED");
+    expect(result.primaryLane).toBe("UNCLASSIFIED");
+    // At the margin the lane is granted.
+    const atMargin = route("Delivery Coordination Lead", MARKETS_COORDINATION, 0.2, {
+      INVESTMENT_MARKETS_FINTECH: threshold + FUNCTION_WAIVER_MARGIN + 0.001,
+    });
+    expect(atMargin.primaryLane).toBe("INVESTMENT_MARKETS_FINTECH");
+    expect(atMargin.laneConfidence).toBe("Low");
+  });
+
+  it("keeps the domain veto: no domain phrase, no lane, whatever the semantic score", () => {
+    const result = route(
+      "Delivery Coordination Lead",
+      "Coordinate the delivery of internal reporting. Run stakeholder meetings and track milestones.",
+      0.9,
+    );
+    expect(result.primaryLane).toBe("UNCLASSIFIED");
+  });
+
+  it("keeps the role-family veto", () => {
+    const result = route("Sales Manager, Capital Markets Coordination", MARKETS_COORDINATION, 0.9);
+    expect(result.primaryLane).toBe("UNCLASSIFIED");
+  });
+
+  it("keeps the cybersecurity veto", () => {
+    const result = route(
+      "Cyber Security Coordination Lead",
+      `${MARKETS_COORDINATION} Own vulnerability management, threat detection and incident response for the security operations centre.`,
+      0.9,
+    );
+    expect(result.primaryLane).toBe("UNCLASSIFIED");
+  });
+
+  it("keeps the non-technical-project veto when the title names the subject", () => {
+    const result = route("Delivery Coordination Lead, Office Fit-out", MARKETS_COORDINATION, 0.2, { INVESTMENT_MARKETS_FINTECH: 0.9 });
+    expect(result.primaryLane).toBe("UNCLASSIFIED");
+  });
+
+  it("keeps the non-technical-project veto when the role text describes building or estates work", () => {
+    const text = `${MARKETS_COORDINATION} Manage building works, facilities management and refurbishment of our offices.`;
+    const result = route("Delivery Coordination Lead", text, 0.2, { INVESTMENT_MARKETS_FINTECH: 0.9 });
+    expect(result.primaryLane).toBe("UNCLASSIFIED");
+  });
+
+  it("keeps the excluded-sector veto", () => {
+    const text = "Coordinate delivery for our trading and market data teams. Run stakeholder meetings and track milestones.";
+    const scores = { INVESTMENT_MARKETS_FINTECH: 0.9 };
+    const covered = route("Delivery Coordination Lead", text, 0.2, scores, "Example Holdings");
+    expect(covered.primaryLane).toBe("INVESTMENT_MARKETS_FINTECH");
+    expect(covered.laneConfidence).toBe("Low");
+    const excluded = route("Delivery Coordination Lead", text, 0.2, scores, "Example Freight Logistics");
+    expect(excluded.primaryLane).toBe("UNCLASSIFIED");
+    expect(excluded.laneEvidence.some((e) => e.startsWith("INVESTMENT_MARKETS_FINTECH:excluded_sector="))).toBe(true);
+  });
+
+  it("keeps the negative-concept veto", () => {
+    expect(config.lanes.INVESTMENT_MARKETS_FINTECH.negative_concepts).toContain("treasury");
+    const scores = { INVESTMENT_MARKETS_FINTECH: 0.9 };
+    const clean = route("Delivery Coordination Lead", MARKETS_COORDINATION, 0.2, scores);
+    expect(clean.primaryLane).toBe("INVESTMENT_MARKETS_FINTECH");
+    expect(clean.laneConfidence).toBe("Low");
+    const vetoed = route("Delivery Coordination Lead", `${MARKETS_COORDINATION} Support the treasury function.`, 0.2, scores);
+    expect(vetoed.primaryLane).toBe("UNCLASSIFIED");
+  });
+
+  it("never waives the function of INVESTIGATIONS_ENFORCEMENT", () => {
+    const result = route(
+      "Programme Coordination Lead",
+      "Coordinate reporting for the regulatory enforcement and financial crime function. Track milestones and prepare status updates.",
+      0.2,
+      { INVESTIGATIONS_ENFORCEMENT: 0.9 },
+    );
+    expect(result.primaryLane).not.toBe("INVESTIGATIONS_ENFORCEMENT");
+  });
+
+  it("lets a lane that qualifies outright win over a waived lane with a higher score, at normal confidence", () => {
+    const result = route(
+      "Product Manager",
+      `Own the product roadmap for our digital platform and cloud platform. ${MARKETS_COORDINATION}`,
+      0.2,
+      { TECHNICAL_PRODUCT_TRANSFORMATION: 0.45, INVESTMENT_MARKETS_FINTECH: 0.8 },
+    );
+    expect(result.primaryLane).toBe("TECHNICAL_PRODUCT_TRANSFORMATION");
+    expect(result.laneConfidence).not.toBe("Low");
+    expect(result.laneEvidence.some((e) => e.includes("function_waived"))).toBe(false);
+  });
+});
+
+describe("leadership words in the CORE_AI_DATA title list", () => {
+  it.each(["Programme Director, Applied AI", "Head of Data Platform", "Lead, Applied Research Delivery", "Engineering Manager"])(
+    "approves %s for CORE_AI_DATA",
+    (title) => {
+      expect(hasApprovedLaneFunction("CORE_AI_DATA", title)).toBe(true);
+    },
+  );
+
+  it("gives CORE_AI_DATA a function score of 0 for a leadership title whose subject is non-technical", () => {
+    const technical = "Build machine learning models in software for AI.";
+    const ok = route("Lead, Applied Machine Learning", technical, 0.2, { CORE_AI_DATA: 0.9 });
+    expect(ok.functionScores.CORE_AI_DATA).toBe(1);
+    expect(ok.primaryLane).toBe("CORE_AI_DATA");
+    const estates = route(
+      "Lead, Applied Machine Learning",
+      `${technical} Includes campus estates works: building works, facilities management and refurbishment.`,
+      0.2,
+      { CORE_AI_DATA: 0.9 },
+    );
+    expect(estates.functionScores.CORE_AI_DATA).toBe(0);
+    expect(estates.primaryLane).toBe("UNCLASSIFIED");
+    // A non-technical subject in the title is refused for the same reason.
+    expect(route("Programme Manager, Campus Estates", technical, 0.2, { CORE_AI_DATA: 0.9 }).functionScores.CORE_AI_DATA).toBe(0);
+  });
+
+  it.each(["Sales Director", "Marketing Manager", "Talent Lead", "Operations Manager"])(
+    "still refuses the non-technical role family %s",
+    (title) => {
+      expect(hasApprovedLaneFunction("CORE_AI_DATA", title)).toBe(false);
+    },
+  );
+});
