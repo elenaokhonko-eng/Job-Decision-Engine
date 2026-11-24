@@ -16,7 +16,6 @@ import { runRequirementsExtraction as defaultRunRequirementsExtraction } from ".
 import { runHardGates as defaultRunHardGates } from "../pipeline/hardGate.js";
 import { runEmbeddingBatchWithFallback as defaultRunEmbeddingBatchWithFallback } from "../embeddings/batchCoordinator.js";
 import { getEmbeddingSpaceRegistryConfiguration } from "../embeddings/spaceRegistry.js";
-import { GATE_VERSION } from "../contracts/version.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
 import { LANE_ROUTER_RULE_VERSION, runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
