@@ -223,8 +223,44 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
 }
 
 /**
+ * A live job whose latest gate outcome differs from the gate outcome its latest decision was made under: the decision predates a
+ * changed gate result (PASS to NEEDS_VERIFICATION, a changed hard-reject code set, ...) and nothing re-decided it. The decision
+ * context carries only a hash of a non-PASS gate outcome (`gate_outcome_hash`, never readable, and absent for PASS), so the baseline
+ * is read from the gate history instead: the gate_decisions row in force when the decision was written (the latest one created at
+ * or before the decision). Outcome and the set of rejection codes are compared; a re-gate that repeats the same outcome and codes,
+ * a job with no gate row before its decision (nothing to compare), and a decision written after the latest gate are not counted.
+ */
+export async function changedGateOutcomeUnchangedDecision(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  const { rows } = await db.query<{ id: string }>(
+    `WITH latest_gate AS (
+       SELECT DISTINCT ON (g.canonical_job_id) g.canonical_job_id, g.decision, g.rejection_codes
+         FROM gate_decisions g WHERE g.workspace_id = $1::uuid
+        ORDER BY g.canonical_job_id, g.created_at DESC, g.id DESC)
+     SELECT c.id::text AS id
+       FROM canonical_jobs c
+       JOIN deterministic_decisions d ON d.workspace_id = c.workspace_id AND d.id = c.latest_deterministic_decision_id
+       JOIN latest_gate lg ON lg.canonical_job_id = c.id
+       JOIN LATERAL (
+         SELECT g.decision, g.rejection_codes
+           FROM gate_decisions g
+          WHERE g.workspace_id = c.workspace_id AND g.canonical_job_id = c.id AND g.created_at <= d.created_at
+          ORDER BY g.created_at DESC, g.id DESC
+          LIMIT 1
+       ) at_decision ON TRUE
+      WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+        AND (lg.decision IS DISTINCT FROM at_decision.decision
+             OR COALESCE((SELECT jsonb_agg(code ORDER BY code::text) FROM jsonb_array_elements(COALESCE(lg.rejection_codes, '[]'::jsonb)) code), '[]'::jsonb)
+                IS DISTINCT FROM
+                COALESCE((SELECT jsonb_agg(code ORDER BY code::text) FROM jsonb_array_elements(COALESCE(at_decision.rejection_codes, '[]'::jsonb)) code), '[]'::jsonb))
+      ORDER BY c.id`,
+    [workspaceId],
+  );
+  return result("changed_gate_outcome_unchanged_decision", rows.map((row) => row.id));
+}
+
+/**
  * `phase` "pre" is for a run BEFORE a drain: it leaves out the stale-stage check, which is non-zero by design
- * right after a rule-version change until the reopen seeds have drained. The default, "post", is strict
+ * right after a rule-version or gate change until the reopen seeds have drained. The default, "post", is strict
  * and runs every check.
  */
 export async function runZeroChecks(
@@ -232,7 +268,8 @@ export async function runZeroChecks(
   workspaceId: string,
   options: { phase?: "pre" | "post" } = {},
 ): Promise<ZeroCheckResult[]> {
-  const stale = options.phase === "pre" ? [] : [await staleStageResults(db, workspaceId)];
+  // Both are non-zero by design right after a rule or gate change, until the reopen seeds and the decider have drained.
+  const stale = options.phase === "pre" ? [] : [await staleStageResults(db, workspaceId), await changedGateOutcomeUnchangedDecision(db, workspaceId)];
   return [
     await rejectedJobsWithRecommendation(db, workspaceId),
     await listedJobsNotCurrentlyOpen(db, workspaceId),

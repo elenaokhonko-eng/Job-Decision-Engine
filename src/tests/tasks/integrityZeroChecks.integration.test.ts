@@ -16,6 +16,7 @@ import {
   routableVerificationJobsStranded,
   runZeroChecks,
   staleStageResults,
+  changedGateOutcomeUnchangedDecision,
   zeroChecksExitCode,
 } from "../../tasks/integrityZeroChecks.js";
 
@@ -118,9 +119,9 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     const results = await runZeroChecks(db(), ws);
     expect(results.map((check) => check.name)).toEqual([
       "rejected_job_with_recommendation", "listed_job_not_currently_open", "task_completed_without_result",
-      "routable_verification_job_stranded", "protected_job_auto_archived", "stage_result_older_than_rule_version",
+      "routable_verification_job_stranded", "protected_job_auto_archived", "stage_result_older_than_rule_version", "changed_gate_outcome_unchanged_decision",
     ]);
-    expect(results.map((check) => check.total)).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(results.map((check) => check.total)).toEqual([0, 0, 0, 0, 0, 0, 0]);
     expect(zeroChecksExitCode(results)).toBe(0);
     expect(zeroChecksExitCode([{ total: 0 }, { total: 2 }])).toBe(1);
   });
@@ -404,6 +405,53 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     const pre = await runZeroChecks(db(), ws, { phase: "pre" });
     expect(pre.map((entry) => entry.name)).not.toContain("stage_result_older_than_rule_version");
     expect(zeroChecksExitCode(pre)).toBe(0);
+  });
+
+  it("changed gate outcome with an unchanged older decision: reported for an outcome change and a code change; unchanged, PASS-to-PASS, no baseline, and a decision after the gate are not", async () => {
+    const ws = await newWorkspace();
+    expect((await changedGateOutcomeUnchangedDecision(db(), ws)).total).toBe(0);
+    const gate = (j: { canonicalJobId: string; jobVersionId: string }, decision: string, codes: string[], minutesAgo: number) => db().query(
+      `INSERT INTO gate_decisions (canonical_job_id, job_version_id, decision, rejection_codes, workspace_id, created_at)
+       VALUES ($1, $2, $3, $4::jsonb, $5, NOW() - make_interval(mins => $6::int))`,
+      [j.canonicalJobId, j.jobVersionId, decision, JSON.stringify(codes), ws, minutesAgo]);
+    const decide = async (j: { canonicalJobId: string; jobVersionId: string }, minutesAgo: number) => {
+      const snapshot = await db().query<{ id: string }>(
+        `INSERT INTO workspace_policy_snapshots (workspace_id, snapshot_hash, resolved_snapshot) VALUES ($1, $2, '{}'::jsonb) RETURNING id`, [ws, `snap-${randomUUID()}`]);
+      const decision = await db().query<{ id: string }>(
+        `INSERT INTO deterministic_decisions (workspace_id, canonical_job_id, job_version_id, policy_snapshot_id, decision_hash, decision_json,
+           recommendation_eligibility, recommendation_outcome, created_at)
+         VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, 'ELIGIBLE', 'REVIEW', NOW() - make_interval(mins => $6::int)) RETURNING id`,
+        [ws, j.canonicalJobId, j.jobVersionId, snapshot.rows[0]!.id, `d-${randomUUID()}`, minutesAgo]);
+      await db().query(`UPDATE canonical_jobs SET latest_deterministic_decision_id = $1 WHERE id = $2`, [decision.rows[0]!.id, j.canonicalJobId]);
+    };
+    // Violation 1: decided under PASS, the gate later became NEEDS_VERIFICATION.
+    const outcomeChanged = await job(ws);
+    await gate(outcomeChanged, "PASS", [], 60); await decide(outcomeChanged, 30); await gate(outcomeChanged, "NEEDS_VERIFICATION", ["LOCATION_UNKNOWN"], 10);
+    // Violation 2: same outcome, different code set.
+    const codesChanged = await job(ws);
+    await gate(codesChanged, "NEEDS_VERIFICATION", ["LOCATION_UNKNOWN"], 60); await decide(codesChanged, 30); await gate(codesChanged, "NEEDS_VERIFICATION", ["WORK_AUTH_UNKNOWN"], 10);
+    // Near misses.
+    const passAgain = await job(ws);          // PASS (no hash) re-gated to PASS
+    await gate(passAgain, "PASS", [], 60); await decide(passAgain, 30); await gate(passAgain, "PASS", [], 10);
+    const sameCodesReordered = await job(ws); // identical outcome and codes in another order
+    await gate(sameCodesReordered, "NEEDS_VERIFICATION", ["A", "B"], 60); await decide(sameCodesReordered, 30); await gate(sameCodesReordered, "NEEDS_VERIFICATION", ["B", "A"], 10);
+    const redecided = await job(ws);          // gate changed, then the decider ran again
+    await gate(redecided, "PASS", [], 60); await gate(redecided, "NEEDS_VERIFICATION", ["LOCATION_UNKNOWN"], 40); await decide(redecided, 30);
+    const noBaseline = await job(ws);         // no gate row before the decision
+    await decide(noBaseline, 30); await gate(noBaseline, "NEEDS_VERIFICATION", ["LOCATION_UNKNOWN"], 10);
+    const noDecision = await job(ws);         // gate changed, no decision at all (another check's concern)
+    await gate(noDecision, "PASS", [], 60); await gate(noDecision, "NEEDS_VERIFICATION", ["LOCATION_UNKNOWN"], 10);
+    const archived = await job(ws);
+    await gate(archived, "PASS", [], 60); await decide(archived, 30); await gate(archived, "HARD_REJECT", ["X"], 10);
+    await db().query(`UPDATE canonical_jobs SET archived_at = NOW(), archive_reason = 'JOB_OLDER_THAN_THREE_CALENDAR_MONTHS', archive_age_basis = 'AUTHORITATIVE_PUBLICATION_DATE', archive_reference_at = NOW(), archive_run_id = (SELECT id FROM job_archive_runs LIMIT 1) WHERE id = $1`, [archived.canonicalJobId]).catch(() => undefined);
+    const check = await changedGateOutcomeUnchangedDecision(db(), ws);
+    const nearMisses = [passAgain, sameCodesReordered, redecided, noBaseline, noDecision].map((j) => j.canonicalJobId);
+    expect(check.sample.filter((id) => nearMisses.includes(id))).toEqual([]);
+    if (archived.canonicalJobId) expect(check.sample).not.toContain(archived.canonicalJobId);
+    expect([...check.sample].sort()).toEqual([outcomeChanged.canonicalJobId, codesChanged.canonicalJobId].sort());
+    expect(check.total).toBe(2);
+    expect((await runZeroChecks(db(), ws, { phase: "pre" })).map((entry) => entry.name)).not.toContain("changed_gate_outcome_unchanged_decision");
+    expect((await runZeroChecks(db(), ws)).find((entry) => entry.name === "changed_gate_outcome_unchanged_decision")?.total).toBe(2);
   });
 });
 
