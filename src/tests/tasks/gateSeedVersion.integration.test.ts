@@ -51,7 +51,7 @@ let candidateProfileId = "";
 let profileV1 = "";
 let profileV2 = "";
 let policySnapshotId = "";
-const jobs: Record<"stale" | "current" | "archived" | "rawStaged", FixtureJob> = {} as never;
+const jobs: Record<"stale" | "current" | "archived" | "rawStaged" | "saved" | "held", FixtureJob> = {} as never;
 
 function db(): pg.PoolClient {
   if (!client) throw new Error("The integration test database client is not initialized.");
@@ -256,9 +256,26 @@ describe.skipIf(skipReal)("APPLY_HARD_GATES seed follows the gate version", () =
       `INSERT INTO gate_decisions (workspace_id, canonical_job_id, job_version_id, gate_version, decision) VALUES ($1, $2, $3, $4, 'PASS')`,
       [ctx().workspaceId, job.canonicalJobId, job.jobVersionId, version],
     );
+    jobs.saved = await seedRoutableJob("saved", [requirement]);
+    jobs.held = await seedRoutableJob("held", [requirement]);
+    // Intended behaviour: a saved or held job is re-queued like any other stale job (re-computing is not
+    // archiving); the protection only stops an automatic archive. Archived jobs are skipped.
+    await db().query(
+      `INSERT INTO raw_job_observations (workspace_id, source_name, source_external_id, source_url, retrieved_at, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id)
+       VALUES ($1, 'LINKEDIN_SAVED', $2, $3, NOW(), 'Seed Test Co', 'fixture role', 'x', '{}'::jsonb, $4, 'PROCESSED', $5)`,
+      [ctx().workspaceId, `s-${crypto.randomUUID()}`, `https://example.test/s/${crypto.randomUUID()}`, crypto.randomUUID().replaceAll("-", "").padEnd(64, "0"), jobs.saved.jobVersionId],
+    );
+    await db().query(
+      `INSERT INTO job_archive_holds (workspace_id, canonical_job_id, hold_reason, hold_type, created_by, expires_at)
+       VALUES ($1, $2, 'owner keeps it', 'USER_PRESERVE', 'test', NOW() + INTERVAL '30 days')`,
+      [ctx().workspaceId, jobs.held.canonicalJobId],
+    );
     await gated(jobs.stale, "gate-old-version");
     await gated(jobs.current, GATE_VERSION);
     await gated(jobs.archived, "gate-old-version");
+    await gated(jobs.saved, "gate-old-version");
+    await gated(jobs.held, "gate-old-version");
     await gated(jobs.rawStaged, "gate-old-version");
     await db().query(`UPDATE canonical_jobs SET processing_state = 'RAW_STAGED', processing_status = 'RAW_STAGED' WHERE id = $1`, [jobs.rawStaged.canonicalJobId]);
     const run = await db().query<{ id: string }>(
@@ -310,6 +327,9 @@ describe.skipIf(skipReal)("APPLY_HARD_GATES seed follows the gate version", () =
     expect(forStale[0]!.task_key).toContain(`gate-${GATE_VERSION}`);
     expect(rows.filter((row) => row.payload.job_version_id === jobs.current.jobVersionId)).toHaveLength(0);
     expect(rows.filter((row) => row.payload.job_version_id === jobs.archived.jobVersionId)).toHaveLength(0);
+    // Saved and held jobs are re-queued like any stale job; protection only blocks archiving.
+    expect(rows.filter((row) => row.payload.job_version_id === jobs.saved.jobVersionId)).toHaveLength(1);
+    expect(rows.filter((row) => row.payload.job_version_id === jobs.held.jobVersionId)).toHaveLength(1);
     expect(first.byType.APPLY_HARD_GATES?.inserted).toBeGreaterThanOrEqual(1);
   });
 
