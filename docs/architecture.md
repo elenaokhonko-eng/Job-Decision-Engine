@@ -209,9 +209,9 @@ Matching needs a shared vocabulary: a requirement is about a concept, and a prof
 
 | Rule | Target | Today |
 |---|---|---|
-| One gateway | Every model call goes through `src/platform/llm/` with a typed request and a typed result | Calls are made from `src/services/agent.ts`, which also holds prompts, parsing and database writes |
+| One gateway | Every model call goes through `src/platform/llm/` with a typed request and a typed result | Calls are still made from `src/services/agent.ts`, which also holds prompts, parsing and database writes. Phase 1 has started: `src/platform/llm/` holds error classification, usage and cost accounting, response-schema converters, the resilience layer (retry, deadline, rate-limit), fetch timeouts and the measurement check; the old paths re-export from there |
 | No database in the gateway | B5 | The audited call path in `src/services/agent.ts` takes a database client |
-| Model IDs in one place | `src/platform/config/` only; checked against the providers with `npm run models:check` | The evaluation default is in `src/services/modelDefaults.ts`. Other defaults are still spread across `src/services/agent.ts`, `src/services/openAiModelRoles.ts`, scripts and environment variables |
+| Model IDs in one place | `src/platform/config/` only; checked against the providers with `npm run models:check` | `src/platform/config/` holds the Gemini credential and backend settings. The evaluation default is in `src/services/modelDefaults.ts`. Other model defaults are still spread across `src/services/agent.ts`, `src/services/openAiModelRoles.ts`, scripts and environment variables, and an unset variable falls back to the code default |
 | Versioned prompts | Each stored output records prompt id, prompt version and model | Prompts are built inline. Only the quoted-requirement prompt records a hash |
 | Advice only | An evaluation is stored in `ai_evaluations` and never changes a gate, a score or an outcome | Holds. The legacy `eval:run` scripts are removed and `runAgent` no longer writes to the database. `runAgent` itself is still in `src/services/agent.ts` and goes with Phase 1 |
 | Cleaned input | Posting text is cleaned and delimited before any model sees it | The posting is placed in the same message as the instructions, with no cleaning step |
@@ -395,7 +395,7 @@ The code predates the target layout. No file lives under `src/modules/`, `src/pl
 
 ### Known violations
 
-Counted on 23 November 2026, when the check was merged. The live list is the baseline file.
+Counted on 24 November 2026. The first count was on 23 November, when the check was merged. The live list is the baseline file.
 
 | Rule | Count | What it shows |
 |---|---|---|
@@ -405,12 +405,12 @@ Counted on 23 November 2026, when the check was merged. The live list is the bas
 | F4 | 25 | 16 importers of `src/services/agent.ts`, 9 of `src/db/db.ts` |
 | F5 | 33 | Files in `src/services/` |
 | F6 | 46 | Writers of job status columns: `processing_state` from 14 files, `recommendation_outcome` from 6 |
-| F7 | 163 | Table and area pairs; 30 tables are written from more than one area |
+| F7 | 166 | Table and area pairs; 30 tables are written from more than one area |
 | F8 | 5 | Tables that `streamlit_app.py` reads directly |
 | F9 | 1 | `src/pipeline/laneRouter.ts` imports the task queue |
 | F10, F11 | 0 | Clean today; the rules keep them so |
 
-Two files concentrate the problem. `src/services/agent.ts` (3,328 lines) holds model configuration, provider calls, cost accounting, prompts, parsing, embeddings and a legacy evaluator. `src/tasks/stageTaskWorker.ts` (4,014 lines) holds the queue and the logic that links every stage.
+Two files concentrate the problem. `src/services/agent.ts` (3,094 lines, down from 3,328 as Phase 1 moves code out) holds model configuration, provider calls, cost accounting, prompts, parsing, embeddings and a legacy evaluator. `src/tasks/stageTaskWorker.ts` (4,041 lines) holds the queue and the logic that links every stage.
 
 ## 15. Migration order
 
