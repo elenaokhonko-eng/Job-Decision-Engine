@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import crypto from "node:crypto";
 import pg from "pg";
 
-import { awaitingVisibilityFailures, classifyContentCompleteness, reportAwaitingContentOutputs, reportAwaitingContentVisibility } from "../../ingestion/contentCompleteness.js";
+import { awaitingVisibilityFailures, classifyContentCompleteness, LIST_READ_MODELS, NON_LIST_READ_MODELS, reportAwaitingContentOutputs, reportAwaitingContentVisibility } from "../../ingestion/contentCompleteness.js";
 import { sourceContentEvidencePredicate } from "../../pipeline/descriptionQuality.js";
 import { archiveJobsAsPostingNotConfirmable } from "../../services/jobArchive.js";
 import { readFileSync } from "node:fs";
@@ -276,6 +276,20 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
       await database.query("ROLLBACK");
     }
     expect((await reportAwaitingContentVisibility(database, workspaceId)).visible).toEqual([]);
+  });
+
+  it("every v_*_scoped view is classified: a list checked by check 8 or an exempt view with a reason (a new view fails until classified)", async () => {
+    const views = await db().query<{ table_name: string }>(
+      `SELECT table_name FROM information_schema.views WHERE table_schema = $1 AND table_name LIKE 'v\_%\_scoped' ORDER BY table_name`, [schemaName]);
+    const checked = new Set<string>(LIST_READ_MODELS);
+    const exempt = new Set(Object.keys(NON_LIST_READ_MODELS));
+    const unclassified = views.rows.map((row) => row.table_name).filter((name) => !checked.has(name) && !exempt.has(name));
+    expect(unclassified).toEqual([]);
+    // No view is both, and every listed name still exists (a renamed or dropped view must be removed from the lists).
+    expect([...checked].filter((name) => exempt.has(name))).toEqual([]);
+    const existing = new Set(views.rows.map((row) => row.table_name));
+    expect([...checked, ...exempt].filter((name) => !existing.has(name))).toEqual([]);
+    for (const reason of Object.values(NON_LIST_READ_MODELS)) expect(reason.length).toBeGreaterThan(10);
   });
 
   it("check 8 fails when an expected list read model is missing or nothing was checked (an empty check is never a pass)", async () => {

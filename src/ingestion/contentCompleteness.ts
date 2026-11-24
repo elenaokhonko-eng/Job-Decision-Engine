@@ -103,6 +103,30 @@ export const LIST_READ_MODELS = [
   "v_top_ten_ready_jobs_scoped",
   "v_top_ten_ready_jobs_stage3_scoped",
 ] as const;
+
+/**
+ * Every other `v_*_scoped` view and why check 8 does not test it. A test enumerates the schema's views: a view that is in
+ * neither LIST_READ_MODELS nor this record fails the test until someone classifies it.
+ */
+export const NON_LIST_READ_MODELS: Readonly<Record<string, string>> = {
+  v_application_workspace_scoped: "application history built on application_records: it shows a job the owner applied to whatever its content state",
+  v_application_workspace_summary_scoped: "workspace counts, no per-job rows",
+  v_archived_jobs_scoped: "archived jobs are not live",
+  v_company_culture_analytics_scoped: "company-level analytics, not a list of jobs",
+  v_company_culture_evidence_scoped: "company-level evidence, not a list of jobs",
+  v_job_awaiting_content_counts_scoped: "the awaiting-content counts themselves",
+  v_job_awaiting_content_scoped: "the awaiting-content read model itself",
+  v_job_engine_dashboard_summary_scoped: "aggregate dashboard counts, no per-job rows",
+  // KNOWN GAPS found by the classification test: both views return a row for awaiting-content jobs (they select from canonical_jobs without the
+  // content gate). Migration 123 gates them with v_job_content_state; move them into LIST_READ_MODELS in that PR so check 8 covers them.
+  v_job_ranking_scoped: "KNOWN GAP: one row per live job with its stored ranking score, not gated by content_complete yet; migration 123 gates it and moves it into LIST_READ_MODELS",
+  v_job_verification_checks_scoped: "KNOWN GAP: owner verification questions per job version, not gated by content_complete yet; migration 123 gates it and moves it into LIST_READ_MODELS",
+  v_job_profile_evidence_scoped: "per-job evidence detail for the review panel, not a list",
+  v_job_status_bucket_counts_scoped: "bucket counts, no per-job rows",
+  v_job_support_issues_scoped: "support issues, built on the shortlist actions view; awaiting jobs are added deliberately by the support-issues migration so the owner can paste a description",
+  v_profile_coverage_scoped: "profile-level coverage, not a list of jobs",
+  v_rejected_jobs_audit_scoped: "hard-rejected and removed jobs: a rejection is not a recommendation, and the awaiting-content view excludes them by design",
+};
 // v_application_workspace_scoped is deliberately not listed: it is built on application_records, so it shows a job the owner
 // already applied to whatever its content state is (application history, not a list of candidates). The other lists are
 // built on v_canonical_shortlist_scoped, which migration 120 gates with content_complete.
