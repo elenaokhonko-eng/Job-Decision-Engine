@@ -212,7 +212,7 @@ describe("exit code and predicate map", () => {
       MATCH_PROFILE_EVIDENCE: "match_runs", DECIDE_RECOMMENDATION: "deterministic_decisions",
     };
     for (const [type, name] of Object.entries(table)) expect(COMPLETED_RESULT_PREDICATES[type]).toContain(`FROM ${name} result`);
-    expect(COMPLETED_RESULT_TASK_TYPES).not.toContain("RECHECK_AVAILABILITY");
-    expect(COMPLETED_RESULT_TASK_TYPES).toEqual(["APPLY_HARD_GATES", "ROUTE_LANE", "MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION"]);
+    expect(COMPLETED_RESULT_TASK_TYPES).toEqual(["APPLY_HARD_GATES", "ROUTE_LANE", "MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION", "RECHECK_AVAILABILITY"]);
+    expect(COMPLETED_RESULT_PREDICATES.RECHECK_AVAILABILITY).toContain("FROM job_availability_recheck_events result");
   });
 });

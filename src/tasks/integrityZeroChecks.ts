@@ -1,0 +1,140 @@
+/**
+ * Must-be-zero checks for the rehearsal and for every reconcile run. Each check returns a count and a
+ * short sample of ids (never titles or employers); any count above zero is an error. Read only.
+ * Wired into scripts/reconcile_pipeline.ts and scripts/check_integrity.ts, so the scripts hold no SQL.
+ */
+import type pg from "pg";
+
+import { OWNER_SAVED_SOURCE_NAMES } from "../services/jobArchiveHardRejectedPolicy.js";
+import { routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
+import { findTasksCompletedWithoutResult } from "./completedWithoutResult.js";
+
+type Queryable = Pick<pg.PoolClient, "query">;
+
+export interface ZeroCheckResult {
+  readonly name: string;
+  readonly total: number;
+  readonly sample: readonly string[];
+  readonly detail?: Record<string, number>;
+}
+
+const SAMPLE = 10;
+
+function result(name: string, ids: readonly string[], detail?: Record<string, number>): ZeroCheckResult {
+  return { name, total: ids.length, sample: ids.slice(0, SAMPLE), ...(detail ? { detail } : {}) };
+}
+
+/** A job whose latest gate result is HARD_REJECT still carries a recommendation. */
+export async function rejectedJobsWithRecommendation(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  const { rows } = await db.query<{ id: string }>(
+    `WITH latest AS (
+       SELECT DISTINCT ON (canonical_job_id) canonical_job_id, decision
+         FROM gate_decisions WHERE workspace_id = $1::uuid
+        ORDER BY canonical_job_id, created_at DESC, id DESC)
+     SELECT c.id::text AS id
+       FROM canonical_jobs c JOIN latest l ON l.canonical_job_id = c.id
+      WHERE c.workspace_id = $1::uuid AND l.decision = 'HARD_REJECT' AND c.archived_at IS NULL AND NOT c.is_test_fixture
+        AND (c.recommendation_outcome IN ('PRIORITY', 'REVIEW', 'TRACK') OR c.recommendation_eligibility IN ('ELIGIBLE', 'VERIFY'))
+      ORDER BY c.id`,
+    [workspaceId],
+  );
+  return result("rejected_job_with_recommendation", rows.map((row) => row.id));
+}
+
+/** A job in the Apply Now or Top 10 list whose current version is not confirmed open (v_job_availability_current). */
+export const LISTED_JOB_VIEWS: Readonly<Record<string, string>> = {
+  apply_now: "v_apply_now_jobs_stage3_scoped",
+  top_10: "v_top_ten_ready_jobs_stage3_scoped",
+};
+
+export async function listedJobsNotCurrentlyOpen(
+  db: Queryable,
+  workspaceId: string,
+  lists: Readonly<Record<string, string>> = LISTED_JOB_VIEWS,
+): Promise<ZeroCheckResult> {
+  for (const view of Object.values(lists)) {
+    if (!/^[a-z_][a-z0-9_]*$/.test(view)) throw new Error("A listed-job view name must be a plain identifier.");
+  }
+  const ids: string[] = [];
+  const detail: Record<string, number> = {};
+  for (const [label, view] of Object.entries(lists)) {
+    const { rows } = await db.query<{ id: string }>(
+      `SELECT DISTINCT listed.canonical_job_id::text AS id
+         FROM ${view} listed
+         LEFT JOIN v_job_availability_current availability
+           ON availability.workspace_id = listed.workspace_id
+          AND availability.canonical_job_id = listed.canonical_job_id
+          AND availability.job_version_id::text = listed.job_version_id::text
+        WHERE listed.workspace_id = $1::uuid
+          AND NOT COALESCE(availability.availability_current, FALSE)
+        ORDER BY 1`,
+      [workspaceId],
+    );
+    detail[label] = rows.length;
+    ids.push(...rows.map((row) => `${label}:${row.id}`));
+  }
+  return result("listed_job_not_currently_open", ids, detail);
+}
+
+/** A task COMPLETED with no result row, including RECHECK_AVAILABILITY. */
+export async function completedTasksWithoutResult(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  const report = await findTasksCompletedWithoutResult(db, workspaceId, { sampleLimit: SAMPLE });
+  return { name: "task_completed_without_result", total: report.total, sample: report.sample.map((row) => row.taskId), detail: report.byTaskType };
+}
+
+/** A routable NEEDS_VERIFICATION job with no active task and no match run: nothing will carry it on. */
+export async function routableVerificationJobsStranded(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT c.id::text AS id
+       FROM canonical_jobs c
+      WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+        AND ${routableWorkabilityVerificationSql("c")}
+        AND NOT EXISTS (
+          SELECT 1 FROM pipeline_tasks task
+           WHERE task.workspace_id = c.workspace_id
+             AND task.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+             AND (task.payload->>'canonical_job_id' = c.id::text OR task.payload->>'job_version_id' = c.latest_job_version_id::text))
+        AND c.latest_match_run_id IS NULL
+      ORDER BY c.id`,
+    [workspaceId],
+  );
+  return result("routable_verification_job_stranded", rows.map((row) => row.id));
+}
+
+/** A job the owner saved, applied to or holds that is archived as not confirmable (availability re-check, snippet or link rules). */
+export async function protectedJobsAutoArchived(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT c.id::text AS id
+       FROM canonical_jobs c
+      WHERE c.workspace_id = $1::uuid AND c.archived_at IS NOT NULL AND c.archive_reason = 'POSTING_NOT_CONFIRMABLE'
+        AND (
+          EXISTS (SELECT 1 FROM job_versions v JOIN raw_job_observations o
+                    ON o.workspace_id = v.workspace_id AND o.job_version_id = v.id
+                   WHERE v.workspace_id = c.workspace_id AND v.canonical_job_id = c.id
+                     AND UPPER(o.source_name) = ANY($2::text[]))
+          OR EXISTS (SELECT 1 FROM application_records a
+                      WHERE a.workspace_id = c.workspace_id AND a.canonical_job_id = c.id
+                        AND a.status NOT IN ('REJECTED', 'WITHDRAWN', 'CLOSED'))
+          OR EXISTS (SELECT 1 FROM job_archive_holds h
+                      WHERE h.workspace_id = c.workspace_id AND h.canonical_job_id = c.id
+                        AND h.released_at IS NULL AND h.hold_type = 'USER_PRESERVE')
+        )
+      ORDER BY c.id`,
+    [workspaceId, [...OWNER_SAVED_SOURCE_NAMES]],
+  );
+  return result("protected_job_auto_archived", rows.map((row) => row.id), { POSTING_NOT_CONFIRMABLE: rows.length });
+}
+
+export async function runZeroChecks(db: Queryable, workspaceId: string): Promise<ZeroCheckResult[]> {
+  return [
+    await rejectedJobsWithRecommendation(db, workspaceId),
+    await listedJobsNotCurrentlyOpen(db, workspaceId),
+    await completedTasksWithoutResult(db, workspaceId),
+    await routableVerificationJobsStranded(db, workspaceId),
+    await protectedJobsAutoArchived(db, workspaceId),
+  ];
+}
+
+export function zeroChecksExitCode(results: readonly Pick<ZeroCheckResult, "total">[]): 0 | 1 {
+  return results.some((check) => check.total > 0) ? 1 : 0;
+}

@@ -6,6 +6,7 @@ import {
   DEAD_LETTER_LINEAGE_JOINS_SQL,
 } from "../src/tasks/deadLetterPolicy.js";
 import { completedWithoutResultExitCode, findTasksCompletedWithoutResult, type CompletedWithoutResultReport } from "../src/tasks/completedWithoutResult.js";
+import { runZeroChecks, zeroChecksExitCode, type ZeroCheckResult } from "../src/tasks/integrityZeroChecks.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { reportAwaitingContentOutputs } from "../src/ingestion/contentCompleteness.js";
 import { reportContentWithoutFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
@@ -42,6 +43,8 @@ interface ReconciliationReport {
   };
   /** Tasks marked COMPLETED whose result row is missing. Any count above zero is an error. */
   completed_without_result: CompletedWithoutResultReport;
+  /** Must-be-zero checks (src/tasks/integrityZeroChecks.ts). Any total above zero is an error. */
+  zero_checks: ZeroCheckResult[];
   /** Awaiting-content jobs (live, no complete posting text). Violations are listed by scripts/check_integrity.ts. */
   content_completeness: {
     awaiting_content_jobs: number;
@@ -458,6 +461,7 @@ async function run(): Promise<void> {
       evaluation_queue_states: evaluationQueueStates,
       funnel: { ...funnel.rows[0] },
       completed_without_result: await findTasksCompletedWithoutResult(client, ctx.workspaceId),
+      zero_checks: await runZeroChecks(client, ctx.workspaceId),
       content_completeness: {
         awaiting_content_jobs: awaitingOutputs.awaitingContentJobs,
         awaiting_with_gate_lane_or_recommendation: awaitingOutputs.violations.length,
@@ -477,6 +481,10 @@ async function run(): Promise<void> {
       console.log("PIPELINE RECONCILIATION (READ ONLY)");
       console.log(JSON.stringify(report, null, 2));
     }
+    for (const check of report.zero_checks.filter((entry) => entry.total > 0)) {
+      console.error(`ERROR: zero-check ${check.name} found ${check.total} (sample ${check.sample.join(", ")}).`);
+    }
+    if (zeroChecksExitCode(report.zero_checks) !== 0) process.exitCode = 1;
     if (completedWithoutResultExitCode(report.completed_without_result) !== 0) {
       console.error(
         `ERROR: ${report.completed_without_result.total} pipeline task(s) are COMPLETED with no result recorded ` +
