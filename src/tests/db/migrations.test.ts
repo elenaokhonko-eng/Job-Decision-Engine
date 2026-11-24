@@ -1147,9 +1147,9 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       const canonical = await client.query<{ id: string }>(
         `INSERT INTO canonical_jobs (
            workspace_id, company_name, normalized_title, canonical_url,
-           processing_state, processing_status, gate_decision
+           processing_state, processing_status, gate_decision, description_quality_status
          ) VALUES ($1, 'Action Test Co', 'Action Test Engineer', 'https://example.test/action',
-                   'NEEDS_VERIFICATION', 'NEEDS_VERIFICATION', 'NEEDS_VERIFICATION')
+                   'NEEDS_VERIFICATION', 'NEEDS_VERIFICATION', 'NEEDS_VERIFICATION', 'COMPLETE')
          RETURNING id`,
         [workspaceId]
       );
