@@ -10,7 +10,7 @@ import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pg
 import { runEmbeddingBatchWithFallback } from "../../embeddings/batchCoordinator.js";
 import { upsertLaneRevision } from "../../lanes/registry.js";
 import { loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
-import { seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
+import { runPipelineStageTaskWorker, seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { batchEmbeddingFromPerInput } from "../fixtures/embeddingBatchMock.js";
 import { insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
@@ -304,24 +304,85 @@ describe.skipIf(skipReal)("PUBLISH_EMBEDDING seed follows the active requirement
     expect(await embedTasks()).toHaveLength(1);
   });
 
-  // NOT PROVEN: the seed selects the job for the new set but reports it as already existing; the cause is not found.
-  it.skip("a new active requirement set (a re-extraction) reopens the job once", async () => {
+  const workerOptions = {
+    seed: false, includeTestFixtures: true, reconcileStalePending: false, heartbeatSeconds: 0, minTimeToStartTaskMs: 0, maxTasks: 100,
+  } as const;
+  const runEmbeddingTasks = () => runPipelineStageTaskWorker(db(), { ...workerOptions, context: ctx(), taskTypes: ["PUBLISH_EMBEDDING"] });
+  const missingInputs = async (jobVersionId: string) => Number((await db().query<{ n: string }>(
+    `SELECT COUNT(*)::text AS n FROM job_requirements r JOIN job_versions jv ON jv.id = r.job_version_id AND r.requirement_set_id = jv.active_requirement_set_id
+      WHERE r.job_version_id = $1 AND NOT EXISTS (
+        SELECT 1 FROM embedding_inputs ei JOIN v_published_semantic_embeddings se ON se.embedding_input_id = ei.id
+         WHERE ei.source_type = 'JOB_REQUIREMENT' AND ei.source_id = r.id AND ei.is_current)`, [jobVersionId])).rows[0]!.n);
+
+  // Root cause of the earlier "task already exists": the older PUBLISH_EMBEDDING seed (job-version embeddings)
+  // had queued a PENDING task for the same job version, and the seed correctly skips a job with a task in
+  // flight (the task embeds the ACTIVE requirement set when it runs). The new set is reopened once that task is done.
+  it("a new active requirement set (a re-extraction) reopens the job exactly once, after the in-flight task has run", async () => {
     const workspaceId = ctx().workspaceId;
+    // While a task is in flight for the job it is skipped, and it covers the set that is active when it runs.
+    expect((await seed()).byType.PUBLISH_EMBEDDING?.inserted ?? 0).toBe(0);
+    const ran = await runEmbeddingTasks();
+    expect(ran.failed).toBe(0);
+    expect(await missingInputs(jobs.needs.jobVersionId)).toBe(0);
+
     const identity = await db().query<{ id: string }>(
       `INSERT INTO requirement_set_identities (workspace_id, canonical_job_id, identity_hash, job_content_hash, deterministic_extractor_version, quoted_extractor_version, quoted_prompt_hash, normalizer_hash, quoted_enabled)
        VALUES ($1, $2, $3, 'c', 'deterministic-fixture-v2', 'q', 'p', 'n', FALSE) RETURNING id`, [workspaceId, jobs.needs.canonicalJobId, crypto.randomUUID()]);
     const set = await db().query<{ id: string }>(
       `INSERT INTO requirement_sets (workspace_id, requirement_identity_id, canonical_job_id, job_version_id, revision_number, source_type) VALUES ($1, $2, $3, $4, 2, 'EXTRACTED') RETURNING id`,
       [workspaceId, identity.rows[0]!.id, jobs.needs.canonicalJobId, jobs.needs.jobVersionId]);
+    const newSetId = set.rows[0]!.id;
     await db().query(
       `INSERT INTO job_requirements (workspace_id, canonical_job_id, job_version_id, requirement_set_id, requirement_key, requirement_type, importance, requirement_text, extractor_type, extractor_version, confidence, status)
        VALUES ($1, $2, $3, $4, 'function-1', 'FUNCTION', 'MUST', 'A brand new requirement text', 'DETERMINISTIC', 'deterministic-fixture-v2', 1, 'VALIDATED')`,
-      [workspaceId, jobs.needs.canonicalJobId, jobs.needs.jobVersionId, set.rows[0]!.id]);
-    await db().query(`UPDATE job_versions SET active_requirement_set_id = $1 WHERE id = $2`, [set.rows[0]!.id, jobs.needs.jobVersionId]);
+      [workspaceId, jobs.needs.canonicalJobId, jobs.needs.jobVersionId, newSetId]);
+    await db().query(`UPDATE job_versions SET active_requirement_set_id = $1 WHERE id = $2`, [newSetId, jobs.needs.jobVersionId]);
+    expect(await missingInputs(jobs.needs.jobVersionId)).toBe(1);
+
     expect((await seed()).byType.PUBLISH_EMBEDDING?.inserted).toBe(1);
-    expect((await embedTasks()).filter((row) => row.payload.job_version_id === jobs.needs.jobVersionId)).toHaveLength(2);
-    // And the same new set again adds nothing.
-    await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE workspace_id = $1 AND task_type = 'PUBLISH_EMBEDDING' AND payload ? 'embedding_requirement_set_id'`, [workspaceId]);
+    const forJob = (await embedTasks()).filter((row) => row.payload.job_version_id === jobs.needs.jobVersionId);
+    expect(forJob).toHaveLength(2); // one per requirement set, never two for the same set
+    expect(forJob.map((row) => row.payload.embedding_requirement_set_id)).toContain(newSetId);
+    // The same new set again adds nothing, whether the task is pending or completed.
     expect((await seed()).byType.PUBLISH_EMBEDDING?.inserted ?? 0).toBe(0);
+    expect((await runEmbeddingTasks()).failed).toBe(0);
+    expect(await missingInputs(jobs.needs.jobVersionId)).toBe(0);
+    expect((await seed()).byType.PUBLISH_EMBEDDING?.inserted ?? 0).toBe(0);
+    expect((await embedTasks()).filter((row) => row.payload.job_version_id === jobs.needs.jobVersionId)).toHaveLength(2);
+  });
+
+  it("the per-type cap is respected, and a job with a task in flight is skipped on the next pass", async () => {
+    const extra = [await seedRoutableJob("cap-1", ["Zebra cap one"]), await seedRoutableJob("cap-2", ["Zebra cap two"]), await seedRoutableJob("cap-3", ["Zebra cap three"])];
+    const scoped = extra.map((job) => job.jobVersionId);
+    const capped = () => seedRecoverablePipelineTasks(db(), {
+      context: ctx(), taskTypes: ["PUBLISH_EMBEDDING"], includeTestFixtures: true, jobVersionIds: scoped, maxSeedPerType: 2,
+    });
+    const counts = async () => (await embedTasks()).filter((row) => scoped.includes(row.payload.job_version_id)).length;
+    // The older job-version seed has its own cap and set-less task keys, so only the set-keyed tasks are counted.
+    await capped();
+    expect(await counts()).toBe(2);
+    await capped();
+    expect(await counts()).toBe(3); // the third job is reached; the two with a task in flight were skipped, not duplicated
+    await capped();
+    expect(await counts()).toBe(3);
+  });
+
+  it("after PUBLISH_EMBEDDING completes, a task blocked on the missing embedding resumes and the ROUTE_LANE successor exists", async () => {
+    const job = await seedRoutableJob("unblock", ["Zebra unblock requirement"]);
+    await db().query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, blocked_on, repair_action)
+       VALUES ($1, 'MATCH_PROFILE_EVIDENCE', $2, $3::jsonb, 'BLOCKED_DEPENDENCY', 'REQUIREMENT_EMBEDDING_MISSING', 'PUBLISH_EMBEDDING')`,
+      [ctx().workspaceId, `MATCH_PROFILE_EVIDENCE:${job.jobVersionId}:blocked-fixture`, JSON.stringify({ canonical_job_id: job.canonicalJobId, job_version_id: job.jobVersionId })]);
+    const scoped = [job.jobVersionId];
+    await seedRecoverablePipelineTasks(db(), { context: ctx(), taskTypes: ["PUBLISH_EMBEDDING"], includeTestFixtures: true, jobVersionIds: scoped });
+    expect(await missingInputs(job.jobVersionId)).toBe(1);
+    expect((await runEmbeddingTasks()).failed).toBe(0);
+    expect(await missingInputs(job.jobVersionId)).toBe(0);
+    const blocked = await db().query<{ status: string }>(
+      `SELECT status FROM pipeline_tasks WHERE workspace_id = $1 AND task_key = $2`, [ctx().workspaceId, `MATCH_PROFILE_EVIDENCE:${job.jobVersionId}:blocked-fixture`]);
+    expect(blocked.rows[0]!.status).toBe("PENDING");
+    const route = await db().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM pipeline_tasks WHERE workspace_id = $1 AND task_type = 'ROUTE_LANE' AND payload->>'job_version_id' = $2`, [ctx().workspaceId, job.jobVersionId]);
+    expect(Number(route.rows[0]!.n)).toBeGreaterThanOrEqual(1);
   });
 });
