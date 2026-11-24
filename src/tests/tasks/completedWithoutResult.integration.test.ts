@@ -172,6 +172,32 @@ describe.skipIf(skipReal)("tasks completed without a result (PostgreSQL)", () =>
     expect(reported).not.toContain(gateOk);
     expect(reported).not.toContain(laneOk);
   });
+  it("a task the worker closes without a result by design is not reported; the same task on a job that should have one is", async () => {
+    const setState = (canonicalJobId: string, state: string) => db().query(
+      `UPDATE canonical_jobs SET processing_state = $2, processing_status = $2 WHERE id = $1`, [canonicalJobId, state]);
+    const designed: string[] = [];
+    for (const state of ["UNMATCHED", "ROUTING_DEFERRED", "NEEDS_VERIFICATION", "HARD_REJECTED"]) {
+      const j = await job();
+      await setState(j.canonicalJobId, state);
+      designed.push(await completedTask("MATCH_PROFILE_EVIDENCE", j.jobVersionId));
+    }
+    for (const state of ["RAW_STAGED", "PREQUALIFIED"]) {
+      const j = await job();
+      await setState(j.canonicalJobId, state);
+      designed.push(await completedTask("DECIDE_RECOMMENDATION", j.jobVersionId));
+    }
+    const shouldHaveMatch = await job();
+    await setState(shouldHaveMatch.canonicalJobId, "LANE_ROUTED");
+    const missingMatch = await completedTask("MATCH_PROFILE_EVIDENCE", shouldHaveMatch.jobVersionId);
+    const rejectedNoDecision = await job();
+    await setState(rejectedNoDecision.canonicalJobId, "HARD_REJECTED");
+    const missingDecision = await completedTask("DECIDE_RECOMMENDATION", rejectedNoDecision.jobVersionId);
+    const reported = (await findTasksCompletedWithoutResult(db(), ctx().workspaceId, { sampleLimit: 200 })).sample.map((row) => row.taskId);
+    for (const taskId of designed) expect(reported).not.toContain(taskId);
+    expect(reported).toContain(missingMatch);
+    expect(reported).toContain(missingDecision);
+  });
+
   it("a match task with a match run is not reported; a technically deferred route is not reported", async () => {
     const matched = await job();
     const matchTask = await completedTask("MATCH_PROFILE_EVIDENCE", matched.jobVersionId);

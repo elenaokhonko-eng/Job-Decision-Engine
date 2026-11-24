@@ -40,7 +40,7 @@ import { isCurrentCanonicalJobVersion } from "./canonicalJobVersion.js";
 import { createTaskIntentV2, TaskIntentV2Schema } from "./taskIntent.js";
 import { runAvailabilityRecheck, seedAvailabilityRechecks, type AvailabilityRecheckDependencies } from "./availabilityRecheck.js";
 import { archivedJobForPipelineTask } from "./jobArchiveGuard.js";
-import { forcedTaskRerouteIntent, forcedTaskReroutePayload } from "./forcedTaskReroute.js";
+import { forcedTaskRerouteIntent, forcedTaskReroutePayload, isForcedRecomputeTask } from "./forcedTaskReroute.js";
 import { planPipelineStageRound } from "./pipelineStageScheduler.js";
 import {
   KeyedMutex,
@@ -426,6 +426,11 @@ export class DecisionSupersededError extends PipelineTaskDependencyBlockedError 
     );
     this.name = "DecisionSupersededError";
   }
+}
+
+/** PRIORITY, REVIEW and TRACK are recommendations; SKIP is the absence of one. */
+function isActionableRecommendationOutcome(outcome: string | null | undefined): boolean {
+  return outcome === "PRIORITY" || outcome === "REVIEW" || outcome === "TRACK";
 }
 
 function abortReasonMessage(signal: AbortSignal): string {
@@ -3430,8 +3435,16 @@ async function executeStageTask(
       // must not create a permanent blocked/manual-review record.
       return;
     }
-    if (decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) {
-      // Terminal jobs with recorded recommendation outcomes are complete.
+    if (
+      decisionState.recommendationOutcome &&
+      ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "") &&
+      !isActionableRecommendationOutcome(decisionState.recommendationOutcome) &&
+      !isForcedRecomputeTask(task)
+    ) {
+      // A terminal job whose recorded outcome is a non-recommendation (SKIP) is complete. A recommendation
+      // (PRIORITY, REVIEW, TRACK) still stored on a terminal job is stale: accepting it here completed the
+      // task without a decision and kept the recommendation visible, so the decider runs instead. A forced
+      // recompute (zero-check repair) always runs the decider.
       return;
     }
     const matchDependentStates = new Set([
@@ -3479,6 +3492,13 @@ async function executeStageTask(
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (!state.recommendationOutcome) {
       throw new Error(`Recommendation decider left job_version_id=${jobVersionId} without recommendation_outcome.`);
+    }
+    if (state.processingState === "HARD_REJECTED" && isActionableRecommendationOutcome(state.recommendationOutcome)) {
+      // The decider selected nothing (for example the posting has no complete source content), so the stale
+      // recommendation survived. Fail visibly instead of completing a hard-rejected job that still recommends.
+      throw new Error(
+        `Recommendation decider left a ${state.recommendationOutcome} recommendation on hard-rejected job_version_id=${jobVersionId}.`
+      );
     }
     return;
   }

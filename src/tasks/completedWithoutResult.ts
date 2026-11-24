@@ -72,6 +72,13 @@ export async function findTasksCompletedWithoutResult(
         AND COALESCE(canonical.processing_state, canonical.processing_status) <> 'MANUALLY_REMOVED'
         -- A technically deferred route (ROUTING_DEFERRED) leaves no lane decision by design; it is its own waiting state.
         AND NOT (task.task_type = 'ROUTE_LANE' AND COALESCE(canonical.processing_state, canonical.processing_status) = 'ROUTING_DEFERRED')
+        -- The worker completes a profile match without a match run, by design, for a job that has no match to perform:
+        -- no active lane match (UNMATCHED), a technical routing deferral, verification still open, or a hard rejection.
+        AND NOT (task.task_type = 'MATCH_PROFILE_EVIDENCE' AND COALESCE(canonical.processing_state, canonical.processing_status)
+                 IN ('UNMATCHED', 'ROUTING_DEFERRED', 'NEEDS_VERIFICATION', 'HARD_REJECTED'))
+        -- A decision task for a job still before lane routing is a stale task the worker closes without a decision, by design.
+        AND NOT (task.task_type = 'DECIDE_RECOMMENDATION' AND COALESCE(canonical.processing_state, canonical.processing_status)
+                 IN ('RAW_STAGED', 'PREQUALIFIED'))
         -- RECHECK_AVAILABILITY skips (and completes without an event) a job that has no observation to read.
         AND NOT (task.task_type = 'RECHECK_AVAILABILITY' AND NOT EXISTS (
           SELECT 1 FROM raw_job_observations skip_observation

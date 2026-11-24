@@ -1,0 +1,130 @@
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+
+import { isLocalPostgresConnectionString } from "../../db/pgSsl.js";
+import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
+import { createTaskIntentV2 } from "../../tasks/taskIntent.js";
+import { runPipelineStageTaskWorker } from "../../tasks/stageTaskWorker.js";
+import { openPipelineStack, type PipelineStack, type StackJob } from "../fixtures/pipelineStackFixture.js";
+
+// Real PostgreSQL, real recommendation decider. A DECIDE_RECOMMENDATION task for a job that is already in a
+// terminal state (HARD_REJECTED or UNMATCHED) used to complete without running the decider whenever ANY
+// outcome was stored, so a recommendation (TRACK) left on a hard-rejected job by a gate that predates the
+// clear-on-reject fix (#202) was accepted and no decision was recorded for the job version.
+const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
+const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
+if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
+  throw new Error("CI must run the terminal decide tests against its PostgreSQL service.");
+}
+
+let stack: PipelineStack | undefined;
+const s = (): PipelineStack => { if (!stack) throw new Error("not initialised"); return stack; };
+
+async function hardRejected(job: StackJob, outcome: string, eligibility: string): Promise<void> {
+  const { db, ctx } = s();
+  await db.query(
+    `UPDATE canonical_jobs
+        SET processing_state = 'HARD_REJECTED', processing_status = 'HARD_REJECTED', gate_decision = 'HARD_REJECT',
+            rejection_reason = 'HARD_LOCATION_ONSITE', description_quality_status = 'COMPLETE',
+            recommendation_outcome = $3, recommendation_eligibility = $4
+      WHERE workspace_id = $1 AND id = $2`,
+    [ctx.workspaceId, job.canonicalJobId, outcome, eligibility],
+  );
+  await db.query(
+    `INSERT INTO gate_decisions (workspace_id, canonical_job_id, job_version_id, gate_version, decision) VALUES ($1, $2, $3, 'gate-2026-11.4', 'HARD_REJECT')`,
+    [ctx.workspaceId, job.canonicalJobId, job.jobVersionId],
+  );
+}
+
+async function enqueueDecide(job: StackJob, forced: boolean): Promise<void> {
+  const { db, ctx } = s();
+  const payload: Record<string, unknown> = {
+    canonical_job_id: job.canonicalJobId,
+    job_version_id: job.jobVersionId,
+    ...(forced ? { force_policy_recalculation: true } : {}),
+  };
+  const taskKey = `DECIDE_RECOMMENDATION:${job.jobVersionId}:terminal-test:${randomUUID()}`;
+  await enqueuePipelineTask({
+    taskType: "DECIDE_RECOMMENDATION",
+    taskKey,
+    payload,
+    maxAttempts: 2,
+    ...(forced ? {
+      intent: createTaskIntentV2({
+        workspaceId: ctx.workspaceId, taskType: "DECIDE_RECOMMENDATION", stageVersion: "recommendation_decider_v1",
+        producer: "terminal-test", requestId: taskKey, mode: "FORCE_RECOMPUTE", payload,
+      }),
+    } : {}),
+  }, db, { context: ctx });
+}
+
+async function runDecide() {
+  return runPipelineStageTaskWorker(s().db, {
+    context: s().ctx, seed: false, includeTestFixtures: true, reconcileStalePending: false,
+    heartbeatSeconds: 0, minTimeToStartTaskMs: 0, maxTasks: 20, taskTypes: ["DECIDE_RECOMMENDATION"],
+  });
+}
+
+async function jobRow(job: StackJob) {
+  const { rows } = await s().db.query<{ outcome: string | null; eligibility: string | null; decisions: number }>(
+    `SELECT c.recommendation_outcome AS outcome, c.recommendation_eligibility AS eligibility,
+            (SELECT COUNT(*)::int FROM deterministic_decisions d WHERE d.workspace_id = c.workspace_id AND d.job_version_id = c.latest_job_version_id) AS decisions
+       FROM canonical_jobs c WHERE c.workspace_id = $1 AND c.id = $2`,
+    [s().ctx.workspaceId, job.canonicalJobId],
+  );
+  return rows[0]!;
+}
+
+describe.skipIf(skipReal)("decide task on a terminal job (PostgreSQL)", () => {
+  beforeAll(async () => { stack = await openPipelineStack(databaseUrl, "terminal_decide"); }, 180_000);
+  afterAll(async () => { await stack?.close(); });
+
+  it("a stale recommendation on a hard-rejected job is cleared by the decider and a decision is recorded", async () => {
+    const job = await s().seedRoutableJob("stale-track");
+    await hardRejected(job, "TRACK", "VERIFY");
+    await enqueueDecide(job, false);
+    const summary = await runDecide();
+    expect(summary.failed).toBe(0);
+    const row = await jobRow(job);
+    expect(row.outcome).toBe("SKIP");
+    expect(row.eligibility).toBe("INELIGIBLE");
+    expect(row.decisions).toBe(1);
+  });
+
+  it("a hard-rejected job whose outcome is already SKIP completes without a decider run when the task is not forced", async () => {
+    const job = await s().seedRoutableJob("skip-recorded");
+    await hardRejected(job, "SKIP", "INELIGIBLE");
+    await enqueueDecide(job, false);
+    const summary = await runDecide();
+    expect(summary.failed).toBe(0);
+    expect((await jobRow(job)).decisions).toBe(0);
+  });
+
+  it("a forced recompute runs the decider even when the stored outcome is already SKIP", async () => {
+    const job = await s().seedRoutableJob("skip-forced");
+    await hardRejected(job, "SKIP", "INELIGIBLE");
+    await enqueueDecide(job, true);
+    const summary = await runDecide();
+    expect(summary.failed).toBe(0);
+    const row = await jobRow(job);
+    expect(row.outcome).toBe("SKIP");
+    expect(row.decisions).toBe(1);
+  });
+
+  it("when the decider cannot select the job, a stale recommendation fails the task visibly instead of completing it", async () => {
+    const job = await s().seedRoutableJob("stale-undecidable");
+    await hardRejected(job, "TRACK", "VERIFY");
+    // The decider only selects jobs with a complete description; without it the stale value would survive.
+    await s().db.query(`UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, job.canonicalJobId]);
+    await enqueueDecide(job, false);
+    const summary = await runDecide();
+    expect(summary.completed).toBe(0);
+    expect(summary.failed + summary.blocked + summary.deadLettered).toBeGreaterThan(0);
+    expect((await jobRow(job)).outcome).toBe("TRACK");
+    const task = await s().db.query<{ status: string }>(
+      `SELECT status FROM pipeline_tasks WHERE workspace_id = $1 AND payload->>'job_version_id' = $2 AND task_type = 'DECIDE_RECOMMENDATION'`,
+      [s().ctx.workspaceId, job.jobVersionId],
+    );
+    expect(task.rows[0]!.status).not.toBe("COMPLETED");
+  });
+});
