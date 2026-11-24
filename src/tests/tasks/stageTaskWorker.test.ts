@@ -1168,7 +1168,8 @@ describe("stageTaskWorker", () => {
           }],
         };
       }
-      if (sql.includes("embedding_repair_round")) return { rows: [{ n: 3 }], rowCount: 1 };
+      if (sql.includes("embedding_repair_seq")) return { rows: [{ payload: { embedding_repair_round: 3, embedding_repair_seq: 3, missing_requirements: 1 } }], rowCount: 1 };
+      if (sql.includes("NOT EXISTS") && sql.includes("JOB_REQUIREMENT")) return { rows: [{ n: 1 }], rowCount: 1 };
       if (sql.includes("INSERT INTO pipeline_tasks")) return { rows: [{ id: "task-embedding-repair" }], rowCount: 1 };
       if (sql.includes("UPDATE pipeline_task_attempts")) return { rows: [], rowCount: 1 };
       if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "task-semantic-gap" }], rowCount: 1 };
