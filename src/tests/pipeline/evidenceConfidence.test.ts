@@ -24,3 +24,15 @@ describe("applyThinPostingCap", () => {
     expect(applyThinPostingCap("TRACK", { level: "LOW" })).toBe("TRACK");
   });
 });
+
+describe("deciderVersionRefreshSql only selects jobs the decider will process", () => {
+  it("requires a live job and, unless fixtures are included, a non-fixture job", async () => {
+    const { deciderVersionRefreshSql } = await import("../../pipeline/deciderVersion.js");
+    const normal = deciderVersionRefreshSql("c");
+    expect(normal).toContain("c.archived_at IS NULL");
+    expect(normal).toContain("c.is_test_fixture IS NOT TRUE");
+    const withFixtures = deciderVersionRefreshSql("c", { includeTestFixtures: true });
+    expect(withFixtures).toContain("c.archived_at IS NULL");
+    expect(withFixtures).not.toContain("is_test_fixture");
+  });
+});
