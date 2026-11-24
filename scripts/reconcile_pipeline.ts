@@ -71,10 +71,11 @@ function parseArgs(argv: string[]): {
   apply: boolean;
   target?: string;
   confirmWorkspace?: string;
+  maxTasks?: number;
 } {
   const out: {
     workspaceKey?: string; userKey?: string; json: boolean; phase: "pre" | "post";
-    repair: boolean; apply: boolean; target?: string; confirmWorkspace?: string;
+    repair: boolean; apply: boolean; target?: string; confirmWorkspace?: string; maxTasks?: number;
   } = { json: false, phase: "post", repair: false, apply: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -92,6 +93,8 @@ function parseArgs(argv: string[]): {
       out.target = String(argv[++i]).trim();
     } else if (arg.startsWith("--target=")) {
       out.target = arg.slice("--target=".length).trim();
+    } else if (arg.startsWith("--max-tasks=")) {
+      out.maxTasks = Number(arg.slice("--max-tasks=".length));
     } else if (arg.startsWith("--confirm-workspace=")) {
       out.confirmWorkspace = arg.slice("--confirm-workspace=".length).trim();
     } else if (arg === "--phase=pre" || arg === "--phase=post") {
@@ -120,10 +123,18 @@ async function run(): Promise<void> {
       target: args.target,
       apply: args.apply,
       confirmWorkspace: args.confirmWorkspace,
+      maxTasks: args.maxTasks,
       workspaceKey: args.workspaceKey,
       userKey: args.userKey,
     });
     console.log(JSON.stringify(report, null, 2));
+    if (report.truncated) {
+      console.error(
+        report.mode === "apply"
+          ? `WARNING: the cap of ${report.maxTasks} stopped the run with ${report.applied?.remaining ?? 0} plan item(s) not attempted; run again to continue.`
+          : `WARNING: the plan has ${report.planned} item(s), more than the cap of ${report.maxTasks}; an apply run needs several runs.`,
+      );
+    }
     return;
   }
   if (args.apply) throw new Error("--apply is only valid with --repair.");

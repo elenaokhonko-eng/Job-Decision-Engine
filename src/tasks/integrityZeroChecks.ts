@@ -88,7 +88,7 @@ export async function listedJobsNotCurrentlyOpen(
 
 /** A task COMPLETED with no result row, including RECHECK_AVAILABILITY. */
 export async function completedTasksWithoutResult(db: Queryable, workspaceId: string, options?: ZeroCheckOptions): Promise<ZeroCheckResult> {
-  const report = await findTasksCompletedWithoutResult(db, workspaceId, { sampleLimit: options?.withIds ? Number.MAX_SAFE_INTEGER : SAMPLE });
+  const report = await findTasksCompletedWithoutResult(db, workspaceId, { sampleLimit: SAMPLE, all: options?.withIds === true });
   const ids = report.sample.map((row) => row.taskId);
   return { name: "task_completed_without_result", total: report.total, sample: ids.slice(0, SAMPLE), detail: report.byTaskType, ...(options?.withIds ? { ids } : {}) };
 }

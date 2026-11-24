@@ -111,7 +111,7 @@ describe.skipIf(skipReal)("zero-check repair (PostgreSQL)", () => {
       ["rejected_job_with_recommendation", "DECIDE_RECOMMENDATION", job.canonicalJobId],
     ]);
     const first = await applyZeroCheckRepairs(s().db, s().ctx, plan);
-    expect(first).toEqual({ inserted: 1, existing: 0, skipped: 0 });
+    expect(first).toMatchObject({ inserted: 1, existing: 0, skipped: 0, truncated: false, remaining: 0 });
     const second = await applyZeroCheckRepairs(s().db, s().ctx, await planZeroCheckRepairs(s().db, s().ctx.workspaceId));
     expect(second.inserted).toBe(0);
 
@@ -156,6 +156,8 @@ describe.skipIf(skipReal)("zero-check repair (PostgreSQL)", () => {
     await enqueuePlain("ROUTE_LANE", job);
     expect((await runWorker(["ROUTE_LANE"])).failed).toBe(0);
     expect((await copy(job)).state).toBe("LANE_ROUTED");
+    // The router queued the match; drop it so the job shows only the completed-without-result task (an active task would keep the repair away).
+    await s().db.query(`DELETE FROM pipeline_tasks WHERE workspace_id = $1 AND status = 'PENDING' AND payload->>'job_version_id' = $2`, [s().ctx.workspaceId, job.jobVersionId]);
     await completedTask("MATCH_PROFILE_EVIDENCE", job);
     expect((await totals()).task_completed_without_result).toBe(1);
 

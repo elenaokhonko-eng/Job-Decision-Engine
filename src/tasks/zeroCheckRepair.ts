@@ -18,7 +18,6 @@ import { requireApprovedReplayTarget } from "../reporting/replayGuard.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import {
   canonicalCopyColumnsDrift,
-  completedTasksWithoutResult,
   matchBlockedOnRequirementEmbedding,
   rejectedJobsWithRecommendation,
   routableVerificationJobsStranded,
@@ -68,7 +67,12 @@ export interface UnrepairableViolation {
 export interface ZeroCheckRepairPlan {
   readonly items: readonly ZeroCheckRepairItem[];
   readonly unrepairable: readonly UnrepairableViolation[];
+  /** Jobs left out because a task of the entry stage is already active or a repair of that stage is already queued. */
+  readonly skippedActive: number;
 }
+
+/** Default cap on tasks one apply run inserts. */
+export const DEFAULT_MAX_REPAIR_TASKS = 200;
 
 interface LiveJob {
   readonly canonicalJobId: string;
@@ -105,9 +109,9 @@ export async function planZeroCheckRepairs(db: Queryable, workspaceId: string): 
   }
 
   // 2. A completed task without a result: re-run that stage (a re-match is followed by its decision by the worker).
-  const withoutResult = await completedTasksWithoutResult(db, workspaceId, { withIds: true });
-  if (withoutResult.total > 0) {
-    const report = await findTasksCompletedWithoutResult(db, workspaceId, { sampleLimit: Number.MAX_SAFE_INTEGER });
+  {
+    // `all: true`: the reporting sample is clamped to 200 rows; the repair needs every row.
+    const report = await findTasksCompletedWithoutResult(db, workspaceId, { all: true });
     const versionIds = [...new Set(report.sample.map((row) => row.jobVersionId))];
     const versionOwner = new Map<string, string>();
     if (versionIds.length > 0) {
@@ -118,6 +122,8 @@ export async function planZeroCheckRepairs(db: Queryable, workspaceId: string): 
       );
       for (const row of rows) versionOwner.set(row.id, row.canonical_job_id);
     }
+    // Archived, fixture and stale-version exclusion happens in loadLiveJobs only.
+    const liveJobs = await loadLiveJobs(db, workspaceId, [...new Set(versionOwner.values())]);
     const unsupported: Record<string, number> = {};
     for (const row of report.sample) {
       const entry: RepairEntryTaskType | null =
@@ -127,6 +133,8 @@ export async function planZeroCheckRepairs(db: Queryable, workspaceId: string): 
       const canonicalJobId = versionOwner.get(row.jobVersionId);
       if (!entry) { unsupported[row.taskType] = (unsupported[row.taskType] ?? 0) + 1; continue; }
       if (!canonicalJobId) continue;
+      const live = liveJobs.get(canonicalJobId);
+      if (!live || live.latestJobVersionId !== row.jobVersionId) continue;
       candidates.push({ kind: "task_completed_without_result", canonicalJobId, jobVersionId: row.jobVersionId, entry });
     }
     for (const [taskType, count] of Object.entries(unsupported)) {
@@ -164,8 +172,25 @@ export async function planZeroCheckRepairs(db: Queryable, workspaceId: string): 
       (ENTRY_RANK[item.entry] === ENTRY_RANK[current.entry] && item.kind < current.kind)
     ) chosen.set(item.canonicalJobId, item);
   }
-  const items = [...chosen.values()].sort((a, b) => a.canonicalJobId.localeCompare(b.canonicalJobId));
-  return { items, unrepairable };
+  const ordered = [...chosen.values()].sort((a, b) => a.canonicalJobId.localeCompare(b.canonicalJobId));
+
+  // A job that already has an active task of the entry stage, or a repair of that stage queued for the same rule
+  // version under any kind, gets nothing more: two kinds on one job never queue two forced tasks.
+  const busy = new Set<string>();
+  if (ordered.length > 0) {
+    const { rows } = await db.query<{ task_type: string; job_version_id: string }>(
+      `SELECT task.task_type, task.payload->>'job_version_id' AS job_version_id
+         FROM pipeline_tasks task
+        WHERE task.workspace_id = $1::uuid
+          AND task.payload->>'job_version_id' = ANY($2::text[])
+          AND (task.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+               OR task.payload->'zero_check_repair'->>'rule_version' = $3)`,
+      [workspaceId, ordered.map((item) => item.jobVersionId), ZERO_CHECK_REPAIR_RULE_VERSION],
+    );
+    for (const row of rows) busy.add(`${row.task_type}:${row.job_version_id}`);
+  }
+  const items = ordered.filter((item) => !busy.has(`${item.entry}:${item.jobVersionId}`));
+  return { items, unrepairable, skippedActive: ordered.length - items.length };
 }
 
 export function repairTaskKey(item: ZeroCheckRepairItem): string {
@@ -191,17 +216,27 @@ export interface ZeroCheckRepairApplyResult {
   readonly inserted: number;
   readonly existing: number;
   readonly skipped: number;
+  /** True when the cap stopped the run before every plan item was attempted. */
+  readonly truncated: boolean;
+  /** Plan items not attempted because of the cap; run again to continue. */
+  readonly remaining: number;
 }
 
 export async function applyZeroCheckRepairs(
   db: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
   plan: ZeroCheckRepairPlan,
+  maxTasks: number = DEFAULT_MAX_REPAIR_TASKS,
 ): Promise<ZeroCheckRepairApplyResult> {
+  if (!Number.isInteger(maxTasks) || maxTasks < 1) throw new Error("The repair cap (--max-tasks) must be a positive integer.");
   let inserted = 0;
   let existing = 0;
   let skipped = 0;
+  let attempted = 0;
   for (const item of plan.items) {
+    // The cap counts inserted tasks, so a rerun continues past items that are already queued.
+    if (inserted >= maxTasks) break;
+    attempted += 1;
     const stageVersion = pipelineTaskStageVersion(item.entry);
     if (!stageVersion) throw new Error(`No stage version for ${item.entry}.`);
     const taskKey = repairTaskKey(item);
@@ -220,7 +255,8 @@ export async function applyZeroCheckRepairs(
     else if (result.inserted) inserted += 1;
     else existing += 1;
   }
-  return { inserted, existing, skipped };
+  const remaining = plan.items.length - attempted;
+  return { inserted, existing, skipped, truncated: remaining > 0, remaining };
 }
 
 /* ---------------------------------------------------------------------------------------------------------------
@@ -272,10 +308,20 @@ export interface ZeroCheckRepairReport {
   /** First ids per kind; ids only. */
   readonly sample: Record<string, string[]>;
   readonly unrepairable: readonly UnrepairableViolation[];
+  readonly skippedActive: number;
+  readonly maxTasks: number;
+  /** True when the apply cap stopped the run, or (dry run) when the plan is larger than the cap. */
+  readonly truncated: boolean;
   readonly applied?: ZeroCheckRepairApplyResult;
 }
 
-export function summarizeRepairPlan(workspaceId: string, plan: ZeroCheckRepairPlan, mode: "dry_run" | "apply", applied?: ZeroCheckRepairApplyResult): ZeroCheckRepairReport {
+export function summarizeRepairPlan(
+  workspaceId: string,
+  plan: ZeroCheckRepairPlan,
+  mode: "dry_run" | "apply",
+  maxTasks: number,
+  applied?: ZeroCheckRepairApplyResult,
+): ZeroCheckRepairReport {
   const byKind: Record<string, number> = {};
   const byEntry: Record<string, number> = {};
   const sample: Record<string, string[]> = {};
@@ -287,7 +333,9 @@ export function summarizeRepairPlan(workspaceId: string, plan: ZeroCheckRepairPl
   }
   return {
     mode, workspaceId, ruleVersion: ZERO_CHECK_REPAIR_RULE_VERSION, planned: plan.items.length, byKind, byEntry, sample,
-    unrepairable: plan.unrepairable, ...(applied ? { applied } : {}),
+    unrepairable: plan.unrepairable, skippedActive: plan.skippedActive, maxTasks,
+    truncated: applied ? applied.truncated : plan.items.length > maxTasks,
+    ...(applied ? { applied } : {}),
   };
 }
 
@@ -295,6 +343,8 @@ export interface ZeroCheckRepairCommandOptions {
   readonly target: string | undefined;
   readonly apply: boolean;
   readonly confirmWorkspace?: string;
+  /** Cap on tasks inserted by one apply run; default DEFAULT_MAX_REPAIR_TASKS. */
+  readonly maxTasks?: number;
   readonly workspaceKey?: string;
   readonly userKey?: string;
 }
@@ -308,6 +358,8 @@ export async function runZeroCheckRepairCommand(
   if (options.target !== "replay") throw new Error("Zero-check repair needs --target replay; no other target is supported yet.");
   const url = (env.REPLAY_DATABASE_URL ?? "").trim();
   if (!url) throw new Error("REPLAY_DATABASE_URL is required for --target replay.");
+  const maxTasks = options.maxTasks ?? DEFAULT_MAX_REPAIR_TASKS;
+  if (!Number.isInteger(maxTasks) || maxTasks < 1) throw new Error("--max-tasks must be a positive integer.");
   const pool = new pg.Pool({ ...pgConnectionConfig(url), max: 2 });
   const client = await pool.connect();
   try {
@@ -324,13 +376,13 @@ export async function runZeroCheckRepairCommand(
     if (options.apply) {
       requireRepairApply({ allowedEnv: env.ZERO_CHECK_REPAIR_ALLOWED, confirmWorkspace: options.confirmWorkspace, workspaceId: ctx.workspaceId });
       const plan = await planZeroCheckRepairs(client, ctx.workspaceId);
-      const applied = await applyZeroCheckRepairs(client, ctx, plan);
-      return summarizeRepairPlan(ctx.workspaceId, plan, "apply", applied);
+      const applied = await applyZeroCheckRepairs(client, ctx, plan, maxTasks);
+      return summarizeRepairPlan(ctx.workspaceId, plan, "apply", maxTasks, applied);
     }
     await client.query("BEGIN READ ONLY");
     try {
       const plan = await planZeroCheckRepairs(client, ctx.workspaceId);
-      return summarizeRepairPlan(ctx.workspaceId, plan, "dry_run");
+      return summarizeRepairPlan(ctx.workspaceId, plan, "dry_run", maxTasks);
     } finally {
       await client.query("ROLLBACK");
     }
