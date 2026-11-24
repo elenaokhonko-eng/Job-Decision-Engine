@@ -5,6 +5,7 @@
  * crashing the deterministic decider. Unknown values must be treated as
  * "unknown gate decision" so the policy defaults to VERIFY/TRACK.
  */
+import { ROLE_SHAPE_POLICY_VERSION } from "../../pipeline/roleShape.js";
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import pg from "pg";
 import { runMigrations } from "../../db/migrate.js";
@@ -177,7 +178,7 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     await q(`UPDATE canonical_jobs SET normalized_title = 'Forward Deployed Engineer' WHERE id = $1`, [JOB_ID]);
     expect((await runRecommendationDecider(client)).errors).toBe(0);
     const shaped = await latest();
-    expect(shaped.trace.role_downrank.policy_version).toBe("role_shape_v1");
+    expect(shaped.trace.role_downrank.policy_version).toBe(ROLE_SHAPE_POLICY_VERSION);
     expect(shaped.trace.role_downrank.signals.map((signal: { code: string }) => signal.code)).toContain("CUSTOMER_FACING_DELIVERY");
     expect(shaped.trace.role_downrank.total_penalty).toBeGreaterThan(0);
     expect(shaped.trace.notes).toContain("role_downrank:CUSTOMER_FACING_DELIVERY");
@@ -369,7 +370,7 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
       [JOB_ID],
     );
     expect(Number(stored.rows[0].recommendation_requirement_score)).toBeCloseTo(0.7 * 0.94, 3);
-    expect(stored.rows[0].recommendation_score_policy).toMatch(/\|role_shape_v1$/);
+    expect(stored.rows[0].recommendation_score_policy?.endsWith(`|${ROLE_SHAPE_POLICY_VERSION}`)).toBe(true);
     expect(stored.rows[0].recommendation_degree_asked_for).toBe(quote);
     expect(stored.rows[0].recommendation_role_signals).toEqual([expect.objectContaining({ code: "DEGREE_GAP_FLAGGED", penalty: 0.06, quote })]);
     expect(stored.rows[0].recommendation_evidence_confidence).toBe("NORMAL");
