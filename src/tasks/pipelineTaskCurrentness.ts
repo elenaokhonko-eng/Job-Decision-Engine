@@ -4,6 +4,7 @@ import { z } from "zod";
 import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { GATE_VERSION } from "../contracts/version.js";
 import { loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPolicy.js";
+import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
 import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 import { completeRetrievedPostingPredicate } from "../pipeline/descriptionQuality.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
@@ -137,9 +138,9 @@ export function pipelineTaskStageVersion(taskType: string): string | null {
     case "PUBLISH_EMBEDDING": return "embedding_publication_v1";
     case "ROUTE_LANE": return "lane_router_v1";
     case "MATCH_PROFILE_EVIDENCE": return "deterministic_matcher_v1";
-    case "DECIDE_RECOMMENDATION": return "recommendation_decider_v1";
+    case "DECIDE_RECOMMENDATION": return DECIDER_VERSION;
     case "ENQUEUE_EXPLANATION": return "explanation_queue_v2";
-    case "RECHECK_AVAILABILITY": return "availability_recheck_v1";
+    case "RECHECK_AVAILABILITY": return "availability_recheck_v2";
     default: return null;
   }
 }

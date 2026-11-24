@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { DECIDER_VERSION } from '../pipeline/deciderVersion.js';
 import { stableStringify, sha256Hex } from '../config/structuredLoader.js';
 import { loadActiveEvidenceStrengthPolicy, type LoadedEvidenceStrengthPolicy } from '../evidence/evidenceStrengthPolicy.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
@@ -49,7 +50,7 @@ export async function resolveWorkspacePolicySnapshot(
       },
       engines: {
         rule_dsl: 'rule_dsl_v1',
-        recommendation_decider: 'recommendation_decider_v1',
+        recommendation_decider: DECIDER_VERSION,
       },
     };
 
