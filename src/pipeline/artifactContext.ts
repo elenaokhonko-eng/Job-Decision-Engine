@@ -46,6 +46,8 @@ const CONTEXT_PAYLOAD_KEYS = [
   "qualification_comparator_version",
   "career_track_policy_version",
   "career_track_assessment_hash",
+  "role_downrank_policy_version",
+  "role_downrank_assessment_hash",
   "evaluation_schema_version",
   "prompt_hash",
   "model_route",

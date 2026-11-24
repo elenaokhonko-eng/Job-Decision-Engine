@@ -3,6 +3,7 @@ import {
   decodeGmailRawEmail,
   extractEmailJobCards,
   extractEmailJobCardsWithLinkSummary,
+  isFullPostingUrl,
   EmailExtractionError,
   htmlToPlainText,
   isEmailAlertPostingLink,
@@ -143,6 +144,7 @@ describe("job-card link classification and collapsing", () => {
       // 3 cards x (3 job + 1 company) + 8 footer links in HTML; 3 job + 2 footer links in text.
       linksSeen: 25,
       jobCards: 3,
+      leadCards: 3,
       // 3 company pages + 8 footer links + 2 text footer links.
       nonJobLinksSkipped: 13,
       duplicateLinksCollapsed: 9,
@@ -362,7 +364,8 @@ describe("job-card link classification and collapsing", () => {
       title: "Synthetic Platform Lead",
       linkCount: 4,
     });
-    expect(links).toEqual({ linksSeen: 4, jobCards: 1, nonJobLinksSkipped: 0, duplicateLinksCollapsed: 3 });
+    expect(links).toEqual({ linksSeen: 4, jobCards: 1, leadCards: 1, nonJobLinksSkipped: 0, duplicateLinksCollapsed: 3 });
+    expect(cards[0]?.leadKind).toBe("AGGREGATOR_LEAD");
   });
 
   it("drops non-LinkedIn navigation by whole path segment while keeping posting slugs", async () => {
@@ -421,6 +424,62 @@ describe("job-card link classification and collapsing", () => {
       location: "Example City",
       linkCount: 4,
     })]);
-    expect(links).toEqual({ linksSeen: 4, jobCards: 1, nonJobLinksSkipped: 0, duplicateLinksCollapsed: 3 });
+    expect(links).toEqual({ linksSeen: 4, jobCards: 1, leadCards: 0, nonJobLinksSkipped: 0, duplicateLinksCollapsed: 3 });
+  });
+});
+
+describe("company alerts versus aggregator leads", () => {
+  const htmlRaw = (html: string): string =>
+    gmailRaw(["MIME-Version: 1.0", "Content-Type: text/html; charset=utf-8", "", html].join("\r\n"));
+
+  it("marks a full employer posting link a company posting and an aggregator posting a lead", async () => {
+    const html = [
+      '<a href="https://careers.example.com/jobs/4200000779">Synthetic Platform Lead</a>',
+      '<a href="https://boards.greenhouse.io/examplecorp/jobs/5100000001">Synthetic Analyst</a>',
+      '<a href="https://www.linkedin.com/comm/jobs/view/4300000124/">Synthetic Engineer</a>',
+      '<a href="https://www.mycareersfuture.gov.sg/job/information-technology/synthetic-role-abc123">Synthetic Officer</a>',
+      '<a href="https://sg.indeed.com/viewjob?jk=abc123def456">Synthetic Clerk</a>',
+    ].join("");
+    const { cards, links } = await extractEmailJobCardsWithLinkSummary(htmlRaw(html));
+    const kinds = Object.fromEntries(cards.map((card) => [new URL(card.sourceUrl).hostname, card.leadKind]));
+    expect(kinds["careers.example.com"]).toBe("COMPANY_POSTING");
+    expect(kinds["boards.greenhouse.io"]).toBe("COMPANY_POSTING");
+    expect(kinds["www.linkedin.com"]).toBe("AGGREGATOR_LEAD");
+    expect(kinds["www.mycareersfuture.gov.sg"]).toBe("AGGREGATOR_LEAD");
+    expect(kinds["sg.indeed.com"]).toBe("AGGREGATOR_LEAD");
+    expect(Object.keys(kinds)).toHaveLength(5);
+    expect(links.leadCards).toBe(cards.filter((card) => card.leadKind === "AGGREGATOR_LEAD").length);
+    expect(links.linksSeen).toBe(links.jobCards + links.nonJobLinksSkipped + links.duplicateLinksCollapsed);
+  });
+
+  it("does not stage an employer link that is not a full posting link", async () => {
+    const html = [
+      '<a href="https://careers.example.com/">Apply now</a>',
+      '<a href="https://careers.example.com/careers">View our open roles</a>',
+      '<a href="https://careers.example.com/jobs">See the job</a>',
+      '<a href="https://careers.example.com/en/jobs/">Job openings</a>',
+      '<a href="https://example.com/about-us">Role at Example</a>',
+      '<a href="https://boards.greenhouse.io/examplecorp">Example Corp jobs</a>',
+    ].join("");
+    const { cards, links } = await extractEmailJobCardsWithLinkSummary(htmlRaw(html));
+    expect(cards).toEqual([]);
+    // Each of the six anchors is seen twice (HTML plus the generated text alternative); every one is skipped.
+    expect(links).toEqual({ linksSeen: 12, jobCards: 0, leadCards: 0, nonJobLinksSkipped: 12, duplicateLinksCollapsed: 0 });
+  });
+
+  it("isFullPostingUrl needs an identifier, an ATS company board path, or a slug below a jobs segment", () => {
+    const full = (value: string) => isFullPostingUrl(new URL(value));
+    expect(full("https://careers.example.com/jobs/data-engineer-singapore")).toBe(true);
+    expect(full("https://careers.example.com/position/12345")).toBe(true);
+    expect(full("https://jobs.lever.co/examplecorp/9f4c2c1e-1b7a-4c1e-9a5e-1a2b3c4d5e6f")).toBe(true);
+    expect(full("https://example.wd3.myworkdayjobs.com/en-US/Careers/job/Singapore/Analyst_R-1234")).toBe(true);
+    expect(full("https://careers.example.com/jobs")).toBe(false);
+    expect(full("https://careers.example.com/jobs/search")).toBe(false);
+    expect(full("https://careers.example.com/jobs/en")).toBe(false);
+    expect(full("https://careers.example.com/en-US/")).toBe(false);
+    expect(full("https://careers.example.com/apply?requisition_id=R12345")).toBe(true);
+    expect(full("https://careers.example.com/apply?utm_source=alert")).toBe(false);
+    expect(full("https://jobs.lever.co/examplecorp")).toBe(false);
+    expect(full("https://careers.example.com/")).toBe(false);
   });
 });
