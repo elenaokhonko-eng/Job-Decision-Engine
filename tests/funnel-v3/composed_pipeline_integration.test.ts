@@ -689,7 +689,7 @@ describe("Composed Pipeline Integration — Full Lifecycle Transition", () => {
     expect(match?.evidence.match_qualification_code).toBe("MATCH_QUALIFICATION_MANDATORY_CERT_MISSING");
   });
 
-  it("transitions GATE_PASSED -> LANE_ROUTED -> mandatory degree mismatch -> UNMATCHED with MATCH_QUALIFICATION_DEGREE_GAP", async () => {
+  it("a mandatory degree mismatch is recorded as MATCH_QUALIFICATION_DEGREE_GAP evidence but does not reject: the job is MATCHED and the decider ranks it lower and flags it", async () => {
     const harness = createFullPipelineHarness({
       canonicalJob: {
         id: "job-degree-gap",
@@ -723,13 +723,14 @@ describe("Composed Pipeline Integration — Full Lifecycle Transition", () => {
 
     const result = await runDeterministicMatcher(harness.client, { context: TEST_CONTEXT });
 
-    expect(result.skippedJobs).toBe(1);
-    expect(harness.getUpdatedJobState()).toMatchObject({
-      processing_state: "UNMATCHED",
-      profile_match_status: "NO_PROFILE_MATCH",
-      rejection_reason: "MATCH_QUALIFICATION_DEGREE_GAP",
-    });
+    expect(result.skippedJobs).toBe(0);
+    expect(result.matchedJobs).toBe(1);
+    const state = harness.getUpdatedJobState();
+    expect(state.processing_state).not.toBe("UNMATCHED");
+    expect(state.profile_match_status).not.toBe("NO_PROFILE_MATCH");
+    expect(state.rejection_reason ?? null).toBeNull();
     const match = harness.getRecordedMatches().find((entry) => entry.requirement_id === "req-degree-phd");
+    expect(match?.match_type).toBe("NO_MATCH");
     expect(match?.evidence.match_qualification_code).toBe("MATCH_QUALIFICATION_DEGREE_GAP");
   });
 

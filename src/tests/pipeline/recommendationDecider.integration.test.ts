@@ -301,6 +301,85 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     expect(json.outputs.outcome).toBe("REVIEW");
   });
 
+  it("a MUST degree the match found short is labelled and downranked 0.06 only: readiness is exactly what it would be without the flag", async () => {
+    const { runRecommendationDecider, loadDegreeGapQuote } = await import("../../pipeline/recommendationDecider.js");
+    const workspace = await q(`SELECT workspace_id FROM canonical_jobs WHERE id = $1`, [JOB_ID]);
+    const workspaceId = workspace.rows[0].workspace_id;
+    const profile = await q(
+      `INSERT INTO candidate_profiles (workspace_id, profile_key, display_name) VALUES ($1, 'degree_fixture', 'Degree Fixture') RETURNING id`,
+      [workspaceId],
+    );
+    const profileVersion = await q(
+      `INSERT INTO profile_versions (workspace_id, candidate_profile_id, version_number, schema_version, source_hash, status)
+       VALUES ($1, $2, 1, '2.3.0', $3, 'ACTIVE') RETURNING id`,
+      [workspaceId, profile.rows[0].id, "d".repeat(64)],
+    );
+    const identity = await q(
+      `INSERT INTO requirement_set_identities (workspace_id, canonical_job_id, identity_hash, job_content_hash, deterministic_extractor_version, quoted_extractor_version, quoted_prompt_hash, normalizer_hash)
+       VALUES ($1, $2, 'degree-identity', 'h', 'v', 'v', 'p', 'n') RETURNING id`,
+      [workspaceId, JOB_ID],
+    );
+    const set = await q(
+      `INSERT INTO requirement_sets (workspace_id, requirement_identity_id, canonical_job_id, job_version_id, revision_number, source_type)
+       VALUES ($1, $2, $3, $4, 3, 'EXTRACTED') RETURNING id`,
+      [workspaceId, identity.rows[0].id, JOB_ID, VERSION_ID],
+    );
+    await q(`UPDATE job_versions SET active_requirement_set_id = $2 WHERE id = $1`, [VERSION_ID, set.rows[0].id]);
+    const quote = "A doctoral degree in a quantitative subject is required.";
+    const requirement = await q(
+      `INSERT INTO job_requirements (workspace_id, canonical_job_id, job_version_id, requirement_set_id, requirement_key, requirement_type, importance,
+                                     requirement_text, quote_text, extractor_type, extractor_version, confidence)
+       VALUES ($1, $2, $3, $4, 'R-001', 'DEGREE', 'MUST', 'Role requires a degree qualification.', $5, 'DETERMINISTIC', 'v', 1) RETURNING id`,
+      [workspaceId, JOB_ID, VERSION_ID, set.rows[0].id, quote],
+    );
+    const hash = await q(`SELECT content_hash FROM job_versions WHERE id = $1`, [VERSION_ID]);
+    const run = await q(
+      `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, requirement_set_id, job_content_hash, context_fingerprint,
+                               status, requirement_count, matched_count, coverage_score, overall_match_score)
+       VALUES ($1, $2, $3, $4, $5, $6, 'degree-context', 'COMPLETED', 4, 3, 75, 70) RETURNING id`,
+      [workspaceId, JOB_ID, VERSION_ID, profileVersion.rows[0].id, set.rows[0].id, hash.rows[0].content_hash],
+    );
+    await q(
+      `INSERT INTO requirement_evidence_matches (workspace_id, match_run_id, requirement_id, match_type, match_score, evidence)
+       VALUES ($1, $2, $3, 'NO_MATCH', 0, $4::jsonb)`,
+      [workspaceId, run.rows[0].id, requirement.rows[0].id, JSON.stringify({ match_qualification_code: "MATCH_QUALIFICATION_DEGREE_GAP" })],
+    );
+    await q(
+      `UPDATE canonical_jobs SET latest_match_run_id = $2, deterministic_match_score = 70, deterministic_match_coverage = 75,
+              profile_match_status = 'POSITIVE_MATCH', gate_decision = 'PASS', normalized_title = 'Research Scientist',
+              workplace_type = 'REMOTE', workability_facts = '{"employment_type":"PERMANENT"}'::jsonb WHERE id = $1`,
+      [JOB_ID, run.rows[0].id],
+    );
+    expect(await loadDegreeGapQuote(client, { workspaceId, matchRunId: run.rows[0].id, requirementSetId: set.rows[0].id })).toBe(quote);
+
+    expect((await runRecommendationDecider(client)).errors).toBe(0);
+    const res = await q(`SELECT decision_json, readiness_json FROM deterministic_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [JOB_ID]);
+    const parse = (value: unknown) => (typeof value === "string" ? JSON.parse(value) : value) as any;
+    const decision = parse(res.rows[0].decision_json);
+    const readiness = parse(res.rows[0].readiness_json);
+    const downrank = decision.trace.role_downrank;
+    expect(downrank.signals).toEqual([expect.objectContaining({ code: "DEGREE_GAP_FLAGGED", penalty: 0.06, quote })]);
+    expect(downrank.raw_requirement_score).toBeCloseTo(0.7, 3);
+    expect(decision.outputs.recommendation_requirement_score).toBeCloseTo(0.7 * 0.94, 3);
+    expect(decision.trace.notes).toContain(`degree_asked_for: ${quote}`);
+    const check = readiness.checks.find((entry: { key: string }) => entry.key === "MANDATORY_QUALIFICATIONS");
+    expect(check.status).toBe("MET");
+    expect(check.reason_code).not.toBe("DEGREE_GAP_FLAGGED");
+    expect(readiness.blockers ?? []).not.toContain("MANDATORY_QUALIFICATIONS");
+
+    // Same job with the gap removed: overall readiness and the qualification check are identical, so the flag changed nothing but rank and label.
+    await q(`UPDATE requirement_evidence_matches SET match_type = 'EXACT', evidence = '{}'::jsonb WHERE match_run_id = $1`, [run.rows[0].id]);
+    const second = await runRecommendationDecider(client);
+    expect(second).toMatchObject({ errors: 0, decisionsInserted: 1 });
+    const clean = await q(`SELECT decision_json, readiness_json FROM deterministic_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [JOB_ID]);
+    const cleanReadiness = parse(clean.rows[0].readiness_json);
+    const countRows = await q(`SELECT COUNT(*)::int n FROM deterministic_decisions WHERE canonical_job_id = $1`, [JOB_ID]);
+    expect(parse(clean.rows[0].decision_json).trace.role_downrank.signals).toEqual([]);
+    expect(cleanReadiness.status).toBe(readiness.status);
+    expect(cleanReadiness.checks.find((entry: { key: string }) => entry.key === "MANDATORY_QUALIFICATIONS").status).toBe("MET");
+    expect(decision.outputs.outcome).not.toBe("SKIP");
+  });
+
   it("records the career-track assessment from the active profile's experience_by_track", async () => {
     const { runRecommendationDecider } = await import("../../pipeline/recommendationDecider.js");
     const latestTrack = async () => {

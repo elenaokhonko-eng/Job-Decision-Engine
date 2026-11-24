@@ -143,12 +143,12 @@ describe.skipIf(skipReal)("mandatory qualification counts (PostgreSQL)", () => {
     expect(counts).toMatchObject({ total: 16, matched: 1, blocked: 0, unresolved: 0 });
   });
 
-  it("still blocks a mandatory degree the matcher found short", async () => {
+  it("does not block a mandatory degree the matcher found short: it is counted as a flagged degree gap", async () => {
     const counts = await seedJob([
       { type: "DEGREE", match: "NO_MATCH", qualificationCode: "MATCH_QUALIFICATION_DEGREE_GAP" },
       { type: "CUSTOM", match: "NO_MATCH" },
     ]);
-    expect(counts.blocked).toBe(1);
+    expect(counts.blocked).toBe(0);
   });
 
   it("still blocks a mandatory credential the profile explicitly lacks", async () => {

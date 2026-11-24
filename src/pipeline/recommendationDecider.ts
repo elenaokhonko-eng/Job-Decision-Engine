@@ -270,7 +270,7 @@ export async function loadMandatoryQualificationCounts(
                     COUNT(jr.id) FILTER (
                       WHERE current_match.match_type = 'NO_MATCH'
                         AND jr.requirement_type IN ('DEGREE', 'CREDENTIAL')
-                        AND COALESCE(current_match.qualification_code, '') <> 'MATCH_QUALIFICATION_PREFERRED_CERT_GAP'
+                        AND COALESCE(current_match.qualification_code, '') NOT IN ('MATCH_QUALIFICATION_PREFERRED_CERT_GAP', 'MATCH_QUALIFICATION_DEGREE_GAP')
                     ) AS blocked_mandatory,
                    COUNT(jr.id) FILTER (WHERE current_match.match_type IS DISTINCT FROM 'EXACT' AND current_match.match_type IS DISTINCT FROM 'SEMANTIC' AND current_match.match_type IS DISTINCT FROM 'NO_MATCH') AS unresolved_mandatory
              FROM job_requirements jr
@@ -290,6 +290,25 @@ export async function loadMandatoryQualificationCounts(
     [args.workspaceId, args.canonicalJobId, args.matchRunId, args.jobVersionId, args.requirementSetId],
   );
   return rows;
+}
+
+/** The posting words of a MUST degree the current match found the profile short of, or null. */
+export async function loadDegreeGapQuote(
+  client: Pick<pg.PoolClient, "query">,
+  args: { workspaceId: string; matchRunId: string; requirementSetId: string },
+): Promise<string | null> {
+  const { rows } = await client.query<{ quote: string | null }>(
+    `SELECT COALESCE(jr.quote_text, jr.requirement_text) AS quote
+       FROM requirement_evidence_matches rem
+       JOIN job_requirements jr ON jr.id = rem.requirement_id
+      WHERE rem.workspace_id = $1 AND rem.match_run_id = $2 AND jr.requirement_set_id = $3
+        AND jr.requirement_type = 'DEGREE' AND jr.importance = 'MUST'
+        AND rem.match_type = 'NO_MATCH'
+        AND rem.evidence->>'match_qualification_code' = 'MATCH_QUALIFICATION_DEGREE_GAP'
+      ORDER BY jr.requirement_key ASC LIMIT 1`,
+    [args.workspaceId, args.matchRunId, args.requirementSetId],
+  );
+  return rows[0]?.quote ?? null;
 }
 
 export async function runRecommendationDecider(
@@ -598,6 +617,9 @@ export async function runRecommendationDecider(
           title: job.normalized_title,
           description: job.description_text,
           employmentType: job.employment_type,
+          degreeGapQuote: currentMatch && job.latest_match_run_id && job.active_requirement_set_id
+            ? await loadDegreeGapQuote(client, { workspaceId: ctx.workspaceId, matchRunId: job.latest_match_run_id, requirementSetId: job.active_requirement_set_id })
+            : null,
         });
         const requirementScore = applyRoleShapePenalty(rawRequirementScore, shape);
         const coverageScore =
@@ -693,6 +715,8 @@ export async function runRecommendationDecider(
           adjustedOutcome = thinCap;
         }
         for (const signal of shape.signals) adjustedNotes.push(`role_downrank:${signal.code}`);
+        // The visible label for a flagged degree: the posting's own words. Readiness is unchanged by the flag.
+        for (const signal of shape.signals) if (signal.code === "DEGREE_GAP_FLAGGED") adjustedNotes.push(`degree_asked_for: ${signal.quote}`);
         if (fxRateFailure) adjustedNotes.push("FX_RATE_RETRIEVAL_INCOMPLETE");
         if (compensationAssessment?.is_hard_reject) {
           adjustedEligibility = "INELIGIBLE";
