@@ -3031,7 +3031,11 @@ async function maybeEnqueueAfterTask(
 
   if (taskType === "PUBLISH_EMBEDDING") {
     await reactivateBlockedDependencyTasks("PUBLISH_EMBEDDING", jobVersionId, clientOrPool, ctx);
-    await enqueueSuccessor("ROUTE_LANE", jobVersionId, stagePayload);
+    // A gate-version refresh can move the job to HARD_REJECTED/NEEDS_VERIFICATION while an embedding repair is queued;
+    // lane routing has nothing to do for such a job, so no ROUTE_LANE task is created for it.
+    if (!GATE_SUPERSEDED_ROUTE_STATES.has(state.processingState ?? "")) {
+      await enqueueSuccessor("ROUTE_LANE", jobVersionId, stagePayload);
+    }
     return insertedSuccessors;
   }
 
@@ -3841,6 +3845,9 @@ interface PipelineTaskRunMetrics {
   stampOnly?: boolean;
 }
 
+/** Job states a deterministic gate decision leaves a job in; lane routing cannot act on them. */
+const GATE_SUPERSEDED_ROUTE_STATES: ReadonlySet<string> = new Set(["HARD_REJECTED", "NEEDS_VERIFICATION"]);
+
 async function processClaimedTask(
   task: ClaimedPipelineTask,
   clientOrPool: pg.Pool | pg.PoolClient,
@@ -3872,6 +3879,20 @@ async function processClaimedTask(
       });
     }
     return;
+  }
+  // A lane-routing or embedding task whose job version a deterministic gate has since moved to HARD_REJECTED or NEEDS_VERIFICATION
+  // has nothing to act on (the embedding input builder does not build job inputs for those states, so the task could only fail).
+  // That is the gate's decision, not a stage failure: record the task as superseded without retry or dead letter, and leave the
+  // job state and its gate evidence untouched.
+  if (taskType === "ROUTE_LANE" || taskType === "PUBLISH_EMBEDDING") {
+    const gateState = await lookupJobState(clientOrPool, ctx, requireStringPayload(task, "job_version_id"));
+    if (GATE_SUPERSEDED_ROUTE_STATES.has(gateState.processingState ?? "")) {
+      await completePipelineTaskAndRun(task, clientOrPool, {
+        context: ctx,
+        repairAction: "SUPERSEDED_BY_GATE_OUTCOME",
+      });
+      return;
+    }
   }
   const isTestFixture = !options.includeTestFixtures && await taskTargetsTestFixture(task, clientOrPool, ctx);
 
