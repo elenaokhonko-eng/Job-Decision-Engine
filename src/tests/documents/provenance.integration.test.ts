@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { DECIDER_VERSION } from "../../pipeline/deciderVersion.js";
 import { readFileSync } from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
@@ -446,9 +447,9 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
          policy_snapshot_id, decision_hash, decision_json,
          recommendation_eligibility, recommendation_outcome, context_fingerprint,
          created_by_user_id, preference_user_id, preference_context_id,
-         readiness_json, evidence_revision_hash, readiness_fingerprint
+         readiness_json, evidence_revision_hash, readiness_fingerprint, decider_version
        ) VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, 'ELIGIBLE', 'REVIEW',
-         $7, $8, NULL, NULL, $9::jsonb, $10, $11)
+         $7, $8, NULL, NULL, $9::jsonb, $10, $11, '${DECIDER_VERSION}')
        RETURNING id`,
       [
         workspace.workspaceId,

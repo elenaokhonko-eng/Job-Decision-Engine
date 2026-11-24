@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { load } from "js-yaml";
+import { configPath } from "../config/configPaths.js";
 import { z } from "zod";
 
 export const REQUIRED_DISCOVERY_LANES = [
@@ -38,7 +39,7 @@ export const SixLaneSourcePlanConfigSchema = z.object({
 
 export type SixLaneSourcePlanConfig = z.infer<typeof SixLaneSourcePlanConfigSchema>;
 
-export function loadSixLaneSourcePlanConfig(filePath = path.resolve(process.cwd(), "config/source-plans/six_lane_sources.yml")): SixLaneSourcePlanConfig {
+export function loadSixLaneSourcePlanConfig(filePath = configPath("source-plans", "six_lane_sources.yml")): SixLaneSourcePlanConfig {
   const contents = fs.readFileSync(filePath, "utf8");
   const parsed: unknown = load(contents);
   return SixLaneSourcePlanConfigSchema.parse(parsed);
