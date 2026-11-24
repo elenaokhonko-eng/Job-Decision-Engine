@@ -13,6 +13,7 @@ import { currentMatcherPolicyVersion } from "../pipeline/profileMatchCurrency.js
 import { LANE_ROUTER_RULE_VERSION } from "../pipeline/laneRouter.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
 import { findTasksCompletedWithoutResult } from "./completedWithoutResult.js";
+import { reportAggregatorLeadsInRanking } from "../ingestion/leadRankingCheck.js";
 
 type Queryable = Pick<pg.PoolClient, "query">;
 
@@ -203,6 +204,12 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
   return result("stage_result_older_than_rule_version", ids, detail);
 }
 
+/** A ranked job backed only by an aggregator lead (src/ingestion/leadRankingCheck.ts owns the rule and the query). */
+export async function aggregatorLeadsInRanking(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  const report = await reportAggregatorLeadsInRanking(db, workspaceId);
+  return { name: "aggregator_lead_in_ranking", total: report.count, sample: report.sample.slice(0, SAMPLE) };
+}
+
 export async function runZeroChecks(db: Queryable, workspaceId: string): Promise<ZeroCheckResult[]> {
   return [
     await rejectedJobsWithRecommendation(db, workspaceId),
@@ -211,6 +218,7 @@ export async function runZeroChecks(db: Queryable, workspaceId: string): Promise
     await routableVerificationJobsStranded(db, workspaceId),
     await protectedJobsAutoArchived(db, workspaceId),
     await staleStageResults(db, workspaceId),
+    await aggregatorLeadsInRanking(db, workspaceId),
   ];
 }
 

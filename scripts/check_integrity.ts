@@ -204,7 +204,7 @@ async function runIntegrityChecks() {
       );
     }
 
-    // Checks 10 to 15: the must-be-zero set (src/tasks/integrityZeroChecks.ts).
+    // Checks 10 to 16: the must-be-zero set (src/tasks/integrityZeroChecks.ts).
     for (const check of await runZeroChecks(pool, ctx.workspaceId)) {
       if (check.total > 0) {
         console.error(`Found ${check.total} for ${check.name}; first ids: ${check.sample.join(", ")}`);
