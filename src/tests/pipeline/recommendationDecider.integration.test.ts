@@ -5,6 +5,7 @@
  * crashing the deterministic decider. Unknown values must be treated as
  * "unknown gate decision" so the policy defaults to VERIFY/TRACK.
  */
+import { ROLE_SHAPE_POLICY_VERSION } from "../../pipeline/roleShape.js";
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import pg from "pg";
 import { runMigrations } from "../../db/migrate.js";
@@ -177,7 +178,7 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     await q(`UPDATE canonical_jobs SET normalized_title = 'Forward Deployed Engineer' WHERE id = $1`, [JOB_ID]);
     expect((await runRecommendationDecider(client)).errors).toBe(0);
     const shaped = await latest();
-    expect(shaped.trace.role_downrank.policy_version).toBe("role_shape_v1");
+    expect(shaped.trace.role_downrank.policy_version).toBe(ROLE_SHAPE_POLICY_VERSION);
     expect(shaped.trace.role_downrank.signals.map((signal: { code: string }) => signal.code)).toContain("CUSTOMER_FACING_DELIVERY");
     expect(shaped.trace.role_downrank.total_penalty).toBeGreaterThan(0);
     expect(shaped.trace.notes).toContain("role_downrank:CUSTOMER_FACING_DELIVERY");
@@ -365,6 +366,21 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     expect(downrank.raw_requirement_score).toBeCloseTo(0.7, 3);
     expect(decision.outputs.recommendation_requirement_score).toBeCloseTo(0.7 * 0.94, 3);
     expect(decision.trace.notes).toContain(`degree_asked_for: ${quote}`);
+    // Migration 121: the same decision writes the read-model columns next to the adjusted score.
+    const stored = await q(
+      `SELECT recommendation_requirement_score, recommendation_score_policy, recommendation_degree_asked_for, recommendation_role_signals, recommendation_evidence_confidence
+         FROM canonical_jobs WHERE id = $1`,
+      [JOB_ID],
+    );
+    expect(Number(stored.rows[0].recommendation_requirement_score)).toBeCloseTo(0.7 * 0.94, 3);
+    expect(stored.rows[0].recommendation_score_policy?.endsWith(`|${ROLE_SHAPE_POLICY_VERSION}`)).toBe(true);
+    expect(stored.rows[0].recommendation_degree_asked_for).toBe(quote);
+    expect(stored.rows[0].recommendation_role_signals).toEqual([expect.objectContaining({ code: "DEGREE_GAP_FLAGGED", penalty: 0.06, quote })]);
+    expect(stored.rows[0].recommendation_evidence_confidence).toBe("NORMAL");
+
+    // decider_version is written in the INSERT of the decision (rows are immutable), outside decision_hash.
+    const stamped = await q(`SELECT decider_version FROM deterministic_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [JOB_ID]);
+    expect(stamped.rows[0].decider_version).toBe("recommendation_decider_v1");
     const check = readiness.checks.find((entry: { key: string }) => entry.key === "MANDATORY_QUALIFICATIONS");
     expect(check.status).toBe("MET");
     expect(check.reason_code).not.toBe("DEGREE_GAP_FLAGGED");

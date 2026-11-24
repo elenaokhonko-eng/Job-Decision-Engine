@@ -1225,6 +1225,10 @@ export async function runHardGates(
                recommendation_coverage_score = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_coverage_score END,
                recommendation_evidence_completeness = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_evidence_completeness END,
                recommendation_decided_at = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_decided_at END,
+               recommendation_score_policy = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_score_policy END,
+               recommendation_degree_asked_for = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_degree_asked_for END,
+               recommendation_role_signals = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN '[]'::jsonb ELSE recommendation_role_signals END,
+               recommendation_evidence_confidence = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_evidence_confidence END,
                updated_at         = NOW()
            WHERE workspace_id = $6
              AND id = $7

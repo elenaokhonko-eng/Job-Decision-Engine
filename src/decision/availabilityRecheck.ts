@@ -18,9 +18,6 @@
 export const ABSENT_READS_TO_CLOSE = 2;
 export const CANNOT_TELL_RETRIES = 3;
 export const CANNOT_TELL_RETRY_INTERVAL_MS = 24 * 3_600_000;
-/** Day 10 counted from the end of the expired availability window (day 7 of the job's verification). */
-export const NOT_CONFIRMABLE_AFTER_DAYS_FROM_CYCLE_START = 3;
-const DAY_MS = 24 * 3_600_000;
 
 export type RecheckReadKind = "FEED" | "PAGE" | "NONE";
 
@@ -118,14 +115,14 @@ export function decideRecheck(
     cannotTellAttempts: attempts,
     cycleStartedAt: cycleStart,
   };
+  // Real attempts only: the job is archived after the retries have all been READ and all failed, never because
+  // time passed. A worker backlog therefore cannot turn one infrastructure failure into an archive; each read
+  // is queued a day after the previous one, so the counted reads are on separate days.
   const retriesUsed = attempts - 1;
-  const deadline = cycleStart.getTime() + NOT_CONFIRMABLE_AFTER_DAYS_FROM_CYCLE_START * DAY_MS;
-  if (retriesUsed >= CANNOT_TELL_RETRIES || now.getTime() >= deadline) {
+  if (retriesUsed >= CANNOT_TELL_RETRIES) {
     return {
       action: "ARCHIVE_NOT_CONFIRMABLE",
-      reasonCode: retriesUsed >= CANNOT_TELL_RETRIES
-        ? `CANNOT_TELL_RETRIES_EXHAUSTED:${outcome.reason}`
-        : `CANNOT_TELL_DAY_LIMIT_REACHED:${outcome.reason}`,
+      reasonCode: `CANNOT_TELL_RETRIES_EXHAUSTED:${outcome.reason}`,
       nextCheckAt: null,
       counters: next,
     };
@@ -133,7 +130,7 @@ export function decideRecheck(
   return {
     action: "RETRY_LATER",
     reasonCode: `CANNOT_TELL:${outcome.reason}`,
-    nextCheckAt: new Date(Math.min(nextDay.getTime(), deadline)),
+    nextCheckAt: nextDay,
     counters: next,
   };
 }
