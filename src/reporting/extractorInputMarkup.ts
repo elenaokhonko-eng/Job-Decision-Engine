@@ -7,7 +7,7 @@ import pg from "pg";
 
 import { pgConnectionConfig } from "../db/pgSsl.js";
 import { extractDeterministicRequirements } from "../requirements/deterministicExtractors.js";
-import { cleanPostingText } from "../security/postingText.js";
+import { extractDeterministicRequirementsFromPosting } from "../requirements/cleanedInputExtraction.js";
 import { resolveWorkspaceContext } from "../workspace/context.js";
 
 const ZERO_UUID = "00000000-0000-4000-8000-000000000000";
@@ -20,6 +20,10 @@ export interface MarkupFigures {
   readonly quotes: number;
   readonly quotesWithMarkup: number;
   readonly jobsWithMarkupInAQuote: number;
+  /** Requirement wordings (requirement_text) that contain markup. */
+  readonly requirementTextsWithMarkup: number;
+  /** Quotes that are not a substring of the stored raw text. Must be 0 after the change. */
+  readonly quotesNotInRaw: number;
 }
 
 export interface MarkupMeasurement {
@@ -28,21 +32,24 @@ export interface MarkupMeasurement {
   readonly after: MarkupFigures;
 }
 
-function figures(descriptions: readonly string[]): MarkupFigures {
+function figures(
+  descriptions: readonly string[],
+  extract: (raw: string) => ReadonlyArray<{ quote_text?: string | null; requirement_text: string }>,
+): MarkupFigures {
   let quotes = 0;
+  let textsWithMarkup = 0;
+  let notInRaw = 0;
   let withMarkup = 0;
   let jobsWith = 0;
   for (const description of descriptions) {
-    const { requirements } = extractDeterministicRequirements({
-      canonical_job_id: ZERO_UUID,
-      job_version_id: ZERO_UUID,
-      description_text: description,
-    });
+    const requirements = extract(description);
     let jobHit = false;
     for (const requirement of requirements) {
+      if (MARKUP_IN_QUOTE.test(requirement.requirement_text)) textsWithMarkup += 1;
       const quote = requirement.quote_text;
       if (!quote) continue;
       quotes += 1;
+      if (!description.includes(quote)) notInRaw += 1;
       if (MARKUP_IN_QUOTE.test(quote)) {
         withMarkup += 1;
         jobHit = true;
@@ -50,14 +57,22 @@ function figures(descriptions: readonly string[]): MarkupFigures {
     }
     if (jobHit) jobsWith += 1;
   }
-  return { jobs: descriptions.length, quotes, quotesWithMarkup: withMarkup, jobsWithMarkupInAQuote: jobsWith };
+  return {
+    jobs: descriptions.length,
+    quotes,
+    quotesWithMarkup: withMarkup,
+    jobsWithMarkupInAQuote: jobsWith,
+    requirementTextsWithMarkup: textsWithMarkup,
+    quotesNotInRaw: notInRaw,
+  };
 }
 
 export function measureQuoteMarkup(descriptions: readonly string[]): MarkupMeasurement {
   return {
     postingsContainingMarkup: descriptions.filter((d) => MARKUP_IN_QUOTE.test(d)).length,
-    before: figures(descriptions),
-    after: figures(descriptions.map((d) => cleanPostingText(d).text)),
+    // before: the rules on the raw text. after: what production now does (cleaned input, quotes anchored to raw).
+    before: figures(descriptions, (raw) => extractDeterministicRequirements({ canonical_job_id: ZERO_UUID, job_version_id: ZERO_UUID, description_text: raw }).requirements),
+    after: figures(descriptions, (raw) => extractDeterministicRequirementsFromPosting({ canonical_job_id: ZERO_UUID, job_version_id: ZERO_UUID, description_text: raw }).requirements),
   };
 }
 

@@ -42,10 +42,14 @@ describe("measureQuoteMarkup", () => {
     expect(measurement.before.jobsWithMarkupInAQuote).toBeGreaterThan(0);
   });
 
-  it("sees none after cleaning", () => {
-    expect(measurement.after.quotesWithMarkup).toBe(0);
-    expect(measurement.after.jobsWithMarkupInAQuote).toBe(0);
+  it("after the change: no markup in a requirement wording, and every quote is a substring of the raw text", () => {
+    expect(measurement.after.requirementTextsWithMarkup).toBe(0);
+    expect(measurement.after.quotesNotInRaw).toBe(0);
     expect(measurement.after.quotes).toBeGreaterThan(0);
+  });
+
+  it("before the change the quotes were raw spans too (nothing was cleaned)", () => {
+    expect(measurement.before.quotesNotInRaw).toBe(0);
   });
 
   it("does not change the quotes of an already clean posting", () => {
