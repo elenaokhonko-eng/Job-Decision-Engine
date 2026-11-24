@@ -2,7 +2,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
-import { reportAwaitingContentOutputs, reportAwaitingContentVisibility } from "../src/ingestion/contentCompleteness.js";
+import { awaitingVisibilityFailures, reportAwaitingContentOutputs, reportAwaitingContentVisibility } from "../src/ingestion/contentCompleteness.js";
 import { reportContentWithoutFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
 
 dotenv.config();
@@ -183,12 +183,10 @@ async function runIntegrityChecks() {
       `INFO: ${stored.awaitingContentJobs} awaiting-content job(s); ${stored.violations.length} keep a stored gate decision, lane or recommendation `
       + `(hidden by the read models; first ids: ${stored.violations.slice(0, 5).map((v) => v.canonicalJobId).join(", ") || "none"}).`,
     );
-    if (visibility.viewsMissing.length > 0) console.log(`INFO: list read models not present, not checked: ${visibility.viewsMissing.join(", ")}`);
-    if (visibility.visible.length > 0) {
-      console.error(
-        `Found ${visibility.visible.length} awaiting-content job(s) shown by a list read model; first: `
-        + visibility.visible.slice(0, 5).map((entry) => `${entry.canonicalJobId} (${entry.views.join(", ")})`).join("; "),
-      );
+    // Every expected list read model must exist and be checked (migration 120 is on main): a missing view or an empty check fails.
+    const visibilityFailures = awaitingVisibilityFailures(visibility);
+    if (visibilityFailures.length > 0) {
+      for (const failure of visibilityFailures) console.error(`Check 8: ${failure}`);
       errors++;
     } else {
       console.log(`OK: No awaiting-content job is shown by any list read model (${visibility.viewsChecked.length} checked).`);

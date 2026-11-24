@@ -177,16 +177,9 @@ export async function ensureFetchTasksForAwaitingContent(
   const coverage = await reportContentWithoutFetchTask(client, ctx.workspaceId);
   const limit = input.limit ?? AWAITING_FETCH_SEED_DEFAULT_CAP;
   const jobIds = coverage.withoutFetchTask;
-  const found = jobIds.length === 0 ? { rows: [] as { observation_id: string; owner_saved: boolean }[] } : await client.query<{ observation_id: string; owner_saved: boolean }>(
-    `SELECT DISTINCT ON (version.canonical_job_id) observation.id::text AS observation_id,
-            EXISTS (
-              SELECT 1 FROM job_versions saved_version
-                JOIN raw_job_observations saved_observation
-                  ON saved_observation.workspace_id = saved_version.workspace_id AND saved_observation.job_version_id = saved_version.id
-               WHERE saved_version.workspace_id = observation.workspace_id
-                 AND saved_version.canonical_job_id = version.canonical_job_id
-                 AND saved_observation.source_name IN ('LINKEDIN_SAVED', 'MCF_SAVED')
-            ) AS owner_saved
+  // Which jobs a fetch can serve (alert-backed, not owner-saved, not a lead) is decided once, in reportContentWithoutFetchTask.
+  const found = jobIds.length === 0 ? { rows: [] as { observation_id: string }[] } : await client.query<{ observation_id: string }>(
+    `SELECT DISTINCT ON (version.canonical_job_id) observation.id::text AS observation_id
        FROM raw_job_observations observation
        JOIN job_versions version
          ON version.workspace_id = observation.workspace_id AND version.id = observation.job_version_id
@@ -196,7 +189,7 @@ export async function ensureFetchTasksForAwaitingContent(
       ORDER BY version.canonical_job_id, observation.retrieved_at DESC, observation.id DESC`,
     [ctx.workspaceId, jobIds],
   );
-  const observations = found.rows.filter((row) => !row.owner_saved).slice(0, limit);
+  const observations = found.rows.slice(0, limit);
   let queued = 0;
   if (input.apply) {
     for (const row of observations) {

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import crypto from "node:crypto";
 import pg from "pg";
 
-import { classifyContentCompleteness, reportAwaitingContentOutputs, reportAwaitingContentVisibility } from "../../ingestion/contentCompleteness.js";
+import { awaitingVisibilityFailures, classifyContentCompleteness, reportAwaitingContentOutputs, reportAwaitingContentVisibility } from "../../ingestion/contentCompleteness.js";
 import { sourceContentEvidencePredicate } from "../../pipeline/descriptionQuality.js";
 import { archiveJobsAsPostingNotConfirmable } from "../../services/jobArchive.js";
 import { readFileSync } from "node:fs";
@@ -55,6 +55,7 @@ const CASES: readonly Case[] = [
   { name: "archived snippet is not live", quality: "INCOMPLETE", observations: [{ source: "GMAIL_ALERT" }], decisions: true, archived: true, expectAwaiting: true, expectViolation: false },
 ];
 
+let schemaName = "";
 let pool: pg.Pool | undefined;
 let client: pg.PoolClient | undefined;
 let context: WorkspaceContext | undefined;
@@ -69,7 +70,7 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
   beforeAll(async () => {
     pool = new pg.Pool(pgConnectionConfig(databaseUrl));
     client = await pool.connect();
-    const schemaName = `awaiting_content_${crypto.randomUUID().replaceAll("-", "")}`;
+    schemaName = `awaiting_content_${crypto.randomUUID().replaceAll("-", "")}`;
     await client.query(`CREATE SCHEMA ${schemaName}`);
     await client.query(`SET search_path TO ${schemaName}, public`);
     await runMigrations(client);
@@ -142,7 +143,12 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
   }, 180_000);
 
   afterAll(async () => {
-    client?.release();
+    if (client) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      await client.query("RESET search_path").catch(() => undefined);
+      if (schemaName) await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+      client.release();
+    }
     await pool?.end();
   });
 
@@ -270,6 +276,27 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
       await database.query("ROLLBACK");
     }
     expect((await reportAwaitingContentVisibility(database, workspaceId)).visible).toEqual([]);
+  });
+
+  it("check 8 fails when an expected list read model is missing or nothing was checked (an empty check is never a pass)", async () => {
+    const database = db();
+    const workspaceId = context!.workspaceId;
+    const normal = await reportAwaitingContentVisibility(database, workspaceId);
+    expect(normal.viewsMissing).toEqual([]);
+    expect(awaitingVisibilityFailures(normal)).toEqual([]);
+    await database.query("BEGIN");
+    try {
+      // Only this schema on the path: the shared test database also has a public copy of every view.
+      await database.query(`SET LOCAL search_path TO ${schemaName}`);
+      await database.query("ALTER VIEW v_track_jobs_scoped RENAME TO v_track_jobs_scoped_renamed");
+      const missing = await reportAwaitingContentVisibility(database, workspaceId);
+      expect(missing.viewsMissing).toContain("v_track_jobs_scoped");
+      expect(awaitingVisibilityFailures(missing).join(" ")).toMatch(/could not verify the lists.*v_track_jobs_scoped/);
+    } finally {
+      await database.query("ROLLBACK");
+    }
+    expect(awaitingVisibilityFailures({ visible: [], viewsChecked: [], viewsMissing: [] }).join(" ")).toMatch(/could not verify the lists: 0 checked/);
+    expect(awaitingVisibilityFailures({ visible: [{ canonicalJobId: "x", views: ["v"] }], viewsChecked: ["v"], viewsMissing: [] }).join(" ")).toMatch(/shown by a list read model/);
   });
 
   it("each live job is in exactly one bucket or in awaiting content, and the counts add up", async () => {

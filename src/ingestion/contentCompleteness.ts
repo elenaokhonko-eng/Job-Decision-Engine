@@ -101,15 +101,35 @@ export const LIST_READ_MODELS = [
   "v_track_jobs_scoped",
   "v_top_ten_ready_jobs_scoped",
   "v_top_ten_ready_jobs_stage3_scoped",
-  "v_application_workspace_scoped",
 ] as const;
+// v_application_workspace_scoped is deliberately not listed: it is built on application_records, so it shows a job the owner
+// already applied to whatever its content state is (application history, not a list of candidates). The other lists are
+// built on v_canonical_shortlist_scoped, which migration 120 gates with content_complete.
 
 export interface AwaitingContentVisibilityReport {
   /** Awaiting-content jobs shown by at least one list read model (each is a violation). */
   visible: { canonicalJobId: string; views: string[] }[];
   viewsChecked: string[];
-  /** List read models absent from the schema or without workspace_id and canonical_job_id; not checked. */
+  /** Expected list read models that are absent or lack workspace_id and canonical_job_id; check 8 fails on any. */
   viewsMissing: string[];
+}
+
+/**
+ * Check 8's verdict: a failure when a list shows an awaiting job, when an expected list read model is missing, or when
+ * nothing could be checked (an empty check must never read as a pass). Returns the failure lines, empty when it passes.
+ */
+export function awaitingVisibilityFailures(report: AwaitingContentVisibilityReport): string[] {
+  const failures: string[] = [];
+  if (report.viewsMissing.length > 0 || report.viewsChecked.length === 0) {
+    failures.push(`could not verify the lists: ${report.viewsChecked.length} checked, missing: ${report.viewsMissing.join(", ") || "all"}`);
+  }
+  if (report.visible.length > 0) {
+    failures.push(
+      `${report.visible.length} awaiting-content job(s) shown by a list read model; first: `
+      + report.visible.slice(0, 5).map((entry) => `${entry.canonicalJobId} (${entry.views.join(", ")})`).join("; "),
+    );
+  }
+  return failures;
 }
 
 /**
@@ -117,13 +137,17 @@ export interface AwaitingContentVisibilityReport {
  * awaiting job are kept as evidence and reported by reportAwaitingContentOutputs as information only. Read only; ids only.
  */
 export async function reportAwaitingContentVisibility(client: Queryable, workspaceId: string): Promise<AwaitingContentVisibilityReport> {
-  const present = await client.query<{ table_name: string }>(
-    `SELECT table_name FROM information_schema.columns
-      WHERE table_schema = current_schema() AND table_name = ANY($1::text[]) AND column_name IN ('workspace_id', 'canonical_job_id')
-      GROUP BY table_name HAVING COUNT(DISTINCT column_name) = 2`,
+  // to_regclass follows the connection's search_path like the lists do, and pg_attribute needs no extra privilege on the
+  // view, so a permissions problem does not read as "missing" (the view query below would then fail loudly instead).
+  const present = await client.query<{ name: string }>(
+    `SELECT candidate AS name
+       FROM UNNEST($1::text[]) AS candidate
+      WHERE to_regclass(candidate) IS NOT NULL
+        AND (SELECT COUNT(*) FROM pg_attribute attribute
+              WHERE attribute.attrelid = to_regclass(candidate) AND attribute.attname IN ('workspace_id', 'canonical_job_id') AND NOT attribute.attisdropped) = 2`,
     [[...LIST_READ_MODELS]],
   );
-  const available = new Set(present.rows.map((row) => row.table_name));
+  const available = new Set(present.rows.map((row) => row.name));
   const viewsChecked = LIST_READ_MODELS.filter((name) => available.has(name));
   const viewsMissing = LIST_READ_MODELS.filter((name) => !available.has(name));
   const byJob = new Map<string, string[]>();
