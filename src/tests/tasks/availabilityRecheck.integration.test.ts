@@ -132,6 +132,16 @@ async function archiveAsAged(job: Fixture): Promise<void> {
   );
 }
 
+/** A successful read of ANOTHER host: the health signal that lets failed reads archive a job. */
+async function healthSignal(when: Date, host = "healthy.example"): Promise<void> {
+  const other = await createJob({ windowEndedDaysAgo: 1, board: `health-${randomUUID().slice(0, 8)}` });
+  await db().query(
+    `INSERT INTO job_availability_recheck_events (workspace_id, canonical_job_id, job_version_id, read_kind, outcome, decision, reason_code,
+       consecutive_absent_reads_after, cannot_tell_attempts_after, details, occurred_at)
+     VALUES ($1, $2, $3, 'PAGE', 'OPEN', 'MARK_OPEN', 'HEALTH_FIXTURE', 0, 0, $4::jsonb, $5)`,
+    [ctx().workspaceId, other.canonicalJobId, other.jobVersionId, JSON.stringify({ host }), new Date(when.getTime() - 3_600_000)]);
+}
+
 function payload(job: Fixture, cycleStart: Date = at(-1)) {
   return { canonical_job_id: job.canonicalJobId, job_version_id: job.jobVersionId, cycle_started_at: cycleStart.toISOString() };
 }
@@ -257,7 +267,7 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     await client.query(`SET search_path TO ${schemaName}, public`);
     await runMigrations(client);
     context = await resolveWorkspaceContext(client);
-  });
+  }, 60_000);
 
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -342,6 +352,7 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     const cycle = at(0);
     const outcomes: string[] = [];
     for (let day = 0; day <= 3; day += 1) {
+      await healthSignal(at(day));
       const result = await runAvailabilityRecheck(db(), ctx(), payload(job, cycle), null, { ...login, now: () => at(day) });
       if (result.status === "RECORDED") outcomes.push(result.action);
       expect((await availabilityState(job))).not.toBe("CLOSED");
@@ -375,14 +386,79 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     for (const job of [saved, held]) {
       const cycle = at(0);
       const blocked = deps({ now: at(0), fetchJobContent: async () => ({ kind: "RETRYABLE_FAILURE", reason: "Posting provider returned HTTP 503." }) });
-      for (let day = 0; day <= 3; day += 1) await runAvailabilityRecheck(db(), ctx(), payload(job, cycle), null, { ...blocked, now: () => at(day) });
+      for (let day = 0; day <= 3; day += 1) { await healthSignal(at(day)); await runAvailabilityRecheck(db(), ctx(), payload(job, cycle), null, { ...blocked, now: () => at(day) }); }
       expect((await archiveInfo(job)).archived).toBe(false);
       const last = (await events(job)).at(-1);
       expect(last?.decision).toBe("KEPT_PROTECTED");
       expect(last?.reason_code).toMatch(/PROTECTED:/);
       const state = await db().query(`SELECT next_check_at, last_decision FROM job_availability_recheck_state WHERE canonical_job_id = $1`, [job.canonicalJobId]);
-      expect(state.rows[0]).toMatchObject({ next_check_at: null, last_decision: "KEPT_PROTECTED" });
+      expect(state.rows[0]).toMatchObject({ last_decision: "KEPT_PROTECTED" });
+      // A protected job is read again in 7 days; it is not abandoned.
+      expect(new Date(state.rows[0]!.next_check_at).getTime()).toBeGreaterThan(at(6).getTime());
+      expect((await pendingTasks(job, "RECHECK_AVAILABILITY")).some((task) => new Date(task.available_at).getTime() > at(6).getTime())).toBe(true);
     }
+  });
+
+  it("the re-check's own running task does not protect the job; another live lease does", async () => {
+    const claimed = async (job: Fixture, key: string): Promise<string> => {
+      const id = randomUUID();
+      await db().query(
+        `INSERT INTO pipeline_tasks (id, workspace_id, task_type, task_key, payload, status, lease_id, lease_expires_at)
+         VALUES ($1, $2, 'RECHECK_AVAILABILITY', $3, $4::jsonb, 'RUNNING', $5, NOW() + INTERVAL '30 days')`,
+        [id, ctx().workspaceId, key, JSON.stringify(payload(job)), randomUUID()]);
+      return id;
+    };
+    const unreadable = (now: Date) => deps({ now, fetchJobContent: async () => ({ kind: "BLOCKED", reason: "AUTH_REQUIRED" }) });
+
+    const own = await createJob({ windowEndedDaysAgo: 1, board: "own-lease" });
+    const ownTask = await claimed(own, `RECHECK_AVAILABILITY:${own.jobVersionId}:own`);
+    const cycle = at(0);
+    for (let day = 0; day <= 3; day += 1) { await healthSignal(at(day)); await runAvailabilityRecheck(db(), ctx(), payload(own, cycle), ownTask, unreadable(at(day))); }
+    expect((await archiveInfo(own)).archived).toBe(true);
+
+    const other = await createJob({ windowEndedDaysAgo: 1, board: "other-lease" });
+    const otherTask = await claimed(other, `RECHECK_AVAILABILITY:${other.jobVersionId}:mine`);
+    await claimed(other, `APPLY_HARD_GATES:${other.jobVersionId}:someone-else`);
+    for (let day = 0; day <= 3; day += 1) { await healthSignal(at(day)); await runAvailabilityRecheck(db(), ctx(), payload(other, cycle), otherTask, unreadable(at(day))); }
+    expect((await archiveInfo(other)).archived).toBe(false);
+    expect((await events(other)).at(-1)?.decision).toBe("KEPT_PROTECTED");
+  });
+
+  it("outage rule: a host-wide outage of five days never archives; an isolated dead page with other hosts healthy does; a mixture waits for the health signal", async () => {
+    const dead = (now: Date) => deps({ now, fetchJobContent: async () => ({ kind: "RETRYABLE_FAILURE", reason: "Posting provider returned HTTP 503." }) });
+    // The whole timeline is 100 days after the other tests' events, so their health fixtures are outside the 24 h window.
+    const t = (days: number) => at(100 + days);
+    const cycle = t(0);
+
+    // Host-wide outage: every read fails, no other host succeeds. Five days of reads: never archived,
+    // the job is read again in 7 days, and the host is on every event.
+    const outage = await createJob({ windowEndedDaysAgo: 1, board: "outage-host" });
+    for (let day = 0; day <= 5; day += 1) await runAvailabilityRecheck(db(), ctx(), payload(outage, cycle), null, dead(t(day)));
+    expect((await archiveInfo(outage)).archived).toBe(false);
+    const outageEvents = await db().query(`SELECT details, reason_code FROM job_availability_recheck_events WHERE canonical_job_id = $1 ORDER BY id`, [outage.canonicalJobId]);
+    expect(outageEvents.rows.at(-1)!.reason_code).toContain("DEFERRED:NO_HEALTH_SIGNAL");
+    expect(outageEvents.rows.every((row) => row.details.host === "boards.greenhouse.io")).toBe(true);
+    const outageState = await db().query(`SELECT next_check_at FROM job_availability_recheck_state WHERE canonical_job_id = $1`, [outage.canonicalJobId]);
+    expect(new Date(outageState.rows[0]!.next_check_at).getTime()).toBeGreaterThan(t(5).getTime() + 6 * 24 * 3_600_000);
+
+    // Isolated dead page, other hosts healthy on each day: archived after four reads on four days.
+    const isolated = await createJob({ windowEndedDaysAgo: 1, board: "isolated-dead" });
+    for (let day = 0; day <= 3; day += 1) { await healthSignal(t(day)); await runAvailabilityRecheck(db(), ctx(), payload(isolated, cycle), null, dead(t(day))); }
+    expect((await archiveInfo(isolated)).archived).toBe(true);
+
+    // Mixture: three failed days with no health signal, then health appears on the fourth: archived then, not before.
+    const mixed = await createJob({ windowEndedDaysAgo: 1, board: "mixed-host" });
+    for (let day = 0; day <= 2; day += 1) await runAvailabilityRecheck(db(), ctx(), payload(mixed, cycle), null, dead(t(day)));
+    expect((await archiveInfo(mixed)).archived).toBe(false);
+    await healthSignal(t(3));
+    await runAvailabilityRecheck(db(), ctx(), payload(mixed, cycle), null, dead(t(3)));
+    expect((await archiveInfo(mixed)).archived).toBe(true);
+
+    // Healthy elsewhere but all failures on one calendar day: not archived.
+    const oneDay = await createJob({ windowEndedDaysAgo: 1, board: "one-day" });
+    await healthSignal(t(0));
+    for (let n = 0; n < 5; n += 1) await runAvailabilityRecheck(db(), ctx(), payload(oneDay, cycle), null, dead(new Date(t(0).getTime() + n * 60_000)));
+    expect((await archiveInfo(oneDay)).archived).toBe(false);
   });
 
   it("page read: gone closes at once; open renews the window; login is cannot-tell", async () => {
@@ -409,7 +485,7 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     const job = await createJob({ windowEndedDaysAgo: 1, board: "restore-board" });
     const cycle = at(0);
     const unreadable = deps({ now: at(0), fetchJobContent: async () => ({ kind: "RETRYABLE_FAILURE", reason: "timeout" }) });
-    for (let day = 0; day <= 3; day += 1) await runAvailabilityRecheck(db(), ctx(), payload(job, cycle), null, { ...unreadable, now: () => at(day) });
+    for (let day = 0; day <= 3; day += 1) { await healthSignal(at(day)); await runAvailabilityRecheck(db(), ctx(), payload(job, cycle), null, { ...unreadable, now: () => at(day) }); }
     expect((await archiveInfo(job)).archived).toBe(true);
 
     await db().query("BEGIN");
@@ -494,26 +570,53 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     expect(await pendingTasks(ambiguous, "APPLY_HARD_GATES")).toHaveLength(0);
   });
 
-  it("a page that states work mode and location clearly fills them and queues a re-gate; an unstated value never overwrites", async () => {
-    const stated = await createJob({ windowEndedDaysAgo: 1, board: "facts-stated", workplaceType: "UNKNOWN", location: "Singapore" });
-    const result = await runAvailabilityRecheck(db(), ctx(), payload(stated), null, deps({
+  it("a page fills an UNKNOWN work mode and location from an explicit statement and queues a re-gate; it never overwrites a known value", async () => {
+    const eventDetails = async (job: Fixture) =>
+      (await db().query(`SELECT details FROM job_availability_recheck_events WHERE canonical_job_id = $1`, [job.canonicalJobId])).rows[0]?.details;
+    const state = async (job: Fixture) =>
+      (await db().query(`SELECT workplace_type, location FROM canonical_jobs WHERE id = $1`, [job.canonicalJobId])).rows[0];
+
+    const unknown = await createJob({ windowEndedDaysAgo: 1, board: "facts-unknown", workplaceType: "UNKNOWN", location: "Unknown" });
+    const filled = await runAvailabilityRecheck(db(), ctx(), payload(unknown), null, deps({
       now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "HYBRID", "London, United Kingdom"),
     }));
-    expect(result).toMatchObject({ action: "MARK_OPEN", factsChanged: true });
-    const row = await db().query(`SELECT workplace_type, location FROM canonical_jobs WHERE id = $1`, [stated.canonicalJobId]);
-    expect(row.rows[0]).toMatchObject({ workplace_type: "HYBRID", location: "London, United Kingdom" });
-    expect(await pendingTasks(stated, "APPLY_HARD_GATES")).toHaveLength(1);
-    const evidence = await db().query(`SELECT details FROM job_availability_recheck_events WHERE canonical_job_id = $1`, [stated.canonicalJobId]);
-    expect(evidence.rows[0]?.details.facts_applied_from_page).toMatchObject({ work_mode: { before: "UNKNOWN", after: "HYBRID" } });
+    expect(filled).toMatchObject({ action: "MARK_OPEN", factsChanged: true });
+    expect(await state(unknown)).toMatchObject({ workplace_type: "HYBRID", location: "London, United Kingdom" });
+    expect(await pendingTasks(unknown, "APPLY_HARD_GATES")).toHaveLength(1);
+    expect((await eventDetails(unknown)).facts_applied_from_page).toMatchObject({ work_mode: { before: "UNKNOWN", after: "HYBRID" } });
 
-    const known = await createJob({ windowEndedDaysAgo: 1, board: "facts-unstated", workplaceType: "ONSITE", location: "Singapore" });
-    const quiet = await runAvailabilityRecheck(db(), ctx(), payload(known), null, deps({
-      now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "UNKNOWN", null),
+    // A known value is never overwritten; a contradiction is stored with both values and nothing is re-gated.
+    const known = await createJob({ windowEndedDaysAgo: 1, board: "facts-known", workplaceType: "ONSITE", location: "Singapore", processingState: "MATCHED" });
+    const contradicted = await runAvailabilityRecheck(db(), ctx(), payload(known), null, deps({
+      now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "HYBRID", "London"),
     }));
-    expect(quiet).toMatchObject({ action: "MARK_OPEN", factsChanged: false });
-    const kept = await db().query(`SELECT workplace_type, location FROM canonical_jobs WHERE id = $1`, [known.canonicalJobId]);
-    expect(kept.rows[0]).toMatchObject({ workplace_type: "ONSITE", location: "Singapore" });
+    expect(contradicted).toMatchObject({ action: "MARK_OPEN", factsChanged: false });
+    expect(await state(known)).toMatchObject({ workplace_type: "ONSITE", location: "Singapore" });
     expect(await pendingTasks(known, "APPLY_HARD_GATES")).toHaveLength(0);
+    // The conflict is on the event only: the re-check writes no job status column.
+    expect((await db().query(`SELECT processing_state FROM canonical_jobs WHERE id = $1`, [known.canonicalJobId])).rows[0]?.processing_state).toBe("MATCHED");
+    expect((await eventDetails(known)).facts_conflict).toMatchObject({
+      work_mode: { known: "ONSITE", page: "HYBRID" }, territory: { known: "singapore", page: "london" }, source_name: "GREENHOUSE",
+    });
+
+    const rejected = await createJob({ windowEndedDaysAgo: 1, board: "facts-rejected", workplaceType: "ONSITE", location: "Singapore", processingState: "HARD_REJECTED" });
+    await runAvailabilityRecheck(db(), ctx(), payload(rejected), null, deps({ now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "HYBRID", "Singapore") }));
+    expect((await state(rejected)).workplace_type).toBe("ONSITE");
+    expect((await db().query(`SELECT processing_state FROM canonical_jobs WHERE id = $1`, [rejected.canonicalJobId])).rows[0]?.processing_state).toBe("HARD_REJECTED");
+
+    // The same place written differently is not a conflict.
+    const same = await createJob({ windowEndedDaysAgo: 1, board: "facts-same", workplaceType: "HYBRID", location: "Singapore" });
+    await runAvailabilityRecheck(db(), ctx(), payload(same), null, deps({ now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "HYBRID", "Singapore, SG") }));
+    expect((await eventDetails(same)).facts_conflict).toBeUndefined();
+
+    // Hostile or ambiguous page text is ignored: only the closed list REMOTE / HYBRID / ONSITE fills a fact.
+    const hostile = await createJob({ windowEndedDaysAgo: 1, board: "facts-hostile", workplaceType: "UNKNOWN", location: "Singapore" });
+    const ignored = await runAvailabilityRecheck(db(), ctx(), payload(hostile), null, deps({
+      now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "remote work possible for some roles", null),
+    }));
+    expect(ignored).toMatchObject({ action: "MARK_OPEN", factsChanged: false });
+    expect(await state(hostile)).toMatchObject({ workplace_type: "UNKNOWN" });
+    expect(await pendingTasks(hostile, "APPLY_HARD_GATES")).toHaveLength(0);
   });
 
   it("Workday: the employer listing is the feed reading; absence counts only from a complete listing, twice in a row", async () => {

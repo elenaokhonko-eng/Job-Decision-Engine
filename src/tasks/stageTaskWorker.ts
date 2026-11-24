@@ -1542,7 +1542,7 @@ export async function seedRecoverablePipelineTasks(
               active_profile.id AS profile_version_id,
               TRUE AS repair_existing_state,
               (${readinessRefreshPredicate} AND c.recommendation_outcome IS NOT NULL) AS readiness_reassessment_required,
-              (${deciderVersionRefreshSql("c")} AND c.recommendation_outcome IS NOT NULL) AS decider_reassessment_required
+              (${deciderVersionRefreshSql("c", { includeTestFixtures })} AND c.recommendation_outcome IS NOT NULL) AS decider_reassessment_required
        FROM canonical_jobs c
        LEFT JOIN LATERAL (
          SELECT pv.id
@@ -1566,13 +1566,13 @@ export async function seedRecoverablePipelineTasks(
              'MATCHED', 'QUEUED_FOR_AI', 'NEEDS_MANUAL_REVIEW'
            )
            OR ${readinessRefreshPredicate}
-           OR ${deciderVersionRefreshSql("c")}
+           OR ${deciderVersionRefreshSql("c", { includeTestFixtures })}
          )
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
          AND (
            c.recommendation_outcome IS NULL
            OR ${readinessRefreshPredicate}
-           OR ${deciderVersionRefreshSql("c")}
+           OR ${deciderVersionRefreshSql("c", { includeTestFixtures })}
          )
          AND (
            COALESCE(c.processing_state, c.processing_status) IN (

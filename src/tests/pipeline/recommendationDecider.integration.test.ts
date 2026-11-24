@@ -351,7 +351,10 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
               workplace_type = 'REMOTE', workability_facts = '{"employment_type":"PERMANENT"}'::jsonb WHERE id = $1`,
       [JOB_ID, run.rows[0].id],
     );
-    expect(await loadDegreeGapQuote(client, { workspaceId, matchRunId: run.rows[0].id, requirementSetId: set.rows[0].id })).toBe(quote);
+    // Scoped like the counts query: another workspace or job version never matches, and only the latest evidence row counts.
+    expect(await loadDegreeGapQuote(client, { workspaceId: crypto.randomUUID(), matchRunId: run.rows[0].id, requirementSetId: set.rows[0].id, jobVersionId: VERSION_ID })).toBeNull();
+    expect(await loadDegreeGapQuote(client, { workspaceId, matchRunId: run.rows[0].id, requirementSetId: set.rows[0].id, jobVersionId: crypto.randomUUID() })).toBeNull();
+    expect(await loadDegreeGapQuote(client, { workspaceId, matchRunId: run.rows[0].id, requirementSetId: set.rows[0].id, jobVersionId: VERSION_ID })).toBe(quote);
 
     expect((await runRecommendationDecider(client)).errors).toBe(0);
     const res = await q(`SELECT decision_json, readiness_json FROM deterministic_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [JOB_ID]);

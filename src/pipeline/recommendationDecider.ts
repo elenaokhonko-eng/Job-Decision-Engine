@@ -296,18 +296,26 @@ export async function loadMandatoryQualificationCounts(
 /** The posting words of a MUST degree the current match found the profile short of, or null. */
 export async function loadDegreeGapQuote(
   client: Pick<pg.PoolClient, "query">,
-  args: { workspaceId: string; matchRunId: string; requirementSetId: string },
+  args: { workspaceId: string; matchRunId: string; requirementSetId: string; jobVersionId: string },
 ): Promise<string | null> {
+  // Same scoping as loadMandatoryQualificationCounts: this workspace, this job version and requirement set, and only the
+  // LATEST evidence row of the match run for each requirement.
   const { rows } = await client.query<{ quote: string | null }>(
     `SELECT COALESCE(jr.quote_text, jr.requirement_text) AS quote
-       FROM requirement_evidence_matches rem
-       JOIN job_requirements jr ON jr.id = rem.requirement_id
-      WHERE rem.workspace_id = $1 AND rem.match_run_id = $2 AND jr.requirement_set_id = $3
+       FROM job_requirements jr
+       JOIN LATERAL (
+         SELECT rem.match_type, rem.evidence->>'match_qualification_code' AS qualification_code
+           FROM requirement_evidence_matches rem
+          WHERE rem.workspace_id = jr.workspace_id AND rem.match_run_id = $2 AND rem.requirement_id = jr.id
+          ORDER BY rem.created_at DESC, rem.id DESC
+          LIMIT 1
+       ) current_match ON TRUE
+      WHERE jr.workspace_id = $1 AND jr.job_version_id = $4 AND jr.requirement_set_id = $3
         AND jr.requirement_type = 'DEGREE' AND jr.importance = 'MUST'
-        AND rem.match_type = 'NO_MATCH'
-        AND rem.evidence->>'match_qualification_code' = 'MATCH_QUALIFICATION_DEGREE_GAP'
+        AND current_match.match_type = 'NO_MATCH'
+        AND current_match.qualification_code = 'MATCH_QUALIFICATION_DEGREE_GAP'
       ORDER BY jr.requirement_key ASC LIMIT 1`,
-    [args.workspaceId, args.matchRunId, args.requirementSetId],
+    [args.workspaceId, args.matchRunId, args.requirementSetId, args.jobVersionId],
   );
   return rows[0]?.quote ?? null;
 }
@@ -621,7 +629,7 @@ export async function runRecommendationDecider(
           description: job.description_text,
           employmentType: job.employment_type,
           degreeGapQuote: currentMatch && job.latest_match_run_id && job.active_requirement_set_id
-            ? await loadDegreeGapQuote(client, { workspaceId: ctx.workspaceId, matchRunId: job.latest_match_run_id, requirementSetId: job.active_requirement_set_id })
+            ? await loadDegreeGapQuote(client, { workspaceId: ctx.workspaceId, matchRunId: job.latest_match_run_id, requirementSetId: job.active_requirement_set_id, jobVersionId: job.job_version_id })
             : null,
         });
         const requirementScore = applyRoleShapePenalty(rawRequirementScore, shape);
