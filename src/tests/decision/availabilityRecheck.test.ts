@@ -77,11 +77,20 @@ describe("decideRecheck", () => {
     expect(actions).toEqual(["RETRY_LATER", "RETRY_LATER", "RETRY_LATER", "ARCHIVE_NOT_CONFIRMABLE"]);
   });
 
-  it("archives at the day limit even when the retries ran late", () => {
-    const late = step({ consecutiveAbsentReads: 0, cannotTellAttempts: 1, cycleStartedAt: cycleStart },
-      { kind: "CANNOT_TELL", reason: "SERVER_ERROR" }, 4);
-    expect(late.action).toBe("ARCHIVE_NOT_CONFIRMABLE");
-    expect(late.reasonCode).toContain("CANNOT_TELL_DAY_LIMIT_REACHED");
+  it("a worker backlog never archives on elapsed time: one failed read ten days late is just the next retry", () => {
+    const late = step({ consecutiveAbsentReads: 0, cannotTellAttempts: 0, cycleStartedAt: cycleStart },
+      { kind: "CANNOT_TELL", reason: "RATE_LIMITED" }, 10);
+    expect(late.action).toBe("RETRY_LATER");
+    expect(late.nextCheckAt?.getTime()).toBe(at(11).getTime());
+    // Only a read that follows three failed retries archives, however late each read ran.
+    let counters = late.counters;
+    const actions: string[] = [];
+    for (let day = 11; day <= 13; day += 1) {
+      const decision = step(counters, { kind: "CANNOT_TELL", reason: "RATE_LIMITED" }, day);
+      actions.push(decision.action);
+      counters = decision.counters;
+    }
+    expect(actions).toEqual(["RETRY_LATER", "RETRY_LATER", "ARCHIVE_NOT_CONFIRMABLE"]);
   });
 
   it("a successful feed read ends a cannot-tell run", () => {

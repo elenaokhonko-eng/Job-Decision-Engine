@@ -67,12 +67,15 @@ import { enqueuePipelineTask } from "./pipelineTasks.js";
 import { createTaskIntentV2 } from "./taskIntent.js";
 
 export const RECHECK_AVAILABILITY_TASK_TYPE = "RECHECK_AVAILABILITY" as const;
-export const RECHECK_AVAILABILITY_STAGE_VERSION = "availability_recheck_v1" as const;
+export const RECHECK_AVAILABILITY_STAGE_VERSION = "availability_recheck_v2" as const;
 
 /** OPEN lasts 7 days when the posting itself was read (same rule as the source-evidence builder). */
 const OPEN_WINDOW_MS = 7 * 24 * 3_600_000;
 const CLOSED_WINDOW_MS = 24 * 3_600_000;
 const DEFAULT_PAGE_INTERVAL_MS = 2_000;
+const PROTECTED_RECHECK_MS = 7 * 24 * 3_600_000;
+const OUTAGE_RECHECK_MS = 7 * 24 * 3_600_000;
+const HEALTH_WINDOW_MS = 24 * 3_600_000;
 
 type Queryable = Pick<pg.PoolClient, "query">;
 
@@ -386,6 +389,15 @@ function hostOf(url: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+const CLOSED_WORK_MODES = ["REMOTE", "HYBRID", "ONSITE"] as const;
+
+/** Two location strings agree when one contains the other after normalising (so "Singapore" and "Singapore, SG" agree). */
+function locationsAgree(known: string | null, page: string): boolean {
+  const a = normalizedLocation(known);
+  const b = normalizedLocation(page);
+  return a === b || a.includes(b) || b.includes(a);
 }
 
 function normalizedLocation(value: string | null): string {
@@ -745,6 +757,61 @@ async function readOnce(
   };
 }
 
+export interface ArchiveHealthGate {
+  readonly ok: boolean;
+  readonly why: "OK" | "NO_HEALTH_SIGNAL" | "FAILURES_ON_ONE_DAY";
+  readonly otherHostSucceeded: boolean;
+  readonly failedDays: number;
+}
+
+/**
+ * Whether failed reads may archive the job. (1) Health signal: a read of ANOTHER host succeeded (open, absent
+ * from a complete feed, or the page said closed) within the last 24 hours; without it the failure may be an
+ * outage or a login wall of this host, so the job is read again later instead. (2) The failed reads of this job
+ * must fall on at least two different calendar days (UTC), counting this one.
+ */
+export async function archiveHealthGate(
+  db: Queryable,
+  workspaceId: string,
+  canonicalJobId: string,
+  host: string,
+  now: Date,
+): Promise<ArchiveHealthGate> {
+  const health = await db.query<{ ok: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM job_availability_recheck_events event
+        WHERE event.workspace_id = $1::uuid AND event.outcome IN ('OPEN', 'FEED_ABSENT', 'CLOSED_BY_PAGE')
+          AND event.occurred_at > $2::timestamptz - make_interval(secs => $3::int) AND event.occurred_at <= $2::timestamptz
+          AND COALESCE(event.details->>'host', '') <> $4
+          AND COALESCE(event.details->>'host', '') <> ''
+     ) AS ok`,
+    [workspaceId, now, Math.floor(HEALTH_WINDOW_MS / 1000), host],
+  );
+  const days = await db.query<{ n: number }>(
+    `SELECT COUNT(DISTINCT (event.occurred_at AT TIME ZONE 'UTC')::date)::int AS n
+       FROM job_availability_recheck_events event
+      WHERE event.workspace_id = $1::uuid AND event.canonical_job_id = $2::uuid AND event.outcome = 'CANNOT_TELL'`,
+    [workspaceId, canonicalJobId],
+  );
+  const failedDays = (days.rows[0]?.n ?? 0) + ((await todayHasNoFailure(db, workspaceId, canonicalJobId, now)) ? 1 : 0);
+  const otherHostSucceeded = health.rows[0]?.ok === true;
+  if (!otherHostSucceeded) return { ok: false, why: "NO_HEALTH_SIGNAL", otherHostSucceeded, failedDays };
+  if (failedDays < 2) return { ok: false, why: "FAILURES_ON_ONE_DAY", otherHostSucceeded, failedDays };
+  return { ok: true, why: "OK", otherHostSucceeded, failedDays };
+}
+
+/** True when no CANNOT_TELL event of this job exists yet on the UTC day of `now` (this read adds one more day). */
+async function todayHasNoFailure(db: Queryable, workspaceId: string, canonicalJobId: string, now: Date): Promise<boolean> {
+  const { rows } = await db.query<{ present: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM job_availability_recheck_events event
+        WHERE event.workspace_id = $1::uuid AND event.canonical_job_id = $2::uuid AND event.outcome = 'CANNOT_TELL'
+          AND (event.occurred_at AT TIME ZONE 'UTC')::date = ($3::timestamptz AT TIME ZONE 'UTC')::date) AS present`,
+    [workspaceId, canonicalJobId, now],
+  );
+  return rows[0]?.present !== true;
+}
+
 /**
  * Performs one availability re-check read for a job and acts on it. Idempotent per task: the event
  * log and counters are written in one step after the read, and the next read is queued only then.
@@ -784,11 +851,26 @@ export async function runAvailabilityRecheck(
   const read = await readOnce(client, context, identity, deps);
   if (read.outcome === "STALE") return { status: "SKIPPED", reason: "STALE_VERSION" };
   const outcome = read.outcome;
-  const decision: RecheckDecision = decideRecheck(counters, outcome, now, cycleStartedAt);
+  let decision: RecheckDecision = decideRecheck(counters, outcome, now, cycleStartedAt);
+  const readHost = hostOf(observation.source_url ?? observation.canonical_apply_url ?? target.canonical_url) ?? "unknown-host";
 
-  const details: Record<string, unknown> = { source_name: observation.source_name };
+  const details: Record<string, unknown> = { source_name: observation.source_name, host: readHost };
+  if (decision.action === "ARCHIVE_NOT_CONFIRMABLE") {
+    // Failed reads archive a job only when they are not just an outage: another host must have been read
+    // successfully in the last 24 hours (a health signal), and the failures must span two calendar days.
+    const gate = await archiveHealthGate(client, context.workspaceId, payload.canonical_job_id, readHost, now);
+    details.archive_gate = gate;
+    if (!gate.ok) {
+      decision = {
+        ...decision,
+        action: "RETRY_LATER",
+        reasonCode: `${decision.reasonCode}|DEFERRED:${gate.why}`,
+        nextCheckAt: new Date(now.getTime() + (gate.why === "NO_HEALTH_SIGNAL" ? OUTAGE_RECHECK_MS : 24 * 3_600_000)),
+      };
+    }
+  }
   if (outcome.kind === "CANNOT_TELL") details.cannot_tell_reason = outcome.reason;
-  let action: RecheckAction | "KEPT_PROTECTED" = decision.action;
+  let action = decision.action as RecheckAction | "KEPT_PROTECTED";
   let reasonCode = decision.reasonCode;
   let nextCheckAt = decision.nextCheckAt;
 
@@ -804,35 +886,55 @@ export async function runAvailabilityRecheck(
       }, now);
       details.readiness_recomputed = stored.readinessRecomputed;
       if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
-      // A page that states work mode or location clearly fills or corrects the fact. A value the page does
-      // not state (UNKNOWN or empty) never overwrites a known one. The before/after pair is the evidence.
+      // Page text is untrusted. A page may FILL an unknown work mode or location, and only from an explicit
+      // statement: work mode must be exactly REMOTE, HYBRID or ONSITE (the closed list the page reader emits;
+      // free text such as "remote work possible for some roles" is ignored) and the location a non-empty,
+      // non-"unknown" value. A page NEVER overwrites a known value: if it contradicts one, both values and the
+      // source are recorded as a conflict on the event, and the job is neither re-gated nor rejected.
       const storedMode = String(target.workplace_type ?? "").trim().toUpperCase();
-      const storedUnknown = storedMode === "" || storedMode === "UNKNOWN" || storedMode === "ASSUMED_HYBRID";
-      const pageMode = normalizeWorkMode(read.page.posting.workplaceType);
+      const storedModeUnknown = storedMode === "" || storedMode === "UNKNOWN" || storedMode === "ASSUMED_HYBRID";
+      const rawPageMode = String(read.page.posting.workplaceType ?? "").trim().toUpperCase();
+      const pageMode = (CLOSED_WORK_MODES as readonly string[]).includes(rawPageMode) ? rawPageMode : "UNKNOWN";
       const pageLocation = (read.page.posting.location ?? "").trim();
+      const pageLocationClear = pageLocation !== "" && normalizedLocation(pageLocation) !== "unknown";
+      const storedLocationUnknown = normalizedLocation(target.location) === "" || normalizedLocation(target.location) === "unknown";
       const applied: Record<string, unknown> = {};
-      if (pageMode !== "UNKNOWN" && (storedUnknown || normalizeWorkMode(storedMode) !== pageMode)) {
-        writes.push(async () => {
-          await client.query(
-            `UPDATE canonical_jobs SET workplace_type = $3, updated_at = NOW() WHERE workspace_id = $1::uuid AND id = $2::uuid`,
-            [context.workspaceId, payload.canonical_job_id, pageMode],
-          );
-        });
-        applied.work_mode = { before: storedMode === "" ? "UNKNOWN" : storedMode, after: pageMode };
+      const conflicts: Record<string, unknown> = {};
+      if (pageMode !== "UNKNOWN") {
+        if (storedModeUnknown) {
+          writes.push(async () => {
+            await client.query(
+              `UPDATE canonical_jobs SET workplace_type = $3, updated_at = NOW()
+                WHERE workspace_id = $1::uuid AND id = $2::uuid AND UPPER(COALESCE(workplace_type, 'UNKNOWN')) IN ('UNKNOWN', '', 'ASSUMED_HYBRID')`,
+              [context.workspaceId, payload.canonical_job_id, pageMode],
+            );
+          });
+          applied.work_mode = { before: storedMode === "" ? "UNKNOWN" : storedMode, after: pageMode };
+        } else if (normalizeWorkMode(storedMode) !== pageMode) {
+          conflicts.work_mode = { known: storedMode, page: pageMode };
+        }
       }
-      if (pageLocation !== "" && normalizedLocation(pageLocation) !== "unknown" &&
-          normalizedLocation(pageLocation) !== normalizedLocation(target.location)) {
-        writes.push(async () => {
-          await client.query(
-            `UPDATE canonical_jobs SET location = $3, updated_at = NOW() WHERE workspace_id = $1::uuid AND id = $2::uuid`,
-            [context.workspaceId, payload.canonical_job_id, pageLocation],
-          );
-        });
-        applied.territory = { before: normalizedLocation(target.location), after: normalizedLocation(pageLocation) };
+      if (pageLocationClear) {
+        if (storedLocationUnknown) {
+          writes.push(async () => {
+            await client.query(
+              `UPDATE canonical_jobs SET location = $3, updated_at = NOW()
+                WHERE workspace_id = $1::uuid AND id = $2::uuid AND LOWER(BTRIM(COALESCE(location, ''))) IN ('', 'unknown')`,
+              [context.workspaceId, payload.canonical_job_id, pageLocation],
+            );
+          });
+          applied.territory = { before: normalizedLocation(target.location), after: normalizedLocation(pageLocation) };
+        } else if (!locationsAgree(target.location, pageLocation)) {
+          conflicts.territory = { known: normalizedLocation(target.location), page: normalizedLocation(pageLocation) };
+        }
       }
       if (Object.keys(applied).length > 0) {
         factsChanged = true;
         details.facts_applied_from_page = { ...applied, source_name: observation.source_name, observation_id: observation.observation_id };
+      }
+      if (Object.keys(conflicts).length > 0) {
+        // No change and no re-gate: the conflict is stored with both values and the evidence for a person to verify.
+        details.facts_conflict = { ...conflicts, source_name: observation.source_name, observation_id: observation.observation_id, evidence: "page read" };
       }
     } else if (read.feedFactsAfter !== null) {
       const change = compareFacts(beforeFacts, read.feedFactsAfter);
@@ -877,33 +979,37 @@ export async function runAvailabilityRecheck(
     details.readiness_recomputed = stored.readinessRecomputed;
       if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
   } else if (decision.action === "ARCHIVE_NOT_CONFIRMABLE") {
-    const protection = await readAutomaticArchiveProtection(client, {
-      workspaceId: context.workspaceId,
-      canonicalJobId: payload.canonical_job_id,
-      now,
-    });
-    if (protection.protected) {
-      // Saved, applied or held: never archived automatically. The job stays; the reason is on record.
-      action = "KEPT_PROTECTED";
-      reasonCode = `${decision.reasonCode}|PROTECTED:${protection.reasons.join("+")}`;
-      nextCheckAt = null;
-      details.protection = protection.reasons;
-    } else {
-      writes.push(async () => {
-        const archived = await archiveJobsAsPostingNotConfirmable(client, {
-          workspaceId: context.workspaceId,
-          canonicalJobIds: [payload.canonical_job_id],
-          actor: "system:availability-recheck",
-          details: {
-            rule: AVAILABILITY_RECHECK_ARCHIVE_RULE,
-            reason_code: decision.reasonCode,
-            cannot_tell_attempts: decision.counters.cannotTellAttempts,
-            cycle_started_at: cycleStartedAt.toISOString(),
-          },
-        });
-        details.archived = archived.length === 1;
+    // Protection is read INSIDE the write transaction with the job row locked, so a save, application or hold
+    // made between the decision and the archive cannot be missed. A protected job is never archived; it is read
+    // again in 7 days (it stays hidden from the lists meanwhile because its availability is unconfirmed).
+    writes.push(async () => {
+      const protection = await readAutomaticArchiveProtection(client, {
+        workspaceId: context.workspaceId,
+        canonicalJobId: payload.canonical_job_id,
+        now,
+        lock: true,
+        excludeTaskId: taskId,
       });
-    }
+      if (protection.protected) {
+        action = "KEPT_PROTECTED";
+        reasonCode = `${decision.reasonCode}|PROTECTED:${protection.reasons.join("+")}`;
+        nextCheckAt = new Date(now.getTime() + PROTECTED_RECHECK_MS);
+        details.protection = protection.reasons;
+        return;
+      }
+      const archived = await archiveJobsAsPostingNotConfirmable(client, {
+        workspaceId: context.workspaceId,
+        canonicalJobIds: [payload.canonical_job_id],
+        actor: "system:availability-recheck",
+        details: {
+          rule: AVAILABILITY_RECHECK_ARCHIVE_RULE,
+          reason_code: decision.reasonCode,
+          cannot_tell_attempts: decision.counters.cannotTellAttempts,
+          cycle_started_at: cycleStartedAt.toISOString(),
+        },
+      });
+      details.archived = archived.length === 1;
+    });
   }
 
   let nextTaskQueued = false;
@@ -924,7 +1030,7 @@ export async function runAvailabilityRecheck(
       now,
     });
 
-    if (nextCheckAt !== null && (action === "WAIT_NEXT_READ" || action === "RETRY_LATER")) {
+    if (nextCheckAt !== null && (action === "WAIT_NEXT_READ" || action === "RETRY_LATER" || action === "KEPT_PROTECTED")) {
       nextTaskQueued = await enqueueAvailabilityRecheck(client, context, {
         canonicalJobId: payload.canonical_job_id,
         jobVersionId: payload.job_version_id,
