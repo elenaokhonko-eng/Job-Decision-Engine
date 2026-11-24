@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 import { materializeApplicationRankings } from "../../services/applicationRankingMaterializer.js";
@@ -8,10 +9,10 @@ const POLICY_WEIGHTS = {
   requirementCoverage: 15,
   evidenceCompleteness: 10,
   laneConfidence: 10,
-  autonomy: 10,
-  politicsRisk: 7.5,
-  sensoryWorkloadRisk: 5,
-  strategicValue: 5,
+  autonomy: 0,
+  politicsRisk: 0,
+  sensoryWorkloadRisk: 0,
+  strategicValue: 0,
 };
 
 function currentApplyNowRow(overrides: Record<string, unknown> = {}) {
@@ -79,11 +80,12 @@ function currentApplyNowRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function createPool(rows: unknown[], insertRowCounts: number[] = [1]) {
+function createPool(rows: unknown[], insertRowCounts: number[] = [1], policyWeights: Record<string, number> = POLICY_WEIGHTS) {
   const calls: Array<{ sql: string; params?: unknown[] }> = [];
   const client = {
     query: vi.fn(async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params });
+      if (sql.includes("FROM ranking_policies WHERE workspace_id = $1")) return { rows: [{ weights: policyWeights }] };
       if (sql.includes("FROM v_apply_now_jobs_scoped")) return { rows };
       if (sql.includes("INSERT INTO job_ranking_snapshots")) {
         return { rows: [], rowCount: insertRowCounts.shift() ?? 0 };
@@ -96,7 +98,7 @@ function createPool(rows: unknown[], insertRowCounts: number[] = [1]) {
 }
 
 describe("application ranking materializer", () => {
-  it("persists an immutable current-context snapshot and reports missing current evaluations", async () => {
+  it("persists an immutable current-context snapshot and ranks a job without a current evaluation as AI notes pending", async () => {
     const { pool, calls } = createPool([
       currentApplyNowRow(),
       currentApplyNowRow({
@@ -106,16 +108,17 @@ describe("application ranking materializer", () => {
         evaluation_context_fingerprint: null,
         evaluation_job_content_hash: null,
       }),
-    ]);
+    ], [1, 1]);
 
     const result = await materializeApplicationRankings(pool, "workspace-1");
     const insert = calls.find((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"));
 
+    const inserts = calls.filter((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"));
     expect(result).toEqual({
       dryRun: false,
       eligibleApplyNowJobs: 2,
       snapshotsWouldInsert: 0,
-      snapshotsInserted: 1,
+      snapshotsInserted: 2,
       snapshotsAlreadyCurrent: 0,
       missingCurrentEvaluations: 1,
       incompleteRequiredInputs: 0,
@@ -135,8 +138,11 @@ describe("application ranking materializer", () => {
     expect(insert?.params?.[14]).toBeNull();
     expect(insert?.params?.[15]).toBeNull();
     expect(insert?.params?.[16]).toBeNull();
-    expect(insert?.params?.[22]).toBe(false);
+    expect(insert?.params?.[22]).toBe(true);
     expect(JSON.parse(String(insert?.params?.[25]))).toMatchObject({
+      ai_labels_display_only: true,
+      ai_notes_pending: false,
+      ranking_composite_version: "deterministic_composite_v2",
       culture_score_derivation_version: "quote_phrase_rules_v1",
       culture_evidence: [{
         signal: "AUTONOMY",
@@ -145,6 +151,68 @@ describe("application ranking materializer", () => {
         score_derivation_version: "quote_phrase_rules_v1",
       }],
     });
+
+    // The job without a current evaluation is ranked, not hidden: NULL evaluation id, no AI labels,
+    // Top 10 ready from deterministic terms alone, and flagged pending in provenance.
+    const pending = inserts[1];
+    expect(pending?.params?.[1]).toBe("job-2");
+    expect(pending?.params?.[6]).toBeNull();
+    expect(pending?.params?.slice(13, 16)).toEqual([null, null, null]);
+    expect(pending?.params?.[22]).toBe(true);
+    expect(JSON.parse(String(pending?.params?.[25]))).toMatchObject({
+      ai_notes_pending: true,
+      ai_labels_display_only: true,
+      culture_evidence: [],
+    });
+    // Same deterministic inputs, so the same rank with and without AI notes.
+    expect(pending?.params?.[20]).toBe(insert?.params?.[20]);
+  });
+
+  it("does not let AI values move the rank: wildly different AI evidence gives the same stored rank", async () => {
+    const { pool, calls } = createPool([
+      currentApplyNowRow({ canonical_job_id: "ai-high" }),
+      currentApplyNowRow({
+        canonical_job_id: "ai-risky",
+        current_job_description: "Constant reorganisations, heavy politics and a loud open office.",
+        evaluation_payload: {
+          culture_evidence: [
+            { signal: "POLITICS_RISK", quote: "heavy politics" },
+            { signal: "SENSORY_WORKLOAD_RISK", quote: "loud open office" },
+          ],
+        },
+      }),
+    ], [1, 1]);
+
+    await materializeApplicationRankings(pool, "workspace-1");
+    const inserts = calls.filter((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"));
+
+    expect(inserts).toHaveLength(2);
+    expect(inserts[0]?.params?.[20]).toBe(inserts[1]?.params?.[20]);
+    expect(inserts[0]?.params?.[27]).toBe(inserts[1]?.params?.[27]);
+    expect(inserts[0]?.params?.[13]).not.toBe(inserts[1]?.params?.[13]);
+  });
+
+  it("refuses to materialize under a policy that gives an AI term a weight, even with no eligible rows", async () => {
+    for (const rows of [[currentApplyNowRow()], []]) {
+      const { pool, calls } = createPool(rows, [1], { ...POLICY_WEIGHTS, autonomy: 10 });
+
+      const result = await materializeApplicationRankings(pool, "workspace-1");
+
+      expect(result.policyError).toMatch(/display-only/);
+      expect(result.snapshotsInserted).toBe(0);
+      expect(calls.some((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"))).toBe(false);
+    }
+  });
+
+  it("reads the policy for the latest version only when no version is requested", async () => {
+    const { pool, calls } = createPool([currentApplyNowRow({ ranking_policy_version: 2 })]);
+
+    await materializeApplicationRankings(pool, "workspace-1");
+    const insert = calls.find((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"));
+    const select = calls.find((call) => call.sql.includes("FROM v_apply_now_jobs_scoped"));
+
+    expect(select?.params?.[2]).toBeNull();
+    expect(insert?.params?.[7]).toBe(2);
   });
 
   it("does not materialize rankings when readiness is blocked or its evidence fingerprint is stale", async () => {
@@ -193,12 +261,14 @@ describe("application ranking materializer", () => {
     const provenance = JSON.parse(String(insert?.params?.[25]));
     expect(insert?.params?.[38]).toBe(80);
     expect(provenance.culture_priority_policy_version).toBe("culture_priority_mapping_v1");
-    expect(provenance.effective_ranking_weights).toMatchObject({
-      autonomy: 0,
-      politicsRisk: 0,
-      sensoryWorkloadRisk: 0,
-      culturePriorityFit: 22.5,
+    // Culture priorities are a label now: the composite weights are unchanged and the AI budget is not moved.
+    expect(provenance.effective_ranking_weights).toEqual({
+      requirementFit: 37.5,
+      requirementCoverage: 15,
+      evidenceCompleteness: 10,
+      laneConfidence: 10,
     });
+    expect(provenance.ai_labels_display_only).toBe(true);
     expect(provenance.culture_evidence).toEqual(expect.arrayContaining([
       expect.objectContaining({
         signal: "AUTONOMY",
@@ -264,7 +334,7 @@ describe("application ranking materializer", () => {
     const provenance = JSON.parse(String(insert?.params?.[25]));
 
     expect(result.snapshotsInserted).toBe(1);
-    expect(availability.autonomy).toBe(false);
+    expect(availability.ai_label_autonomy).toBe(false);
     expect(provenance.culture_evidence).toEqual([{
       signal: "AUTONOMY",
       score: null,
@@ -289,7 +359,7 @@ describe("application ranking materializer", () => {
 
     const select = calls.find((call) => call.sql.includes("FROM v_apply_now_jobs_scoped"));
     expect(select?.sql).toContain("shortlist.job_version_id::uuid = ANY($2::uuid[])");
-    expect(select?.params).toEqual(["workspace-1", ["job-version-1"]]);
+    expect(select?.params).toEqual(["workspace-1", ["job-version-1"], null]);
   });
 
   it("persists an incomplete rank but never marks it Top 10 when a required deterministic signal is missing", async () => {
@@ -313,7 +383,7 @@ describe("application ranking materializer", () => {
     expect(insert?.params?.[22]).toBe(false);
   });
 
-  it("persists a ranking snapshot with Top 10 disabled when an optional signal is unknown", async () => {
+  it("persists a Top 10 ready ranking snapshot when an optional AI label is unknown", async () => {
     const { pool, calls } = createPool([
       currentApplyNowRow({
         evaluation_payload: {
@@ -330,7 +400,8 @@ describe("application ranking materializer", () => {
     const insert = calls.find((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"));
 
     expect(result.snapshotsInserted).toBe(1);
-    expect(insert?.params?.[22]).toBe(false);
+    // Unknown optional AI labels no longer affect Top 10 readiness.
+    expect(insert?.params?.[22]).toBe(true);
     expect(insert?.params?.[15]).toBeNull();
     expect(insert?.params?.[23]).toBe(false);
   });
@@ -381,5 +452,13 @@ describe("application ranking materializer", () => {
 
     expect(result.snapshotsAlreadyCurrent).toBe(1);
     expect(result.snapshotsInserted).toBe(0);
+  });
+
+  it.each([
+    "scripts/materialize_application_rankings.ts",
+    "scripts/rematch_current_actionable_profile.ts",
+    "scripts/run_stage1_3_staging_evaluation_smoke.ts",
+  ])("%s exits non-zero when the ranking policy is invalid", (script) => {
+    expect(readFileSync(script, "utf8")).toMatch(/if \(\w+\.policyError\)[\s\S]{0,160}process\.exitCode = 1/);
   });
 });
