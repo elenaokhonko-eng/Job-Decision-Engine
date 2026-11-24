@@ -3540,9 +3540,11 @@ async function executeStageTask(
       throw new Error(`Recommendation decider left job_version_id=${jobVersionId} without recommendation_outcome.`);
     }
     const terminalAfter = ["HARD_REJECTED", "UNMATCHED"].includes(state.processingState || "");
-    if (terminalAfter && isActionableRecommendationOutcome(state.recommendationOutcome)) {
-      // The decider selected nothing (for example the posting has no complete source content), so the stale
-      // recommendation survived. Fail visibly instead of completing a terminal job that still recommends.
+    if (state.processingState === "HARD_REJECTED" && isActionableRecommendationOutcome(state.recommendationOutcome)) {
+      // A hard reject always decides INELIGIBLE / SKIP, so a recommendation that survives means the decider did not run
+      // for this job: fail visibly instead of completing it. An UNMATCHED job is different: the policy can legitimately
+      // return TRACK again (no usable match, null scores); that is reported by the unmatched_job_with_recommendation
+      // check and the repair report, never a failed task.
       throw new Error(
         `Recommendation decider left a ${state.recommendationOutcome} recommendation on ${state.processingState} job_version_id=${jobVersionId}.`
       );

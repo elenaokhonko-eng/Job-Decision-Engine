@@ -176,6 +176,20 @@ describe.skipIf(skipReal)("decide task on a terminal job (PostgreSQL)", () => {
     expect(await reported()).not.toContain(job.jobVersionId);
   });
 
+  it("an UNMATCHED job whose decider recompute is a recommendation again completes: the repair reports it, the task does not fail", async () => {
+    const job = await s().seedRoutableJob("unmatched-recomputes-track");
+    // State UNMATCHED set by the matcher (disposition ROUTED), no usable match: scores are null, so the policy says TRACK.
+    await hardRejected(job, "TRACK", "VERIFY", "UNMATCHED");
+    await s().db.query(`UPDATE canonical_jobs SET gate_decision = 'PASS', routing_disposition = 'ROUTED', profile_match_status = 'NO_PROFILE_MATCH' WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, job.canonicalJobId]);
+    await enqueueDecide(job, true);
+    const summary = await runDecide();
+    expect(summary.failed + summary.blocked + summary.deadLettered).toBe(0);
+    expect(summary.completed).toBe(1);
+    const row = await jobRow(job);
+    expect(row.decisions).toBe(1);
+    expect(row.outcome).toBe("TRACK");
+  });
+
   it("a stale recommendation on a DECIDABLE terminal job that the decider leaves in place fails visibly", async () => {
     const job = await s().seedRoutableJob("decidable-silent");
     await hardRejected(job, "TRACK", "VERIFY", "UNMATCHED");
