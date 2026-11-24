@@ -4,6 +4,7 @@ import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { reportAwaitingContentOutputs } from "../src/ingestion/contentCompleteness.js";
 import { reportContentWithoutFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
+import { reportAggregatorLeadsInRanking } from "../src/ingestion/leadRankingCheck.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -201,6 +202,17 @@ async function runIntegrityChecks() {
         `OK: Every live job has complete content or a fetch task (${coverage.awaitingContentJobs} waiting, `
         + `${coverage.fetchDeadLetteredOnly} with only a dead-lettered fetch).`,
       );
+    }
+
+    // Check 10: no aggregator lead is in any ranking (it needs the employer's own posting or the owner's saved export).
+    const leadsRanked = await reportAggregatorLeadsInRanking(pool, ctx.workspaceId);
+    if (leadsRanked.count > 0) {
+      console.error(
+        `Found ${leadsRanked.count} ranked job(s) backed only by an aggregator lead; first ids: ${leadsRanked.sample.slice(0, 5).join(", ")}`,
+      );
+      errors++;
+    } else {
+      console.log("OK: No aggregator lead is in any ranking.");
     }
 
     if (errors === 0) {
