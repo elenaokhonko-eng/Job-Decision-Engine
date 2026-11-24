@@ -5,6 +5,7 @@ import {
   DEAD_LETTER_CLASSIFICATION_SQL,
   DEAD_LETTER_LINEAGE_JOINS_SQL,
 } from "../src/tasks/deadLetterPolicy.js";
+import { completedWithoutResultExitCode, findTasksCompletedWithoutResult, type CompletedWithoutResultReport } from "../src/tasks/completedWithoutResult.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
@@ -37,6 +38,8 @@ interface ReconciliationReport {
     actionable_dead_letter_tasks: number;
     stale_historical_dead_letter_tasks: number;
   };
+  /** Tasks marked COMPLETED whose result row is missing. Any count above zero is an error. */
+  completed_without_result: CompletedWithoutResultReport;
   samples: {
     pass_missing_current_requirements: string[];
     pass_missing_current_matches: string[];
@@ -442,6 +445,7 @@ async function run(): Promise<void> {
       task_states: taskStates,
       evaluation_queue_states: evaluationQueueStates,
       funnel: { ...funnel.rows[0] },
+      completed_without_result: await findTasksCompletedWithoutResult(client, ctx.workspaceId),
       samples: samples.rows[0] ?? {
         pass_missing_current_requirements: [],
         pass_missing_current_matches: [],
@@ -454,6 +458,13 @@ async function run(): Promise<void> {
     } else {
       console.log("PIPELINE RECONCILIATION (READ ONLY)");
       console.log(JSON.stringify(report, null, 2));
+    }
+    if (completedWithoutResultExitCode(report.completed_without_result) !== 0) {
+      console.error(
+        `ERROR: ${report.completed_without_result.total} pipeline task(s) are COMPLETED with no result recorded ` +
+        `(${JSON.stringify(report.completed_without_result.byTaskType)}).`,
+      );
+      process.exitCode = 1;
     }
   } finally {
     client.release();
