@@ -140,7 +140,7 @@ export function pipelineTaskStageVersion(taskType: string): string | null {
     case "MATCH_PROFILE_EVIDENCE": return "deterministic_matcher_v1";
     case "DECIDE_RECOMMENDATION": return DECIDER_VERSION;
     case "ENQUEUE_EXPLANATION": return "explanation_queue_v2";
-    case "RECHECK_AVAILABILITY": return "availability_recheck_v1";
+    case "RECHECK_AVAILABILITY": return "availability_recheck_v2";
     default: return null;
   }
 }

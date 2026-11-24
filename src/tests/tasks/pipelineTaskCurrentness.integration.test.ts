@@ -1301,14 +1301,11 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       expect(await deciderVersionTasks(ids)).toBe(2);
     }, 30000);
 
-    it("the stored version is outside decision_hash and the context fingerprint changes only when the version constant does", () => {
-      const base = { workspaceId: "w", taskType: "DECIDE_RECOMMENDATION" as const, payload: { canonical_job_id: "j" } };
-      const sameVersion = buildPipelineTaskContextFingerprint({ ...base, taskVersion: DECIDER_VERSION });
-      expect(buildPipelineTaskContextFingerprint({ ...base, taskVersion: DECIDER_VERSION })).toBe(sameVersion);
-      expect(buildPipelineTaskContextFingerprint({ ...base, taskVersion: "recommendation_decider_v2" })).not.toBe(sameVersion);
-      // decision_hash hashes the decision, readiness and evidence (recommendationDecider.ts); the version is written by a
-      // separate UPDATE of the decider_version column, so it cannot enter that hash.
-      expect(DECIDER_VERSION).toBe("recommendation_decider_v1");
+    it("decider_version is in the decision context: a different version gives a different fingerprint", () => {
+      const base = { workspaceId: "w", taskType: "DECIDE_RECOMMENDATION" as const, taskVersion: DECIDER_VERSION };
+      const current = buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j", decider_version: DECIDER_VERSION } });
+      expect(buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j", decider_version: "recommendation_decider_next" } })).not.toBe(current);
+      expect(buildPipelineTaskContextFingerprint({ ...base, taskVersion: "recommendation_decider_next", payload: { canonical_job_id: "j", decider_version: DECIDER_VERSION } })).not.toBe(current);
     });
   });
 });

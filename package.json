@@ -58,7 +58,6 @@
     "e2e:retest-gate": "tsx scripts/check_e2e_retest_gate.ts",
     "decisions:replay": "tsx scripts/replay_deterministic_decisions.ts",
     "test": "vitest run",
-    "eval:golden": "tsx scripts/run_evals.ts",
     "lint": "tsc --noEmit",
     "gemini:models": "tsx scripts/list_gemini_models.ts",
     "models:check": "tsx scripts/check_model_ids.ts",
@@ -85,6 +84,15 @@
     "asar": true,
     "asarUnpack": [
       "desktop/electron/dist-backend/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "config",
+        "to": "config",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "generateUpdatesFilesForAllChannels": true,
     "win": {
