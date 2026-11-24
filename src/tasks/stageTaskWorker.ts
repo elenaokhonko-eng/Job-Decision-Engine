@@ -16,6 +16,7 @@ import { runHardGates as defaultRunHardGates } from "../pipeline/hardGate.js";
 import { runEmbeddingBatchWithFallback as defaultRunEmbeddingBatchWithFallback } from "../embeddings/batchCoordinator.js";
 import { getEmbeddingSpaceRegistryConfiguration } from "../embeddings/spaceRegistry.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
+import { GATE_VERSION } from "../contracts/version.js";
 import { LANE_ROUTER_RULE_VERSION, runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/laneRoutingCurrency.js";
@@ -613,8 +614,17 @@ async function enqueueStageTask(
     taskPayload.superseded_match_run_id.trim() !== ""
       ? taskPayload.superseded_match_run_id.trim()
       : null;
+  // A gate rule change is a new task: the key carries the gate version the job was last gated under.
+  const gateRuleVersion =
+    taskType === "APPLY_HARD_GATES" &&
+    typeof taskPayload.gate_rule_version === "string" &&
+    taskPayload.gate_rule_version.trim() !== ""
+      ? taskPayload.gate_rule_version.trim()
+      : null;
   const taskVariant = routingReplayVersion
     ? `repair-${routingReplayVersion}`
+    : gateRuleVersion
+      ? `gate-${gateRuleVersion}`
     : laneRoutingRerouteVersion
       ? `reroute-${laneRoutingRerouteVersion}`
       : supersededMatchRunId
@@ -1075,6 +1085,47 @@ export async function seedRecoverablePipelineTasks(
       deadlineAt,
     seedScope,
     maxPerType,
+    );
+
+    // Jobs last gated under an older gate version are gated again (forced recalculation), bounded by
+    // the per-type cap. The task key carries the gate version, so an unchanged version enqueues nothing.
+    await selectAndEnqueue(
+      client as any,
+      ctx,
+      summary,
+      "APPLY_HARD_GATES",
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+       FROM canonical_jobs c
+       JOIN job_versions jv
+         ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
+       JOIN LATERAL (
+         SELECT gate.gate_version
+         FROM gate_decisions gate
+         WHERE gate.workspace_id = c.workspace_id AND gate.job_version_id = jv.id
+         ORDER BY gate.created_at DESC, gate.id DESC
+         LIMIT 1
+       ) latest_gate ON TRUE
+       WHERE c.workspace_id = $1
+         AND c.archived_at IS NULL
+         AND COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'MANUALLY_REMOVED')
+         AND latest_gate.gate_version IS DISTINCT FROM $3
+       ORDER BY jv.observed_at ASC
+       LIMIT $2`,
+      [ctx.workspaceId, maxPerType, GATE_VERSION],
+      (row) => ({
+        id: requiredSeedValue(row, "job_version_id"),
+        payload: {
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
+          force_policy_recalculation: true,
+          gate_rule_version: GATE_VERSION,
+        },
+      }),
+      enabledTypes,
+      includeTestFixtures,
+      deadlineAt,
+      seedScope,
+      maxPerType,
     );
 
     await selectAndEnqueue(
