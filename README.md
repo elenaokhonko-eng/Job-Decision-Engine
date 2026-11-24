@@ -150,6 +150,10 @@ Job Decision Engine supports two distribution modes:
    ```bash
    npm run db:init
    ```
+   Or do steps 2 and 3 in one go: `npm run setup` asks for a PostgreSQL connection string (any
+   PostgreSQL works; `npm run setup -- --docker` starts a local one), applies the migrations, seeds
+   the embedding spaces and lanes, and writes `.env.local`. Secrets are never taken from the
+   command line.
 4. Run the desktop app in development:
    ```bash
    npm run desktop:dev
@@ -170,7 +174,7 @@ npx tsc --noEmit
 # Unit & integration test suite (275+ tests)
 npm test
 
-# Desktop packaging & security checks (56 checks)
+# Desktop packaging & security checks (67 checks)
 npm run desktop:verify
 
 # Standalone desktop E2E gate check
