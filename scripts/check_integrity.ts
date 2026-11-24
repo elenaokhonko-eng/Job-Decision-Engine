@@ -1,7 +1,9 @@
+import { runZeroChecks } from "../src/tasks/integrityZeroChecks.js";
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import { findStrandedNonterminalJobs } from "../src/ingestion/nonterminalRecovery.js";
 import { reportAwaitingContentOutputs } from "../src/ingestion/contentCompleteness.js";
 import { reportContentWithoutFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
 
@@ -140,36 +142,10 @@ async function runIntegrityChecks() {
       console.log("OK: No completed semantic match orphans found.");
     }
 
-    // Check 7: Automatic nonterminal jobs must have recoverable work attached.
-    const { rows: strandedNonterminal } = await pool.query(`
-      SELECT c.id
-      FROM canonical_jobs c
-      WHERE c.workspace_id = $1
-        AND NOT c.is_test_fixture
-        AND COALESCE(c.processing_state, c.processing_status) IN (
-          'RAW_STAGED', 'PREQUALIFIED', 'ROUTING_DEFERRED', 'LANE_ROUTED',
-          'QUEUED_FOR_AI', 'EVALUATING', 'RETRY_WAIT'
-        )
-        AND NOT EXISTS (
-          SELECT 1
-          FROM pipeline_tasks task
-          WHERE task.workspace_id = c.workspace_id
-            AND task.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
-            AND (
-              task.payload->>'canonical_job_id' = c.id::text
-              OR task.payload->>'job_version_id' = c.latest_job_version_id::text
-            )
-        )
-        AND NOT EXISTS (
-          SELECT 1
-          FROM evaluation_queue evaluation
-          WHERE evaluation.workspace_id = c.workspace_id
-            AND evaluation.canonical_job_id = c.id
-            AND evaluation.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT')
-        )
-    `, [ctx.workspaceId]);
-    if (strandedNonterminal.length > 0) {
-      console.error(`Found ${strandedNonterminal.length} nonterminal job(s) without active recovery tasks.`);
+    // Check 7: Automatic nonterminal jobs must have recoverable work attached (archived jobs are not live and are skipped).
+    const stranded = await findStrandedNonterminalJobs(pool, ctx.workspaceId);
+    if (stranded.count > 0) {
+      console.error(`Found ${stranded.count} live nonterminal job(s) without active recovery tasks; first ids: ${stranded.sample.slice(0, 5).join(", ")}`);
       errors++;
     } else {
       console.log("OK: Every automatic nonterminal job has active recovery work.");
@@ -201,6 +177,16 @@ async function runIntegrityChecks() {
         `OK: Every live job has complete content or a fetch task (${coverage.awaitingContentJobs} waiting, `
         + `${coverage.fetchDeadLetteredOnly} with only a dead-lettered fetch).`,
       );
+    }
+
+    // Checks 10 to 15: the must-be-zero set (src/tasks/integrityZeroChecks.ts).
+    for (const check of await runZeroChecks(pool, ctx.workspaceId)) {
+      if (check.total > 0) {
+        console.error(`Found ${check.total} for ${check.name}; first ids: ${check.sample.join(", ")}`);
+        errors++;
+      } else {
+        console.log(`OK: ${check.name} is zero.`);
+      }
     }
 
     if (errors === 0) {
