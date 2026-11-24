@@ -106,6 +106,30 @@ describe.skipIf(skipReal)("seedRecoverablePipelineTasks queues the awaiting-cont
     for (const untouched of [saved, lead, feed, archived]) expect(tasks).not.toContain(untouched.observationId);
   });
 
+  it("an observationIds-scoped seed never widens to the workspace", async () => {
+    const job = await seedAlertJob("observation-scoped");
+    await seedRecoverablePipelineTasks(db(), { context: c(), taskTypes: ["FETCH_JOB_CONTENT"], observationIds: [job.observationId] });
+    expect(await fetchTaskObservations()).not.toContain(job.observationId);
+  });
+
+  it("a fixture job is never fetched, even with includeTestFixtures", async () => {
+    const job = await seedAlertJob("fixture");
+    await db().query(`UPDATE canonical_jobs SET is_test_fixture = TRUE WHERE id = $1`, [job.canonicalJobId]);
+    await seedRecoverablePipelineTasks(db(), { context: c(), includeTestFixtures: true });
+    expect(await fetchTaskObservations()).not.toContain(job.observationId);
+  });
+
+  it("a spent time budget skips the fetch call and says so", async () => {
+    const job = await seedAlertJob("budget");
+    const summary = await seedRecoverablePipelineTasks(db(), { context: c(), timeBudgetMs: 1 });
+    expect(summary.timeBudgetExceeded).toBe(true);
+    expect(await fetchTaskObservations()).not.toContain(job.observationId);
+    // With budget the same job is picked up.
+    const later = await seedRecoverablePipelineTasks(db(), { context: c() });
+    expect(later.byType.FETCH_JOB_CONTENT?.inserted).toBeGreaterThanOrEqual(1);
+    expect(await fetchTaskObservations()).toContain(job.observationId);
+  });
+
   it("a taskTypes filter without FETCH_JOB_CONTENT queues no fetch task", async () => {
     const job = await seedAlertJob("filtered-out");
     await seedRecoverablePipelineTasks(db(), { context: c(), taskTypes: ["DECIDE_RECOMMENDATION"] });

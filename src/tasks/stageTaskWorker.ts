@@ -1645,7 +1645,14 @@ export async function seedRecoverablePipelineTasks(
     // idempotent, capped per call; aggregator leads, owner-saved, archived and non-alert jobs are left alone).
     // A scoped seed (explicit job versions or observations) never widens to the workspace.
     const unscoped = !options.jobVersionIds?.length && !options.observationIds?.length;
-    if (unscoped && (!enabledTypes || enabledTypes.has("FETCH_JOB_CONTENT")) && (deadlineAt === undefined || Date.now() < deadlineAt)) {
+    // The coverage read scans the workspace's awaiting-content view once per call, so it is skipped, and the budget
+    // flag set, when the time budget is already spent. Release canaries (includeTestFixtures) are never fetched: the
+    // awaiting-content view excludes fixtures.
+    if (unscoped && (!enabledTypes || enabledTypes.has("FETCH_JOB_CONTENT"))) {
+      if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+        summary.timeBudgetExceeded = true;
+        return summary;
+      }
       const fetches = await ensureFetchTasksForAwaitingContent(client as pg.PoolClient, ctx, {
         apply: true,
         producer: "stageTaskWorker:seed",
