@@ -69,6 +69,12 @@ export interface DeterministicMatchSummary {
   matchedJobs: number;
   skippedJobs: number;
   errors: number;
+  /**
+   * Canonical jobs left unmatched because a requirement of their active set has no published embedding in any space that holds
+   * the profile's facts. No match run and no score is stored for them; the stage task blocks on the embedding task and the job
+   * is matched once the embeddings exist.
+   */
+  blockedOnRequirementEmbeddings?: string[];
 }
 
 function tokenize(text: string): Set<string> {
@@ -545,6 +551,7 @@ export async function runDeterministicMatcher(
 
   let matchedJobs = 0;
   let skippedJobs = 0;
+  const blockedOnRequirementEmbeddings: string[] = [];
   let errors = 0;
 
   try {
@@ -928,6 +935,15 @@ export async function runDeterministicMatcher(
             semanticEmbeddingSpaceId = candidate;
             break;
           }
+        }
+
+        // Never match (or score) on partial embeddings: when a space holds the profile's facts but no space holds every requirement,
+        // the job waits for its requirement embeddings. The transaction is rolled back, so no match run exists for it.
+        const scoredRequirementCount = reqRes.rows.filter((req) => isCapabilityRequirementType(req.requirement_type)).length;
+        if (semanticSpaceCandidates.length > 0 && scoredRequirementCount > 0 && factIds.length > 0 && !semanticEmbeddingSpaceId) {
+          await client.query("ROLLBACK");
+          blockedOnRequirementEmbeddings.push(job.id);
+          continue;
         }
 
         const factEmbeddings =
@@ -1403,9 +1419,9 @@ export async function runDeterministicMatcher(
   }
 
   console.log(
-    `Deterministic Matcher complete. Matched: ${matchedJobs}, Skipped: ${skippedJobs}, Errors: ${errors}`
+    `Deterministic Matcher complete. Matched: ${matchedJobs}, Skipped: ${skippedJobs}, Blocked on requirement embeddings: ${blockedOnRequirementEmbeddings.length}, Errors: ${errors}`
   );
-  return { matchedJobs, skippedJobs, errors };
+  return { matchedJobs, skippedJobs, errors, blockedOnRequirementEmbeddings };
 }
 
 /**

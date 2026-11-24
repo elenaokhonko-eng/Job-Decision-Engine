@@ -3386,6 +3386,19 @@ async function executeStageTask(
     if (summary.errors > 0) {
       throw new Error(`Deterministic matching reported ${summary.errors} error(s).`);
     }
+    if ((summary.blockedOnRequirementEmbeddings ?? []).length > 0) {
+      // The matcher stored no match run: a requirement of this job has no published embedding. Queue the embedding repair and
+      // wait on it; the match runs once the embeddings exist (never on partial embeddings).
+      const dependency = await classifySemanticMatchDependency(clientOrPool, ctx, jobVersionId);
+      if (await enqueueDependencyRepair(dependency, task, jobVersionId, clientOrPool, ctx)) {
+        onSuccessorTaskCreated();
+      }
+      throw new PipelineTaskDependencyBlockedError(
+        `${dependency.code}:${jobVersionId}`,
+        dependency.repairTaskType,
+        `Matching is blocked by ${dependency.code} for job_version_id=${jobVersionId}.`,
+      );
+    }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (state.processingState === "UNMATCHED") {
       return;
