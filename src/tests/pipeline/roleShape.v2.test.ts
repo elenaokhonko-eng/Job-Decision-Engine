@@ -63,3 +63,29 @@ describe("role shape v2: permanent wording only counts when it modifies the cont
     expect(codes("", "Permanent contract")).toEqual([]);
   });
 });
+
+describe("role shape v2: negation recall (review MED-3)", () => {
+  const codes = (description: string, employmentType = "") => assessRoleShape({ title: "Analyst", description, employmentType }).signals.map((s) => s.code);
+
+  it.each([
+    "This is not a permanent role, 6-month contract.",
+    "We offer no relocation, 12-month contract.",
+    "A non‑permanent 6-month contract.",
+    "A non–permanent 6-month contract.",
+  ])("flags: %s", (text) => {
+    expect(codes(text)).toEqual(["CONTRACT_EMPLOYMENT"]);
+  });
+
+  it("an employment type with a Unicode dash is still read", () => {
+    expect(codes("", "Non‑permanent contract")).toEqual(["CONTRACT_EMPLOYMENT"]);
+  });
+
+  it("still does not flag a negation inside the contract clause", () => {
+    expect(codes("This is not a fixed-term contract.")).toEqual([]);
+  });
+
+  // Known gap kept for a later change: an employment type such as CONTRACT_TO_HIRE is not matched by the word-boundary pattern.
+  it.fails("CONTRACT_TO_HIRE employment type is not recognised yet (known gap)", () => {
+    expect(codes("", "CONTRACT_TO_HIRE")).toEqual(["CONTRACT_EMPLOYMENT"]);
+  });
+});

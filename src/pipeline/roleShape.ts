@@ -120,14 +120,20 @@ export const detectPeopleManagementCore: RoleShapeDetector = ({ title, descripti
 const CONTRACT_DESCRIPTION =
   /\b(?:(?:\d{1,2}|six|twelve|twelve|nine|three)[- ]months?(?: fixed[- ]term)? contract|fixed[- ]term contract|contract (?:role|position|basis|opportunity)|freelance(?:r)?|independent contractor|contractor position)\b/i;
 
-const CONTRACT_NOT_CONTRACT_BEFORE = /\b(?:not|no|non|isn'?t|is not|without|never)\b[^.\n]{0,24}$/i;
+// A negation only reaches the contract phrase within the same clause: punctuation (comma, semicolon, colon, full stop) ends it, so
+// "We offer no relocation, 12-month contract" is still a contract. "non" is not a negation word here ("non-permanent" negates permanent).
+const CONTRACT_NOT_CONTRACT_BEFORE = /\b(?:not|no|isn'?t|is not|without|never)\b[^.,;:\n]{0,24}$/i;
+/** Unicode dashes (hyphen, non-breaking hyphen, en and em dash, minus) become "-", one character for one character so indexes hold. */
+const normaliseDashes = (text: string): string => text.replace(/[‐-―−]/g, "-");
 // "permanent" only counts when it is not negated ("non-permanent", "not permanent"): the lookbehinds keep "non-permanent" a contract.
 const PERMANENT_WORD = String.raw`(?<!non[- ]?)(?<!not )(?<!un)\b(?:permanent|open[- ]ended|indefinite)\b`;
 /** Permanent wording that modifies the contract itself ("permanent contract basis"): directly before the contract phrase. */
 const PERMANENT_BEFORE_CONTRACT = new RegExp(`${PERMANENT_WORD}[\\s,-]*$`, "i");
 const PERMANENT_IN_TYPE = new RegExp(PERMANENT_WORD, "i");
 
-export const detectContractEmployment: RoleShapeDetector = ({ description, employmentType }) => {
+export const detectContractEmployment: RoleShapeDetector = ({ description: rawDescription, employmentType: rawEmploymentType }) => {
+  const description = normaliseDashes(rawDescription);
+  const employmentType = normaliseDashes(rawEmploymentType);
   // "Permanent contract" is a permanent job: an employment type that says permanent is not a contract.
   if (/\b(?:CONTRACT|CONTRACTOR|FIXED[_ -]?TERM|FREELANCE)\b/i.test(employmentType) && !PERMANENT_IN_TYPE.test(employmentType)) {
     return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "EMPLOYMENT_TYPE", quote: employmentType.slice(0, EVIDENCE_QUOTE_MAX) };
