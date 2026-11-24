@@ -95,6 +95,7 @@ export async function reportAwaitingContentOutputs(
 export const LIST_READ_MODELS = [
   "v_canonical_shortlist_scoped",
   "v_canonical_shortlist_actions_scoped",
+  "v_canonical_shortlist_readiness_scoped",
   "v_job_status_buckets_scoped",
   "v_apply_now_jobs_scoped",
   "v_apply_now_jobs_stage3_scoped",

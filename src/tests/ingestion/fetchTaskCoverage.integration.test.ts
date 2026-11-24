@@ -248,10 +248,20 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
        VALUES ($1, $2, 'MCF_SAVED', $3, 'https://example.test/saved', NOW(), 'Coverage Fixture Co', 'saved', 'Short.', '{}'::jsonb, $4, 'PROCESSED', $5)`,
       [savedObservation, ctx.workspaceId, `saved-${savedObservation}`, `raw-${savedObservation}`, version.rows[0]!.job_version_id],
     );
+    // LinkedIn saved export too: the other owner-saved source.
+    const linkedInJob = await seedAlertJob("linkedin-saved-no-task", ctx);
+    const linkedInVersion = await db().query<{ job_version_id: string }>(`SELECT job_version_id FROM raw_job_observations WHERE id = $1`, [linkedInJob.observationId]);
+    const linkedInObservation = randomUUID();
+    await db().query(
+      `INSERT INTO raw_job_observations (id, workspace_id, source_name, source_external_id, source_url, retrieved_at, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id)
+       VALUES ($1, $2, 'LINKEDIN_SAVED', $3, 'https://example.test/linkedin-saved', NOW(), 'Coverage Fixture Co', 'saved', 'Short.', '{}'::jsonb, $4, 'PROCESSED', $5)`,
+      [linkedInObservation, ctx.workspaceId, `linkedin-saved-${linkedInObservation}`, `raw-${linkedInObservation}`, linkedInVersion.rows[0]!.job_version_id],
+    );
     const report = await reportContentWithoutFetchTask(db(), ctx.workspaceId);
     expect(report.withoutFetchTask).toEqual([alertJob.canonicalJobId]);
-    expect(report.notFetchableWithoutTask).toBe(2);
-    expect(report.awaitingContentJobs).toBe(3);
+    expect(report.notFetchableWithoutTask).toBe(3);
+    expect(report.awaitingContentJobs).toBe(4);
   });
 
   it("reconciliation lists exactly the live jobs with neither complete content nor a fetch task", async () => {
