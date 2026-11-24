@@ -207,3 +207,13 @@ describe("executeMigrationCommand", () => {
     expect(h.calls).toContain("run");
   });
 });
+
+describe("legacy src/db/migrate.ts entry point", () => {
+  it("prints errors through safeErrorText and says it is legacy (workflows still call it, so it is not removed)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../../db/migrate.ts", import.meta.url), "utf8");
+    expect(source).toContain('console.error("Migration runner failed:", safeErrorText(err))');
+    expect(source).not.toMatch(/console\.error\("Migration runner failed:", err\)/);
+    expect(source).toContain("LEGACY ENTRY POINT");
+  });
+});
