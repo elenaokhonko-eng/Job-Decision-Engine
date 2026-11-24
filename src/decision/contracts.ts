@@ -85,6 +85,19 @@ export const CareerTrackAssessmentSchema = z.object({
   rationale: z.string().max(1000),
 }).strict();
 
+/** Role-shape downranks (src/pipeline/roleShape.ts): a fixed share off the score, with the posting words behind each. */
+export const RoleShapeTraceSchema = z.object({
+  policy_version: z.string().min(1).max(100),
+  raw_requirement_score: z.number().min(0).max(1).nullable(),
+  total_penalty: z.number().min(0).max(1),
+  signals: z.array(z.object({
+    code: z.string().min(1).max(100),
+    penalty: z.number().min(0).max(1),
+    source: z.enum(["TITLE", "DESCRIPTION", "EMPLOYMENT_TYPE"]),
+    quote: z.string().max(200),
+  }).strict()),
+}).strict();
+
 export const RecommendationDecisionTraceSchema = z.object({
   policy_version: z.string().min(1).max(100),
   policy_hash: z.string().min(1).max(200),
@@ -97,6 +110,7 @@ export const RecommendationDecisionTraceSchema = z.object({
   fx_rate_observation_id: z.string().uuid().nullable().optional(),
   qualification_comparator_version: z.string().min(1).nullable().optional(),
   career_track: CareerTrackAssessmentSchema.optional(),
+  role_downrank: RoleShapeTraceSchema.optional(),
   notes: z.array(z.string()).default([]),
 });
 
