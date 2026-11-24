@@ -98,6 +98,14 @@ export const RoleShapeTraceSchema = z.object({
   }).strict()),
 }).strict();
 
+/** A posting with few extracted requirements: the score is unchanged, the confidence in it is low (src/pipeline/recommendationDecider.ts). */
+export const EvidenceConfidenceSchema = z.object({
+  level: z.enum(["NORMAL", "LOW"]),
+  reason: z.enum(["THIN_POSTING"]).nullable(),
+  requirement_count: z.number().int().min(0).nullable(),
+  threshold: z.number().int().min(0),
+}).strict();
+
 export const RecommendationDecisionTraceSchema = z.object({
   policy_version: z.string().min(1).max(100),
   policy_hash: z.string().min(1).max(200),
@@ -111,6 +119,7 @@ export const RecommendationDecisionTraceSchema = z.object({
   qualification_comparator_version: z.string().min(1).nullable().optional(),
   career_track: CareerTrackAssessmentSchema.optional(),
   role_downrank: RoleShapeTraceSchema.optional(),
+  evidence_confidence: EvidenceConfidenceSchema.optional(),
   notes: z.array(z.string()).default([]),
 });
 
