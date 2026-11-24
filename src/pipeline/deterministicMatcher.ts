@@ -1466,8 +1466,9 @@ export async function rematchActionableJobs(
     try {
       const { materializeApplicationRankings } = await import("../services/applicationRankingMaterializer.js");
       if (typeof (pool as any).connect === "function") {
-        await materializeApplicationRankings(pool as pg.Pool, ctx.workspaceId);
-        rankingsMaterialized = true;
+        const rankings = await materializeApplicationRankings(pool as pg.Pool, ctx.workspaceId);
+        rankingsMaterialized = rankings.policyError === undefined;
+        if (rankings.policyError) console.warn("Ranking policy is invalid; no rankings were materialized:", rankings.policyError);
       }
     } catch (err) {
       console.warn("Ranking materialization after rematch encountered non-fatal error:", publicErrorSummary(err, "pipeline"));

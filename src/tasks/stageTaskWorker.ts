@@ -1,3 +1,4 @@
+import { GATE_VERSION } from "../contracts/version.js";
 import crypto from "crypto";
 import pg from "pg";
 import dotenv from "dotenv";
@@ -624,10 +625,19 @@ async function enqueueStageTask(
     taskType === "PUBLISH_EMBEDDING" && Number.isInteger(payload.embedding_repair_seq) && Number(payload.embedding_repair_seq) > 0
       ? Number(payload.embedding_repair_seq)
       : null;
+  // A gate rule change is a new task: the key carries the gate version the job was last gated under.
+  const gateRuleVersion =
+    taskType === "APPLY_HARD_GATES" &&
+    typeof taskPayload.gate_rule_version === "string" &&
+    taskPayload.gate_rule_version.trim() !== ""
+      ? taskPayload.gate_rule_version.trim()
+      : null;
   const taskVariant = embeddingRepairSequence !== null
     ? `repair-embedding-${embeddingRepairSequence}`
     : routingReplayVersion
     ? `repair-${routingReplayVersion}`
+    : gateRuleVersion
+      ? `gate-${gateRuleVersion}`
     : laneRoutingRerouteVersion
       ? `reroute-${laneRoutingRerouteVersion}`
       : supersededMatchRunId
@@ -756,6 +766,8 @@ export async function seedRecoverablePipelineTasks(
     includeTestFixtures?: boolean;
     routingDeferredReplayVersion?: string;
     timeBudgetMs?: number;
+    /** The running gate version; defaults to GATE_VERSION. Injectable so the unparseable-version path is testable. */
+    gateVersion?: string;
   } = {}
 ): Promise<SeedPipelineTasksSummary> {
   const pool = clientOrPool || defaultPool;
@@ -1088,6 +1100,79 @@ export async function seedRecoverablePipelineTasks(
       deadlineAt,
     seedScope,
     maxPerType,
+    );
+
+    // The running gate version is parsed here, not in SQL: Postgres does not guarantee AND short-circuit, so a
+    // bad running version could make the cast error instead of selecting nothing. Unparseable: no query at all
+    // (an empty type set makes selectAndEnqueue return before querying).
+    const runningGateVersion = options.gateVersion ?? GATE_VERSION;
+    const runningGateVersionParses = /^(gate-)?[0-9]{1,17}([-.][0-9]{1,17})*$/.test(runningGateVersion);
+    if (!runningGateVersionParses) console.warn("APPLY_HARD_GATES version seed skipped: the running gate version does not parse as a dotted number.");
+    const gateVersionSeedTypes = runningGateVersionParses ? enabledTypes : new Set<PipelineStageTaskType>();
+    // Jobs last gated under an older gate version get a stamp-only version refresh, bounded by
+    // the per-type cap. The task key carries the gate version, so an unchanged version enqueues nothing.
+    await selectAndEnqueue(
+      client as any,
+      ctx,
+      summary,
+      "APPLY_HARD_GATES",
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+       FROM canonical_jobs c
+       JOIN job_versions jv
+         ON jv.workspace_id = c.workspace_id
+        AND jv.id = COALESCE(c.latest_job_version_id, (
+          SELECT jv2.id FROM job_versions jv2
+           WHERE jv2.workspace_id = c.workspace_id AND jv2.canonical_job_id = c.id
+           ORDER BY jv2.observed_at DESC LIMIT 1))
+       JOIN LATERAL (
+         SELECT gate.gate_version
+         FROM gate_decisions gate
+         WHERE gate.workspace_id = c.workspace_id AND gate.job_version_id = jv.id
+         ORDER BY gate.created_at DESC, gate.id DESC
+         LIMIT 1
+       ) latest_gate ON TRUE
+       WHERE c.workspace_id = $1
+         AND c.archived_at IS NULL
+         AND ($4::boolean OR c.is_test_fixture IS NOT TRUE)
+         AND COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'MANUALLY_REMOVED')
+         -- The gate skips a job whose posting is incomplete or has no source content; selecting it would only
+         -- refill the cap every run.
+         AND c.description_quality_status = 'COMPLETE'
+         AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
+         -- "Older than", not "different from": a job a newer worker (desktop, rollback target) gated under a
+         -- newer version is never reopened. A stored version that does not parse as a dotted number (segments of
+         -- 1 to 17 digits, so the bigint cast cannot overflow) counts as older. The running version ($3) is
+         -- parsed in JS before this query is issued; an unparseable one selects nothing.
+         AND CASE WHEN latest_gate.gate_version ~ '^(gate-)?[0-9]{1,17}([-.][0-9]{1,17})*$'
+             THEN regexp_split_to_array(regexp_replace(latest_gate.gate_version, '^gate-', ''), '[-.]')::bigint[]
+                  < regexp_split_to_array(regexp_replace($3::text, '^gate-', ''), '[-.]')::bigint[]
+             ELSE TRUE END
+         -- One forced gate per job version: skip a job that already has a gate task in flight (for example the
+         -- successor of a forced re-extraction).
+         AND NOT EXISTS (
+           SELECT 1 FROM pipeline_tasks inflight
+            WHERE inflight.workspace_id = c.workspace_id AND inflight.task_type = 'APPLY_HARD_GATES'
+              AND inflight.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+              AND inflight.payload->>'job_version_id' = jv.id::text)
+       ORDER BY jv.observed_at ASC
+       LIMIT $2`,
+      [ctx.workspaceId, maxPerType, runningGateVersion, includeTestFixtures],
+      (row) => ({
+        id: requiredSeedValue(row, "job_version_id"),
+        payload: {
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
+          // Stamp-only refresh: the handler (gate 11.6, #275) records the new gate version without clearing
+          // lane, match, decision or ranking state. Never force_policy_recalculation here.
+          version_refresh: true,
+          gate_rule_version: runningGateVersion,
+        },
+      }),
+      gateVersionSeedTypes,
+      includeTestFixtures,
+      deadlineAt,
+      seedScope,
+      maxPerType,
     );
 
     await selectAndEnqueue(
@@ -2835,10 +2920,23 @@ async function maybeEnqueueAfterTask(
   const stagePayload = {
     canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
     job_version_id: jobVersionId,
-    ...(payload.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
+    // A gate-version refresh whose outcome changed re-runs the downstream stages for the SAME job version: its successors need
+    // repair-variant task keys, or the completed tasks of the first run would suppress them and the job would wait forever.
+    ...(payload.reprocess_existing_state === true || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
+      ? { reprocess_existing_state: true }
+      : {}),
+    ...(payload.repair_existing_state === true || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
+      ? { repair_existing_state: true }
+      : {}),
     ...(typeof payload.repair_dependency === "string" ? { repair_dependency: payload.repair_dependency } : {}),
     ...(typeof payload.repair_generation === "string" ? { repair_generation: payload.repair_generation } : {}),
     ...(typeof payload.repair_match_run_id === "string" ? { repair_match_run_id: payload.repair_match_run_id } : {}),
+    // Each gate version gets its own successor identities: a COMPLETED repair-variant task of the same job version (an earlier
+    // repair seed, or an earlier gate-version flip) must not turn this changed-outcome successor into a silent no-op.
+    // repair_generation is whitelisted into the task context and propagates down the chain.
+    ...(taskType === "APPLY_HARD_GATES" && payload.version_refresh === true
+      ? { repair_generation: typeof payload.gate_rule_version === "string" && payload.gate_rule_version.trim() !== "" ? payload.gate_rule_version.trim() : GATE_VERSION }
+      : {}),
   };
 
   if (taskType === "APPLY_HARD_GATES") {
@@ -2949,6 +3047,7 @@ async function executeStageTask(
   budgetRunId: string,
   onSuccessorTaskCreated: () => void,
   onTaskRerouted: () => void,
+  onStampOnly: () => void = () => undefined,
 ): Promise<string | void> {
   if (taskType === "RECHECK_AVAILABILITY") {
     // The read result (verdict, counters, next read) is recorded by the task itself; it has no successor stage.
@@ -3227,8 +3326,11 @@ async function executeStageTask(
   if (taskType === "APPLY_HARD_GATES") {
     const payload = (task.payload || {}) as Record<string, unknown>;
     const verificationAnswerRevisionId = optionalStringPayload(task, "verification_answer_revision_id");
+    // A gate-version refresh: re-evaluate, and when the outcome is unchanged only stamp the audit row (see runHardGates).
+    const versionRefresh = payload.version_refresh === true;
     const reprocess = payload.force_policy_recalculation === true ||
       payload.reprocess === true ||
+      versionRefresh ||
       verificationAnswerRevisionId !== undefined;
     const currentState = await lookupJobState(clientOrPool, ctx, jobVersionId);
 
@@ -3263,6 +3365,7 @@ async function executeStageTask(
       jobVersionIds: [jobVersionId],
       limit: 1,
       reprocess,
+      ...(versionRefresh ? { versionRefresh: true } : {}),
       verificationJobVersionId: jobVersionId,
       ...(verificationAnswerRevisionId
         ? { verificationAnswerRevisionId }
@@ -3270,6 +3373,12 @@ async function executeStageTask(
     });
     if (summary.errors > 0) {
       throw new Error(`Hard gate failed for job_version_id=${jobVersionId}.`);
+    }
+    if (versionRefresh && (summary.stamped ?? 0) > 0) {
+      // Stamp-only re-gate: the job keeps its state and its downstream work. Nothing to enqueue and nothing to verify; the
+      // after-complete successor logic is skipped too (it would enqueue PUBLISH_EMBEDDING / DECIDE_RECOMMENDATION from the state).
+      onStampOnly();
+      return;
     }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (!["PREQUALIFIED", "HARD_REJECTED", "NEEDS_VERIFICATION"].includes(state.processingState || "")) {
@@ -3659,6 +3768,8 @@ async function executeStageTask(
 interface PipelineTaskRunMetrics {
   successorTasksCreated: number;
   rerouted: boolean;
+  /** A version-refresh gate stamp: the task completes without any successor enqueue. */
+  stampOnly?: boolean;
 }
 
 async function processClaimedTask(
@@ -3761,11 +3872,12 @@ async function processClaimedTask(
       options.budgetRunId,
       () => { metrics.successorTasksCreated += 1; },
       () => { metrics.rerouted = true; },
+      () => { metrics.stampOnly = true; },
     );
     await completePipelineTaskAndRun(task, clientOrPool, {
       context: ctx,
       afterComplete: async (transactionClient) => {
-        if (!metrics.rerouted) {
+        if (!metrics.rerouted && !metrics.stampOnly) {
           metrics.successorTasksCreated += await maybeEnqueueAfterTask(
             taskType,
             task,

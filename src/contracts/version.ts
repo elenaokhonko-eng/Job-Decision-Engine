@@ -21,6 +21,8 @@ export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
 // "Work Type: Office Working" is full on-site; each gate verification names its own open fact;
 // pre-sales / post-sales / customer-engagement role duties are GATE_HIGH_INTERACTION for any title.
 // 2026-11.5: a pre-sales title ("Presales", "Pre-Sales", "Pre Sales") is GATE_HIGH_INTERACTION.
-export const GATE_VERSION = "gate-2026-11.5" as const;
+// 2026-11.6: no change to any decision rule. A version-change re-gate whose outcome is unchanged only stamps the audit row
+// (runHardGates versionRefresh); flagNeedsVerification records a work-fact contradiction as NEEDS_VERIFICATION (hardGate.ts).
+export const GATE_VERSION = "gate-2026-11.6" as const;
 export const PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;
 

@@ -232,6 +232,7 @@ async function main(): Promise<void> {
     });
 
     const rankings = await materializeApplicationRankings(pool, context.workspaceId, { context });
+    if (rankings.policyError) process.exitCode = 1;
     console.log(JSON.stringify({ matching, decisions, evaluations, rankings }, null, 2));
   } finally {
     await pool.end();
