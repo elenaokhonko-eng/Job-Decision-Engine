@@ -497,26 +497,46 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     expect(await pendingTasks(ambiguous, "APPLY_HARD_GATES")).toHaveLength(0);
   });
 
-  it("a page that states work mode and location clearly fills them and queues a re-gate; an unstated value never overwrites", async () => {
-    const stated = await createJob({ windowEndedDaysAgo: 1, board: "facts-stated", workplaceType: "UNKNOWN", location: "Singapore" });
-    const result = await runAvailabilityRecheck(db(), ctx(), payload(stated), null, deps({
+  it("a page fills an UNKNOWN work mode and location from an explicit statement and queues a re-gate; it never overwrites a known value", async () => {
+    const eventDetails = async (job: Fixture) =>
+      (await db().query(`SELECT details FROM job_availability_recheck_events WHERE canonical_job_id = $1`, [job.canonicalJobId])).rows[0]?.details;
+    const state = async (job: Fixture) =>
+      (await db().query(`SELECT workplace_type, location FROM canonical_jobs WHERE id = $1`, [job.canonicalJobId])).rows[0];
+
+    const unknown = await createJob({ windowEndedDaysAgo: 1, board: "facts-unknown", workplaceType: "UNKNOWN", location: "Unknown" });
+    const filled = await runAvailabilityRecheck(db(), ctx(), payload(unknown), null, deps({
       now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "HYBRID", "London, United Kingdom"),
     }));
-    expect(result).toMatchObject({ action: "MARK_OPEN", factsChanged: true });
-    const row = await db().query(`SELECT workplace_type, location FROM canonical_jobs WHERE id = $1`, [stated.canonicalJobId]);
-    expect(row.rows[0]).toMatchObject({ workplace_type: "HYBRID", location: "London, United Kingdom" });
-    expect(await pendingTasks(stated, "APPLY_HARD_GATES")).toHaveLength(1);
-    const evidence = await db().query(`SELECT details FROM job_availability_recheck_events WHERE canonical_job_id = $1`, [stated.canonicalJobId]);
-    expect(evidence.rows[0]?.details.facts_applied_from_page).toMatchObject({ work_mode: { before: "UNKNOWN", after: "HYBRID" } });
+    expect(filled).toMatchObject({ action: "MARK_OPEN", factsChanged: true });
+    expect(await state(unknown)).toMatchObject({ workplace_type: "HYBRID", location: "London, United Kingdom" });
+    expect(await pendingTasks(unknown, "APPLY_HARD_GATES")).toHaveLength(1);
+    expect((await eventDetails(unknown)).facts_applied_from_page).toMatchObject({ work_mode: { before: "UNKNOWN", after: "HYBRID" } });
 
-    const known = await createJob({ windowEndedDaysAgo: 1, board: "facts-unstated", workplaceType: "ONSITE", location: "Singapore" });
-    const quiet = await runAvailabilityRecheck(db(), ctx(), payload(known), null, deps({
-      now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "UNKNOWN", null),
+    // A known value is never overwritten; a contradiction is stored with both values and nothing is re-gated.
+    const known = await createJob({ windowEndedDaysAgo: 1, board: "facts-known", workplaceType: "ONSITE", location: "Singapore" });
+    const contradicted = await runAvailabilityRecheck(db(), ctx(), payload(known), null, deps({
+      now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "HYBRID", "London"),
     }));
-    expect(quiet).toMatchObject({ action: "MARK_OPEN", factsChanged: false });
-    const kept = await db().query(`SELECT workplace_type, location FROM canonical_jobs WHERE id = $1`, [known.canonicalJobId]);
-    expect(kept.rows[0]).toMatchObject({ workplace_type: "ONSITE", location: "Singapore" });
+    expect(contradicted).toMatchObject({ action: "MARK_OPEN", factsChanged: false });
+    expect(await state(known)).toMatchObject({ workplace_type: "ONSITE", location: "Singapore" });
     expect(await pendingTasks(known, "APPLY_HARD_GATES")).toHaveLength(0);
+    expect((await eventDetails(known)).facts_conflict).toMatchObject({
+      work_mode: { known: "ONSITE", page: "HYBRID" }, territory: { known: "singapore", page: "london" }, source_name: "GREENHOUSE",
+    });
+
+    // The same place written differently is not a conflict.
+    const same = await createJob({ windowEndedDaysAgo: 1, board: "facts-same", workplaceType: "HYBRID", location: "Singapore" });
+    await runAvailabilityRecheck(db(), ctx(), payload(same), null, deps({ now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "HYBRID", "Singapore, SG") }));
+    expect((await eventDetails(same)).facts_conflict).toBeUndefined();
+
+    // Hostile or ambiguous page text is ignored: only the closed list REMOTE / HYBRID / ONSITE fills a fact.
+    const hostile = await createJob({ windowEndedDaysAgo: 1, board: "facts-hostile", workplaceType: "UNKNOWN", location: "Singapore" });
+    const ignored = await runAvailabilityRecheck(db(), ctx(), payload(hostile), null, deps({
+      now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "remote work possible for some roles", null),
+    }));
+    expect(ignored).toMatchObject({ action: "MARK_OPEN", factsChanged: false });
+    expect(await state(hostile)).toMatchObject({ workplace_type: "UNKNOWN" });
+    expect(await pendingTasks(hostile, "APPLY_HARD_GATES")).toHaveLength(0);
   });
 
   it("Workday: the employer listing is the feed reading; absence counts only from a complete listing, twice in a row", async () => {

@@ -67,7 +67,7 @@ import { enqueuePipelineTask } from "./pipelineTasks.js";
 import { createTaskIntentV2 } from "./taskIntent.js";
 
 export const RECHECK_AVAILABILITY_TASK_TYPE = "RECHECK_AVAILABILITY" as const;
-export const RECHECK_AVAILABILITY_STAGE_VERSION = "availability_recheck_v1" as const;
+export const RECHECK_AVAILABILITY_STAGE_VERSION = "availability_recheck_v2" as const;
 
 /** OPEN lasts 7 days when the posting itself was read (same rule as the source-evidence builder). */
 const OPEN_WINDOW_MS = 7 * 24 * 3_600_000;
@@ -387,6 +387,15 @@ function hostOf(url: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+const CLOSED_WORK_MODES = ["REMOTE", "HYBRID", "ONSITE"] as const;
+
+/** Two location strings agree when one contains the other after normalising (so "Singapore" and "Singapore, SG" agree). */
+function locationsAgree(known: string | null, page: string): boolean {
+  const a = normalizedLocation(known);
+  const b = normalizedLocation(page);
+  return a === b || a.includes(b) || b.includes(a);
 }
 
 function normalizedLocation(value: string | null): string {
@@ -805,35 +814,55 @@ export async function runAvailabilityRecheck(
       }, now);
       details.readiness_recomputed = stored.readinessRecomputed;
       if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
-      // A page that states work mode or location clearly fills or corrects the fact. A value the page does
-      // not state (UNKNOWN or empty) never overwrites a known one. The before/after pair is the evidence.
+      // Page text is untrusted. A page may FILL an unknown work mode or location, and only from an explicit
+      // statement: work mode must be exactly REMOTE, HYBRID or ONSITE (the closed list the page reader emits;
+      // free text such as "remote work possible for some roles" is ignored) and the location a non-empty,
+      // non-"unknown" value. A page NEVER overwrites a known value: if it contradicts one, both values and the
+      // source are recorded as a conflict on the event, and the job is neither re-gated nor rejected.
       const storedMode = String(target.workplace_type ?? "").trim().toUpperCase();
-      const storedUnknown = storedMode === "" || storedMode === "UNKNOWN" || storedMode === "ASSUMED_HYBRID";
-      const pageMode = normalizeWorkMode(read.page.posting.workplaceType);
+      const storedModeUnknown = storedMode === "" || storedMode === "UNKNOWN" || storedMode === "ASSUMED_HYBRID";
+      const rawPageMode = String(read.page.posting.workplaceType ?? "").trim().toUpperCase();
+      const pageMode = (CLOSED_WORK_MODES as readonly string[]).includes(rawPageMode) ? rawPageMode : "UNKNOWN";
       const pageLocation = (read.page.posting.location ?? "").trim();
+      const pageLocationClear = pageLocation !== "" && normalizedLocation(pageLocation) !== "unknown";
+      const storedLocationUnknown = normalizedLocation(target.location) === "" || normalizedLocation(target.location) === "unknown";
       const applied: Record<string, unknown> = {};
-      if (pageMode !== "UNKNOWN" && (storedUnknown || normalizeWorkMode(storedMode) !== pageMode)) {
-        writes.push(async () => {
-          await client.query(
-            `UPDATE canonical_jobs SET workplace_type = $3, updated_at = NOW() WHERE workspace_id = $1::uuid AND id = $2::uuid`,
-            [context.workspaceId, payload.canonical_job_id, pageMode],
-          );
-        });
-        applied.work_mode = { before: storedMode === "" ? "UNKNOWN" : storedMode, after: pageMode };
+      const conflicts: Record<string, unknown> = {};
+      if (pageMode !== "UNKNOWN") {
+        if (storedModeUnknown) {
+          writes.push(async () => {
+            await client.query(
+              `UPDATE canonical_jobs SET workplace_type = $3, updated_at = NOW()
+                WHERE workspace_id = $1::uuid AND id = $2::uuid AND UPPER(COALESCE(workplace_type, 'UNKNOWN')) IN ('UNKNOWN', '', 'ASSUMED_HYBRID')`,
+              [context.workspaceId, payload.canonical_job_id, pageMode],
+            );
+          });
+          applied.work_mode = { before: storedMode === "" ? "UNKNOWN" : storedMode, after: pageMode };
+        } else if (normalizeWorkMode(storedMode) !== pageMode) {
+          conflicts.work_mode = { known: storedMode, page: pageMode };
+        }
       }
-      if (pageLocation !== "" && normalizedLocation(pageLocation) !== "unknown" &&
-          normalizedLocation(pageLocation) !== normalizedLocation(target.location)) {
-        writes.push(async () => {
-          await client.query(
-            `UPDATE canonical_jobs SET location = $3, updated_at = NOW() WHERE workspace_id = $1::uuid AND id = $2::uuid`,
-            [context.workspaceId, payload.canonical_job_id, pageLocation],
-          );
-        });
-        applied.territory = { before: normalizedLocation(target.location), after: normalizedLocation(pageLocation) };
+      if (pageLocationClear) {
+        if (storedLocationUnknown) {
+          writes.push(async () => {
+            await client.query(
+              `UPDATE canonical_jobs SET location = $3, updated_at = NOW()
+                WHERE workspace_id = $1::uuid AND id = $2::uuid AND LOWER(BTRIM(COALESCE(location, ''))) IN ('', 'unknown')`,
+              [context.workspaceId, payload.canonical_job_id, pageLocation],
+            );
+          });
+          applied.territory = { before: normalizedLocation(target.location), after: normalizedLocation(pageLocation) };
+        } else if (!locationsAgree(target.location, pageLocation)) {
+          conflicts.territory = { known: normalizedLocation(target.location), page: normalizedLocation(pageLocation) };
+        }
       }
       if (Object.keys(applied).length > 0) {
         factsChanged = true;
         details.facts_applied_from_page = { ...applied, source_name: observation.source_name, observation_id: observation.observation_id };
+      }
+      if (Object.keys(conflicts).length > 0) {
+        // No change and no re-gate: the conflict is stored with both values and the evidence for a person to verify.
+        details.facts_conflict = { ...conflicts, source_name: observation.source_name, observation_id: observation.observation_id, evidence: "page read" };
       }
     } else if (read.feedFactsAfter !== null) {
       const change = compareFacts(beforeFacts, read.feedFactsAfter);
