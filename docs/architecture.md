@@ -251,6 +251,25 @@ After the stages:
 | Ranking of Apply Now jobs into Top 10 Ready | `scripts/materialize_application_rankings.ts`, `src/services/applicationRankingMaterializer.ts` | `decision` |
 | Archiving of rejected and aged jobs | `scripts/archive_jobs.ts`, `src/services/jobArchive.ts` | `catalog` |
 
+### Ranking composite (policy version 5.5.0, migration 122)
+
+The overall rank is a weighted average of four deterministic terms, renormalised over the terms that are available. The AI-derived terms are labels and never enter the sort (AGENTS.md invariant 11).
+
+| Term | Weight | Share of the composite |
+|---|---|---|
+| `requirementFit` | 37.5 | 51.7% |
+| `requirementCoverage` | 15 | 20.7% |
+| `evidenceCompleteness` | 10 | 13.8% |
+| `laneConfidence` | 10 | 13.8% |
+
+Worked example: fit 80, coverage 60, evidence 70, lane 100 gives (80 x 37.5 + 60 x 15 + 70 x 10 + 100 x 10) / 72.5 = 77.241. A Low lane confidence (30) instead of High (100) costs 70 x 10 / 72.5 = 9.66 composite points.
+
+- Removed from the composite: autonomy, politics risk, sensory workload risk, culture priority fit, and the always-empty strategic value. Their weights are stored as 0 in `ranking_policies`; the materializer rejects a policy that gives any of them a positive weight.
+- The AI values stay stored on `job_ranking_snapshots` (`autonomy_score`, `politics_risk_score`, `sensory_workload_risk_score`, `focus_protection_score`, `culture_priority_score`, and the quotes in `component_provenance.culture_evidence`). They are exposed read-only as `ai_label_*` columns on the Stage 3 views. Configured culture priorities only change the label `culture_priority_score`; they no longer move any weight.
+- Top 10 no longer requires a current AI evaluation. A job without one is ranked from its deterministic terms, its snapshot has `ai_evaluation_id` NULL, and the Stage 3 views show `ai_notes_pending = TRUE`.
+- Apply Now priority is unchanged: 0.75 x composite + 0.125 x freshness + 0.125 x remote freedom.
+- Version rule: a snapshot is keyed by `ranking_policy_version`, and the read models join the latest policy version, so a new `ranking_policies` row makes the materializer write a new snapshot for every eligible job (no AI call). Until it runs, the Top 10 is empty. The previous version's snapshots stay as history. `src/pipeline/rankingPolicyComparison.ts` compares two policy versions read-only (Top 10 side by side, rated rows marked, lane confidence effect).
+
 ## 10. Job states, decisions and status
 
 ### Job states

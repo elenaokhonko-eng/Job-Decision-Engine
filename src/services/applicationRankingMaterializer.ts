@@ -13,7 +13,9 @@ import type { Stage3ApplicationPriorityWeights, Stage3WorkPreferences } from "..
 import {
   calculateRanking,
   INITIAL_RANKING_WEIGHTS,
+  RANKING_COMPOSITE_VERSION,
   calculateStage3PriorityScore,
+  type RankingAiLabels,
   type RankingComponents,
   type RankingWeights,
 } from "./applicationRanking.js";
@@ -23,7 +25,7 @@ import {
   type CultureEvidenceSignal,
 } from "./cultureEvidenceScoring.js";
 
-interface ApplyNowContextRow extends pg.QueryResultRow {
+export interface ApplyNowContextRow extends pg.QueryResultRow {
   workspace_id: string;
   canonical_job_id: string;
   job_version_id: string;
@@ -82,7 +84,7 @@ export interface RankingMaterializationResult {
   readonly incompleteRequiredInputs: number;
 }
 
-const CURRENT_APPLY_NOW_CONTEXT_QUERY = `
+export const CURRENT_APPLY_NOW_CONTEXT_QUERY = `
   SELECT
     shortlist.workspace_id,
     shortlist.canonical_job_id,
@@ -198,6 +200,7 @@ const CURRENT_APPLY_NOW_CONTEXT_QUERY = `
     SELECT policy.policy_version, policy.weights, policy.minimum_ranking_confidence
     FROM ranking_policies AS policy
     WHERE policy.workspace_id = job.workspace_id
+      AND ($3::integer IS NULL OR policy.policy_version = $3::integer)
     ORDER BY policy.policy_version DESC
     LIMIT 1
   ) AS current_policy ON TRUE
@@ -266,7 +269,7 @@ const DEFAULT_CULTURE_SIGNAL_ORDER: readonly CultureEvidenceSignal[] = [
 ];
 
 type CulturePriorityPreference = NonNullable<Stage3WorkPreferences["culture_priorities"]>[number];
-type NormalizedCultureEvidence = {
+export type NormalizedCultureEvidence = {
   signal: CultureEvidenceSignal;
   score: number | null;
   quote: string | null;
@@ -279,7 +282,7 @@ type NormalizedCultureEvidence = {
   score_derivation_version: string;
 };
 
-interface CulturePriorityAssessment {
+export interface CulturePriorityAssessment {
   readonly score: number | null;
   readonly configured: boolean;
   readonly mapped: readonly { name: string; signal: CultureEvidenceSignal; configured_weight: number; priority_order: number }[];
@@ -420,7 +423,19 @@ function assessCulturePriorities(
   };
 }
 
-function parseRankingWeights(value: unknown): RankingWeights {
+/**
+ * Weights of AI-derived terms that earlier policy versions carried. They are display-only now
+ * (AGENTS.md invariant 11), so a policy may list them only with weight 0.
+ */
+const RETIRED_AI_WEIGHT_NAMES: ReadonlySet<string> = new Set([
+  "autonomy",
+  "politicsRisk",
+  "sensoryWorkloadRisk",
+  "strategicValue",
+  "culturePriorityFit",
+]);
+
+export function parseRankingWeights(value: unknown): RankingWeights {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("The active ranking policy weights are not a JSON object.");
   }
@@ -428,65 +443,62 @@ function parseRankingWeights(value: unknown): RankingWeights {
   const names = Object.keys(INITIAL_RANKING_WEIGHTS) as Array<keyof RankingWeights>;
   const parsed = {} as Record<keyof RankingWeights, number>;
   for (const name of names) {
-    const rawWeight = weights[name];
-    if (name === "culturePriorityFit" && rawWeight === undefined) {
-      parsed[name] = 0;
-      continue;
-    }
-    const weight = toFiniteNumber(rawWeight);
+    const weight = toFiniteNumber(weights[name]);
     if (weight === null || weight < 0) {
       throw new Error(`The active ranking policy has an invalid ${name} weight.`);
     }
     parsed[name] = weight;
   }
-  const allowedNames = new Set<string>(names);
-  if (Object.keys(weights).some((name) => !allowedNames.has(name))) {
-    throw new Error("The active ranking policy contains unsupported ranking weights.");
+  for (const name of Object.keys(weights)) {
+    if ((names as string[]).includes(name)) continue;
+    if (!RETIRED_AI_WEIGHT_NAMES.has(name)) {
+      throw new Error("The active ranking policy contains unsupported ranking weights.");
+    }
+    const retired = toFiniteNumber(weights[name]);
+    if (retired === null || retired !== 0) {
+      throw new Error(
+        `The active ranking policy gives the AI-derived term ${name} a weight; AI terms are display-only and must be 0.`
+      );
+    }
   }
   return parsed;
 }
 
-function weightsForCulturePriorities(weights: RankingWeights, cultureConfigured: boolean): RankingWeights {
-  if (!cultureConfigured) return weights;
-  const cultureBudget = weights.autonomy + weights.politicsRisk + weights.sensoryWorkloadRisk + weights.culturePriorityFit;
-  return {
-    ...weights,
-    autonomy: 0,
-    politicsRisk: 0,
-    sensoryWorkloadRisk: 0,
-    culturePriorityFit: cultureBudget,
-  };
-}
-
-function buildComponents(
-  row: ApplyNowContextRow,
-  cultureEvidence: readonly NormalizedCultureEvidence[],
-  culturePriorityScore: number | null,
-): RankingComponents {
-  const cultureScore = (signal: CultureEvidenceSignal) =>
-    cultureEvidence.find((evidence) => evidence.signal === signal)?.score ?? null;
-
+function buildComponents(row: ApplyNowContextRow): RankingComponents {
   return {
     // The stored ADJUSTED score (raw match score lowered by the role-shape downranks), on the 0-100 scale of the raw one.
     requirementFit: adjustedScoreToPercent(row.recommendation_requirement_score),
     requirementCoverage: toFiniteNumber(row.deterministic_match_coverage),
     evidenceCompleteness: scoreFromFraction(row.recommendation_evidence_completeness),
     laneConfidence: laneConfidenceScore(row.lane_confidence),
+  };
+}
+
+/** Display-only labels from the AI culture evidence. They are stored, never weighted. */
+function buildAiLabels(
+  cultureEvidence: readonly NormalizedCultureEvidence[],
+  culturePriorityScore: number | null,
+): RankingAiLabels {
+  const cultureScore = (signal: CultureEvidenceSignal) =>
+    cultureEvidence.find((evidence) => evidence.signal === signal)?.score ?? null;
+  return {
     autonomy: cultureScore("AUTONOMY"),
     politicsRisk: cultureScore("POLITICS_RISK"),
     sensoryWorkloadRisk: cultureScore("SENSORY_WORKLOAD_RISK"),
-    strategicValue: null,
+    focusProtection: cultureScore("FOCUS_PROTECTION"),
     culturePriorityFit: culturePriorityScore,
   };
 }
 
 function componentAvailability(
   components: RankingComponents,
+  aiLabels: RankingAiLabels,
   freshness: FreshnessEvaluationResult,
   mobility: MobilityEvaluationResult,
 ): Record<string, boolean> {
   return {
     ...Object.fromEntries(Object.entries(components).map(([name, score]) => [name, score !== null && score !== undefined])),
+    ...Object.fromEntries(Object.entries(aiLabels).map(([name, score]) => ["ai_label_" + name, score !== null && score !== undefined])),
     freshness: freshness.status !== 'UNKNOWN',
     remote_from_home_base: mobility.remote_from_home_base_score !== null,
     temporary_abroad: mobility.temporary_abroad_score !== null,
@@ -513,6 +525,9 @@ function componentProvenance(
     stage3_preference_revisions: preferenceContext?.revisionsByDomain ?? {},
     application_priority_weights: priorityWeights,
     ranking_policy_version: row.ranking_policy_version,
+    ranking_composite_version: RANKING_COMPOSITE_VERSION,
+    ai_labels_display_only: true,
+    ai_notes_pending: row.evaluation_id === null,
     culture_priority_policy_version: CULTURE_PRIORITY_POLICY_VERSION,
     effective_ranking_weights: effectiveRankingWeights,
     culture_priority: {
@@ -562,6 +577,108 @@ function componentProvenance(
   };
 }
 
+export interface ScoredApplyNowRow {
+  readonly evaluation: { id: string; payload: Record<string, unknown> } | null;
+  readonly evaluationRow: ApplyNowContextRow;
+  readonly cultureEvidence: readonly NormalizedCultureEvidence[];
+  readonly culturePriority: CulturePriorityAssessment;
+  readonly components: RankingComponents;
+  readonly aiLabels: RankingAiLabels;
+  readonly freshness: FreshnessEvaluationResult;
+  readonly mobility: MobilityEvaluationResult;
+  readonly priorityWeights: Stage3ApplicationPriorityWeights;
+  readonly weights: RankingWeights;
+  readonly ranking: ReturnType<typeof calculateRanking>;
+  readonly finalPriorityScore: number | null;
+  readonly currentContext: boolean;
+  readonly componentMissing: boolean;
+}
+
+/** Pure scoring of one Apply Now context row under the given policy weights. No database access. */
+export function scoreApplyNowRow(
+  row: ApplyNowContextRow,
+  preferenceContext: ResolvedWorkspacePreferenceContext | null,
+  rawWeights: unknown,
+): ScoredApplyNowRow {
+  // A job without a current, matching AI evaluation is still ranked from its deterministic
+  // terms and flagged "AI notes pending"; the AI labels are then all NULL.
+  const evaluation = row.evaluation_id !== null
+    && row.evaluation_payload !== null
+    && row.evaluation_context_fingerprint === row.deterministic_context_fingerprint
+    && row.evaluation_job_content_hash === row.current_job_content_hash
+    ? { id: row.evaluation_id, payload: row.evaluation_payload }
+    : null;
+  const evaluationRow: ApplyNowContextRow = evaluation === null
+    ? { ...row, evaluation_id: null, evaluation_payload: null, evaluation_context_fingerprint: null }
+    : row;
+
+  const stage3Preferences = preferenceContext?.stage3;
+  const culturePreferences = stage3Preferences?.culture_priorities ?? [];
+  const cultureEvidence = normalizedCultureEvidence(evaluationRow, culturePreferences);
+  const culturePriority = assessCulturePriorities(cultureEvidence, culturePreferences);
+  const components = buildComponents(row);
+  const aiLabels = buildAiLabels(cultureEvidence, culturePriority.score);
+  const freshness = evaluateJobFreshness({
+    posted_at: row.posted_at,
+    reposted_at: row.reposted_at,
+    source_updated_at: row.source_updated_at,
+    first_seen_at: row.first_seen_at,
+    freshness_basis: row.freshness_basis,
+    is_repost: isRepostFreshnessBasis(row.freshness_basis),
+    posting_identity_is_new: row.freshness_basis === 'NEW_POSTING_ID',
+  }, stage3Preferences?.freshness);
+  const mobility = evaluateMobilityMatch({
+    workplace_type: row.workplace_type ?? undefined,
+    location: row.location ?? undefined,
+    description: row.current_job_description,
+  }, stage3Preferences?.mobility);
+  const configuredPriorityWeights = stage3Preferences?.application_priority_weights;
+  const priorityWeights: Stage3ApplicationPriorityWeights = configuredPriorityWeights ?? {
+    base_rank_pct: 75,
+    freshness_pct: 12.5,
+    remote_freedom_pct: 12.5,
+  };
+  const weights = parseRankingWeights(rawWeights);
+  const minConfidence = toFiniteNumber(row.minimum_ranking_confidence);
+  if (minConfidence === null) throw new Error("The active ranking policy has an invalid confidence threshold.");
+  const currentContext =
+    row.current_artifact_status === "CURRENT_OR_NOT_APPLICABLE" ||
+    row.current_artifact_status === "EVALUATION_MISSING" ||
+    row.current_artifact_status === "EVALUATION_STALE";
+  const ranking = calculateRanking(
+    components,
+    {
+      gatePassed: row.gate_status === "PASS",
+      laneCurrent: Boolean(row.primary_lane?.trim()),
+      matchCurrent: row.match_job_content_hash === row.current_job_content_hash,
+      deterministicDecisionCurrent: Boolean(row.deterministic_decision_id && row.deterministic_context_fingerprint),
+      contextVersionMismatch: row.version_mismatch,
+      policyRecheckRequired: row.policy_recheck_required,
+    },
+    { weights, minimumRankingConfidence: minConfidence }
+  );
+  const finalPriorityScore = calculateStage3PriorityScore(
+    ranking.overallRankScore,
+    {
+      freshnessScore: freshness.status === 'UNKNOWN' ? null : freshness.freshness_score,
+      remoteFreedomScore: mobility.remote_freedom_score,
+    },
+    {
+      baseRankWeight: priorityWeights.base_rank_pct / 100,
+      freshnessWeight: priorityWeights.freshness_pct / 100,
+      remoteFreedomWeight: priorityWeights.remote_freedom_pct / 100,
+    }
+  );
+  return {
+    evaluation, evaluationRow, cultureEvidence, culturePriority, components, aiLabels,
+    freshness, mobility, priorityWeights, weights, ranking, finalPriorityScore, currentContext,
+    componentMissing: components.requirementFit === null
+      || components.requirementCoverage === null
+      || components.evidenceCompleteness === null
+      || components.laneConfidence === null,
+  };
+}
+
 export async function materializeApplicationRankings(
   pool: pg.Pool,
   workspaceId: string,
@@ -587,6 +704,7 @@ export async function materializeApplicationRankings(
     const { rows } = await client.query<ApplyNowContextRow>(CURRENT_APPLY_NOW_CONTEXT_QUERY, [
       workspaceId,
       options.jobVersionIds ?? [],
+      null,
     ]);
     const result = {
       dryRun: options.dryRun === true,
@@ -609,88 +727,17 @@ export async function materializeApplicationRankings(
         result.incompleteRequiredInputs += 1;
         continue;
       }
-      if (!row.evaluation_id || !row.evaluation_payload || !row.evaluation_context_fingerprint) {
-        result.missingCurrentEvaluations += 1;
-        continue;
-      }
-      if (
-        row.evaluation_context_fingerprint !== row.deterministic_context_fingerprint ||
-        row.evaluation_job_content_hash !== row.current_job_content_hash
-      ) {
-        result.missingCurrentEvaluations += 1;
-        continue;
-      }
-
-      const stage3Preferences = preferenceContext?.stage3;
-      const culturePreferences = stage3Preferences?.culture_priorities ?? [];
-      const cultureEvidence = normalizedCultureEvidence(row, culturePreferences);
-      const culturePriority = assessCulturePriorities(cultureEvidence, culturePreferences);
-      const components = buildComponents(row, cultureEvidence, culturePriority.score);
-      if (
-        components.requirementFit === null ||
-        components.requirementCoverage === null ||
-        components.evidenceCompleteness === null ||
-        components.laneConfidence === null
-      ) {
-        result.incompleteRequiredInputs += 1;
-      }
-      const freshness = evaluateJobFreshness({
-        posted_at: row.posted_at,
-        reposted_at: row.reposted_at,
-        source_updated_at: row.source_updated_at,
-        first_seen_at: row.first_seen_at,
-        freshness_basis: row.freshness_basis,
-        is_repost: isRepostFreshnessBasis(row.freshness_basis),
-        posting_identity_is_new: row.freshness_basis === 'NEW_POSTING_ID',
-      }, stage3Preferences?.freshness);
-      const mobility = evaluateMobilityMatch({
-        workplace_type: row.workplace_type ?? undefined,
-        location: row.location ?? undefined,
-        description: row.current_job_description,
-      }, stage3Preferences?.mobility);
-      const configuredPriorityWeights = stage3Preferences?.application_priority_weights;
-      const priorityWeights: Stage3ApplicationPriorityWeights = configuredPriorityWeights ?? {
-        base_rank_pct: 75,
-        freshness_pct: 12.5,
-        remote_freedom_pct: 12.5,
-      };
-      const baseRankingWeights = parseRankingWeights(row.ranking_weights);
-      const weights = weightsForCulturePriorities(baseRankingWeights, culturePriority.configured);
-      const minConfidence = toFiniteNumber(row.minimum_ranking_confidence);
-      if (minConfidence === null) throw new Error("The active ranking policy has an invalid confidence threshold.");
-      const currentContext =
-        row.current_artifact_status === "CURRENT_OR_NOT_APPLICABLE" ||
-        row.current_artifact_status === "EVALUATION_MISSING" ||
-        row.current_artifact_status === "EVALUATION_STALE";
-      const ranking = calculateRanking(
-        components,
-        {
-          gatePassed: row.gate_status === "PASS",
-          laneCurrent: Boolean(row.primary_lane?.trim()),
-          matchCurrent: row.match_job_content_hash === row.current_job_content_hash,
-          deterministicDecisionCurrent: Boolean(row.deterministic_decision_id && row.deterministic_context_fingerprint),
-          aiEvaluationCurrent: true,
-          contextVersionMismatch: row.version_mismatch,
-          policyRecheckRequired: row.policy_recheck_required,
-        },
-        { weights, minimumRankingConfidence: minConfidence }
-      );
-      const finalPriorityScore = calculateStage3PriorityScore(
-        ranking.overallRankScore,
-        {
-          freshnessScore: freshness.status === 'UNKNOWN' ? null : freshness.freshness_score,
-          remoteFreedomScore: mobility.remote_freedom_score,
-        },
-        {
-          baseRankWeight: priorityWeights.base_rank_pct / 100,
-          freshnessWeight: priorityWeights.freshness_pct / 100,
-          remoteFreedomWeight: priorityWeights.remote_freedom_pct / 100,
-        }
-      );
-      if (ranking.overallRankScore === null || finalPriorityScore === null) {
+      const scored = scoreApplyNowRow(row, preferenceContext, row.ranking_weights);
+      if (scored.evaluation === null) result.missingCurrentEvaluations += 1;
+      if (scored.componentMissing) result.incompleteRequiredInputs += 1;
+      if (scored.ranking.overallRankScore === null || scored.finalPriorityScore === null) {
         result.incompleteRequiredInputs += 1;
         continue;
       }
+      const {
+        evaluation, evaluationRow, cultureEvidence, culturePriority, components, aiLabels,
+        freshness, mobility, priorityWeights, weights, ranking, finalPriorityScore, currentContext,
+      } = scored;
       if (options.dryRun === true) {
         result.snapshotsWouldInsert += 1;
         continue;
@@ -729,27 +776,27 @@ export async function materializeApplicationRankings(
           row.profile_version_id,
           row.match_run_id,
           row.deterministic_decision_id,
-          row.evaluation_id,
+          evaluationRow.evaluation_id,
           row.ranking_policy_version,
           row.deterministic_context_fingerprint,
           components.requirementFit,
           components.requirementCoverage,
           components.evidenceCompleteness,
           components.laneConfidence,
-          components.autonomy,
-          components.politicsRisk,
-          components.sensoryWorkloadRisk,
-          components.strategicValue,
-          cultureEvidence.find((evidence) => evidence.signal === "FOCUS_PROTECTION")?.score ?? null,
-          toFiniteNumber(row.evaluation_payload.building_research_ratio),
-          toFiniteNumber(row.evaluation_payload.interaction_load),
+          aiLabels.autonomy,
+          aiLabels.politicsRisk,
+          aiLabels.sensoryWorkloadRisk,
+          null,
+          aiLabels.focusProtection,
+          toFiniteNumber(evaluation?.payload.building_research_ratio),
+          toFiniteNumber(evaluation?.payload.interaction_load),
           finalPriorityScore,
           ranking.rankingConfidence,
           ranking.topTenReady && currentContext,
           row.policy_recheck_required,
-          JSON.stringify(componentAvailability(components, freshness, mobility)),
+          JSON.stringify(componentAvailability(components, aiLabels, freshness, mobility)),
           JSON.stringify(componentProvenance(
-            row,
+            evaluationRow,
             preferenceContext,
             freshness,
             mobility,
