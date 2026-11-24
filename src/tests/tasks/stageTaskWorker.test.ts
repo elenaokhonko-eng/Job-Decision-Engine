@@ -1,3 +1,4 @@
+import { LANE_ROUTER_RULE_VERSION } from "../../pipeline/laneRouter.js";
 import { describe, expect, it, vi } from "vitest";
 import { planPipelineStageRound } from "../../tasks/pipelineStageScheduler.js";
 import { scopeSeedQuery } from "../../tasks/seedQueryScope.js";
@@ -1269,7 +1270,7 @@ describe("stageTaskWorker", () => {
     expect(routeSeed?.sql).toContain("NEEDS_VERIFICATION_TRAVEL");
     expect(routeSeed?.sql).not.toContain("NEEDS_VERIFICATION_WORK_AUTHORIZATION");
     expect(routeSeed?.params?.[1]).toBe(true);
-    expect(routeSeed?.params?.[2]).toBe("lanes_2.3.0");
+    expect(routeSeed?.params?.[2]).toBe(`lanes_2.3.0@${LANE_ROUTER_RULE_VERSION}`);
     expect(routeSeed?.params?.[3]).toBe(103);
   });
 
