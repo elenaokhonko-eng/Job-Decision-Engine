@@ -7,7 +7,9 @@
  */
 import { createHash } from "node:crypto";
 
-export const ROLE_SHAPE_POLICY_VERSION = "role_shape_v1";
+export const ROLE_SHAPE_POLICY_VERSION = "role_shape_v2";
+// v2: contract detection ignores permanent / negated wording; people management needs a strong cue (direct reports, a team
+// of N, people or line management) with a management title, so one weak mention ("performance reviews") never flags.
 /** The combined downrank never exceeds this share of the score, so a job can lose rank but is never erased by it. */
 export const ROLE_SHAPE_MAX_TOTAL_PENALTY = 0.15;
 const EVIDENCE_QUOTE_MAX = 160;
@@ -90,13 +92,17 @@ const PEOPLE_MANAGEMENT_CUES: RegExp[] = [
   /\bcareer (?:development|growth) of (?:your|the) (?:team|reports)\b/i,
 ];
 
+/** Cues that say the job is to run people. "performance reviews" and "hire and develop" also appear in individual-contributor postings. */
+const STRONG_PEOPLE_CUES: RegExp[] = [PEOPLE_MANAGEMENT_CUES[0]!, PEOPLE_MANAGEMENT_CUES[1]!, PEOPLE_MANAGEMENT_CUES[2]!, PEOPLE_MANAGEMENT_CUES[3]!];
+
 export const detectPeopleManagementCore: RoleShapeDetector = ({ title, description }) => {
-  // A management-sounding title alone is not evidence: "Lead" and "Manager" are often individual roles. Managing a team
-  // is the core of the role only when the description says so: two separate cues, or a management title plus one cue.
+  // Managing a team is the core of the role only when the description says so: two separate cues, or a management title plus
+  // one STRONG cue. A senior or director title with a single weak mention ("performance reviews") is an individual role.
   const hits = PEOPLE_MANAGEMENT_CUES.map((cue) => description.match(cue)).filter((match): match is RegExpMatchArray => match !== null);
+  const strongHits = STRONG_PEOPLE_CUES.map((cue) => description.match(cue)).filter((match): match is RegExpMatchArray => match !== null);
   const titleHit = title.match(PEOPLE_MANAGEMENT_TITLE);
-  if (hits.length >= 2 || (titleHit && hits.length >= 1)) {
-    const first = hits[0]!;
+  if (hits.length >= 2 || (titleHit && strongHits.length >= 1)) {
+    const first = (strongHits[0] ?? hits[0])!;
     return { code: "PEOPLE_MANAGEMENT_CORE", penalty: 0.08, source: "DESCRIPTION", quote: excerpt(description, first.index ?? 0, first[0].length) };
   }
   return null;
@@ -110,12 +116,22 @@ export const detectPeopleManagementCore: RoleShapeDetector = ({ title, descripti
 const CONTRACT_DESCRIPTION =
   /\b(?:(?:\d{1,2}|six|twelve|twelve|nine|three)[- ]months?(?: fixed[- ]term)? contract|fixed[- ]term contract|contract (?:role|position|basis|opportunity)|freelance(?:r)?|independent contractor|contractor position)\b/i;
 
+const CONTRACT_NOT_CONTRACT_BEFORE = /\b(?:not|no|non|isn'?t|is not|without|never)\b[^.\n]{0,24}$/i;
+const CONTRACT_PERMANENT_NEAR = /\b(?:permanent|non[- ]?fixed|open[- ]ended|indefinite)\b/i;
+
 export const detectContractEmployment: RoleShapeDetector = ({ description, employmentType }) => {
-  if (/\b(?:CONTRACT|CONTRACTOR|FIXED[_ -]?TERM|FREELANCE)\b/i.test(employmentType)) {
+  // "Permanent contract" is a permanent job: an employment type that says permanent is not a contract.
+  if (/\b(?:CONTRACT|CONTRACTOR|FIXED[_ -]?TERM|FREELANCE)\b/i.test(employmentType) && !CONTRACT_PERMANENT_NEAR.test(employmentType)) {
     return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "EMPLOYMENT_TYPE", quote: employmentType.slice(0, EVIDENCE_QUOTE_MAX) };
   }
-  const hit = description.match(CONTRACT_DESCRIPTION);
-  if (hit) return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "DESCRIPTION", quote: excerpt(description, hit.index ?? 0, hit[0].length) };
+  for (const hit of description.matchAll(new RegExp(CONTRACT_DESCRIPTION.source, "gi"))) {
+    const index = hit.index ?? 0;
+    const before = description.slice(Math.max(0, index - 40), index);
+    const around = description.slice(Math.max(0, index - 40), index + hit[0].length + 40);
+    if (CONTRACT_NOT_CONTRACT_BEFORE.test(before)) continue; // "not a fixed-term contract"
+    if (CONTRACT_PERMANENT_NEAR.test(around)) continue; // "permanent contract basis"
+    return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "DESCRIPTION", quote: excerpt(description, index, hit[0].length) };
+  }
   return null;
 };
 

@@ -177,7 +177,7 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     await q(`UPDATE canonical_jobs SET normalized_title = 'Forward Deployed Engineer' WHERE id = $1`, [JOB_ID]);
     expect((await runRecommendationDecider(client)).errors).toBe(0);
     const shaped = await latest();
-    expect(shaped.trace.role_downrank.policy_version).toBe("role_shape_v1");
+    expect(shaped.trace.role_downrank.policy_version).toBe("role_shape_v2");
     expect(shaped.trace.role_downrank.signals.map((signal: { code: string }) => signal.code)).toContain("CUSTOMER_FACING_DELIVERY");
     expect(shaped.trace.role_downrank.total_penalty).toBeGreaterThan(0);
     expect(shaped.trace.notes).toContain("role_downrank:CUSTOMER_FACING_DELIVERY");
