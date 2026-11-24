@@ -430,6 +430,22 @@ export class DecisionSupersededError extends PipelineTaskDependencyBlockedError 
   }
 }
 
+/** repair_action recorded on a decide task closed because its job is awaiting content. */
+export const AWAITING_CONTENT_NOT_DECIDABLE = "AWAITING_CONTENT_NOT_DECIDABLE";
+
+async function isAwaitingContentTerminalDecide(
+  task: ClaimedPipelineTask,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+): Promise<boolean> {
+  const jobVersionId = optionalStringPayload(task, "job_version_id");
+  if (!jobVersionId) return false;
+  const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
+  if (state.latestJobVersionId !== jobVersionId) return false;
+  if (!["HARD_REJECTED", "UNMATCHED"].includes(state.processingState || "")) return false;
+  return !(await jobVersionIsDecidable(clientOrPool, ctx, jobVersionId));
+}
+
 async function jobVersionHasDecision(clientOrPool: pg.Pool | pg.PoolClient, ctx: WorkspaceContext, jobVersionId: string): Promise<boolean> {
   const { rows } = await (clientOrPool as QueryClient).query<{ exists: boolean }>(
     `SELECT EXISTS (SELECT 1 FROM deterministic_decisions d WHERE d.workspace_id = $1 AND d.job_version_id = $2) AS exists`,
@@ -3649,6 +3665,13 @@ async function processClaimedTask(
         await completePipelineTaskAndRun(task, clientOrPool, { context: ctx });
         return;
       }
+    }
+    if (taskType === "DECIDE_RECOMMENDATION" && (await isAwaitingContentTerminalDecide(task, clientOrPool, ctx))) {
+      // A terminal job whose version cannot be decided (incomplete description or no source evidence) is awaiting
+      // content: its stored outputs are information only. The task completes with an explicit recorded reason, not a
+      // failure and not a silent no-result; the completed-without-result check skips it by the same predicate.
+      await completePipelineTaskAndRun(task, clientOrPool, { context: ctx, repairAction: AWAITING_CONTENT_NOT_DECIDABLE });
+      return;
     }
     const retrievedObservationId = await executeStageTask(
       taskType,

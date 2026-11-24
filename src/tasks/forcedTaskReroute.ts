@@ -83,9 +83,9 @@ export function isForcedRecomputeTask(task: Pick<ClaimedPipelineTask, "payload">
   if (
     record.reprocess === true ||
     record.force_policy_recalculation === true ||
-    record.reprocess_existing_state === true ||
-    record.repair_existing_state === true
+    record.reprocess_existing_state === true
   ) return true;
+  // repair_existing_state is not a force: the seeds put it on every decide task for an existing job.
   const intent = TaskIntentV2Schema.safeParse(record.task_intent);
   return intent.success && intent.data.mode === "FORCE_RECOMPUTE";
 }

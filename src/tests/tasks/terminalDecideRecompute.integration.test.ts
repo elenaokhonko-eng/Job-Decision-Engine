@@ -37,11 +37,12 @@ async function hardRejected(job: StackJob, outcome: string, eligibility: string,
   );
 }
 
-async function enqueueDecide(job: StackJob, forced: boolean): Promise<void> {
+async function enqueueDecide(job: StackJob, forced: boolean, extra: Record<string, unknown> = {}): Promise<void> {
   const { db, ctx } = s();
   const payload: Record<string, unknown> = {
     canonical_job_id: job.canonicalJobId,
     job_version_id: job.jobVersionId,
+    ...extra,
     ...(forced ? { force_policy_recalculation: true } : {}),
   };
   const taskKey = `DECIDE_RECOMMENDATION:${job.jobVersionId}:terminal-test:${randomUUID()}`;
@@ -106,6 +107,51 @@ describe.skipIf(skipReal)("decide task on a terminal job (PostgreSQL)", () => {
     expect(await reported()).not.toContain(job.jobVersionId);
   });
 
+  it("a seeded decide task (repair_existing_state) is not a forced recompute: a decided SKIP job does not run the decider again", async () => {
+    const job = await s().seedRoutableJob("seeded-decided");
+    await hardRejected(job, "SKIP", "INELIGIBLE");
+    await enqueueDecide(job, false);
+    expect((await runDecide()).failed).toBe(0);
+    expect((await jobRow(job)).decisions).toBe(1);
+    let calls = 0;
+    const counting = {
+      ...defaultPipelineStageWorkerDependencies,
+      runRecommendationDecider: async (...args: Parameters<typeof defaultPipelineStageWorkerDependencies.runRecommendationDecider>) => {
+        calls += 1;
+        return defaultPipelineStageWorkerDependencies.runRecommendationDecider(...args);
+      },
+    } as typeof defaultPipelineStageWorkerDependencies;
+    await enqueueDecide(job, false, { repair_existing_state: true });
+    const summary = await runDecide(counting);
+    expect(summary.failed).toBe(0);
+    expect(summary.completed).toBe(1);
+    expect(calls).toBe(0);
+  });
+
+  it("a terminal job whose version cannot be decided is awaiting content: a seeded decide task completes quietly with a recorded reason, not a failure", async () => {
+    const job = await s().seedRoutableJob("seeded-awaiting");
+    await hardRejected(job, "TRACK", "VERIFY");
+    await s().db.query(`UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, job.canonicalJobId]);
+    await enqueueDecide(job, false, { repair_existing_state: true });
+    const summary = await runDecide();
+    expect(summary.failed + summary.blocked + summary.deadLettered).toBe(0);
+    expect(summary.completed).toBe(1);
+    const task = await s().db.query<{ status: string; repair_action: string | null }>(
+      `SELECT status, repair_action FROM pipeline_tasks WHERE workspace_id = $1 AND payload->>'job_version_id' = $2 AND task_type = 'DECIDE_RECOMMENDATION'`,
+      [s().ctx.workspaceId, job.jobVersionId]);
+    expect(task.rows[0]).toEqual({ status: "COMPLETED", repair_action: "AWAITING_CONTENT_NOT_DECIDABLE" });
+    expect((await jobRow(job)).outcome).toBe("TRACK");
+    expect(await reported()).not.toContain(job.jobVersionId);
+  });
+
+  it("a seeded decide task for a decidable job holding a stale recommendation runs the decider", async () => {
+    const job = await s().seedRoutableJob("seeded-stale-decidable");
+    await hardRejected(job, "TRACK", "VERIFY");
+    await enqueueDecide(job, false, { repair_existing_state: true });
+    expect((await runDecide()).failed).toBe(0);
+    expect((await jobRow(job)).outcome).toBe("SKIP");
+  });
+
   it("a terminal job whose version cannot be decided (incomplete description) completes without a decision and is not reported", async () => {
     const job = await s().seedRoutableJob("skip-undecidable");
     await hardRejected(job, "SKIP", "INELIGIBLE");
@@ -118,15 +164,29 @@ describe.skipIf(skipReal)("decide task on a terminal job (PostgreSQL)", () => {
     expect(await reported()).not.toContain(job.jobVersionId);
   });
 
-  it("a stale recommendation on an UNMATCHED job the decider cannot select fails visibly", async () => {
+  it("a stale recommendation on an undecidable UNMATCHED job is awaiting content, recorded and not failed", async () => {
     const job = await s().seedRoutableJob("unmatched-stale");
     await hardRejected(job, "TRACK", "VERIFY", "UNMATCHED");
     await s().db.query(`UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, job.canonicalJobId]);
     await enqueueDecide(job, false);
     const summary = await runDecide();
+    expect(summary.failed + summary.blocked + summary.deadLettered).toBe(0);
+    expect(summary.completed).toBe(1);
+    expect((await jobRow(job)).outcome).toBe("TRACK");
+    expect(await reported()).not.toContain(job.jobVersionId);
+  });
+
+  it("a stale recommendation on a DECIDABLE terminal job that the decider leaves in place fails visibly", async () => {
+    const job = await s().seedRoutableJob("decidable-silent");
+    await hardRejected(job, "TRACK", "VERIFY", "UNMATCHED");
+    await enqueueDecide(job, false);
+    const silentDecider = {
+      ...defaultPipelineStageWorkerDependencies,
+      runRecommendationDecider: async () => ({ updated: 0, decisionsInserted: 0, errors: 0, policySnapshotId: "p", policySnapshotHash: "h" }),
+    } as typeof defaultPipelineStageWorkerDependencies;
+    const summary = await runDecide(silentDecider);
     expect(summary.completed).toBe(0);
     expect(summary.failed + summary.blocked + summary.deadLettered).toBeGreaterThan(0);
-    expect((await jobRow(job)).outcome).toBe("TRACK");
   });
 
   it("a forced decide on a decidable job fails when the decider wrote no decision", async () => {
@@ -153,20 +213,5 @@ describe.skipIf(skipReal)("decide task on a terminal job (PostgreSQL)", () => {
     expect(row.decisions).toBe(1);
   });
 
-  it("when the decider cannot select the job, a stale recommendation fails the task visibly instead of completing it", async () => {
-    const job = await s().seedRoutableJob("stale-undecidable");
-    await hardRejected(job, "TRACK", "VERIFY");
-    // The decider only selects jobs with a complete description; without it the stale value would survive.
-    await s().db.query(`UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, job.canonicalJobId]);
-    await enqueueDecide(job, false);
-    const summary = await runDecide();
-    expect(summary.completed).toBe(0);
-    expect(summary.failed + summary.blocked + summary.deadLettered).toBeGreaterThan(0);
-    expect((await jobRow(job)).outcome).toBe("TRACK");
-    const task = await s().db.query<{ status: string }>(
-      `SELECT status FROM pipeline_tasks WHERE workspace_id = $1 AND payload->>'job_version_id' = $2 AND task_type = 'DECIDE_RECOMMENDATION'`,
-      [s().ctx.workspaceId, job.jobVersionId],
-    );
-    expect(task.rows[0]!.status).not.toBe("COMPLETED");
-  });
+
 });
