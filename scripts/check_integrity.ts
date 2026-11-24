@@ -1,10 +1,10 @@
+import { runZeroChecks } from "../src/tasks/integrityZeroChecks.js";
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { reportAwaitingContentOutputs } from "../src/ingestion/contentCompleteness.js";
 import { reportContentWithoutFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
-import { reportAggregatorLeadsInRanking } from "../src/ingestion/leadRankingCheck.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -204,15 +204,14 @@ async function runIntegrityChecks() {
       );
     }
 
-    // Check 10: no aggregator lead is in any ranking (it needs the employer's own posting or the owner's saved export).
-    const leadsRanked = await reportAggregatorLeadsInRanking(pool, ctx.workspaceId);
-    if (leadsRanked.count > 0) {
-      console.error(
-        `Found ${leadsRanked.count} ranked job(s) backed only by an aggregator lead; first ids: ${leadsRanked.sample.join(", ")}`,
-      );
-      errors++;
-    } else {
-      console.log("OK: No aggregator lead is in any ranking.");
+    // Checks 10 to 16: the must-be-zero set (src/tasks/integrityZeroChecks.ts).
+    for (const check of await runZeroChecks(pool, ctx.workspaceId)) {
+      if (check.total > 0) {
+        console.error(`Found ${check.total} for ${check.name}; first ids: ${check.sample.join(", ")}`);
+        errors++;
+      } else {
+        console.log(`OK: ${check.name} is zero.`);
+      }
     }
 
     if (errors === 0) {

@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
+import { runZeroChecks, zeroChecksExitCode } from "../../tasks/integrityZeroChecks.js";
 import { LEAD_RANKING_SAMPLE_SIZE, reportAggregatorLeadsInRanking } from "../../ingestion/leadRankingCheck.js";
 import { archiveJobsAsPostingNotConfirmable } from "../../services/jobArchive.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
@@ -132,6 +133,17 @@ describe.skipIf(skipReal)("no aggregator lead is in any ranking (PostgreSQL)", (
     expect((await reportAggregatorLeadsInRanking(db(), ws)).count).toBe(1);
     await db().query(`UPDATE canonical_jobs SET recommendation_outcome = NULL WHERE id = $1`, [lead]);
     expect(await reportAggregatorLeadsInRanking(db(), ws)).toEqual({ count: 0, sample: [] });
+  });
+
+  it("is registered in runZeroChecks as aggregator_lead_in_ranking and fails the zero-check exit code on a seeded violation", async () => {
+    const ws = await newWorkspace();
+    const lead = await seed(ws, "ranked-lead", { outcome: "REVIEW", observations: [{ source: "GMAIL_ALERT", url: LINKEDIN }] });
+    const check = (await runZeroChecks(db(), ws)).find((entry) => entry.name === "aggregator_lead_in_ranking");
+    expect(check).toEqual({ name: "aggregator_lead_in_ranking", total: 1, sample: [lead] });
+    expect(zeroChecksExitCode([check!])).toBe(1);
+    await db().query(`UPDATE canonical_jobs SET recommendation_outcome = NULL WHERE id = $1`, [lead]);
+    const cleared = (await runZeroChecks(db(), ws)).find((entry) => entry.name === "aggregator_lead_in_ranking");
+    expect(cleared?.total).toBe(0);
   });
 
   it("caps the sample at the documented size", async () => {
