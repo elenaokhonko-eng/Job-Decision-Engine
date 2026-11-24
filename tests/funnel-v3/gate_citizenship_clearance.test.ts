@@ -544,7 +544,7 @@ describe("end to end through the hard gate", () => {
     // 11.2 introduced these rules; 11.3 (#177, neutral workplace perks and the
     // Singapore on-site rule) and 11.4 (location header line, office work type, verification
     // open-fact codes) and 11.5 (pre-sales titles) followed, so the current version is later than 11.2.
-    expect(GATE_VERSION).toBe("gate-2026-11.5");
+    expect(GATE_VERSION).toBe("gate-2026-11.6");
   });
 });
 

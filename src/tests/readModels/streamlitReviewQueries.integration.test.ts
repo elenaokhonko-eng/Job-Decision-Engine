@@ -46,6 +46,8 @@ interface SeedOptions {
   readonly readiness: "READY" | "NEEDS_VERIFICATION";
   /** false leaves the job without a current match run (MATCH_STALE). */
   readonly matched?: boolean;
+  /** Stored adjusted score and raw score written to canonical_jobs (migration 121), for ordering checks. */
+  readonly scores?: { readonly adjusted: number; readonly raw: number };
 }
 
 let pool: pg.Pool | undefined;
@@ -116,6 +118,15 @@ async function seedJob(options: SeedOptions): Promise<{ canonicalJobId: string; 
      WHERE workspace_id = $2 AND id = $3`,
     [jobVersionId, workspaceId, canonicalJobId],
   );
+  if (options.scores) {
+    await database.query(
+      `UPDATE canonical_jobs
+          SET recommendation_requirement_score = $1, deterministic_match_score = $2,
+              recommendation_score_policy = 'fixture-match|role_shape_v1'
+        WHERE workspace_id = $3 AND id = $4`,
+      [options.scores.adjusted, options.scores.raw, workspaceId, canonicalJobId],
+    );
+  }
   if (!matched) return { canonicalJobId, jobVersionId };
 
   const requirementIdentity = await database.query<{ id: string }>(
@@ -234,6 +245,46 @@ async function seedJob(options: SeedOptions): Promise<{ canonicalJobId: string; 
     [matchRunId, decision.rows[0]!.id, workspaceId, canonicalJobId],
   );
   return { canonicalJobId, jobVersionId };
+}
+
+/**
+ * Gives a seeded, matched job a current AI evaluation and a Stage 3 ranking snapshot with the given overall rank, so
+ * v_apply_now_jobs_stage3_scoped exposes a non-null overall_rank_score for it.
+ */
+async function seedRankingSnapshot(canonicalJobId: string, overallRank: number): Promise<void> {
+  const database = db();
+  const { workspaceId } = workspace();
+  const context = await database.query<{
+    job_version_id: string; match_run_id: string; decision_id: string; content_hash: string; context_fingerprint: string;
+  }>(
+    `SELECT job.latest_job_version_id AS job_version_id, job.latest_match_run_id AS match_run_id,
+            job.latest_deterministic_decision_id AS decision_id, version.content_hash,
+            decision.context_fingerprint
+       FROM canonical_jobs job
+       JOIN job_versions version ON version.id = job.latest_job_version_id
+       JOIN deterministic_decisions decision ON decision.id = job.latest_deterministic_decision_id
+      WHERE job.workspace_id = $1 AND job.id = $2`,
+    [workspaceId, canonicalJobId],
+  );
+  const row = context.rows[0]!;
+  const evaluation = await database.query<{ id: string }>(
+    `INSERT INTO ai_evaluations (
+       workspace_id, canonical_job_id, job_version_id, profile_version_id, match_run_id,
+       deterministic_decision_id, job_content_hash, context_fingerprint, prompt_id, prompt_version
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'job_evaluation', '1') RETURNING id`,
+    [workspaceId, canonicalJobId, row.job_version_id, profileVersionId, row.match_run_id, row.decision_id,
+      row.content_hash, row.context_fingerprint],
+  );
+  await database.query(
+    `INSERT INTO job_ranking_snapshots (
+       workspace_id, canonical_job_id, job_version_id, profile_version_id, match_run_id,
+       deterministic_decision_id, ai_evaluation_id, ranking_policy_version, context_fingerprint,
+       overall_rank_score, ranking_confidence
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7,
+       (SELECT MAX(policy_version) FROM ranking_policies WHERE workspace_id = $1), $8, $9, 90)`,
+    [workspaceId, canonicalJobId, row.job_version_id, profileVersionId, row.match_run_id, row.decision_id,
+      evaluation.rows[0]!.id, row.context_fingerprint, overallRank],
+  );
 }
 
 function rowFor<T extends { canonical_job_id: string }>(rows: readonly T[], canonicalJobId: string): T | undefined {
@@ -468,5 +519,94 @@ describe.skipIf(skipReal)("Streamlit review and verification read-model queries 
     for (const hidden of [windowRanOut, closed, neverChecked]) expect(visible).not.toContain(hidden.canonicalJobId);
     expect(await awaiting()).toBe(awaitingBefore + 3);
     expect(visible.length + (await awaiting())).toBe(await allTrack());
+  });
+
+  it("orders Review, Verify, Track and Apply Now by the stored adjusted score, not the raw score, and exposes the evidence columns", async () => {
+    const database = db();
+    const { workspaceId } = workspace();
+    // In each pair the raw order and the adjusted order are opposite: a sort on the raw score fails this test.
+    const pair = async (
+      label: string,
+      base: Omit<SeedOptions, "title" | "scores">,
+    ) => {
+      const highRawPenalised = await seedJob({ ...base, title: `${label} High Raw Penalised`, scores: { adjusted: 0.5, raw: 80 } });
+      const lowRawClean = await seedJob({ ...base, title: `${label} Low Raw Clean`, scores: { adjusted: 0.7, raw: 60 } });
+      return { highRawPenalised: highRawPenalised.canonicalJobId, lowRawClean: lowRawClean.canonicalJobId };
+    };
+    const orderOf = async (queryName: string, ids: readonly string[]) => (
+      await database.query<{ canonical_job_id: string }>(streamlitQuery(queryName), [workspaceId])
+    ).rows.map((row) => row.canonical_job_id).filter((id) => ids.includes(id));
+
+    const review = await pair("Ranking Review", { gate: "PASS", eligibility: "ELIGIBLE", outcome: "REVIEW", readiness: "READY" });
+    const verify = await pair("Ranking Verify", {
+      gate: "NEEDS_VERIFICATION", gateCodes: ["NEEDS_VERIFICATION"], eligibility: "VERIFY", outcome: "REVIEW", readiness: "NEEDS_VERIFICATION",
+    });
+    const track = await pair("Ranking Track", { gate: "PASS", eligibility: "VERIFY", outcome: "TRACK", readiness: "NEEDS_VERIFICATION" });
+
+    expect(await orderOf("REVIEW_JOBS_QUERY", Object.values(review))).toEqual([review.lowRawClean, review.highRawPenalised]);
+    expect(await orderOf("VERIFY_THEN_APPLY_JOBS_QUERY", Object.values(verify))).toEqual([verify.lowRawClean, verify.highRawPenalised]);
+    expect(await orderOf("TRACK_JOBS_QUERY", Object.values(track))).toEqual([track.lowRawClean, track.highRawPenalised]);
+    // Apply Now orders by the stage 3 rank first and the stored adjusted score next; both review-ready jobs tie on rank here.
+    expect(await orderOf("APPLY_NOW_JOBS_QUERY", Object.values(review))).toEqual([review.lowRawClean, review.highRawPenalised]);
+
+    // The evidence columns reach every list from v_job_ranking_scoped.
+    await database.query(
+      `UPDATE canonical_jobs
+          SET recommendation_degree_asked_for = 'A master''s degree is required.',
+              recommendation_role_signals = '[{"code":"DEGREE_GAP_FLAGGED","penalty":0.06,"source":"DESCRIPTION","quote":"A master''s degree is required."}]'::jsonb,
+              recommendation_evidence_confidence = 'LOW'
+        WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, review.highRawPenalised],
+    );
+    const shortlist = await database.query<Record<string, unknown> & { canonical_job_id: string }>(
+      streamlitQuery("SHORTLIST_READ_MODEL_QUERY"), [workspaceId, 5000],
+    );
+    expect(shortlist.fields.map((field) => field.name)).toEqual(expect.arrayContaining(["ranking_score", "raw_match_score", "degree_asked_for", "role_signals", "evidence_confidence"]));
+    expect(Number(rowFor(shortlist.rows, review.highRawPenalised)?.ranking_score)).toBeCloseTo(0.5, 3);
+    for (const name of ["REVIEW_JOBS_QUERY", "APPLY_NOW_JOBS_QUERY", "VERIFY_THEN_APPLY_JOBS_QUERY", "TRACK_JOBS_QUERY"]) {
+      const result = await database.query<Record<string, unknown> & { canonical_job_id: string }>(streamlitQuery(name), [workspaceId]);
+      const columns = result.fields.map((field) => field.name);
+      for (const column of ["ranking_score", "raw_match_score", "score_policy", "degree_asked_for", "role_signals", "evidence_confidence"]) {
+        expect(columns, `${name} selects ${column}`).toContain(column);
+      }
+      const row = rowFor(result.rows, review.highRawPenalised);
+      if (name === "VERIFY_THEN_APPLY_JOBS_QUERY" || name === "TRACK_JOBS_QUERY") {
+        expect(row, `${name} does not list a REVIEW-ready job`).toBeUndefined();
+        continue;
+      }
+      expect(Number(row?.ranking_score)).toBeCloseTo(0.5, 3);
+      expect(Number(row?.raw_match_score)).toBe(80);
+      expect(row?.degree_asked_for).toBe("A master's degree is required.");
+      expect(row?.evidence_confidence).toBe("LOW");
+      expect(row?.role_signals).toEqual([expect.objectContaining({ code: "DEGREE_GAP_FLAGGED" })]);
+    }
+  });
+
+  it("Apply Now orders by the Stage 3 overall rank first and the stored adjusted score next, with differing ranks", async () => {
+    const database = db();
+    const { workspaceId } = workspace();
+    const seed = async (title: string, scores: { adjusted: number; raw: number }, overallRank: number) => {
+      const job = await seedJob({
+        title, gate: "PASS", eligibility: "ELIGIBLE", outcome: "REVIEW", readiness: "READY", scores,
+      });
+      await seedRankingSnapshot(job.canonicalJobId, overallRank);
+      return job.canonicalJobId;
+    };
+    const applyNowRows = async () => (await database.query<{ canonical_job_id: string; overall_rank_score: string | null }>(
+      streamlitQuery("APPLY_NOW_JOBS_QUERY"), [workspaceId],
+    )).rows;
+
+    // Different overall ranks, and the adjusted order is the opposite of the rank order: the documented order is rank first.
+    const highRankLowAdjusted = await seed("Rank High Adjusted Low", { adjusted: 0.5, raw: 60 }, 90);
+    const lowRankHighAdjusted = await seed("Rank Low Adjusted High", { adjusted: 0.9, raw: 95 }, 60);
+    // The same overall rank: the stored adjusted score decides, against the raw order.
+    const tiedHighRaw = await seed("Tied Rank High Raw", { adjusted: 0.4, raw: 90 }, 75);
+    const tiedLowRaw = await seed("Tied Rank Low Raw", { adjusted: 0.8, raw: 50 }, 75);
+
+    const rows = await applyNowRows();
+    const ids = [highRankLowAdjusted, lowRankHighAdjusted, tiedHighRaw, tiedLowRaw];
+    const mine = rows.filter((row) => ids.includes(row.canonical_job_id));
+    expect(mine.map((row) => Number(row.overall_rank_score))).toEqual([90, 75, 75, 60]); // no hidden tie: ranks really differ
+    expect(mine.map((row) => row.canonical_job_id)).toEqual([highRankLowAdjusted, tiedLowRaw, tiedHighRaw, lowRankHighAdjusted]);
   });
 });

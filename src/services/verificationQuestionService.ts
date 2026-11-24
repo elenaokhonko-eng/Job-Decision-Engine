@@ -83,7 +83,7 @@ export async function aggregateVerificationQuestions(
               COALESCE(gd.rejection_codes, '[]'::jsonb) AS rejection_reason_codes
        FROM canonical_jobs c
        JOIN LATERAL (
-         SELECT id, rejection_codes
+         SELECT id, decision, rejection_codes
          FROM gate_decisions
          WHERE workspace_id = c.workspace_id
            AND canonical_job_id = c.id
