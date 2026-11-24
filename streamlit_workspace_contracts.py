@@ -344,11 +344,14 @@ def validate_ranked_job_row(row: Mapping[str, object], workspace_id: object) -> 
         "profile_version_id",
         "match_run_id",
         "deterministic_decision_id",
-        "ai_evaluation_id",
         "ranking_context_fingerprint",
         "primary_lane",
     ):
         _require_string(row, field)
+    # A job can be ranked before it has an AI evaluation (the AI only adds labels), so the
+    # column must be present but may be NULL; a value that is present must still be a string.
+    if row.get("ai_evaluation_id") is not None:
+        _require_string(row, "ai_evaluation_id")
     if row.get("recommendation_eligibility") != "ELIGIBLE":
         raise ValueError("Top 10 rows must have a deterministic ELIGIBLE decision.")
     if row.get("recommendation_outcome") not in {"PRIORITY", "REVIEW"}:
