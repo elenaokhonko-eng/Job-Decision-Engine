@@ -4,6 +4,7 @@ Nothing here reads the database or calls Streamlit, so the category, review
 and verification rules can be tested without a running app.
 """
 
+import json
 import math
 from collections.abc import Iterable, Mapping, Sequence
 
@@ -344,10 +345,19 @@ def role_signal_labels(job: Mapping[str, object]) -> list[str]:
 
     Each ``role_signals`` item is a ``{code, penalty, source, quote}`` object
     written by the decider. The text is untrusted: it is clipped and escaped, and
-    an unknown code is shown as its own escaped text, never guessed at.
+    an unknown code is shown as its own escaped text, never guessed at. A JSON
+    string holding an array is parsed; malformed text gives no labels.
     """
     signals = job.get("role_signals")
-    if isinstance(signals, str) or not isinstance(signals, Iterable):
+    if isinstance(signals, str):
+        # A driver that returns JSONB as text: accept a JSON array, anything else is empty.
+        try:
+            signals = json.loads(signals)
+        except ValueError:
+            return []
+        if not isinstance(signals, list):
+            return []
+    if not isinstance(signals, Iterable) or isinstance(signals, Mapping):
         return []
     labels: list[str] = []
     for signal in signals:

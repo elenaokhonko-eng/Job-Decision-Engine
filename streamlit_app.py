@@ -2661,9 +2661,13 @@ with tab_dashboard:
         else:
             st.subheader(f"{workspace_category} opportunities")
             if workspace_category == VERIFY_THEN_APPLY_CATEGORY:
-                st.caption("Sorted by the stored adjusted match score. These jobs have a current match and decision, but stay out of READY and document generation until the open workability question is resolved.")
+                st.caption("Sorted by the stored adjusted match score (highest first, unscored last). These jobs have a current match and decision, but stay out of READY and document generation until the open workability question is resolved.")
             elif workspace_category == REVIEW_CATEGORY:
-                st.caption("Every current REVIEW decision, sorted by the stored adjusted match score. Each card says why the job is, or is not, also in Apply Now.")
+                st.caption("Every current REVIEW decision, sorted by the stored adjusted match score (highest first, unscored last). Each card says why the job is, or is not, also in Apply Now.")
+            elif workspace_category == "Apply Now":
+                st.caption("Ordered by the overall rank, then decision outcome and pipeline status, then the stored adjusted match score.")
+            elif workspace_category == "Track":
+                st.caption("Grouped by decision eligibility and pipeline status, then the stored adjusted match score (highest first, unscored last).")
         if workspace_category == "Archive":
             pass
         elif not active_jobs and not rejected_jobs:

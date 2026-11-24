@@ -41,14 +41,34 @@ def order_by_clause(query: str) -> str:
     return query[index:]
 
 
-def test_job_list_queries_read_the_ranking_view_and_order_by_its_stored_score():
+EXPECTED_ORDER_BY = {
+    "APPLY_NOW_JOBS_QUERY": (
+        "ORDER BY overall_rank_score DESC NULLS LAST, "
+        "CASE jobs.recommendation_outcome WHEN 'PRIORITY' THEN 0 ELSE 1 END, "
+        "r.ranking_score DESC NULLS LAST, observed_at DESC NULLS LAST LIMIT 5000"
+    ),
+    "VERIFY_THEN_APPLY_JOBS_QUERY": (
+        "ORDER BY r.ranking_score DESC NULLS LAST, "
+        "jobs.recommendation_coverage_score DESC NULLS LAST, "
+        "jobs.lane_confidence DESC NULLS LAST, jobs.observed_at DESC NULLS LAST LIMIT 5000"
+    ),
+    "REVIEW_JOBS_QUERY": (
+        "ORDER BY r.ranking_score DESC NULLS LAST, jobs.observed_at DESC NULLS LAST LIMIT 5000"
+    ),
+    "TRACK_JOBS_QUERY": (
+        "ORDER BY r.ranking_score DESC NULLS LAST, jobs.observed_at DESC NULLS LAST LIMIT 5000"
+    ),
+}
+
+
+def test_job_list_queries_read_the_ranking_view_and_have_exactly_the_documented_order():
+    assert set(EXPECTED_ORDER_BY) == set(LIST_QUERIES)
     for name in LIST_QUERIES:
         query = read_query_constant(name)
         assert "v_job_ranking_scoped" in query, name
-        clause = order_by_clause(query)
-        assert "ranking_score DESC" in clause, name
-        for column in RAW_SCORE_COLUMNS:
-            assert column not in clause, f"{name} orders by the raw score"
+        clause = " ".join(order_by_clause(query).split())
+        # The whole clause, so an extra raw-score (or any other) key fails.
+        assert clause == EXPECTED_ORDER_BY[name], name
 
 
 def test_every_query_orders_without_the_raw_score():
@@ -82,22 +102,46 @@ def test_shortlist_query_carries_the_ranking_evidence_columns():
         assert column in query
 
 
-def test_python_side_sorting_never_uses_the_raw_score():
+def _normalised(expression: str) -> str:
+    return ast.unparse(ast.parse(expression, mode="eval").body)
+
+
+def test_python_side_sort_keys_are_exactly_the_documented_tuples():
     module = _module()
-    source = APP_PATH.read_text(encoding="utf-8")
-    segments = []
+    status_sort_returns = []
+    lambda_keys = []
     for node in ast.walk(module):
         if isinstance(node, ast.FunctionDef) and node.name == "status_sort_key":
-            segments.append(ast.get_source_segment(source, node))
-        if isinstance(node, ast.Call):
-            func = node.func
-            name = getattr(func, "id", None) or getattr(func, "attr", None)
-            if name in {"sorted", "sort"}:
-                segments.append(ast.get_source_segment(source, node))
-    assert any(segment and "ranking_sort_key" in segment for segment in segments)
-    for segment in segments:
-        for column in RAW_SCORE_COLUMNS:
-            assert column not in (segment or "")
+            status_sort_returns = [
+                ast.unparse(child.value)
+                for child in ast.walk(node)
+                if isinstance(child, ast.Return) and child.value is not None
+            ]
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "sorted":
+            for keyword in node.keywords:
+                if keyword.arg == "key" and isinstance(keyword.value, ast.Lambda):
+                    lambda_keys.append(ast.unparse(keyword.value.body))
+    assert status_sort_returns == [
+        _normalised(
+            "(rank_missing, rank_sort, outcome_rank, eligibility_rank, status_rank, "
+            "ranking_sort_key(j), priority_sort)"
+        )
+    ]
+    assert lambda_keys == [
+        _normalised(
+            "(ranking_sort_key(job), "
+            "-(as_number(job.get('recommendation_coverage_score')) or 0), "
+            "job.get('observed_at') or '')"
+        )
+    ]
+    source = APP_PATH.read_text(encoding="utf-8")
+    sort_function = next(
+        ast.get_source_segment(source, node)
+        for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name == "status_sort_key"
+    )
+    for column in RAW_SCORE_COLUMNS:
+        assert column not in sort_function
 
 
 def test_ranking_sort_key_orders_by_the_stored_score_not_the_raw_score():
@@ -166,4 +210,13 @@ def test_role_signal_labels_ignore_malformed_values():
     assert role_signal_labels({}) == []
     assert role_signal_labels({"role_signals": None}) == []
     assert role_signal_labels({"role_signals": "[]"}) == []
+    assert role_signal_labels({"role_signals": "not json {"}) == []
+    assert role_signal_labels({"role_signals": '{"code": "DEGREE_GAP_FLAGGED"}'}) == []
+    assert role_signal_labels({"role_signals": {"code": "DEGREE_GAP_FLAGGED"}}) == []
+    assert role_signal_labels({"role_signals": "42"}) == []
+
+
+def test_role_signal_labels_parse_a_json_string_array():
+    text = '[{"code": "DEGREE_GAP_FLAGGED", "penalty": 0.06}, {"code": "CONTRACT_EMPLOYMENT"}, 7]'
+    assert role_signal_labels({"role_signals": text}) == ["degree gap", "contract role"]
     assert role_signal_labels({"role_signals": []}) == []

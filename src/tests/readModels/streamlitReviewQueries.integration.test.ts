@@ -247,6 +247,46 @@ async function seedJob(options: SeedOptions): Promise<{ canonicalJobId: string; 
   return { canonicalJobId, jobVersionId };
 }
 
+/**
+ * Gives a seeded, matched job a current AI evaluation and a Stage 3 ranking snapshot with the given overall rank, so
+ * v_apply_now_jobs_stage3_scoped exposes a non-null overall_rank_score for it.
+ */
+async function seedRankingSnapshot(canonicalJobId: string, overallRank: number): Promise<void> {
+  const database = db();
+  const { workspaceId } = workspace();
+  const context = await database.query<{
+    job_version_id: string; match_run_id: string; decision_id: string; content_hash: string; context_fingerprint: string;
+  }>(
+    `SELECT job.latest_job_version_id AS job_version_id, job.latest_match_run_id AS match_run_id,
+            job.latest_deterministic_decision_id AS decision_id, version.content_hash,
+            decision.context_fingerprint
+       FROM canonical_jobs job
+       JOIN job_versions version ON version.id = job.latest_job_version_id
+       JOIN deterministic_decisions decision ON decision.id = job.latest_deterministic_decision_id
+      WHERE job.workspace_id = $1 AND job.id = $2`,
+    [workspaceId, canonicalJobId],
+  );
+  const row = context.rows[0]!;
+  const evaluation = await database.query<{ id: string }>(
+    `INSERT INTO ai_evaluations (
+       workspace_id, canonical_job_id, job_version_id, profile_version_id, match_run_id,
+       deterministic_decision_id, job_content_hash, context_fingerprint, prompt_id, prompt_version
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'job_evaluation', '1') RETURNING id`,
+    [workspaceId, canonicalJobId, row.job_version_id, profileVersionId, row.match_run_id, row.decision_id,
+      row.content_hash, row.context_fingerprint],
+  );
+  await database.query(
+    `INSERT INTO job_ranking_snapshots (
+       workspace_id, canonical_job_id, job_version_id, profile_version_id, match_run_id,
+       deterministic_decision_id, ai_evaluation_id, ranking_policy_version, context_fingerprint,
+       overall_rank_score, ranking_confidence
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7,
+       (SELECT MAX(policy_version) FROM ranking_policies WHERE workspace_id = $1), $8, $9, 90)`,
+    [workspaceId, canonicalJobId, row.job_version_id, profileVersionId, row.match_run_id, row.decision_id,
+      evaluation.rows[0]!.id, row.context_fingerprint, overallRank],
+  );
+}
+
 function rowFor<T extends { canonical_job_id: string }>(rows: readonly T[], canonicalJobId: string): T | undefined {
   return rows.find((row) => row.canonical_job_id === canonicalJobId);
 }
@@ -540,5 +580,33 @@ describe.skipIf(skipReal)("Streamlit review and verification read-model queries 
       expect(row?.evidence_confidence).toBe("LOW");
       expect(row?.role_signals).toEqual([expect.objectContaining({ code: "DEGREE_GAP_FLAGGED" })]);
     }
+  });
+
+  it("Apply Now orders by the Stage 3 overall rank first and the stored adjusted score next, with differing ranks", async () => {
+    const database = db();
+    const { workspaceId } = workspace();
+    const seed = async (title: string, scores: { adjusted: number; raw: number }, overallRank: number) => {
+      const job = await seedJob({
+        title, gate: "PASS", eligibility: "ELIGIBLE", outcome: "REVIEW", readiness: "READY", scores,
+      });
+      await seedRankingSnapshot(job.canonicalJobId, overallRank);
+      return job.canonicalJobId;
+    };
+    const applyNowRows = async () => (await database.query<{ canonical_job_id: string; overall_rank_score: string | null }>(
+      streamlitQuery("APPLY_NOW_JOBS_QUERY"), [workspaceId],
+    )).rows;
+
+    // Different overall ranks, and the adjusted order is the opposite of the rank order: the documented order is rank first.
+    const highRankLowAdjusted = await seed("Rank High Adjusted Low", { adjusted: 0.5, raw: 60 }, 90);
+    const lowRankHighAdjusted = await seed("Rank Low Adjusted High", { adjusted: 0.9, raw: 95 }, 60);
+    // The same overall rank: the stored adjusted score decides, against the raw order.
+    const tiedHighRaw = await seed("Tied Rank High Raw", { adjusted: 0.4, raw: 90 }, 75);
+    const tiedLowRaw = await seed("Tied Rank Low Raw", { adjusted: 0.8, raw: 50 }, 75);
+
+    const rows = await applyNowRows();
+    const ids = [highRankLowAdjusted, lowRankHighAdjusted, tiedHighRaw, tiedLowRaw];
+    const mine = rows.filter((row) => ids.includes(row.canonical_job_id));
+    expect(mine.map((row) => Number(row.overall_rank_score))).toEqual([90, 75, 75, 60]); // no hidden tie: ranks really differ
+    expect(mine.map((row) => row.canonical_job_id)).toEqual([highRankLowAdjusted, tiedLowRaw, tiedHighRaw, lowRankHighAdjusted]);
   });
 });
