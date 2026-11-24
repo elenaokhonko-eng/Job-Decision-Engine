@@ -62,7 +62,8 @@
     "lint": "tsc --noEmit",
     "gemini:models": "tsx scripts/list_gemini_models.ts",
     "models:check": "tsx scripts/check_model_ids.ts",
-    "lint:boundaries": "vitest run src/tests/architecture"
+    "lint:boundaries": "vitest run src/tests/architecture",
+    "benchmark:ranking": "tsx scripts/benchmark_ranking.ts"
   },
   "build": {
     "appId": "com.jobdecisionengine.desktop",

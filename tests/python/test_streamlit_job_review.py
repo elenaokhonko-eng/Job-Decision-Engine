@@ -134,6 +134,18 @@ def test_review_query_reads_the_single_availability_field_and_its_count_reconcil
     assert "jobs.recommendation_outcome = 'REVIEW'" in count_query
 
 
+def test_track_query_reads_the_single_availability_field_and_its_count_reconciles():
+    query = read_query_constant("TRACK_JOBS_QUERY")
+    assert "JOIN v_job_availability_current" in query
+    assert "LEFT JOIN v_job_availability_current" not in query
+    assert "availability.availability_current" in query
+    count_query = read_query_constant("TRACK_AWAITING_AVAILABILITY_COUNT_QUERY")
+    assert "FROM v_track_jobs_scoped AS jobs" in count_query
+    assert "LEFT JOIN v_job_availability_current" in count_query
+    assert "NOT COALESCE(availability.availability_current, FALSE)" in count_query
+    assert "WHERE jobs.workspace_id = %s" in count_query
+
+
 def test_review_query_lists_every_review_decision_whatever_its_gate_or_artifact():
     query = read_query_constant("REVIEW_JOBS_QUERY")
     assert "jobs.recommendation_outcome = 'REVIEW'" in query
