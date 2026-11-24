@@ -19,6 +19,7 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/con
 import {
   canonicalCopyColumnsDrift,
   completedTasksWithoutResult,
+  matchBlockedOnRequirementEmbedding,
   rejectedJobsWithRecommendation,
   routableVerificationJobsStranded,
 } from "./integrityZeroChecks.js";
@@ -37,6 +38,7 @@ export const REPAIRABLE_VIOLATION_KINDS = [
   "task_completed_without_result",
   "routable_verification_job_stranded",
   "canonical_copy_columns_drift",
+  "match_blocked_on_requirement_embedding",
 ] as const;
 export type RepairableViolationKind = (typeof REPAIRABLE_VIOLATION_KINDS)[number];
 
@@ -144,6 +146,12 @@ export async function planZeroCheckRepairs(db: Queryable, workspaceId: string): 
     const entry: RepairEntryTaskType =
       job.state === "PREQUALIFIED" ? "PUBLISH_EMBEDDING" : job.state === "LANE_ROUTED" ? "MATCH_PROFILE_EVIDENCE" : "DECIDE_RECOMMENDATION";
     candidates.push({ kind: "canonical_copy_columns_drift", canonicalJobId: job.canonicalJobId, jobVersionId: job.latestJobVersionId, entry });
+  }
+
+  // 5. A match blocked on a missing requirement embedding past the threshold: queue the embedding repair round again.
+  const embeddingBlocked = await matchBlockedOnRequirementEmbedding(db, workspaceId, { withIds: true });
+  for (const job of (await loadLiveJobs(db, workspaceId, embeddingBlocked.ids ?? [])).values()) {
+    candidates.push({ kind: "match_blocked_on_requirement_embedding", canonicalJobId: job.canonicalJobId, jobVersionId: job.latestJobVersionId, entry: "PUBLISH_EMBEDDING" });
   }
 
   // One entry task per job: the earliest stage. The kind is deterministic for a given set of violations.

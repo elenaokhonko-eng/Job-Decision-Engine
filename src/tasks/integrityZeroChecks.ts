@@ -141,6 +141,35 @@ export async function canonicalCopyColumnsDrift(db: Queryable, workspaceId: stri
   return result("canonical_copy_columns_drift", rows.map((row) => row.id), undefined, options);
 }
 
+/** A match task stays blocked on a missing requirement embedding longer than this before it is an error. */
+export const MATCH_BLOCKED_ON_EMBEDDING_MAX_AGE_HOURS = 24;
+
+/**
+ * A MATCH_PROFILE_EVIDENCE task BLOCKED_DEPENDENCY on REQUIREMENT_EMBEDDING_MISSING for more than
+ * MATCH_BLOCKED_ON_EMBEDDING_MAX_AGE_HOURS: the embedding repair round it queued did not unblock it. Ids are the
+ * canonical job ids of live jobs.
+ */
+export async function matchBlockedOnRequirementEmbedding(
+  db: Queryable,
+  workspaceId: string,
+  options?: ZeroCheckOptions & { maxAgeHours?: number },
+): Promise<ZeroCheckResult> {
+  const maxAgeHours = options?.maxAgeHours ?? MATCH_BLOCKED_ON_EMBEDDING_MAX_AGE_HOURS;
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT DISTINCT c.id::text AS id
+       FROM pipeline_tasks task
+       JOIN job_versions v ON v.workspace_id = task.workspace_id AND v.id::text = task.payload->>'job_version_id'
+       JOIN canonical_jobs c ON c.workspace_id = v.workspace_id AND c.id = v.canonical_job_id AND c.latest_job_version_id = v.id
+      WHERE task.workspace_id = $1::uuid AND task.task_type = 'MATCH_PROFILE_EVIDENCE' AND task.status = 'BLOCKED_DEPENDENCY'
+        AND task.blocked_on LIKE 'REQUIREMENT\\_EMBEDDING\\_MISSING:%'
+        AND task.updated_at < NOW() - make_interval(hours => $2::int)
+        AND c.archived_at IS NULL AND NOT c.is_test_fixture
+      ORDER BY 1`,
+    [workspaceId, maxAgeHours],
+  );
+  return result("match_blocked_on_requirement_embedding", rows.map((row) => row.id), undefined, options);
+}
+
 /**
  * A job the owner saved, applied to or held BEFORE the availability re-check archived it as not
  * confirmable. Only archives made by that rule (latest ARCHIVED event details.rule) count, and the
@@ -272,6 +301,7 @@ export async function runZeroChecks(
     await completedTasksWithoutResult(db, workspaceId),
     await routableVerificationJobsStranded(db, workspaceId),
     await canonicalCopyColumnsDrift(db, workspaceId),
+    await matchBlockedOnRequirementEmbedding(db, workspaceId),
     await protectedJobsAutoArchived(db, workspaceId),
     ...stale,
   ];

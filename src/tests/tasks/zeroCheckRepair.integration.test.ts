@@ -238,6 +238,32 @@ describe.skipIf(skipReal)("zero-check repair (PostgreSQL)", () => {
     expect((await totals()).canonical_copy_columns_drift).toBe(0);
   });
 
+  it("repairs a match task blocked on a missing requirement embedding past the threshold, and leaves a fresh block alone", async () => {
+    const stale = await s().seedRoutableJob("blocked-stale");
+    const fresh = await s().seedRoutableJob("blocked-fresh");
+    for (const job of [stale, fresh]) await markComplete(job);
+    await s().publishEmbeddings();
+    const block = async (job: StackJob, hoursAgo: number) => s().db.query(
+      `INSERT INTO pipeline_tasks (id, workspace_id, task_type, task_key, payload, status, blocked_on, blocked_reason, repair_action, updated_at)
+       VALUES ($1, $2, 'MATCH_PROFILE_EVIDENCE', $3, $4::jsonb, 'BLOCKED_DEPENDENCY', $5, 'embedding repair queued', 'PUBLISH_EMBEDDING', NOW() - make_interval(hours => $6::int))`,
+      [randomUUID(), s().ctx.workspaceId, `MATCH_PROFILE_EVIDENCE:${job.jobVersionId}:blocked`,
+       JSON.stringify({ canonical_job_id: job.canonicalJobId, job_version_id: job.jobVersionId }),
+       `REQUIREMENT_EMBEDDING_MISSING:${job.jobVersionId}`, hoursAgo],
+    );
+    await block(stale, 48);
+    await block(fresh, 1);
+    expect((await totals()).match_blocked_on_requirement_embedding).toBe(1);
+
+    const plan = await planZeroCheckRepairs(s().db, s().ctx.workspaceId);
+    expect(plan.items.filter((item) => item.kind === "match_blocked_on_requirement_embedding").map((item) => [item.canonicalJobId, item.entry])).toEqual([
+      [stale.canonicalJobId, "PUBLISH_EMBEDDING"],
+    ]);
+    expect((await applyZeroCheckRepairs(s().db, s().ctx, plan)).inserted).toBe(1);
+    expect((await applyZeroCheckRepairs(s().db, s().ctx, await planZeroCheckRepairs(s().db, s().ctx.workspaceId))).inserted).toBe(0);
+    expect((await runWorker(["PUBLISH_EMBEDDING", "ROUTE_LANE", "MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION"])).failed).toBe(0);
+    expect((await totals()).match_blocked_on_requirement_embedding).toBe(0);
+  });
+
   it("one entry task per job even when a job violates two checks, and the key is per job, kind and rule version", async () => {
     const job = await s().seedRoutableJob("two-kinds");
     await markComplete(job);
