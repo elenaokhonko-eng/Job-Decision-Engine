@@ -85,6 +85,30 @@ describe.skipIf(skipReal)("stranded nonterminal jobs (PostgreSQL)", () => {
     expect(report).toEqual({ count: 1, sample: [live] });
   });
 
+  it("near misses: terminal-status tasks, another workspace's task and another job's task do not count as recovery work", async () => {
+    const ws = await newWorkspace();
+    const otherWs = await newWorkspace();
+    const completedOnly = await job(ws, "completed-task-only", "RAW_STAGED");
+    const skippedArchived = await job(ws, "skipped-archived-task-only", "LANE_ROUTED");
+    const deadLettered = await job(ws, "dead-letter-only", "PREQUALIFIED");
+    const foreignTask = await job(ws, "task-in-another-workspace", "RAW_STAGED");
+    const otherJobTask = await job(ws, "task-names-another-job", "RAW_STAGED");
+    const unrelated = await job(ws, "unrelated-with-task", "RAW_STAGED");
+    const insert = (workspace: string, status: string, repair: string | null, payload: Record<string, string>) => db().query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, repair_action) VALUES ($1, 'ROUTE_LANE', $2, $3::jsonb, $4, $5)`,
+      [workspace, `near-${randomUUID()}`, JSON.stringify(payload), status, repair],
+    );
+    await insert(ws, "COMPLETED", null, { canonical_job_id: completedOnly });
+    await insert(ws, "COMPLETED", "SKIPPED_ARCHIVED_JOB", { canonical_job_id: skippedArchived });
+    await insert(ws, "DEAD_LETTER", null, { canonical_job_id: deadLettered });
+    await insert(otherWs, "PENDING", null, { canonical_job_id: foreignTask });
+    await insert(ws, "PENDING", null, { canonical_job_id: unrelated });
+    // otherJobTask has no task of its own; the pending task above belongs to a different job.
+    const report = await findStrandedNonterminalJobs(db(), ws);
+    expect([...report.sample].sort()).toEqual([completedOnly, skippedArchived, deadLettered, foreignTask, otherJobTask].sort());
+    expect(report.count).toBe(5);
+  });
+
   it("a live job with an active evaluation queue row is not stranded", async () => {
     const ws = await newWorkspace();
     const queued = await job(ws, "queued", "QUEUED_FOR_AI");
