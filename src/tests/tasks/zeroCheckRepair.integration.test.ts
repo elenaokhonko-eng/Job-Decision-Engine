@@ -6,6 +6,7 @@ import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
 import { createTaskIntentV2 } from "../../tasks/taskIntent.js";
 import { runPipelineStageTaskWorker, type PipelineStageTaskType } from "../../tasks/stageTaskWorker.js";
 import { runZeroChecks } from "../../tasks/integrityZeroChecks.js";
+import { diffRepairSnapshots, snapshotRepairState } from "../../tasks/repairStateSnapshot.js";
 import { applyZeroCheckRepairs, planZeroCheckRepairs, repairTaskKey } from "../../tasks/zeroCheckRepair.js";
 import { openPipelineStack, type PipelineStack, type StackJob } from "../fixtures/pipelineStackFixture.js";
 
@@ -238,6 +239,42 @@ describe.skipIf(skipReal)("zero-check repair (PostgreSQL)", () => {
       expect(row.match).not.toBeNull();
     }
     expect((await totals()).canonical_copy_columns_drift).toBe(0);
+  });
+
+  it("a decision row exists but latest_deterministic_decision_id is NULL: reported, repaired by a forced decide, and no job loses a result or a protected status", async () => {
+    const job = await s().seedRoutableJob("decision-id-null");
+    const protectedJob = await s().seedRoutableJob("protected");
+    for (const j of [job, protectedJob]) await markComplete(j);
+    await s().publishEmbeddings();
+    for (const j of [job, protectedJob]) await startPipeline(j, "decision-id");
+    expect((await runWorker()).failed).toBe(0);
+    await s().db.query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE workspace_id = $1 AND status <> 'COMPLETED'`, [s().ctx.workspaceId]);
+    // A protected job: the owner applied to it and holds it.
+    await s().db.query(
+      `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status) VALUES ($1, $2, $3, $4, 'SUBMITTED')`,
+      [s().ctx.workspaceId, s().ctx.userId, protectedJob.canonicalJobId, protectedJob.jobVersionId]);
+    await s().db.query(
+      `INSERT INTO job_archive_holds (workspace_id, canonical_job_id, hold_reason, hold_type, created_by, expires_at)
+       VALUES ($1, $2, 'owner keeps it', 'USER_PRESERVE', 'test', NOW() + INTERVAL '30 days')`,
+      [s().ctx.workspaceId, protectedJob.canonicalJobId]);
+    // Only the copy column is lost: the outcome stays, the decision row exists.
+    await s().db.query(`UPDATE canonical_jobs SET latest_deterministic_decision_id = NULL WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, job.canonicalJobId]);
+    expect((await totals()).canonical_copy_columns_drift).toBe(1);
+
+    const before = await snapshotRepairState(s().db, s().ctx.workspaceId);
+    const plan = await planZeroCheckRepairs(s().db, s().ctx.workspaceId);
+    expect(plan.items.map((item) => [item.canonicalJobId, item.entry])).toEqual([[job.canonicalJobId, "DECIDE_RECOMMENDATION"]]);
+    expect((await applyZeroCheckRepairs(s().db, s().ctx, plan)).inserted).toBe(1);
+    expect((await runWorker()).failed).toBe(0);
+    const after = await snapshotRepairState(s().db, s().ctx.workspaceId);
+    expect((await copy(job)).decision).not.toBeNull();
+    expect((await totals()).canonical_copy_columns_drift).toBe(0);
+    const diff = diffRepairSnapshots(before, after);
+    expect(diff.lostResults).toEqual([]);
+    expect(diff.protectedChanged).toEqual([]);
+    expect(diff.ok).toBe(true);
+    expect(after.liveJobsWithDecision).toBeGreaterThanOrEqual(before.liveJobsWithDecision);
+    expect(after.protectedJobs).toBe(before.protectedJobs);
   });
 
   it("repairs a match task blocked on a missing requirement embedding past the threshold, and leaves a fresh block alone", async () => {

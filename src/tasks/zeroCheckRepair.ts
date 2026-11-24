@@ -23,6 +23,7 @@ import {
   routableVerificationJobsStranded,
 } from "./integrityZeroChecks.js";
 import { findTasksCompletedWithoutResult } from "./completedWithoutResult.js";
+import { snapshotRepairState } from "./repairStateSnapshot.js";
 import { enqueuePipelineTask } from "./pipelineTasks.js";
 import { pipelineTaskStageVersion } from "./pipelineTaskCurrentness.js";
 import { createTaskIntentV2 } from "./taskIntent.js";
@@ -312,6 +313,8 @@ export interface ZeroCheckRepairReport {
   readonly maxTasks: number;
   /** True when the apply cap stopped the run, or (dry run) when the plan is larger than the cap. */
   readonly truncated: boolean;
+  /** Counts only, taken before the run: live jobs with a stored decision, match, lane and score, and protected jobs. */
+  readonly stateBefore: { liveJobs: number; withDecision: number; withMatch: number; withLane: number; withScore: number; protectedJobs: number };
   readonly applied?: ZeroCheckRepairApplyResult;
 }
 
@@ -320,6 +323,7 @@ export function summarizeRepairPlan(
   plan: ZeroCheckRepairPlan,
   mode: "dry_run" | "apply",
   maxTasks: number,
+  stateBefore: ZeroCheckRepairReport["stateBefore"],
   applied?: ZeroCheckRepairApplyResult,
 ): ZeroCheckRepairReport {
   const byKind: Record<string, number> = {};
@@ -333,9 +337,17 @@ export function summarizeRepairPlan(
   }
   return {
     mode, workspaceId, ruleVersion: ZERO_CHECK_REPAIR_RULE_VERSION, planned: plan.items.length, byKind, byEntry, sample,
-    unrepairable: plan.unrepairable, skippedActive: plan.skippedActive, maxTasks,
+    unrepairable: plan.unrepairable, skippedActive: plan.skippedActive, maxTasks, stateBefore,
     truncated: applied ? applied.truncated : plan.items.length > maxTasks,
     ...(applied ? { applied } : {}),
+  };
+}
+
+async function stateCounts(db: Queryable, workspaceId: string): Promise<ZeroCheckRepairReport["stateBefore"]> {
+  const snapshot = await snapshotRepairState(db, workspaceId);
+  return {
+    liveJobs: snapshot.liveJobs, withDecision: snapshot.liveJobsWithDecision, withMatch: snapshot.liveJobsWithMatch,
+    withLane: snapshot.liveJobsWithLane, withScore: snapshot.liveJobsWithScore, protectedJobs: snapshot.protectedJobs,
   };
 }
 
@@ -375,14 +387,16 @@ export async function runZeroCheckRepairCommand(
     const ctx = await resolveWorkspaceContext(client as never, { workspaceKey: options.workspaceKey, userKey: options.userKey });
     if (options.apply) {
       requireRepairApply({ allowedEnv: env.ZERO_CHECK_REPAIR_ALLOWED, confirmWorkspace: options.confirmWorkspace, workspaceId: ctx.workspaceId });
+      const stateBefore = await stateCounts(client, ctx.workspaceId);
       const plan = await planZeroCheckRepairs(client, ctx.workspaceId);
       const applied = await applyZeroCheckRepairs(client, ctx, plan, maxTasks);
-      return summarizeRepairPlan(ctx.workspaceId, plan, "apply", maxTasks, applied);
+      return summarizeRepairPlan(ctx.workspaceId, plan, "apply", maxTasks, stateBefore, applied);
     }
     await client.query("BEGIN READ ONLY");
     try {
+      const stateBefore = await stateCounts(client, ctx.workspaceId);
       const plan = await planZeroCheckRepairs(client, ctx.workspaceId);
-      return summarizeRepairPlan(ctx.workspaceId, plan, "dry_run", maxTasks);
+      return summarizeRepairPlan(ctx.workspaceId, plan, "dry_run", maxTasks, stateBefore);
     } finally {
       await client.query("ROLLBACK");
     }
