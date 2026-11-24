@@ -390,11 +390,19 @@ describe.skipIf(skipReal)("PUBLISH_EMBEDDING seed follows the active requirement
     await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE task_key LIKE ANY($1::text[]) AND payload ? 'embedding_requirement_set_id'`, [[`%${attemptedIds[0]}%`]]);
     await db().query(`UPDATE pipeline_tasks SET status = 'DEAD_LETTER' WHERE task_key LIKE ANY($1::text[]) AND payload ? 'embedding_requirement_set_id'`, [[`%${attemptedIds[1]}%`]]);
     await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE payload->>'job_version_id' = ANY($1::text[]) AND status IN ('PENDING', 'RETRY_WAIT')`, [attemptedIds]);
-    const fresh = [await seedRoutableJob("fresh-1", ["Zebra fresh one"]), await seedRoutableJob("fresh-2", ["Zebra fresh two"])];
+    const fresh = [await seedRoutableJob("fresh-1", ["Zebra fresh one"]), await seedRoutableJob("fresh-2", ["Zebra fresh two"]), await seedRoutableJob("fresh-3", ["Zebra fresh three"])];
     const freshIds = fresh.map((job) => job.jobVersionId);
-    await seedScoped([...attemptedIds, ...freshIds], { maxSeedPerType: 2 });
+    // Explicit ordering: the attempted jobs are the OLDEST, then fresh-1 < fresh-2 < fresh-3.
+    const days = [40, 39, 30, 20, 10];
+    for (const [index, id] of [...attemptedIds, ...freshIds].entries()) {
+      await db().query(`UPDATE job_versions SET observed_at = NOW() - ($2 || ' days')::interval WHERE id = $1`, [id, String(days[index])]);
+    }
+    // The candidate set (3 fresh) is larger than the cap (2): the cap must go to the two oldest fresh jobs.
+    const summary = await seedScoped([...attemptedIds, ...freshIds], { maxSeedPerType: 2 });
+    expect(summary.timeBudgetExceeded).toBe(false);
     expect(await setKeyed(attemptedIds)).toBe(2); // not selected again
-    expect(await setKeyed(freshIds)).toBe(2); // the cap went to the fresh jobs
+    expect(await setKeyed([freshIds[0]!, freshIds[1]!])).toBe(2);
+    expect(await setKeyed([freshIds[2]!])).toBe(0);
   });
 
   it("test fixtures are excluded in SQL before the cap unless fixtures are included", async () => {
@@ -403,9 +411,14 @@ describe.skipIf(skipReal)("PUBLISH_EMBEDDING seed follows the active requirement
     // The fixture is observed first; under a cap of 1 it must not consume the slot before a real job.
     await db().query(`UPDATE job_versions SET observed_at = NOW() - INTERVAL '30 days' WHERE id = $1`, [fixture.jobVersionId]);
     const real = await seedRoutableJob("fixture-real", ["Zebra real behind fixture"]);
-    await seedScoped([fixture.jobVersionId, real.jobVersionId], { includeTestFixtures: false, maxSeedPerType: 1 });
+    const realLater = await seedRoutableJob("fixture-real-later", ["Zebra real later behind fixture"]);
+    await db().query(`UPDATE job_versions SET observed_at = NOW() - INTERVAL '20 days' WHERE id = $1`, [real.jobVersionId]);
+    await db().query(`UPDATE job_versions SET observed_at = NOW() - INTERVAL '10 days' WHERE id = $1`, [realLater.jobVersionId]);
+    // Two real candidates, cap 1, the fixture is oldest: the slot goes to the OLDER real job, never to the fixture.
+    await seedScoped([fixture.jobVersionId, real.jobVersionId, realLater.jobVersionId], { includeTestFixtures: false, maxSeedPerType: 1 });
     expect(await setKeyed([fixture.jobVersionId])).toBe(0);
     expect(await setKeyed([real.jobVersionId])).toBe(1);
+    expect(await setKeyed([realLater.jobVersionId])).toBe(0);
     await seedScoped([fixture.jobVersionId], { includeTestFixtures: true });
     expect(await setKeyed([fixture.jobVersionId])).toBe(1);
   });

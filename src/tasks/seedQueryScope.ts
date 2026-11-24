@@ -8,6 +8,67 @@ export interface ScopedSeedQuery {
   readonly params: unknown[];
 }
 
+
+interface OrderKey { readonly expression: string; readonly direction: string }
+
+/** Index of the last ORDER BY outside parentheses, quotes and comments, or -1. */
+function lastTopLevelOrderBy(sql: string): number {
+  let depth = 0;
+  let found = -1;
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i]!;
+    if (ch === "'") { i = sql.indexOf("'", i + 1); if (i < 0) return -1; continue; }
+    if (ch === "-" && sql[i + 1] === "-") { const end = sql.indexOf("\n", i); if (end < 0) break; i = end; continue; }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") depth -= 1;
+    else if (depth === 0 && /^ORDER\s+BY\s/i.test(sql.slice(i, i + 12)) && (i === 0 || /\s/.test(sql[i - 1]!))) found = i;
+  }
+  return found;
+}
+
+function splitTopLevel(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (ch === "'") { i = text.indexOf("'", i + 1); if (i < 0) break; continue; }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") depth -= 1;
+    else if (ch === "," && depth === 0) { parts.push(text.slice(start, i)); start = i + 1; }
+  }
+  parts.push(text.slice(start));
+  return parts.map((part) => part.trim()).filter((part) => part.length > 0);
+}
+
+function parseOrderKeys(orderText: string): OrderKey[] {
+  return splitTopLevel(orderText).map((item) => {
+    const match = /^([\s\S]*?)(?:\s+(ASC|DESC))?(?:\s+(NULLS\s+(?:FIRST|LAST)))?$/i.exec(item)!;
+    return {
+      expression: match[1]!.trim(),
+      direction: [match[2]?.toUpperCase() ?? "ASC", match[3]?.toUpperCase().replace(/\s+/, " ")].filter(Boolean).join(" "),
+    };
+  });
+}
+
+/**
+ * The scope filter runs outside the seed query, and a subquery's ORDER BY is not guaranteed to survive an
+ * outer SELECT. So the seed's ordering expressions are exposed as extra leading columns and the wrapper
+ * orders by them before applying the cap. A seed without a top-level ORDER BY keeps no ordering.
+ */
+function exposeOrdering(baseSql: string): { sql: string; orderBy: string } {
+  const at = lastTopLevelOrderBy(baseSql);
+  const select = /^(\s*SELECT\s+)(?!DISTINCT\b)/i.exec(baseSql);
+  if (at < 0 || !select || /\bUNION\b/i.test(baseSql)) return { sql: baseSql, orderBy: "" };
+  const keys = parseOrderKeys(baseSql.slice(at + "ORDER BY".length));
+  if (keys.length === 0) return { sql: baseSql, orderBy: "" };
+  const columns = keys.map((key, index) => `(${key.expression}) AS seed_order_${index}`).join(", ");
+  return {
+    sql: `${select[1]}${columns}, ${baseSql.slice(select[1]!.length)}`,
+    orderBy: `ORDER BY ${keys.map((key, index) => `scoped_seed.seed_order_${index} ${key.direction}`).join(", ")}`,
+  };
+}
+
 export function scopeSeedQuery(
   sql: string,
   params: readonly unknown[],
@@ -50,9 +111,11 @@ export function scopeSeedQuery(
   }
   scopedParams.push(limit);
 
+  const ordered = exposeOrdering(baseSql);
   return {
-    sql: `SELECT * FROM (${baseSql}) AS scoped_seed
+    sql: `SELECT * FROM (${ordered.sql}) AS scoped_seed
           WHERE ${filters.length > 1 ? `(${filters.join(" OR ")})` : filters[0]}
+          ${ordered.orderBy}
           LIMIT $${scopedParams.length}`,
     params: scopedParams,
   };
