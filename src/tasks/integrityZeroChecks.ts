@@ -7,10 +7,10 @@ import type pg from "pg";
 
 import { AVAILABILITY_RECHECK_ARCHIVE_RULE } from "../services/jobArchive.js";
 import { OWNER_SAVED_SOURCE_NAMES } from "../services/jobArchiveHardRejectedPolicy.js";
-import { routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
-import { currentMatcherPolicyVersion } from "../pipeline/profileMatchCurrency.js";
 import { LANE_ROUTER_RULE_VERSION } from "../pipeline/laneRouter.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
+import { routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
+import { ROUTABLE_VERIFICATION_SQL, supersededProfileMatchSql } from "./stageTaskWorker.js";
 import { findTasksCompletedWithoutResult } from "./completedWithoutResult.js";
 
 type Queryable = Pick<pg.PoolClient, "query">;
@@ -146,11 +146,11 @@ export async function protectedJobsAutoArchived(db: Queryable, workspaceId: stri
 }
 
 /**
- * A stage result older than the current rule version, per stage, for live jobs: the extractor (requirement
- * set made by an older extractor version), the matcher (latest match run under an older policy version) and the lane router (latest lane decision
- * not stamped with the current router rule version). The gate joins with its seed (#261) and the decider when it stores its version.
- * Staleness is visible after a run: after the version-reopen seeds have drained it must be zero.
- */
+ * A stage result the version-reopen seeds in stageTaskWorker.ts would reopen, per stage: narrower than "any
+ * older version", it equals the seed conditions (the matcher check reuses supersededProfileMatchSql, the lane
+ * router check lists only the states a rule-version bump reopens, the extractor check leaves out versions
+ * blocked on JOB_CONTENT). A job no seed reopens is never counted, so the strict post-drain reconcile cannot
+ * stay red on it. After the seeds have drained it must be zero. */
 export async function staleStageResults(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
   const stages: Record<string, { sql: string; params: unknown[] }> = {
     extractor: {
@@ -162,30 +162,52 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
              WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
                AND COALESCE(c.processing_state, c.processing_status) IN
                    ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'ROUTING_DEFERRED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED')
-               AND ri.deterministic_extractor_version IS DISTINCT FROM $2`,
+               AND ri.deterministic_extractor_version IS DISTINCT FROM $2
+               -- The seed leaves a version blocked on missing posting content alone: it resumes when the content arrives.
+               AND NOT EXISTS (
+                 SELECT 1 FROM pipeline_tasks blocked
+                  WHERE blocked.workspace_id = c.workspace_id AND blocked.task_type = 'EXTRACT_DETERMINISTIC_REQUIREMENTS'
+                    AND blocked.status = 'BLOCKED_DEPENDENCY' AND blocked.blocked_on = 'JOB_CONTENT'
+                    AND blocked.payload->>'job_version_id' = jv.id::text)`,
       params: [DETERMINISTIC_EXTRACTOR_VERSION],
     },
+    // Exactly the jobs the MATCH_PROFILE_EVIDENCE re-match seed selects: the seed's own predicates
+    // (eligible, routed, PRIORITY/REVIEW/TRACK, unique active profile, complete description with source
+    // content, latest match under another profile or policy version). Not a filter of its own.
     matcher: {
       sql: `SELECT c.id::text AS id
               FROM canonical_jobs c
               JOIN match_runs mr ON mr.workspace_id = c.workspace_id AND mr.id = c.latest_match_run_id
-             WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
-               AND mr.policy_version IS DISTINCT FROM $2
-               -- The states the matcher re-seed covers (routed, eligible jobs); not terminal or never-routed ones.
-               AND COALESCE(c.processing_state, c.processing_status) IN
-                   ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED', 'DEFERRED_BUDGET')`,
-      params: [currentMatcherPolicyVersion()],
+             WHERE c.workspace_id = $1::uuid AND NOT c.is_test_fixture
+               AND ${supersededProfileMatchSql()}`,
+      params: [],
     },
+    // Only what a router RULE-version bump reopens in the ROUTE_LANE seed: PREQUALIFIED, routable
+    // verification, ROUTING_DEFERRED (technical) and UNMATCHED with POLICY_NO_MATCH, each with a published
+    // job-version embedding and not blocked on missing content. LANE_ROUTED, MATCHED and DEFERRED_BUDGET are
+    // reopened only when the lane routing CONTENT changes (SUPERSEDED_LANE_ROUTING_SQL), never by rule version.
     lane_router: {
       sql: `SELECT c.id::text AS id
               FROM canonical_jobs c
+              JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
               JOIN lane_decisions ld ON ld.workspace_id = c.workspace_id AND ld.id = c.latest_lane_decision_id
              WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
-               -- Only the states the lane seeds reopen: the routing pool and the routed/matched jobs the
-               -- superseded-routing seed covers. Terminal states (hard rejected, manual review) are not re-routed.
-               AND (COALESCE(c.processing_state, c.processing_status) IN
-                      ('PREQUALIFIED', 'ROUTING_DEFERRED', 'UNMATCHED', 'LANE_ROUTED', 'MATCHED', 'DEFERRED_BUDGET')
-                    OR ${routableWorkabilityVerificationSql("c")})
+               AND (
+                 COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+                 OR ${ROUTABLE_VERIFICATION_SQL}
+                 OR (COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
+                     AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED')
+                 OR (COALESCE(c.processing_state, c.processing_status) = 'UNMATCHED' AND c.routing_disposition = 'POLICY_NO_MATCH')
+               )
+               AND EXISTS (
+                 SELECT 1 FROM embedding_inputs ei
+                   JOIN v_published_semantic_embeddings se ON se.workspace_id = ei.workspace_id AND se.embedding_input_id = ei.id
+                  WHERE ei.workspace_id = c.workspace_id AND ei.source_type = 'JOB_VERSION' AND ei.source_id = jv.id)
+               AND NOT EXISTS (
+                 SELECT 1 FROM pipeline_tasks blocked
+                  WHERE blocked.workspace_id = c.workspace_id AND blocked.task_type = 'ROUTE_LANE'
+                    AND blocked.status = 'BLOCKED_DEPENDENCY' AND blocked.blocked_on = 'JOB_CONTENT'
+                    AND blocked.payload->>'job_version_id' = jv.id::text)
                AND LEFT(ld.model_version, LENGTH($2)) IS DISTINCT FROM $2`,
       params: [LANE_ROUTER_RULE_VERSION],
     },

@@ -266,37 +266,123 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     const check = await protectedJobsAutoArchived(db(), ws);
     expect([...check.sample].sort()).toEqual([savedThenArchived.canonicalJobId, heldThenArchived.canonicalJobId, appliedThenArchived.canonicalJobId].sort());
   });
-  it("stage result older than the current rule version: matcher and lane router are reported per stage; current results are not", async () => {
+  async function matchRun(ws: string, j: { canonicalJobId: string; jobVersionId: string }, profileVersionId: string, policy: string): Promise<void> {
+    const run = await db().query<{ id: string }>(
+      `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, status, requirement_count, matched_count, policy_version, job_content_hash, context_fingerprint)
+       VALUES ($1, $2, $3, $4, 'COMPLETED', 1, 1, $5, 'h', 'fp') RETURNING id`, [ws, j.canonicalJobId, j.jobVersionId, profileVersionId, policy]);
+    await db().query(`UPDATE canonical_jobs SET latest_match_run_id = $1 WHERE id = $2`, [run.rows[0]!.id, j.canonicalJobId]);
+  }
+  async function laneDecision(ws: string, j: { canonicalJobId: string; jobVersionId: string }, model: string): Promise<void> {
+    const decision = await db().query<{ id: string }>(
+      `INSERT INTO lane_decisions (workspace_id, canonical_job_id, job_version_id, decision_hash, model_version, lane_snapshot, decision_json)
+       VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, '{}'::jsonb) RETURNING id`, [ws, j.canonicalJobId, j.jobVersionId, randomUUID(), model]);
+    await db().query(`UPDATE canonical_jobs SET latest_lane_decision_id = $1 WHERE id = $2`, [decision.rows[0]!.id, j.canonicalJobId]);
+  }
+  async function publishJobVersionEmbedding(ws: string, jobVersionId: string): Promise<void> {
+    const space = await db().query<{ id: string }>(
+      `INSERT INTO embedding_spaces (workspace_id, space_key, provider, model, dimensions, is_fallback_space, active)
+       VALUES ($1, $2, 'fixture', 'zero-check-fixture', 4, FALSE, TRUE) RETURNING id`, [ws, `zero-space-${randomUUID()}`]);
+    const input = await db().query<{ id: string }>(
+      `INSERT INTO embedding_inputs (workspace_id, input_key, source_type, source_id, content_text, content_hash)
+       VALUES ($1, $2, 'JOB_VERSION', $3, 'Synthetic', $4) RETURNING id`, [ws, `zero-input-${randomUUID()}`, jobVersionId, randomUUID()]);
+    const batch = await db().query<{ id: string }>(
+      `INSERT INTO embedding_batches (workspace_id, embedding_space_id, batch_key, run_type, status, item_count, success_count, failure_count, completed_at)
+       VALUES ($1, $2, $3, 'PRIMARY', 'COMPLETED', 1, 1, 0, NOW()) RETURNING id`, [ws, space.rows[0]!.id, `zero-batch-${randomUUID()}`]);
+    await db().query(
+      `INSERT INTO embedding_batch_items (workspace_id, embedding_batch_id, embedding_input_id, status) VALUES ($1, $2, $3, 'COMPLETED')`,
+      [ws, batch.rows[0]!.id, input.rows[0]!.id]);
+    await db().query(
+      `INSERT INTO semantic_embeddings (workspace_id, embedding_space_id, embedding_input_id, embedding_batch_id, vector_dimensions, embedding_values, vector_checksum)
+       VALUES ($1, $2, $3, $4, 4, ARRAY[0.1, 0.2, 0.3, 0.4]::DOUBLE PRECISION[], $5)`,
+      [ws, space.rows[0]!.id, input.rows[0]!.id, batch.rows[0]!.id, randomUUID()]);
+  }
+
+  it("stale matcher check equals the re-match seed: only an eligible, routed PRIORITY/REVIEW/TRACK job with a complete description matched under an older policy counts", async () => {
     const ws = await newWorkspace();
     const profile = await db().query<{ id: string }>(
       `INSERT INTO candidate_profiles (workspace_id, profile_key, display_name) VALUES ($1, $2, 'Fixture') RETURNING id`, [ws, `fixture-${randomUUID()}`]);
     const version = await db().query<{ id: string }>(
       `INSERT INTO profile_versions (workspace_id, candidate_profile_id, version_number, schema_version, source_hash, status, effective_at)
-       VALUES ($1, $2, 1, '2.2.0', $3, 'DRAFT', NOW()) RETURNING id`, [ws, profile.rows[0]!.id, `fixture-${randomUUID()}`]);
-    const staleMatch = await job(ws, { state: "MATCHED" });
-    const currentMatch = await job(ws, { state: "MATCHED" });
-    for (const [j, policy] of [[staleMatch, "matcher-old"], [currentMatch, currentMatcherPolicyVersion()]] as const) {
-      const run = await db().query<{ id: string }>(
-        `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, status, requirement_count, matched_count, policy_version, job_content_hash, context_fingerprint)
-         VALUES ($1, $2, $3, $4, 'COMPLETED', 1, 1, $5, 'h', 'fp') RETURNING id`, [ws, j.canonicalJobId, j.jobVersionId, version.rows[0]!.id, policy]);
-      await db().query(`UPDATE canonical_jobs SET latest_match_run_id = $1 WHERE id = $2`, [run.rows[0]!.id, j.canonicalJobId]);
-    }
-
-    const staleLane = await job(ws, { state: "LANE_ROUTED" });
-    const currentLane = await job(ws, { state: "LANE_ROUTED" });
-    for (const [j, model] of [[staleLane, "lane_router_old|lanes_x|"], [currentLane, `${LANE_ROUTER_RULE_VERSION}|lanes_x|`]] as const) {
-      const decision = await db().query<{ id: string }>(
-        `INSERT INTO lane_decisions (workspace_id, canonical_job_id, job_version_id, decision_hash, model_version, lane_snapshot, decision_json)
-         VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, '{}'::jsonb) RETURNING id`, [ws, j.canonicalJobId, j.jobVersionId, randomUUID(), model]);
-      await db().query(`UPDATE canonical_jobs SET latest_lane_decision_id = $1 WHERE id = $2`, [decision.rows[0]!.id, j.canonicalJobId]);
-    }
-
+       VALUES ($1, $2, 1, '2.2.0', $3, 'ACTIVE', NOW()) RETURNING id`, [ws, profile.rows[0]!.id, `fixture-${randomUUID()}`]);
+    const profileVersionId = version.rows[0]!.id;
+    const make = async (over: { state?: string; outcome?: string; eligibility?: string; quality?: string; policy?: string; lane?: string | null; content?: boolean }) => {
+      const j = await job(ws, { state: over.state ?? "MATCHED", outcome: over.outcome ?? "REVIEW" });
+      await db().query(
+        `UPDATE canonical_jobs SET primary_lane = $2, recommendation_eligibility = $3, description_quality_status = $4 WHERE id = $1`,
+        [j.canonicalJobId, over.lane === undefined ? "CORE_AI_DATA" : over.lane, over.eligibility ?? "ELIGIBLE", over.quality ?? "COMPLETE"]);
+      if (over.content !== false) await observation(ws, j.jobVersionId, "LEVER");
+      await matchRun(ws, j, profileVersionId, over.policy ?? "matcher-old");
+      return j.canonicalJobId;
+    };
+    const counted = [
+      await make({}),
+      await make({ outcome: "TRACK" }),
+      await make({ state: "QUEUED_FOR_AI", outcome: "PRIORITY" }), // eligible and routed: the seed re-matches it
+    ];
+    await make({ policy: currentMatcherPolicyVersion() });
+    await make({ outcome: "SKIP" });
+    await make({ eligibility: "VERIFY" });
+    await make({ state: "HARD_REJECTED" });
+    await make({ lane: "UNCLASSIFIED" });
+    await make({ quality: "INCOMPLETE" });
+    await make({ content: false });
     const check = await staleStageResults(db(), ws);
-    expect([...check.sample].sort()).toEqual([
-      `lane_router:${staleLane.canonicalJobId}`, `matcher:${staleMatch.canonicalJobId}`,
-    ].sort());
-    expect(check.detail).toEqual({ extractor: 0, matcher: 1, lane_router: 1 });
-    expect(DETERMINISTIC_EXTRACTOR_VERSION).toBeTruthy();
+    expect(check.detail?.matcher).toBe(3);
+    expect([...check.sample].filter((id) => id.startsWith("matcher:")).sort())
+      .toEqual(counted.map((id) => `matcher:${id}`).sort());
+  });
+
+  it("stale lane router check counts only what a rule-version bump reopens, with a published job embedding; LANE_ROUTED, MATCHED and other UNMATCHED never count (DEFERRED_BUDGET is not a stored state)", async () => {
+    const ws = await newWorkspace();
+    const old = "lane_router_old|lanes_x|";
+    const make = async (state: string, over: { disposition?: string | null; model?: string; embedded?: boolean; blocked?: boolean } = {}) => {
+      const j = await job(ws, { state });
+      if (over.disposition !== undefined) await db().query(`UPDATE canonical_jobs SET routing_disposition = $2 WHERE id = $1`, [j.canonicalJobId, over.disposition]);
+      await laneDecision(ws, j, over.model ?? old);
+      if (over.embedded !== false) await publishJobVersionEmbedding(ws, j.jobVersionId);
+      if (over.blocked) {
+        await db().query(
+          `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, blocked_on) VALUES ($1, 'ROUTE_LANE', $2, $3::jsonb, 'BLOCKED_DEPENDENCY', 'JOB_CONTENT')`,
+          [ws, `ROUTE_LANE:${j.jobVersionId}:blocked`, JSON.stringify({ canonical_job_id: j.canonicalJobId, job_version_id: j.jobVersionId })]);
+      }
+      return j.canonicalJobId;
+    };
+    const counted = [
+      await make("PREQUALIFIED"),
+      await make("ROUTING_DEFERRED", { disposition: "TECHNICAL_DEFERRED" }),
+      await make("UNMATCHED", { disposition: "POLICY_NO_MATCH" }),
+    ];
+    await make("PREQUALIFIED", { model: `${LANE_ROUTER_RULE_VERSION}|lanes_x|` }); // current version
+    await make("PREQUALIFIED", { embedded: false }); // the seed needs a published embedding
+    await make("PREQUALIFIED", { blocked: true }); // blocked on missing content
+    await make("UNMATCHED", { disposition: "ROUTED" }); // not POLICY_NO_MATCH
+    await make("LANE_ROUTED");
+    await make("MATCHED");
+    await make("HARD_REJECTED");
+    const check = await staleStageResults(db(), ws);
+    expect(check.detail?.lane_router).toBe(3);
+    expect([...check.sample].filter((id) => id.startsWith("lane_router:")).sort())
+      .toEqual(counted.map((id) => `lane_router:${id}`).sort());
+  });
+
+  it("stale extractor check leaves out a version blocked on JOB_CONTENT, as the seed does", async () => {
+    const ws = await newWorkspace();
+    const blocked = await job(ws, { state: "PREQUALIFIED" });
+    const open = await job(ws, { state: "PREQUALIFIED" });
+    for (const j of [blocked, open]) {
+      const identity = await db().query<{ id: string }>(
+        `INSERT INTO requirement_set_identities (workspace_id, canonical_job_id, identity_hash, job_content_hash, deterministic_extractor_version, quoted_extractor_version,
+           quoted_prompt_hash, normalizer_hash, quoted_enabled) VALUES ($1, $2, $3, 'c', 'deterministic_v0', 'q', 'p', 'n', FALSE) RETURNING id`, [ws, j.canonicalJobId, randomUUID()]);
+      const set = await db().query<{ id: string }>(
+        `INSERT INTO requirement_sets (workspace_id, requirement_identity_id, canonical_job_id, job_version_id, revision_number, source_type)
+         VALUES ($1, $2, $3, $4, 1, 'EXTRACTED') RETURNING id`, [ws, identity.rows[0]!.id, j.canonicalJobId, j.jobVersionId]);
+      await db().query(`UPDATE job_versions SET active_requirement_set_id = $1 WHERE id = $2`, [set.rows[0]!.id, j.jobVersionId]);
+    }
+    await db().query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, blocked_on) VALUES ($1, 'EXTRACT_DETERMINISTIC_REQUIREMENTS', $2, $3::jsonb, 'BLOCKED_DEPENDENCY', 'JOB_CONTENT')`,
+      [ws, `EXTRACT:${blocked.jobVersionId}:b`, JSON.stringify({ canonical_job_id: blocked.canonicalJobId, job_version_id: blocked.jobVersionId })]);
+    const check = await staleStageResults(db(), ws);
+    expect(check.sample).toEqual([`extractor:${open.canonicalJobId}`]);
   });
 
   it("stage result older than the rule version: the extractor is reported when its requirement set came from an older version; phase pre leaves the stale check out", async () => {
