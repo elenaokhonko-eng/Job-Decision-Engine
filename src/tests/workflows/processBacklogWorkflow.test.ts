@@ -20,7 +20,7 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain('pipeline-dead-letter-health-${{ github.run_id }}');
     expect(workflow).toContain('PIPELINE_DEAD_LETTERED_THIS_RUN: ${{ steps.process_pipeline_worker.outputs.dead_lettered_this_run }}');
     expect(workflow).toContain('DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}');
-    expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-before.json');
+    expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --phase=pre --json > pipeline-reconciliation-before.json');
     expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-after.json');
     expect(workflow).toContain('actions/upload-artifact@v4');
     expect(workflow).toContain('timeout-minutes: 30');
