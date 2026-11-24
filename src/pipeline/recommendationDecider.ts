@@ -28,6 +28,7 @@ import { findOnsiteException } from "./onsiteExceptions.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import { APPROXIMATE_DATE_UNIT_MS, isRepostFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
+import { MIN_CONFIRMED_REQUIREMENTS } from "../requirements/requirementKinds.js";
 import { applyRoleShapePenalty, assessRoleShape, roleShapeFingerprint, ROLE_SHAPE_POLICY_VERSION } from "./roleShape.js";
 import { assessCareerTrack, capOutcome, CAREER_TRACK_POLICY_VERSION, parseTrackExperience, type TrackRequirement } from "./careerTrack.js";
 import {
@@ -47,6 +48,29 @@ dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
+
+export const EVIDENCE_CONFIDENCE_POLICY_VERSION = "evidence_confidence_v1";
+
+/** Few extracted requirements mean little evidence behind the score: confidence is LOW; the score itself is not touched. */
+export function assessEvidenceConfidence(requirementCount: number | null): {
+  level: "NORMAL" | "LOW";
+  reason: "THIN_POSTING" | null;
+  requirement_count: number | null;
+  threshold: number;
+} {
+  const thin = requirementCount !== null && requirementCount < MIN_CONFIRMED_REQUIREMENTS;
+  return {
+    level: thin ? "LOW" : "NORMAL",
+    reason: thin ? "THIN_POSTING" : null,
+    requirement_count: requirementCount,
+    threshold: MIN_CONFIRMED_REQUIREMENTS,
+  };
+}
+
+/** A thin posting cannot be PRIORITY: too little evidence stands behind the score. Only PRIORITY is lowered; the score is not touched. */
+export function applyThinPostingCap<T extends string>(outcome: T, confidence: { level: "NORMAL" | "LOW" }): T | "REVIEW" {
+  return confidence.level === "LOW" && outcome === "PRIORITY" ? "REVIEW" : outcome;
+}
 
 export interface RecommendationDeciderSummary {
   updated: number;
@@ -328,6 +352,7 @@ export async function runRecommendationDecider(
       match_job_version_id: string | null;
       match_status: string | null;
       match_matched_count: number | null;
+      match_requirement_count: number | null;
       match_profile_version_id: string | null;
       match_requirement_set_id: string | null;
       match_job_content_hash: string | null;
@@ -383,6 +408,7 @@ export async function runRecommendationDecider(
         mr.job_version_id AS match_job_version_id,
         mr.status AS match_status,
         mr.matched_count AS match_matched_count,
+        mr.requirement_count AS match_requirement_count,
         mr.profile_version_id AS match_profile_version_id,
         mr.requirement_set_id AS match_requirement_set_id,
         mr.job_content_hash AS match_job_content_hash,
@@ -654,6 +680,18 @@ export async function runRecommendationDecider(
           adjustedOutcome = trackCappedOutcome;
         }
 
+        // A thin posting (few extracted requirements) lowers confidence, never the score: the outcome cannot reach
+        // PRIORITY on so little evidence, and the trace says why.
+        const requirementCount = currentMatch && job.match_requirement_count !== null && job.match_requirement_count !== undefined
+          ? Number(job.match_requirement_count)
+          : null;
+        const confidence = assessEvidenceConfidence(requirementCount);
+        const thinCap = applyThinPostingCap(adjustedOutcome, confidence);
+        if (confidence.level === "LOW") adjustedNotes.push("thin_posting_low_confidence");
+        if (thinCap !== adjustedOutcome) {
+          adjustedNotes.push("priority_downgraded_thin_posting");
+          adjustedOutcome = thinCap;
+        }
         for (const signal of shape.signals) adjustedNotes.push(`role_downrank:${signal.code}`);
         if (fxRateFailure) adjustedNotes.push("FX_RATE_RETRIEVAL_INCOMPLETE");
         if (compensationAssessment?.is_hard_reject) {
@@ -1043,6 +1081,7 @@ export async function runRecommendationDecider(
             fx_rate_observation_id: fxRateObservationId,
             qualification_comparator_version: QUALIFICATION_COMPARATOR_VERSION,
             career_track: careerTrack,
+            evidence_confidence: confidence,
             role_downrank: {
               policy_version: shape.policy_version,
               raw_requirement_score: rawRequirementScore,
@@ -1082,6 +1121,8 @@ export async function runRecommendationDecider(
             career_track_policy_version: CAREER_TRACK_POLICY_VERSION,
             career_track_assessment_hash: sha256Json(careerTrack),
             role_downrank_policy_version: ROLE_SHAPE_POLICY_VERSION,
+            evidence_confidence_policy_version: EVIDENCE_CONFIDENCE_POLICY_VERSION,
+            evidence_confidence_min_requirements: MIN_CONFIRMED_REQUIREMENTS,
             role_downrank_assessment_hash: roleShapeFingerprint(shape),
             ...(confirmedFactsHash ? { confirmed_job_facts_hash: confirmedFactsHash } : {}),
           },
