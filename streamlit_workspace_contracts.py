@@ -348,8 +348,8 @@ def validate_ranked_job_row(row: Mapping[str, object], workspace_id: object) -> 
         "primary_lane",
     ):
         _require_string(row, field)
-    # A job can be ranked before it has an AI evaluation (the AI only adds labels), so the
-    # column must be present but may be NULL; a value that is present must still be a string.
+    # A job can be ranked before it has an AI evaluation (the AI only adds labels). The column
+    # must be present (_require_fields above) but may be NULL; a non-NULL value must be a string.
     if row.get("ai_evaluation_id") is not None:
         _require_string(row, "ai_evaluation_id")
     if row.get("recommendation_eligibility") != "ELIGIBLE":
