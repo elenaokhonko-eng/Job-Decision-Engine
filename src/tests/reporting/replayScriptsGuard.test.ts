@@ -34,4 +34,30 @@ describe("replay and experiment scripts call the replay guard first", () => {
       expect(source).not.toMatch(/\b(INSERT INTO|UPDATE\s+\w+\s+SET|DELETE FROM)\b/i);
     },
   );
+
+  it.each([
+    "scripts/deactivate_stale_embedding_spaces.ts",
+    "scripts/report_missing_embedding_inputs.ts",
+    "scripts/report_zero_checks_replay.ts",
+  ])("%s holds no database access of its own: it goes through the guarded replay session", (file) => {
+    const source = read(file);
+    expect(source).not.toMatch(/from "pg"/);
+    expect(source).not.toMatch(/\.query\(/);
+    const ownsSession = source.includes("withReplaySession(") || source.includes("runStaleSpaceDeactivation(");
+    expect(ownsSession).toBe(true);
+  });
+
+  it.each(["scripts/report_missing_embedding_inputs.ts", "scripts/report_zero_checks_replay.ts"])("%s runs in a read-only session", (file) => {
+    expect(read(file)).toMatch(/withReplaySession\(\{ readOnly: true \}/);
+  });
+
+  it("the session runs the guard before it hands the client to the caller, and the deactivation run wires confirm and commit to apply", () => {
+    const session = read("src/reporting/replaySession.ts");
+    expect(session.indexOf("requireApprovedReplayTarget(")).toBeGreaterThan(-1);
+    expect(session.indexOf("requireApprovedReplayTarget(")).toBeLessThan(session.indexOf("run({"));
+    const run = read("src/embeddings/deactivationRun.ts");
+    expect(run).toMatch(/commit: input\.apply/);
+    expect(run).toMatch(/confirm: input\.apply/);
+    expect(run.indexOf("assertDeactivationAllowed(")).toBeLessThan(run.indexOf("embeddingSpacePreflight("));
+  });
 });

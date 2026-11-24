@@ -106,6 +106,9 @@ export interface DeactivateStaleSpacesResult {
  * primary space exists, is active, and already holds published embeddings for current inputs (the
  * configuration is then evidenced by data, so a mis-set primary cannot deactivate the real one).
  * The active rows are locked, and the UPDATE re-checks every condition.
+ * Layering: this function enforces only `confirm: true` (plus the data checks above). It does NOT know which
+ * database it is connected to; the replay-branch and environment guards live in the script path
+ * (deactivationRun.ts / deactivationGuards.ts) and must run before any call.
  */
 export async function deactivateStaleEmbeddingSpaces(
   db: Queryable,
