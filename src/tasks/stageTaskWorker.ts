@@ -41,6 +41,7 @@ import { createTaskIntentV2, TaskIntentV2Schema } from "./taskIntent.js";
 import { runAvailabilityRecheck, seedAvailabilityRechecks, type AvailabilityRecheckDependencies } from "./availabilityRecheck.js";
 import { archivedJobForPipelineTask } from "./jobArchiveGuard.js";
 import { forcedTaskRerouteIntent, forcedTaskReroutePayload } from "./forcedTaskReroute.js";
+import { ensureFetchTasksForAwaitingContent } from "../ingestion/fetchTaskCoverage.js";
 import { planPipelineStageRound } from "./pipelineStageScheduler.js";
 import {
   KeyedMutex,
@@ -1638,6 +1639,22 @@ export async function seedRecoverablePipelineTasks(
       summary.byType.RECHECK_AVAILABILITY = { inserted: rechecks.inserted, existing: rechecks.existing };
       summary.inserted += rechecks.inserted;
       summary.existing += rechecks.existing;
+    }
+
+    // A live job with no complete text and no fetch task would wait forever: queue its alert fetch (additive,
+    // idempotent, capped per call; aggregator leads, owner-saved, archived and non-alert jobs are left alone).
+    // A scoped seed (explicit job versions or observations) never widens to the workspace.
+    const unscoped = !options.jobVersionIds?.length && !options.observationIds?.length;
+    if (unscoped && (!enabledTypes || enabledTypes.has("FETCH_JOB_CONTENT")) && (deadlineAt === undefined || Date.now() < deadlineAt)) {
+      const fetches = await ensureFetchTasksForAwaitingContent(client as pg.PoolClient, ctx, {
+        apply: true,
+        producer: "stageTaskWorker:seed",
+        limit: maxPerType,
+      });
+      const existing = Math.max(0, fetches.candidates - fetches.queued);
+      summary.byType.FETCH_JOB_CONTENT = { inserted: fetches.queued, existing };
+      summary.inserted += fetches.queued;
+      summary.existing += existing;
     }
 
     return summary;
