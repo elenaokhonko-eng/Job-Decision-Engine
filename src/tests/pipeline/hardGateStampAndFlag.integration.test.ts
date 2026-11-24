@@ -5,8 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { GATE_VERSION } from "../../contracts/version.js";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
-import { runHardGates } from "../../pipeline/hardGate.js";
-import { flagNeedsVerification, FLAGGABLE_REASON_CODES } from "../../pipeline/hardGateFlag.js";
+import { runHardGates, flagNeedsVerification, FLAGGABLE_REASON_CODES } from "../../pipeline/hardGate.js";
 import { aggregateVerificationQuestions, getPendingVerificationQuestions } from "../../services/verificationQuestionService.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
@@ -168,7 +167,8 @@ describe.skipIf(skipReal)("hard gate: version-refresh stamp and flagNeedsVerific
       expect(rows.at(-1)!.rejection_codes).toEqual(expect.arrayContaining(["GATE_UNKNOWN_WORK_MODE", "NEEDS_VERIFICATION"]));
 
       const summary = await aggregateVerificationQuestions(db(), { context: ctx() });
-      expect(summary.questionsCreated ?? summary.created ?? 0).toBeGreaterThanOrEqual(0);
+      expect(summary.discoveredPendingJobs).toBeGreaterThanOrEqual(1);
+      expect(summary.generatedQuestions).toBeGreaterThanOrEqual(1);
       const pending = await getPendingVerificationQuestions(db(), { context: ctx() });
       expect(JSON.stringify(pending)).toContain(jobId);
     });
