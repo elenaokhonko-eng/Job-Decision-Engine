@@ -77,6 +77,18 @@ export interface DeterministicMatchSummary {
   blockedOnRequirementEmbeddings?: string[];
 }
 
+/**
+ * Callers outside the task worker (scripts) must not treat a blocked or failed match as success (invariant 7): throws, loudly,
+ * when the matcher reported errors or left jobs blocked on missing requirement embeddings.
+ */
+export function assertMatchSummaryComplete(summary: DeterministicMatchSummary, label: string): void {
+  const blocked = summary.blockedOnRequirementEmbeddings ?? [];
+  if (summary.errors > 0) throw new Error(`${label}: the matcher reported ${summary.errors} error(s).`);
+  if (blocked.length > 0) {
+    throw new Error(`${label}: ${blocked.length} job(s) were NOT matched because a requirement has no published embedding (ids: ${blocked.slice(0, 10).join(", ")}${blocked.length > 10 ? ", ..." : ""}). Publish the embeddings and run again.`);
+  }
+}
+
 function tokenize(text: string): Set<string> {
   return new Set(
     text

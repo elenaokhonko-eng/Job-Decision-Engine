@@ -1093,7 +1093,8 @@ describe("stageTaskWorker", () => {
     expect(deps.runDeterministicMatcher).toHaveBeenCalledOnce();
     expect(
       calls.some((call) =>
-        call.sql.includes("INSERT INTO pipeline_tasks") && call.params?.[1] === "PUBLISH_EMBEDDING",
+        call.sql.includes("INSERT INTO pipeline_tasks") && call.params?.[1] === "PUBLISH_EMBEDDING" &&
+        JSON.stringify(call.params).includes('"embedding_repair_round":1'),
       ),
     ).toBe(true);
     expect(
@@ -1103,6 +1104,96 @@ describe("stageTaskWorker", () => {
         call.params?.[4] === "REQUIREMENT_EMBEDDING_MISSING:version-gap",
       ),
     ).toBe(true);
+  });
+
+  it("after three repair rounds a job still missing a requirement embedding goes to NEEDS_MANUAL_REVIEW (infrastructure failure), not another repair", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    let stateReads = 0;
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [{
+            id: "task-semantic-gap",
+            workspace_id: ctx.workspaceId,
+            task_type: "MATCH_PROFILE_EVIDENCE",
+            task_key: "MATCH_PROFILE_EVIDENCE:version-gap:deterministic_matcher_v1:profile:profile-1",
+            payload: { canonical_job_id: "job-gap", job_version_id: "version-gap" },
+            status: "RUNNING",
+            available_at: new Date().toISOString(),
+            lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+            heartbeat_at: new Date().toISOString(),
+            claimed_by: "worker:test",
+            attempt_count: 1,
+            max_attempts: 8,
+            last_error: null,
+            dead_letter_reason: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            completed_at: null,
+          }],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("c.is_test_fixture")) return { rows: [{ exists: false }], rowCount: 1 };
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        stateReads += 1;
+        return {
+          rows: [{
+            canonical_job_id: "job-gap",
+            processing_state: "LANE_ROUTED",
+            primary_lane: "CORE_AI_DATA",
+            lane_evidence: null,
+            routing_disposition: "ROUTED",
+            profile_match_status: null,
+            gate_decision: "PASS",
+            recommendation_eligibility: null,
+            recommendation_outcome: null,
+            latest_job_version_id: "version-gap",
+          }],
+        };
+      }
+      if (sql.includes("FROM job_version_pipeline_state ps") && sql.includes("requirement_extraction_runs rer")) {
+        return { rows: [{ exists: true }], rowCount: 1 };
+      }
+      if (sql.includes("WITH configured_spaces AS")) {
+        return {
+          rows: [{
+            has_active_space: true,
+            requirements_complete: false,
+            profile_facts_complete: true,
+            complete_cohort: false,
+          }],
+        };
+      }
+      if (sql.includes("embedding_repair_round")) return { rows: [{ n: 3 }], rowCount: 1 };
+      if (sql.includes("INSERT INTO pipeline_tasks")) return { rows: [{ id: "task-embedding-repair" }], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "task-semantic-gap" }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies({ runDeterministicMatcher: vi.fn(async () => ({ matchedJobs: 0, skippedJobs: 0, errors: 0, blockedOnRequirementEmbeddings: ["job-gap"] })) });
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["MATCH_PROFILE_EVIDENCE"],
+        maxTasks: 1,
+        heartbeatSeconds: 0,
+      },
+      deps,
+    );
+
+    expect(summary).toMatchObject({ completed: 0, blocked: 0 });
+    expect(calls.some((call) => call.sql.includes("UPDATE canonical_jobs") && call.sql.includes("NEEDS_MANUAL_REVIEW"))).toBe(true);
+    // No further repair task is queued and the job is never rejected.
+    expect(calls.some((call) => call.sql.includes("INSERT INTO pipeline_tasks") && call.params?.[1] === "PUBLISH_EMBEDDING")).toBe(false);
+    expect(calls.some((call) => call.sql.includes("processing_state = 'HARD_REJECTED'") || call.sql.includes("gate_decision = 'HARD_REJECT'"))).toBe(false);
   });
 
   it("completes stale pre-lane decision tasks without creating a dependency block", async () => {

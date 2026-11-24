@@ -59,6 +59,7 @@ const CONTEXT_PAYLOAD_KEYS = [
   "repair_existing_state",
   "repair_dependency",
   "repair_generation",
+  "embedding_repair_round",
   "repair_match_run_id",
   "reassessment_reason",
   "verification_answer_revision_id",

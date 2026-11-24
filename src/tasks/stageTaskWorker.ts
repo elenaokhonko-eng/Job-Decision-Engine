@@ -101,6 +101,8 @@ export const PIPELINE_STAGE_TASK_TYPES = [
 ] as const;
 
 const SEMANTIC_MATCH_REPAIR_GENERATION = "semantic_match_repair_v2";
+/** Rounds of PUBLISH_EMBEDDING repair a job's requirement embeddings get before the job goes to NEEDS_MANUAL_REVIEW. */
+export const MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS = 3;
 const ROUTABLE_VERIFICATION_SQL = routableWorkabilityVerificationSql("c");
 
 /**
@@ -1910,6 +1912,9 @@ function classifyRoutingDependency(laneEvidence: string | null): AutomaticDepend
   return { code: "JOB_EMBEDDING_MISSING", repairTaskType: "PUBLISH_EMBEDDING" };
 }
 
+// NOTE: the space and fact filters here are written independently of the matcher's listSemanticEmbeddingSpaceCandidates, so for a
+// job the matcher blocked this can name EMBEDDING_SPACE_INCOMPATIBLE instead of REQUIREMENT_EMBEDDING_MISSING; both repair with
+// PUBLISH_EMBEDDING. Aligning the two selections is tracked as follow-up work.
 async function classifySemanticMatchDependency(
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
@@ -2056,12 +2061,45 @@ async function classifySemanticMatchDependency(
   return { code: "EMBEDDING_SPACE_INCOMPATIBLE", repairTaskType: "PUBLISH_EMBEDDING" };
 }
 
+/** PUBLISH_EMBEDDING repair rounds already queued for this job version by the requirement-embedding guard. */
+async function countRequirementEmbeddingRepairRounds(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<number> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n
+       FROM pipeline_tasks
+      WHERE workspace_id = $1 AND task_type = 'PUBLISH_EMBEDDING'
+        AND payload->>'job_version_id' = $2 AND payload ? 'embedding_repair_round'`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return rows[0]?.n ?? 0;
+}
+
+async function moveJobToManualReviewForEmbeddings(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+  rounds: number,
+): Promise<void> {
+  await (clientOrPool as QueryClient).query(
+    `UPDATE canonical_jobs
+        SET processing_state = 'NEEDS_MANUAL_REVIEW', processing_status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW()
+      WHERE workspace_id = $1 AND latest_job_version_id = $2::uuid AND archived_at IS NULL
+        AND COALESCE(processing_state, processing_status) NOT IN ('HARD_REJECTED', 'MANUALLY_REMOVED')`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  console.error(`Requirement embeddings still missing for job_version_id=${jobVersionId} after ${rounds} repair round(s): NEEDS_MANUAL_REVIEW (infrastructure failure, not a career outcome).`);
+}
+
 async function enqueueDependencyRepair(
   dependency: AutomaticDependency,
   task: ClaimedPipelineTask,
   jobVersionId: string,
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
+  extraPayload: Record<string, unknown> = {},
 ): Promise<boolean> {
   const payload = task.payload as Record<string, unknown> | null;
   const repairPayload = {
@@ -2070,6 +2108,7 @@ async function enqueueDependencyRepair(
     repair_dependency: dependency.code,
     repair_generation: SEMANTIC_MATCH_REPAIR_GENERATION,
     repair_attempt: task.attemptNumber,
+    ...extraPayload,
     ...(dependency.repairTaskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS"
       ? { repair_existing_state: true }
       : { reprocess_existing_state: true }),
@@ -3390,13 +3429,24 @@ async function executeStageTask(
       // The matcher stored no match run: a requirement of this job has no published embedding. Queue the embedding repair and
       // wait on it; the match runs once the embeddings exist (never on partial embeddings).
       const dependency = await classifySemanticMatchDependency(clientOrPool, ctx, jobVersionId);
-      if (await enqueueDependencyRepair(dependency, task, jobVersionId, clientOrPool, ctx)) {
+      // Bounded repair: each round is a new PUBLISH_EMBEDDING task (the round is part of its key). A repair task that
+      // completed and left a requirement unembedded cannot stall the job forever: after the bound the job goes to
+      // NEEDS_MANUAL_REVIEW (an infrastructure failure, never a rejection or a career outcome).
+      const rounds = await countRequirementEmbeddingRepairRounds(clientOrPool, ctx, jobVersionId);
+      if (rounds >= MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS) {
+        await moveJobToManualReviewForEmbeddings(clientOrPool, ctx, jobVersionId, rounds);
+        throw new Error(
+          `REQUIREMENT_EMBEDDING_REPAIR_EXHAUSTED: job_version_id=${jobVersionId} still has a requirement without an embedding after ` +
+            `${rounds} repair round(s); the job is NEEDS_MANUAL_REVIEW.`,
+        );
+      }
+      if (await enqueueDependencyRepair(dependency, task, jobVersionId, clientOrPool, ctx, { embedding_repair_round: rounds + 1 })) {
         onSuccessorTaskCreated();
       }
       throw new PipelineTaskDependencyBlockedError(
         `${dependency.code}:${jobVersionId}`,
         dependency.repairTaskType,
-        `Matching is blocked by ${dependency.code} for job_version_id=${jobVersionId}.`,
+        `Matching is blocked by ${dependency.code} for job_version_id=${jobVersionId} (embedding repair round ${rounds + 1} of ${MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS}).`,
       );
     }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
