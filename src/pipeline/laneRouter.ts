@@ -44,7 +44,7 @@ const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 // semantic score is at least FUNCTION_WAIVER_MARGIN above the lane threshold (never for
 // INVESTIGATIONS_ENFORCEMENT, and never past a role-family, cybersecurity, non-technical-project,
 // negative-concept, excluded-sector or domain veto).
-const LANE_ROUTER_RULE_VERSION = "lane_router_v2.6.0";
+export const LANE_ROUTER_RULE_VERSION = "lane_router_v2.6.0";
 
 /** Semantic margin above the lane threshold that lets a zero function score lower confidence instead of vetoing. */
 export const FUNCTION_WAIVER_MARGIN = 0.1;
