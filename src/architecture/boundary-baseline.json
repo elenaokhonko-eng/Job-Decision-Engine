@@ -1,7 +1,7 @@
 {
   "note": "Known boundary violations. First recorded on 19 November 2026; re-recorded on 23 November 2026 when the check was merged. Entries may only be removed: ARCH_BASELINE=prune npx vitest run src/tests/architecture/boundaries.test.ts. Adding an entry is a hand edit and an exception: list it with its reason at the top of the pull request description. See docs/architecture.md, section 6.",
   "limits": {
-    "src/services/agent.ts": 3094
+    "src/services/agent.ts": 2557
   },
   "violations": [
     "F1|src/services/agent.ts <-> src/services/llmFallback.ts",
@@ -123,8 +123,6 @@
     "F4|scripts/list_gemini_models.ts|src/services/agent.ts",
     "F4|scripts/preflight_models.ts|src/services/agent.ts",
     "F4|scripts/process_pipeline_tasks.ts|src/services/agent.ts",
-    "F4|scripts/run_evals.ts|src/db/db.ts",
-    "F4|scripts/run_evals.ts|src/services/agent.ts",
     "F4|server.ts|src/db/db.ts",
     "F4|src/api/v2/manualApplicationRouter.ts|src/services/agent.ts",
     "F4|src/documents/manualCoverLetter.ts|src/services/agent.ts",
@@ -134,11 +132,8 @@
     "F4|src/pipeline/laneRouter.ts|src/services/agent.ts",
     "F4|src/pipeline/normalize.ts|src/db/db.ts",
     "F4|src/requirements/quotedProvider.ts|src/services/agent.ts",
-    "F4|src/services/agent.ts|src/db/db.ts",
     "F4|src/services/criteria.ts|src/db/db.ts",
     "F4|src/services/llmFallback.ts|src/services/agent.ts",
-    "F4|src/services/test_agent.ts|src/db/db.ts",
-    "F4|src/services/test_agent.ts|src/services/agent.ts",
     "F5|src/services/adapters/ashby.ts",
     "F5|src/services/adapters/greenhouse.ts",
     "F5|src/services/adapters/himalayas.ts",
@@ -169,7 +164,6 @@
     "F5|src/services/openAiModelRoles.ts",
     "F5|src/services/renderers/docx_renderer.ts",
     "F5|src/services/renderers/pdf_renderer.ts",
-    "F5|src/services/test_agent.ts",
     "F5|src/services/verificationQuestionService.ts",
     "F5|src/services/workModeEnrichment.ts",
     "F6|gate_decision|scripts/repair_pipeline_funnel.ts",
