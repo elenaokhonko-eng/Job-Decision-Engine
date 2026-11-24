@@ -107,7 +107,7 @@ export const MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS = 3;
 /** Hard ceiling on repair tasks per job version (progress resets the round counter, this never resets). */
 export const MAX_REQUIREMENT_EMBEDDING_REPAIR_SEQUENCE = 50;
 export const EMBEDDING_REPAIR_EXHAUSTED_REASON = "REQUIREMENT_EMBEDDING_REPAIR_EXHAUSTED";
-const ROUTABLE_VERIFICATION_SQL = routableWorkabilityVerificationSql("c");
+export const ROUTABLE_VERIFICATION_SQL = routableWorkabilityVerificationSql("c");
 
 /**
  * Canonical jobs (alias c, latest lane decision LEFT JOINed as ld) that the explanation enqueuer
@@ -115,7 +115,7 @@ const ROUTABLE_VERIFICATION_SQL = routableWorkabilityVerificationSql("c");
  * live active lane revisions. Budget-only lane revisions never match this predicate (see
  * migrations/101_lane_revision_routing_content_hash.sql); a routing-content change does.
  */
-const SUPERSEDED_LANE_ROUTING_SQL = `(
+export const SUPERSEDED_LANE_ROUTING_SQL = `(
   c.archived_at IS NULL
   AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'DEFERRED_BUDGET')
   AND c.primary_lane IS NOT NULL
@@ -137,7 +137,7 @@ const SUPERSEDED_LANE_ROUTING_SQL = `(
  */
 // A function, not a constant: the matcher policy version (SCORING_POLICY) is read when the SQL is built,
 // the same moment the matcher and task currentness read it, so they cannot disagree about the active policy.
-const supersededProfileMatchSql = (): string => `(
+export const supersededProfileMatchSql = (): string => `(
   ${eligibleRoutedJobSql("c", PROFILE_REMATCH_OUTCOMES)}
   AND ${profileMatchSupersededSql("c", "mr")}
 )`;
