@@ -358,7 +358,7 @@ describe("application ranking materializer", () => {
 
   it("persists an incomplete rank but never marks it Top 10 when a required deterministic signal is missing", async () => {
     const { pool, calls } = createPool([
-      currentApplyNowRow({ deterministic_match_score: null }),
+      currentApplyNowRow({ recommendation_requirement_score: null }), // the raw score (80) is present: only the stored adjusted score counts
     ]);
 
     const result = await materializeApplicationRankings(pool, "workspace-1");
