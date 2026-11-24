@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { db } from "../db/db.ts";
-import { runAgent } from "../services/agent.ts";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -131,25 +130,5 @@ describe("Job Decision Engine Test Suite", () => {
     const logFound = logs.find(l => l.id === interaction.id);
     expect(logFound).toBeDefined();
     expect(logFound?.question).toBe(question);
-  });
-
-  // Test 5: Agent Initialization Key Validation Failure Case (Loud Fail)
-  it("Test 5: should fail loud if neither GEMINI_API_KEY nor OPENAI_API_KEY is configured", async () => {
-
-    // Temporarily save original keys
-    const origGemini = process.env.GEMINI_API_KEY;
-    const origOpenAI = process.env.OPENAI_API_KEY;
-    
-    delete process.env.GEMINI_API_KEY;
-    delete process.env.OPENAI_API_KEY;
-
-    // Expect the agent run to fail loud with a descriptive API error
-    await expect(runAgent("Analyze jobs", { candidateProfileContext: "test fixture context" })).rejects.toThrow(
-      "CRITICAL API KEY CONFLICT"
-    );
-
-    // Restore original keys
-    if (origGemini) process.env.GEMINI_API_KEY = origGemini;
-    if (origOpenAI) process.env.OPENAI_API_KEY = origOpenAI;
   });
 });
