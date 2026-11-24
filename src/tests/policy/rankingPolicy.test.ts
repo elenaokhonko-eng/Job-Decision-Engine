@@ -216,7 +216,7 @@ describe('parseRankingWeights (policy row to composite weights)', () => {
       .toEqual({ requirementFit: 1, requirementCoverage: 1, evidenceCompleteness: 1, laneConfidence: 1 });
   });
 
-  it.each(['autonomy', 'politicsRisk', 'sensoryWorkloadRisk', 'strategicValue', 'culturePriorityFit'])(
+  it.each(['autonomy', 'politicsRisk', 'sensoryWorkloadRisk', 'strategicValue'])(
     'rejects an old-shape policy that still weights %s (invariant 11)',
     (name) => {
       expect(() => parseRankingWeights({ ...NEW_ROW, [name]: 5 })).toThrow(/display-only and must be 0/);

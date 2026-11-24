@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 import { materializeApplicationRankings } from "../../services/applicationRankingMaterializer.js";
@@ -79,11 +80,12 @@ function currentApplyNowRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function createPool(rows: unknown[], insertRowCounts: number[] = [1]) {
+function createPool(rows: unknown[], insertRowCounts: number[] = [1], policyWeights: Record<string, number> = POLICY_WEIGHTS) {
   const calls: Array<{ sql: string; params?: unknown[] }> = [];
   const client = {
     query: vi.fn(async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params });
+      if (sql.includes("FROM ranking_policies WHERE workspace_id = $1")) return { rows: [{ weights: policyWeights }] };
       if (sql.includes("FROM v_apply_now_jobs_scoped")) return { rows };
       if (sql.includes("INSERT INTO job_ranking_snapshots")) {
         return { rows: [], rowCount: insertRowCounts.shift() ?? 0 };
@@ -190,16 +192,16 @@ describe("application ranking materializer", () => {
     expect(inserts[0]?.params?.[13]).not.toBe(inserts[1]?.params?.[13]);
   });
 
-  it("refuses to materialize under a policy that gives an AI term a weight", async () => {
-    const { pool, calls } = createPool([
-      currentApplyNowRow({ ranking_weights: { ...POLICY_WEIGHTS, autonomy: 10 } }),
-    ]);
+  it("refuses to materialize under a policy that gives an AI term a weight, even with no eligible rows", async () => {
+    for (const rows of [[currentApplyNowRow()], []]) {
+      const { pool, calls } = createPool(rows, [1], { ...POLICY_WEIGHTS, autonomy: 10 });
 
-    const result = await materializeApplicationRankings(pool, "workspace-1");
+      const result = await materializeApplicationRankings(pool, "workspace-1");
 
-    expect(result.policyError).toMatch(/display-only/);
-    expect(result.snapshotsInserted).toBe(0);
-    expect(calls.some((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"))).toBe(false);
+      expect(result.policyError).toMatch(/display-only/);
+      expect(result.snapshotsInserted).toBe(0);
+      expect(calls.some((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"))).toBe(false);
+    }
   });
 
   it("reads the policy for the latest version only when no version is requested", async () => {
@@ -450,5 +452,13 @@ describe("application ranking materializer", () => {
 
     expect(result.snapshotsAlreadyCurrent).toBe(1);
     expect(result.snapshotsInserted).toBe(0);
+  });
+
+  it.each([
+    "scripts/materialize_application_rankings.ts",
+    "scripts/rematch_current_actionable_profile.ts",
+    "scripts/run_stage1_3_staging_evaluation_smoke.ts",
+  ])("%s exits non-zero when the ranking policy is invalid", (script) => {
+    expect(readFileSync(script, "utf8")).toMatch(/if \(\w+\.policyError\)[\s\S]{0,160}process\.exitCode = 1/);
   });
 });

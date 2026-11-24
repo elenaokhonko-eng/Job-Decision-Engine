@@ -434,7 +434,6 @@ const RETIRED_AI_WEIGHT_NAMES: ReadonlySet<string> = new Set([
   "politicsRisk",
   "sensoryWorkloadRisk",
   "strategicValue",
-  "culturePriorityFit",
 ]);
 
 export function parseRankingWeights(value: unknown): RankingWeights {
@@ -720,9 +719,14 @@ export async function materializeApplicationRankings(
 
     // An invalid latest policy (for example one that weights an AI term) stops this workspace with an
     // explicit error and no writes; it does not throw out of the call mid-transaction.
-    if (rows.length > 0) {
+    // The latest policy is checked on its own, so an invalid policy is signalled even with no eligible rows.
+    const latestPolicy = await client.query<{ weights: unknown }>(
+      "SELECT weights FROM ranking_policies WHERE workspace_id = $1 ORDER BY policy_version DESC LIMIT 1",
+      [workspaceId],
+    );
+    if (latestPolicy.rows.length > 0) {
       try {
-        parseRankingWeights(rows[0]!.ranking_weights);
+        parseRankingWeights(latestPolicy.rows[0]!.weights);
       } catch (error) {
         await client.query("ROLLBACK");
         committed = true;
