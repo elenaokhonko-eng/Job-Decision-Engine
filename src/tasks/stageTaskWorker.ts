@@ -2159,7 +2159,7 @@ async function planRequirementEmbeddingRepair(
   };
 }
 
-async function moveJobToManualReviewForEmbeddings(
+export async function moveJobToManualReviewForEmbeddings(
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
   jobVersionId: string,

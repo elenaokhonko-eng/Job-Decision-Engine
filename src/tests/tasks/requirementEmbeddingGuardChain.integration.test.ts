@@ -25,7 +25,7 @@ import { runEmbeddingBatch } from "../../embeddings/batchCoordinator.js";
 import { runDeterministicMatcher } from "../../pipeline/deterministicMatcher.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
-import { runPipelineStageTaskWorker, type PipelineStageWorkerDependencies } from "../../tasks/stageTaskWorker.js";
+import { moveJobToManualReviewForEmbeddings, runPipelineStageTaskWorker, type PipelineStageWorkerDependencies } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
 dotenv.config();
@@ -383,4 +383,27 @@ describe.skipIf(skipReal)("requirement-embedding guard: worker chain (PostgreSQL
     const run = await getClient().query(`SELECT status, requirement_count FROM match_runs WHERE canonical_job_id = $1`, [canonicalJobId]);
     expect(run.rows).toEqual([{ status: "COMPLETED", requirement_count: 9 }]);
   }, 240_000);
+
+  it("exhausted repair moves only matchable states to NEEDS_MANUAL_REVIEW: queued, running and evaluated jobs are left untouched", async () => {
+    const workspace = getContext();
+    const untouched = ["QUEUED_FOR_AI", "EVALUATING", "EVALUATED"];
+    for (const state of untouched) {
+      const { canonicalJobId, jobVersionId } = await seedJobAndRequirements(1);
+      await getClient().query(`UPDATE canonical_jobs SET processing_state = $2, processing_status = $2 WHERE id = $1`, [canonicalJobId, state]);
+      await moveJobToManualReviewForEmbeddings(getClient(), workspace, jobVersionId, 3);
+      const job = (await getClient().query<{ processing_state: string; rejection_reason: string | null }>(
+        `SELECT processing_state, rejection_reason FROM canonical_jobs WHERE id = $1`, [canonicalJobId])).rows[0]!;
+      expect(job.processing_state).toBe(state);
+      expect(job.rejection_reason).toBeNull();
+    }
+    for (const state of ["LANE_ROUTED", "MATCHED"]) {
+      const { canonicalJobId, jobVersionId } = await seedJobAndRequirements(1);
+      await getClient().query(`UPDATE canonical_jobs SET processing_state = $2, processing_status = $2 WHERE id = $1`, [canonicalJobId, state]);
+      await moveJobToManualReviewForEmbeddings(getClient(), workspace, jobVersionId, 3);
+      const job = (await getClient().query<{ processing_state: string; rejection_reason: string | null }>(
+        `SELECT processing_state, rejection_reason FROM canonical_jobs WHERE id = $1`, [canonicalJobId])).rows[0]!;
+      expect(job.processing_state).toBe("NEEDS_MANUAL_REVIEW");
+      expect(job.rejection_reason).toContain("REQUIREMENT_EMBEDDING_REPAIR_EXHAUSTED");
+    }
+  }, 120_000);
 });

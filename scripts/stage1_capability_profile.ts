@@ -70,7 +70,9 @@ async function main() {
       assertMatchSummaryComplete(summary, 'stage1_capability_profile rematch');
       console.log(`✓ Bounded rematch complete:`, summary);
     } catch (error: any) {
+      // A failed or blocked rematch must fail the script (invariant 7): log it, then rethrow to the top-level handler (exit 1).
       console.error('Bounded rematch error:', error?.message || error);
+      throw error;
     }
   }
 
