@@ -44,10 +44,15 @@ export interface ExpiredSnippetCandidate {
  * Fail-closed (invariant 1): every other text, including NULL, empty, a lease reclaim, a request time limit, any
  * network, TLS or DNS error, a provider 5xx or rate limit, and a bot block on our side (POSTING_CONTENT_BLOCKED:
  * BOT_BLOCKED), counts as infrastructure and defers the archive. The worker keeps no structured error class, so an
- * allowlist of outcomes is safer than a denylist of error wordings. Written without backslash escapes.
+ * allowlist of outcomes is safer than a denylist of error wordings. Prefix match only (anchored with ^), so a
+ * wording that merely contains an outcome name defers. Written without backslash escapes.
+ *
+ * Consequence, deliberately fail-safe (invariant 1): a fetch task parked with a reason this list does not know, or
+ * dead-lettered on an infrastructure failure, keeps its job from expiring until someone retries the task and it
+ * ends with a content or source outcome. `deferredInfraFailure` makes those jobs visible in every report.
  */
 export const CONTENT_OUTCOME_FETCH_ERROR_PATTERN =
-  "(POSTING_CONTENT_UNAVAILABLE:|POSTING_IDENTITY_CONFLICT:|SOURCE_RETIRED_BY_USER:|POSTING_CONTENT_BLOCKED: (AUTH_REQUIRED|UNSUPPORTED_SOURCE|UNSAFE_REDIRECT|MISSING_POSTING_URL))";
+  "^(POSTING_CONTENT_UNAVAILABLE:|POSTING_IDENTITY_CONFLICT:|SOURCE_RETIRED_BY_USER:|POSTING_CONTENT_BLOCKED: (AUTH_REQUIRED|UNSUPPORTED_SOURCE|UNSAFE_REDIRECT|MISSING_POSTING_URL))";
 
 /**
  * Live snippet-only jobs whose content never arrived and whose time is up: every observation is a bare Gmail
@@ -195,6 +200,19 @@ export interface SnippetExpiryHooks {
 }
 
 /**
+ * Row locks last only until the end of the transaction. Outside a transaction block each statement commits at once and
+ * the lock is gone, so the apply step refuses to run there. SAVEPOINT is accepted only inside a transaction block.
+ */
+async function assertInTransaction(client: pg.PoolClient): Promise<void> {
+  try {
+    await client.query("SAVEPOINT snippet_expiry_in_transaction");
+    await client.query("RELEASE SAVEPOINT snippet_expiry_in_transaction");
+  } catch (error) {
+    throw new Error("expireSnippetOnlyJobsInTransaction must run inside a transaction: the row locks end with it.", { cause: error });
+  }
+}
+
+/**
  * Dry run: reads only (the caller may wrap it in a read-only transaction). Apply: runs in its own transaction, so the
  * row locks below last until the archive commits; a failure rolls everything back.
  */
@@ -227,6 +245,7 @@ export async function expireSnippetOnlyJobsInTransaction(
   input: SnippetExpiryInput,
   hooks: SnippetExpiryHooks = {},
 ): Promise<SnippetExpiryReport> {
+  if (input.apply) await assertInTransaction(client);
   const lastSeenDays = input.lastSeenDays ?? SNIPPET_EXPIRY_LAST_SEEN_DAYS;
   const firstSeenDays = input.firstSeenDays ?? SNIPPET_EXPIRY_FIRST_SEEN_DAYS;
   const candidates = await findExpiredSnippetOnlyJobs(client, { workspaceId: input.workspaceId, now: input.now, lastSeenDays, firstSeenDays });

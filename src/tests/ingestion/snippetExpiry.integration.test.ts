@@ -317,10 +317,33 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
     return connection;
   }
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  /** Polls until the backend is blocked waiting for a lock, instead of sleeping and hoping. */
+  async function waitUntilWaitingForLock(pid: number): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const waiting = await db().query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock'`, [pid]);
+      if (waiting.rows[0]!.n === 1) return;
+      await sleep(50);
+    }
+    throw new Error(`Backend ${pid} never started waiting for a lock.`);
+  }
+  async function backendPid(connection: pg.PoolClient): Promise<number> {
+    return (await connection.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+  }
+  /** Ends any open transaction before the connection goes back to the pool, so no lock outlives the test. */
+  async function releaseSafely(...connections: pg.PoolClient[]): Promise<void> {
+    for (const connection of connections) {
+      await connection.query("ROLLBACK").catch(() => undefined);
+      connection.release();
+    }
+  }
   const settledWithin = async (promise: Promise<unknown>, ms: number): Promise<boolean> =>
     Promise.race([promise.then(() => true, () => true), sleep(ms).then(() => false)]);
 
-  it("a concurrent application insert waits for the archive transaction (second connection)", async () => {
+  // Mutation check (done by hand): removing the FOR UPDATE in snippetExpiry.ts makes this test fail. The archive primitive
+  // alone does not make the insert wait: its UPDATE takes FOR NO KEY UPDATE, which does not conflict with the key-share
+  // lock a foreign-key insert takes; only the explicit FOR UPDATE does.
+  it("a concurrent application insert waits until the archive transaction commits", async () => {
     const ws = await newWorkspace();
     const job = await seedJob("insert-waits", { seen: [30 * DAY] }, ws);
     const archiver = await otherConnection();
@@ -330,22 +353,25 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
       const report = await expireSnippetOnlyJobsInTransaction(archiver, { workspaceId: ws, apply: true, now: NOW, actor: "t" });
       expect(report.archivedJobIds).toEqual([job]);
       // The archive transaction is open and holds the row lock; the application insert must wait.
+      const writerPid = await backendPid(writer); // read before the insert: a blocked connection cannot answer another query
       const insert = writer.query(
         `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status)
          SELECT $1, $2, $3, latest_job_version_id, 'APPLIED' FROM canonical_jobs WHERE id = $3`,
         [ws, context!.userId, job],
       );
-      expect(await settledWithin(insert, 500)).toBe(false);
+      await waitUntilWaitingForLock(writerPid);
+      expect(await settledWithin(insert, 50)).toBe(false);
       await archiver.query("COMMIT");
       await insert;
       expect((await archiveState(job)).archived).toBe(true);
     } finally {
-      archiver.release();
-      writer.release();
+      await releaseSafely(archiver, writer);
     }
   });
 
-  it("an application insert in flight makes the archive wait, and the job is then not archived (second connection)", async () => {
+  // Mutation check (done by hand): without the FOR UPDATE the archive does not wait for the uncommitted application and the
+  // job would be archived, so this test fails.
+  it("an application insert in flight makes the archive wait, and the job is then not archived", async () => {
     const ws = await newWorkspace();
     const job = await seedJob("archive-waits", { seen: [30 * DAY] }, ws);
     const archiver = await otherConnection();
@@ -358,8 +384,10 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
         [ws, context!.userId, job],
       );
       await archiver.query("BEGIN");
+      const archiverPid = await backendPid(archiver);
       const run = expireSnippetOnlyJobsInTransaction(archiver, { workspaceId: ws, apply: true, now: NOW, actor: "t" });
-      expect(await settledWithin(run, 500)).toBe(false);
+      await waitUntilWaitingForLock(archiverPid);
+      expect(await settledWithin(run, 50)).toBe(false);
       await writer.query("COMMIT");
       const report = await run;
       await archiver.query("COMMIT");
@@ -367,12 +395,12 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
       expect(report.archivedJobIds).toEqual([]);
       expect((await archiveState(job)).archived).toBe(false);
     } finally {
-      archiver.release();
-      writer.release();
+      await releaseSafely(archiver, writer);
     }
   });
 
-  it("an archive hold inserted concurrently is respected the same way (second connection)", async () => {
+  // Mutation check (done by hand): this test also fails without the FOR UPDATE in snippetExpiry.ts.
+  it("an archive hold in flight makes the archive wait and the job is not archived", async () => {
     const ws = await newWorkspace();
     const job = await seedJob("hold-race", { seen: [30 * DAY] }, ws);
     const archiver = await otherConnection();
@@ -384,16 +412,17 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
         expiresAt: new Date(Date.now() + 30 * DAY),
       });
       await archiver.query("BEGIN");
+      const archiverPid = await backendPid(archiver);
       const run = expireSnippetOnlyJobsInTransaction(archiver, { workspaceId: ws, apply: true, now: NOW, actor: "t" });
-      expect(await settledWithin(run, 500)).toBe(false);
+      await waitUntilWaitingForLock(archiverPid);
+      expect(await settledWithin(run, 50)).toBe(false);
       await writer.query("COMMIT");
       const report = await run;
       await archiver.query("COMMIT");
       expect(report.archivedJobIds).toEqual([]);
       expect((await archiveState(job)).archived).toBe(false);
     } finally {
-      archiver.release();
-      writer.release();
+      await releaseSafely(archiver, writer);
     }
   });
 
@@ -411,6 +440,24 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
     });
     expect(report.droppedAtApply).toBe(1);
     expect((await archiveState(job)).archived).toBe(false);
+  });
+
+  it("apply outside a transaction is refused, because the row locks would end with each statement", async () => {
+    const ws = await newWorkspace();
+    await seedJob("outside-transaction", { seen: [30 * DAY] }, ws);
+    await expect(expireSnippetOnlyJobsInTransaction(db(), { workspaceId: ws, apply: true, now: NOW, actor: "t" }))
+      .rejects.toThrow(/must run inside a transaction/);
+    // The dry run needs no transaction.
+    await expect(expireSnippetOnlyJobsInTransaction(db(), { workspaceId: ws, apply: false, now: NOW, actor: "t" })).resolves.toMatchObject({ mode: "DRY_RUN" });
+  });
+
+  it("the allowlist matches a prefix only: an outcome name inside another message still defers", async () => {
+    const ws = await newWorkspace();
+    const embedded = await seedJob("embedded-outcome", { seen: [30 * DAY], fetchTask: "DEAD_LETTER", fetchAttempts: 8,
+      fetchError: "Posting retrieval is retryable: POSTING_CONTENT_UNAVAILABLE: lookalike inside a network failure" }, ws);
+    const report = await applyIn(ws);
+    expect(report.deferredInfraFailure).toBe(1);
+    expect((await archiveState(embedded)).archived).toBe(false);
   });
 
   it("the limits must be whole days and the first-seen limit cannot be shorter", async () => {
