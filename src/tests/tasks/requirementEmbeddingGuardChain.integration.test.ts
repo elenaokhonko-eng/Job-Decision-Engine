@@ -365,10 +365,10 @@ describe.skipIf(skipReal)("requirement-embedding guard: worker chain (PostgreSQL
 
   it("a repair round that embedded something resets the counter: a job with many requirements finishes after more than three rounds", async () => {
     const workspace = getContext();
-    const { canonicalJobId, jobVersionId } = await seedJobAndRequirements(6);
+    const { canonicalJobId, jobVersionId } = await seedJobAndRequirements(9);
     await publishRequirementEmbeddings(workspace, jobVersionId, 1);
     const matchTaskId = await enqueueMatchTask(workspace, canonicalJobId, jobVersionId, await activeProfileId());
-    const deps = dependenciesPublishing(workspace, jobVersionId, 1);
+    const deps = dependenciesPublishing(workspace, jobVersionId, 2);
 
     let rounds = 0;
     for (; rounds < 8; rounds += 1) {
@@ -381,6 +381,6 @@ describe.skipIf(skipReal)("requirement-embedding guard: worker chain (PostgreSQL
     expect(rounds).toBeGreaterThan(3);
     expect((await jobRow(canonicalJobId)).processing_state).toBe("MATCHED");
     const run = await getClient().query(`SELECT status, requirement_count FROM match_runs WHERE canonical_job_id = $1`, [canonicalJobId]);
-    expect(run.rows).toEqual([{ status: "COMPLETED", requirement_count: 6 }]);
+    expect(run.rows).toEqual([{ status: "COMPLETED", requirement_count: 9 }]);
   }, 240_000);
 });

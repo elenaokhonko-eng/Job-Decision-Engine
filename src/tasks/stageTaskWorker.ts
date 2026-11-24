@@ -103,6 +103,9 @@ export const PIPELINE_STAGE_TASK_TYPES = [
 const SEMANTIC_MATCH_REPAIR_GENERATION = "semantic_match_repair_v2";
 /** Rounds of PUBLISH_EMBEDDING repair a job's requirement embeddings get before the job goes to NEEDS_MANUAL_REVIEW. */
 export const MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS = 3;
+/** Hard ceiling on repair tasks per job version (progress resets the round counter, this never resets). */
+export const MAX_REQUIREMENT_EMBEDDING_REPAIR_SEQUENCE = 50;
+export const EMBEDDING_REPAIR_EXHAUSTED_REASON = "REQUIREMENT_EMBEDDING_REPAIR_EXHAUSTED";
 const ROUTABLE_VERIFICATION_SQL = routableWorkabilityVerificationSql("c");
 
 /**
@@ -2068,25 +2071,38 @@ async function classifySemanticMatchDependency(
   return { code: "EMBEDDING_SPACE_INCOMPATIBLE", repairTaskType: "PUBLISH_EMBEDDING" };
 }
 
-/** Requirements of the job's active set that have no published embedding in any space. */
+/**
+ * Requirements the matcher would score (VALIDATED, in the active requirement set) that have no published embedding in the best
+ * single space (a space of this workspace; the guard needs ONE space that holds them all). With no active space every
+ * requirement counts as missing.
+ */
 async function countRequirementsWithoutEmbedding(
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
   jobVersionId: string,
-): Promise<number> {
-  const { rows } = await (clientOrPool as QueryClient).query<{ n: number }>(
-    `SELECT COUNT(*)::int AS n
-       FROM job_versions jv
-       JOIN job_requirements jr ON jr.workspace_id = jv.workspace_id AND jr.job_version_id = jv.id
-                               AND jr.requirement_set_id = jv.active_requirement_set_id
-      WHERE jv.workspace_id = $1 AND jv.id = $2::uuid
-        AND NOT EXISTS (
-          SELECT 1 FROM embedding_inputs ei
-            JOIN v_published_semantic_embeddings se ON se.embedding_input_id = ei.id
-           WHERE ei.source_type = 'JOB_REQUIREMENT' AND ei.source_id = jr.id AND ei.is_current = TRUE)`,
+): Promise<{ missing: number; validated: number }> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ validated: number; missing: number | null }>(
+    `WITH requirements AS (
+       SELECT jr.id
+         FROM job_versions jv
+         JOIN job_requirements jr ON jr.workspace_id = jv.workspace_id AND jr.requirement_set_id = jv.active_requirement_set_id
+        WHERE jv.workspace_id = $1 AND jv.id = $2::uuid AND jv.active_requirement_set_id IS NOT NULL AND jr.status = 'VALIDATED'
+     ),
+     spaces AS (SELECT id FROM embedding_spaces WHERE workspace_id = $1 AND active = TRUE),
+     per_space AS (
+       SELECT s.id,
+              (SELECT COUNT(*) FROM requirements r
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM embedding_inputs ei
+                    JOIN v_published_semantic_embeddings se ON se.embedding_input_id = ei.id AND se.embedding_space_id = s.id
+                   WHERE ei.source_type = 'JOB_REQUIREMENT' AND ei.source_id = r.id AND ei.is_current = TRUE)) AS missing
+         FROM spaces s
+     )
+     SELECT (SELECT COUNT(*)::int FROM requirements) AS validated,
+            COALESCE((SELECT MIN(missing)::int FROM per_space), (SELECT COUNT(*)::int FROM requirements)) AS missing`,
     [ctx.workspaceId, jobVersionId],
   );
-  return rows[0]?.n ?? 0;
+  return { missing: rows[0]?.missing ?? 0, validated: rows[0]?.validated ?? 0 };
 }
 
 interface EmbeddingRepairPlan {
@@ -2108,7 +2124,9 @@ async function planRequirementEmbeddingRepair(
   ctx: WorkspaceContext,
   jobVersionId: string,
 ): Promise<EmbeddingRepairPlan> {
-  const missing = await countRequirementsWithoutEmbedding(clientOrPool, ctx, jobVersionId);
+  const { missing, validated } = await countRequirementsWithoutEmbedding(clientOrPool, ctx, jobVersionId);
+  // Absolute bound on the total number of repair tasks, whatever the progress reading says (the missing count is not monotonic).
+  const maxSequence = Math.min(MAX_REQUIREMENT_EMBEDDING_REPAIR_SEQUENCE, Math.ceil(validated / 200) + MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS);
   const { rows } = await (clientOrPool as QueryClient).query<{ payload: Record<string, unknown> | null }>(
     `SELECT payload
        FROM pipeline_tasks
@@ -2125,7 +2143,12 @@ async function planRequirementEmbeddingRepair(
   const previousSequence = Number(previous.embedding_repair_seq);
   const progressed = Number.isFinite(previousMissing) && missing < previousMissing;
   const round = progressed ? 1 : previousRound + 1;
-  return { exhausted: round > MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS, round, sequence: previousSequence + 1, missing };
+  return {
+    exhausted: round > MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS || previousSequence >= maxSequence,
+    round,
+    sequence: previousSequence + 1,
+    missing,
+  };
 }
 
 async function moveJobToManualReviewForEmbeddings(
@@ -2134,14 +2157,16 @@ async function moveJobToManualReviewForEmbeddings(
   jobVersionId: string,
   rounds: number,
 ): Promise<void> {
+  // Only states from which the matcher runs: never a job that is queued for, in, or past AI evaluation, never a hard rejection.
+  const reason = `${EMBEDDING_REPAIR_EXHAUSTED_REASON}: requirement embeddings still missing after ${rounds} repair round(s) without progress (infrastructure failure, not a career outcome)`;
   await (clientOrPool as QueryClient).query(
     `UPDATE canonical_jobs
-        SET processing_state = 'NEEDS_MANUAL_REVIEW', processing_status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW()
+        SET processing_state = 'NEEDS_MANUAL_REVIEW', processing_status = 'NEEDS_MANUAL_REVIEW', rejection_reason = $3, updated_at = NOW()
       WHERE workspace_id = $1 AND latest_job_version_id = $2::uuid AND archived_at IS NULL
-        AND COALESCE(processing_state, processing_status) NOT IN ('HARD_REJECTED', 'MANUALLY_REMOVED')`,
-    [ctx.workspaceId, jobVersionId],
+        AND COALESCE(processing_state, processing_status) IN ('LANE_ROUTED', 'MATCHED')`,
+    [ctx.workspaceId, jobVersionId, reason],
   );
-  console.error(`Requirement embeddings still missing for job_version_id=${jobVersionId} after ${rounds} repair round(s): NEEDS_MANUAL_REVIEW (infrastructure failure, not a career outcome).`);
+  console.error(`Requirement embeddings still missing for job_version_id=${jobVersionId} after ${rounds} repair round(s): NEEDS_MANUAL_REVIEW (${EMBEDDING_REPAIR_EXHAUSTED_REASON}).`);
 }
 
 async function enqueueDependencyRepair(
@@ -3413,6 +3438,16 @@ async function executeStageTask(
     ) {
       return;
     }
+    if (matchState.processingState === "NEEDS_MANUAL_REVIEW") {
+      const exhausted = await (clientOrPool as QueryClient).query<{ rejection_reason: string | null }>(
+        `SELECT rejection_reason FROM canonical_jobs WHERE workspace_id = $1 AND latest_job_version_id = $2::uuid LIMIT 1`,
+        [ctx.workspaceId, jobVersionId],
+      );
+      if ((exhausted.rows[0]?.rejection_reason ?? "").startsWith(EMBEDDING_REPAIR_EXHAUSTED_REASON)) {
+        // A retry of an exhausted match must not complete silently: fail with the explicit reason until a person re-opens the repair.
+        throw new Error(`${EMBEDDING_REPAIR_EXHAUSTED_REASON}: job_version_id=${jobVersionId} is waiting for manual review of its requirement embeddings.`);
+      }
+    }
     if (
       ![
         "LANE_ROUTED",
@@ -3487,7 +3522,7 @@ async function executeStageTask(
       if (plan.exhausted) {
         await moveJobToManualReviewForEmbeddings(clientOrPool, ctx, jobVersionId, MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS);
         throw new Error(
-          `REQUIREMENT_EMBEDDING_REPAIR_EXHAUSTED: job_version_id=${jobVersionId} still has ${plan.missing} requirement(s) without an embedding after ` +
+          `${EMBEDDING_REPAIR_EXHAUSTED_REASON}: job_version_id=${jobVersionId} still has ${plan.missing} requirement(s) without an embedding after ` +
             `${MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS} repair round(s) without progress; the job is NEEDS_MANUAL_REVIEW.`,
         );
       }
