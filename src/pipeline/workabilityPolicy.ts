@@ -1043,7 +1043,10 @@ function normalizeUnknownWorkModeDisposition(_value: unknown): WorkabilityPolicy
 
 export function loadWorkabilityPolicy(): WorkabilityPolicy {
   const filePath = configPath("policies", "workability.yml");
-  if (!fs.existsSync(filePath)) return defaults;
+  // A missing policy file must not quietly replace the configured hard gates with built-in defaults.
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Workability policy not found at ${filePath}. Restore config/policies/workability.yml (or point JDEC_CONFIG_DIR at a complete config directory).`);
+  }
 
   const loadFn = (yaml as any).load || (yaml as any).default?.load || yaml;
   const document = loadFn(fs.readFileSync(filePath, "utf8")) as any;
