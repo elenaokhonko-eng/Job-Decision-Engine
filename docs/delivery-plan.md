@@ -51,7 +51,9 @@ Not started this round:
 4. **Small pull requests to `main`.** No stack deeper than two. Rebase on `main` every day. Each report names the CI status of every pull request it mentions.
 5. **A builder never signs off its own work.** Sign-off comes from the reviewer roles in `.agents/team.yml`: `data-contract-checker`, `test-evals-specialist`, `database-versioning-engineer`, `release-security-reviewer`.
 6. **The boundary check applies to everyone.** New code follows [architecture.md](architecture.md), section 6. An exception is listed with its reason at the top of the pull request description.
-7. **Standing limits.** Processing stays paused. No production write without the owner's go-ahead and the exact command. No secrets, connection strings or profile data in output, fixtures, logs or pull requests. Job titles and employers from the owner's saved list stay out of the repository.
+7. **A stage's version changes when its output changes.** Any change to what a stage produces (gate, extractor, matcher, lane router, decider, role-shape rules) changes that stage's version, so the version-reopen mechanism re-runs the affected jobs. `data-contract-checker` does not sign off a pull request that changes behaviour without a version change. Two faults of this kind reached `main` (the extractor input in #244, the degree rule in #247).
+8. **Merge lists carry evidence.** Every line the orchestrator sends the owner for merging states that CI is green and which reviewer roles signed off. A pull request without both is not on the list.
+9. **Standing limits.** Processing stays paused. No production write without the owner's go-ahead and the exact command. No secrets, connection strings or profile data in output, fixtures, logs or pull requests. Job titles and employers from the owner's saved list stay out of the repository.
 
 ## The orchestrator
 
