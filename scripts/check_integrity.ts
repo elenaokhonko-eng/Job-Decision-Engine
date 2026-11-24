@@ -2,6 +2,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import { reportAwaitingContentOutputs } from "../src/ingestion/contentCompleteness.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -171,6 +172,19 @@ async function runIntegrityChecks() {
       errors++;
     } else {
       console.log("OK: Every automatic nonterminal job has active recovery work.");
+    }
+
+    // Check 8: a job awaiting its posting text has no gate result, lane or recommendation.
+    const awaiting = await reportAwaitingContentOutputs(pool as any, ctx.workspaceId);
+    if (awaiting.violations.length > 0) {
+      console.error(
+        `Found ${awaiting.violations.length} live job(s) awaiting content that still carry a gate decision, lane or recommendation `
+        + `(gate=${awaiting.byOutput.GATE_DECISION} lane=${awaiting.byOutput.LANE} recommendation=${awaiting.byOutput.RECOMMENDATION}); `
+        + `first ids: ${awaiting.violations.slice(0, 5).map((v) => v.canonicalJobId).join(", ")}`,
+      );
+      errors++;
+    } else {
+      console.log(`OK: No awaiting-content job (${awaiting.awaitingContentJobs}) carries a gate decision, lane or recommendation.`);
     }
 
     if (errors === 0) {
