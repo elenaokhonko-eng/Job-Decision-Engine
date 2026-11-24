@@ -513,16 +513,25 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     expect((await eventDetails(unknown)).facts_applied_from_page).toMatchObject({ work_mode: { before: "UNKNOWN", after: "HYBRID" } });
 
     // A known value is never overwritten; a contradiction is stored with both values and nothing is re-gated.
-    const known = await createJob({ windowEndedDaysAgo: 1, board: "facts-known", workplaceType: "ONSITE", location: "Singapore" });
+    const known = await createJob({ windowEndedDaysAgo: 1, board: "facts-known", workplaceType: "ONSITE", location: "Singapore", processingState: "MATCHED" });
     const contradicted = await runAvailabilityRecheck(db(), ctx(), payload(known), null, deps({
       now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "HYBRID", "London"),
     }));
     expect(contradicted).toMatchObject({ action: "MARK_OPEN", factsChanged: false });
     expect(await state(known)).toMatchObject({ workplace_type: "ONSITE", location: "Singapore" });
     expect(await pendingTasks(known, "APPLY_HARD_GATES")).toHaveLength(0);
+    // The conflict flags the job for verification with a routable stored reason; it is not rejected.
+    const flagged = await db().query(`SELECT processing_state, gate_decision, rejection_reason FROM canonical_jobs WHERE id = $1`, [known.canonicalJobId]);
+    expect(flagged.rows[0]).toMatchObject({ processing_state: "NEEDS_VERIFICATION", gate_decision: "NEEDS_VERIFICATION", rejection_reason: "GATE_UNKNOWN_WORK_MODE" });
+    expect((await eventDetails(known)).flagged_for_verification).toMatchObject({ reason_code: "GATE_UNKNOWN_WORK_MODE", flagged: true });
     expect((await eventDetails(known)).facts_conflict).toMatchObject({
       work_mode: { known: "ONSITE", page: "HYBRID" }, territory: { known: "singapore", page: "london" }, source_name: "GREENHOUSE",
     });
+
+    const rejected = await createJob({ windowEndedDaysAgo: 1, board: "facts-rejected", workplaceType: "ONSITE", location: "Singapore", processingState: "HARD_REJECTED" });
+    await runAvailabilityRecheck(db(), ctx(), payload(rejected), null, deps({ now: new Date(), fetchJobContent: async () => pageComplete("OPEN", "HYBRID", "Singapore") }));
+    expect((await state(rejected)).workplace_type).toBe("ONSITE");
+    expect((await db().query(`SELECT processing_state FROM canonical_jobs WHERE id = $1`, [rejected.canonicalJobId])).rows[0]?.processing_state).toBe("HARD_REJECTED");
 
     // The same place written differently is not a conflict.
     const same = await createJob({ windowEndedDaysAgo: 1, board: "facts-same", workplaceType: "HYBRID", location: "Singapore" });

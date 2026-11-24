@@ -863,6 +863,21 @@ export async function runAvailabilityRecheck(
       if (Object.keys(conflicts).length > 0) {
         // No change and no re-gate: the conflict is stored with both values and the evidence for a person to verify.
         details.facts_conflict = { ...conflicts, source_name: observation.source_name, observation_id: observation.observation_id, evidence: "page read" };
+        // The job is flagged for verification with a stored reason; it is not re-gated and not rejected. A
+        // hard-rejected, removed or already-unverified job is left as it is. The code is a routable one, so the
+        // job keeps moving through matching while the question is open (src/pipeline/verificationRouting.ts).
+        const reasonCode = conflicts.work_mode !== undefined ? "GATE_UNKNOWN_WORK_MODE" : "NEEDS_VERIFICATION_LOCATION_DETAIL";
+        writes.push(async () => {
+          const flagged = await client.query(
+            `UPDATE canonical_jobs
+                SET processing_state = 'NEEDS_VERIFICATION', processing_status = 'NEEDS_VERIFICATION',
+                    gate_decision = 'NEEDS_VERIFICATION', rejection_reason = $3, updated_at = NOW()
+              WHERE workspace_id = $1::uuid AND id = $2::uuid
+                AND COALESCE(processing_state, processing_status) NOT IN ('HARD_REJECTED', 'MANUALLY_REMOVED', 'NEEDS_VERIFICATION', 'RAW_STAGED')`,
+            [context.workspaceId, payload.canonical_job_id, reasonCode],
+          );
+          details.flagged_for_verification = { reason_code: reasonCode, flagged: (flagged.rowCount ?? 0) === 1 };
+        });
       }
     } else if (read.feedFactsAfter !== null) {
       const change = compareFacts(beforeFacts, read.feedFactsAfter);
