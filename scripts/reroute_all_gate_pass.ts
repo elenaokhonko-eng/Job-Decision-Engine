@@ -3,7 +3,7 @@ import dotenv from "dotenv";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { runLaneRouting } from "../src/pipeline/laneRouter.js";
-import { runDeterministicMatcher } from "../src/pipeline/deterministicMatcher.js";
+import { assertMatchSummaryComplete, runDeterministicMatcher } from "../src/pipeline/deterministicMatcher.js";
 import { runRecommendationDecider } from "../src/pipeline/recommendationDecider.js";
 
 dotenv.config();
@@ -50,6 +50,7 @@ async function run() {
     console.log(`Matching ${routedIds.length} newly rerouted jobs...`);
     const matching = await runDeterministicMatcher(pool, { context: ctx, canonicalJobIds: routedIds });
     console.log("Matching summary:", matching);
+    assertMatchSummaryComplete(matching, "reroute_all_gate_pass");
     const recommendations = await runRecommendationDecider(pool, { context: ctx, canonicalJobIds: routedIds });
     console.log("Recommendation summary:", recommendations);
   } else {

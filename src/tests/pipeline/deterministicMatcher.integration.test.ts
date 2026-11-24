@@ -5,6 +5,7 @@ import path from 'path';
 import { runMigrations } from '../../db/migrate.js';
 import { isLocalPostgresConnectionString, pgConnectionConfig } from '../../db/pgSsl.js';
 import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from '../fixtures/completePostingEvidence.js';
+import { getEmbeddingSpaceRegistryConfiguration, seedEmbeddingSpaces } from '../../embeddings/spaceRegistry.js';
 import { runDeterministicMatcher } from '../../pipeline/deterministicMatcher.js';
 import type { WorkspaceContext } from '../../workspace/context.js';
 
@@ -207,7 +208,7 @@ describe.skipIf(skipReal)('Pipeline Stage: Deterministic Matcher (real PostgreSQ
       canonicalJobIds: [canonicalJobId],
     });
 
-    expect(summary).toEqual({ matchedJobs: 0, skippedJobs: 1, errors: 0 });
+    expect(summary).toEqual({ matchedJobs: 0, skippedJobs: 1, errors: 0, blockedOnRequirementEmbeddings: [] });
 
     const canonical = await query<{
       processing_state: string;
@@ -249,7 +250,7 @@ describe.skipIf(skipReal)('Pipeline Stage: Deterministic Matcher (real PostgreSQ
       canonicalJobIds: [canonicalJobId],
     });
 
-    expect(summary).toEqual({ matchedJobs: 0, skippedJobs: 1, errors: 0 });
+    expect(summary).toEqual({ matchedJobs: 0, skippedJobs: 1, errors: 0, blockedOnRequirementEmbeddings: [] });
 
     const canonical = await query<{
       processing_state: string;
@@ -348,5 +349,71 @@ describe.skipIf(skipReal)('Pipeline Stage: Deterministic Matcher (real PostgreSQ
     expect(track.rows).toHaveLength(1);
     expect(track.rows[0].recommendation_outcome).toBe('TRACK');
     expect(track.rows[0].recommendation_requirement_score).toBeNull();
+  });
+
+  describe('requirement embeddings guard: never match on partial embeddings', () => {
+    async function publishEmbedding(sourceType: 'PROFILE_FACT' | 'JOB_REQUIREMENT', sourceId: string): Promise<void> {
+      if (!context) throw new Error('Integration test fixture context is not initialized.');
+      const dimensions = getEmbeddingSpaceRegistryConfiguration().primary.dimensions;
+      const space = await query<{ id: string }>(
+        `SELECT id FROM embedding_spaces WHERE workspace_id = $1 AND active = TRUE AND is_fallback_space = FALSE AND provider = $2 ORDER BY created_at DESC LIMIT 1`,
+        [context.workspaceId, getEmbeddingSpaceRegistryConfiguration().primary.provider],
+      );
+      const input = await query<{ id: string }>(
+        `INSERT INTO embedding_inputs (workspace_id, input_key, source_type, source_id, content_text, content_hash)
+         VALUES ($1, $2, $3, $4, 'fixture text', $5) RETURNING id`,
+        [context.workspaceId, `guard-${sourceType}-${sourceId}`, sourceType, sourceId, `hash-${sourceId}`],
+      );
+      const batch = await query<{ id: string }>(
+        `INSERT INTO embedding_batches (workspace_id, embedding_space_id, batch_key, run_type, status, item_count, success_count, failure_count, completed_at)
+         VALUES ($1, $2, $3, 'PRIMARY', 'COMPLETED', 1, 1, 0, NOW()) RETURNING id`,
+        [context.workspaceId, space.rows[0].id, `guard-batch-${sourceId}`],
+      );
+      await query(`INSERT INTO embedding_batch_items (workspace_id, embedding_batch_id, embedding_input_id, status) VALUES ($1, $2, $3, 'COMPLETED')`, [context.workspaceId, batch.rows[0].id, input.rows[0].id]);
+      await query(
+        `INSERT INTO semantic_embeddings (workspace_id, embedding_space_id, embedding_input_id, embedding_batch_id, vector_dimensions, embedding_values, vector_checksum)
+         VALUES ($1, $2, $3, $4, $6, ARRAY(SELECT 0.1::double precision FROM generate_series(1, $6::int)), $5)`,
+        [context.workspaceId, space.rows[0].id, input.rows[0].id, batch.rows[0].id, `guard-sum-${sourceId}`, dimensions],
+      );
+    }
+
+    it('some requirements embedded, some not: no match run, no score, the job waits; once every requirement is embedded it matches', async () => {
+      if (!context) throw new Error('Integration test fixture context is not initialized.');
+      await query(`UPDATE embedding_spaces SET active = FALSE WHERE workspace_id = $1`, [context.workspaceId]);
+      await seedEmbeddingSpaces(getClient(), { context });
+      await query(`UPDATE canonical_jobs SET processing_state = 'LANE_ROUTED', processing_status = 'LANE_ROUTED', profile_match_status = NULL WHERE id = $1`, [canonicalJobId]);
+      await query(`DELETE FROM requirement_evidence_matches WHERE match_run_id IN (SELECT id FROM match_runs WHERE canonical_job_id = $1)`, [canonicalJobId]);
+      await query(`DELETE FROM match_runs WHERE canonical_job_id = $1`, [canonicalJobId]);
+
+      // A second requirement that never gets an embedding makes the set partial once the first is embedded.
+      const set = await query<{ job_version_id: string; requirement_set_id: string; id: string }>(
+        `SELECT job_version_id, requirement_set_id, id FROM job_requirements WHERE canonical_job_id = $1 ORDER BY requirement_key LIMIT 1`, [canonicalJobId]);
+      const first = set.rows[0];
+      const second = await query<{ id: string }>(
+        `INSERT INTO job_requirements (workspace_id, canonical_job_id, job_version_id, requirement_set_id, requirement_key, requirement_type, importance,
+                                       requirement_text, quote_text, extractor_type, extractor_version, confidence, status, structured_value)
+         VALUES ($1, $2, $3, $4, 'domain-2', 'DOMAIN', 'MUST', 'Experience with model evaluation', 'model evaluation', 'DETERMINISTIC', 'deterministic-v1', 1, 'VALIDATED', $5::jsonb)
+         RETURNING id`,
+        [context.workspaceId, canonicalJobId, first.job_version_id, first.requirement_set_id, JSON.stringify({ domain_key: 'MODEL_EVALUATION' })],
+      );
+      const fact = await query<{ node: string }>(`SELECT COALESCE(fact_revision_id, id)::text AS node FROM profile_facts WHERE fact_key = 'fraud-domain' ORDER BY created_at DESC LIMIT 1`);
+      await publishEmbedding('PROFILE_FACT', fact.rows[0].node);
+      await publishEmbedding('JOB_REQUIREMENT', first.id); // the second requirement stays unembedded
+
+      const waiting = await runDeterministicMatcher(getClient(), { context, canonicalJobIds: [canonicalJobId] });
+      expect(waiting).toMatchObject({ matchedJobs: 0, errors: 0, blockedOnRequirementEmbeddings: [canonicalJobId] });
+      const runs = await query(`SELECT id FROM match_runs WHERE canonical_job_id = $1`, [canonicalJobId]);
+      expect(runs.rows).toEqual([]); // no match run exists while a requirement has no embedding
+      const waitingJob = await query(`SELECT processing_state, deterministic_match_score, deterministic_match_coverage FROM canonical_jobs WHERE id = $1`, [canonicalJobId]);
+      expect(waitingJob.rows[0]).toEqual({ processing_state: 'LANE_ROUTED', deterministic_match_score: null, deterministic_match_coverage: null });
+
+      await publishEmbedding('JOB_REQUIREMENT', second.rows[0].id);
+      const matched = await runDeterministicMatcher(getClient(), { context, canonicalJobIds: [canonicalJobId] });
+      expect(matched).toMatchObject({ matchedJobs: 1, errors: 0, blockedOnRequirementEmbeddings: [] });
+      const run = await query(`SELECT status, embedding_space_id, requirement_count FROM match_runs WHERE canonical_job_id = $1`, [canonicalJobId]);
+      expect(run.rows).toHaveLength(1);
+      expect(run.rows[0]).toMatchObject({ status: 'COMPLETED', requirement_count: 2 });
+      expect(run.rows[0].embedding_space_id).not.toBeNull();
+    });
   });
 });

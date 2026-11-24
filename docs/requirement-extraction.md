@@ -74,7 +74,7 @@ must-haves lowered separation at every weight tried, so it is not in the score.
   (`src/pipeline/careerTrack.ts` reads the requirement rows, not the score).
 - Unmatched must-haves are reported beside each job (`unmatchedMustHaves` in
   `src/pipeline/scoringPolicy.ts`), not scored.
-- The policy has its own matcher version (`deterministic_v2+topk_capability_semantic_v1`), so
+- The policy has its own matcher version (`deterministic_v3+topk_capability_semantic_v1`), so
   turning it on makes older matches superseded and the queue re-matches them. Existing cut-offs
   (`recommendation_*` thresholds) are on the legacy scale and must be re-fitted before the flag is
   turned on in production; the cut-offs are not fitted here.
