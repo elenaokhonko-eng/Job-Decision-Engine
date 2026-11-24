@@ -10,7 +10,7 @@ import {
   type EmailLinkSummary,
 } from "../src/ingestion/emailAlertExtractor.js";
 import { ExtractedJobSchema, SCHEMA_VERSION } from "../src/contracts/index.js";
-import { enqueuePipelineTask } from "../src/tasks/pipelineTasks.js";
+import { assertObservationsHaveFetchTask, enqueueAlertFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
 import { blockLeadObservations } from "../src/ingestion/leadStaging.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
@@ -73,6 +73,11 @@ interface AlertRow {
 }
 
 export const NO_VACANCY_FUNNEL_MIN_ALERTS = 3;
+
+/** The process exit code for a run: any failed alert (including a rolled-back staging) or a broken funnel fails it. */
+export function parseEmailsExitCode(summary: Pick<ParseEmailsSummary, "failedEmails" | "noVacancyFunnelBroken">): 0 | 1 {
+  return summary.failedEmails > 0 || summary.noVacancyFunnelBroken ? 1 : 0;
+}
 
 /** A run is a broken funnel when most decoded alerts yield no vacancy link (see ParseEmailsSummary). */
 export function isNoVacancyFunnelBroken(parsedEmails: number, noVacancyEmails: number): boolean {
@@ -171,6 +176,7 @@ async function stageEmail(
   try {
     await client.query("BEGIN");
     const observationIds: string[] = [];
+    const observationsNeedingFetch: string[] = [];
     const leadObservationIds: string[] = [];
     for (const card of cards) {
       const messageIdentity = String(email.gmail_message_id || alertId);
@@ -255,21 +261,12 @@ async function stageEmail(
         continue;
       }
 
-      const taskKey = "FETCH_JOB_CONTENT:" + staged.observationId + ":posting_fetch_v1";
-      await enqueuePipelineTask(
-        {
-          taskType: "FETCH_JOB_CONTENT",
-          taskKey,
-          payload: { observation_id: staged.observationId },
-          maxAttempts: 8,
-          producer: "parse_emails",
-          stageVersion: "posting_fetch_v1",
-          requestId: taskKey,
-        },
-        client,
-        { context: ctx },
-      );
+      const fetchTask = await enqueueAlertFetchTask(client, ctx, { observationId: staged.observationId, producer: "parse_emails" });
+      // An archived job takes no new work; every other non-lead observation must have its fetch task.
+      if (!fetchTask.skippedBecauseArchived) observationsNeedingFetch.push(staged.observationId);
     }
+    // A staged observation without its fetch task could never become a complete posting: roll the alert back.
+    await assertObservationsHaveFetchTask(client, ctx.workspaceId, observationsNeedingFetch);
 
     // One status update per alert instead of one database round trip per card.
     const leadIds = new Set(leadObservationIds);
@@ -487,7 +484,7 @@ if (process.argv[1] && process.argv[1].includes("parse_emails")) {
   if (args) {
     void parseEmails(args)
       .then((summary) => {
-        if (summary.failedEmails > 0 || summary.noVacancyFunnelBroken) process.exitCode = 1;
+        if (parseEmailsExitCode(summary) !== 0) process.exitCode = 1;
       })
       .catch((error) => {
         console.error("Fatal email discovery failure:", error instanceof Error ? error.message : "unknown error");
