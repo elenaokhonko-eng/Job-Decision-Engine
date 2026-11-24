@@ -38,7 +38,17 @@ const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 // v2.5.0: HEALTH_BIO_PHARMA sector requirement (job scope or employer description, a matched
 // sector counts as domain evidence), benefits-clause stripping, industry-list stripping and the
 // uncovered-sector exclusion with covered-sector override and AI/data exemption.
-export const LANE_ROUTER_RULE_VERSION = "lane_router_v2.5.0";
+// v2.6.0: leadership words (director, manager, programme, lead, head) join the CORE_AI_DATA title
+// list (the product lane keeps its own title family), and a lane whose function score is zero only
+// because no function concept or title word matched is granted at Low confidence when its
+// semantic score is at least FUNCTION_WAIVER_MARGIN above the lane threshold (never for
+// INVESTIGATIONS_ENFORCEMENT, and never past a role-family, cybersecurity, non-technical-project,
+// negative-concept, excluded-sector or domain veto).
+export const LANE_ROUTER_RULE_VERSION = "lane_router_v2.6.0";
+
+/** Semantic margin above the lane threshold that lets a zero function score lower confidence instead of vetoing. */
+export const FUNCTION_WAIVER_MARGIN = 0.1;
+const LEADERSHIP_TITLE = /\b(?:director|manager|programme|program|lead|head)\b/i;
 
 
 // ── Cosine similarity ─────────────────────────────────────────────────────────
@@ -1176,6 +1186,7 @@ export function hasNonTechnicalRoleFamily(title: string): boolean {
 export function hasCoreTechnicalFunction(title: string): boolean {
   const value = String(title || "").toLowerCase();
   if (!value || hasNonTechnicalRoleFamily(value)) return false;
+  if (LEADERSHIP_TITLE.test(value)) return true;
 
   return /\b(?:software|data|machine\s+learning|ml|ai|platform|cloud|devops|sre|site\s+reliability|backend|back-end|frontend|front-end|full[- ]stack|engineering|engineer|developer|architect|scientist|researcher|research\s+fellow|quantitative|bioinformatics|mlops|technical\s+(?:product|program|programme|project|delivery|lead)|tech\s+lead|technology\s+(?:lead|manager)|automation|cyber\s+security|security\s+engineer)\b/i.test(value);
 }
@@ -1735,6 +1746,7 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
   const scoreMap: Record<string, number> = {};
   const domainScoreMap: Record<string, number> = {};
   const functionScoreMap: Record<string, number> = {};
+  const functionWaivable: Record<string, boolean> = {};
   const lanePreferenceAdjustments: Record<string, number> = {};
   const lanePreferenceEvidence: Record<string, readonly string[]> = {};
   const laneEvidence: string[] = [];
@@ -1778,8 +1790,17 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
     functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, title)
       || hasCybersecurityFocus(title, scopeText)
       || (laneKey === "TECHNICAL_PRODUCT_TRANSFORMATION" && hasNonTechnicalProjectSubject(title, scopeText))
+      // A leadership title is approved for CORE_AI_DATA only when the role's subject is technical.
+      || (laneKey === "CORE_AI_DATA" && LEADERSHIP_TITLE.test(title) && hasNonTechnicalProjectSubject(title, scopeText))
       ? 0
       : conceptScopeScore(scopeText, laneDef.required_function_concepts);
+    // A zero function score is waivable only when no hard function veto applies: a non-technical
+    // role family, cybersecurity work or a non-technical project subject. The investigation lane's
+    // title family is its defining function and is never waived.
+    functionWaivable[laneKey] = laneKey !== "INVESTIGATIONS_ENFORCEMENT"
+      && !hasNonTechnicalRoleFamily(title)
+      && !hasCybersecurityFocus(title, scopeText)
+      && !hasNonTechnicalProjectSubject(title, scopeText);
     if (score > bestScore) {
       bestScore = score;
     }
@@ -1798,12 +1819,22 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
     enabled: preferenceEnabled(laneKey),
     negativeExcluded: applyNegativeExclusion(exclusionText, laneDef),
   }));
-  const qualifyingPrimary = primaryCandidates
+  const domainPassing = primaryCandidates
     .filter((c) => c.enabled)
     .filter((c) => c.score >= c.threshold)
     .filter((c) => c.domainScore >= (c.laneDef.minimum_domain_score ?? 0))
-    .filter((c) => c.functionScore >= (c.laneDef.minimum_function_score ?? 0))
     .filter((c) => !c.negativeExcluded);
+  const fullyQualifying = domainPassing.filter((c) => c.functionScore >= (c.laneDef.minimum_function_score ?? 0));
+  // Lanes granted only through the function waiver compete only when no lane qualifies outright,
+  // so the waiver can add a lane to a job but never moves a job off a lane it already earns.
+  const waivedCandidates = fullyQualifying.length > 0
+    ? []
+    : domainPassing.filter((c) =>
+        c.functionScore < (c.laneDef.minimum_function_score ?? 0)
+        && functionWaivable[c.laneKey] === true
+        && c.score >= c.threshold + FUNCTION_WAIVER_MARGIN);
+  const waivedLaneKeys = new Set(waivedCandidates.map((c) => c.laneKey));
+  const qualifyingPrimary = fullyQualifying.length > 0 ? fullyQualifying : [...waivedCandidates];
 
   // Sector rule: when the winning sector lane qualifies, it also takes precedence over the
   // generic CORE_AI_DATA lane. TECHNICAL_PRODUCT_TRANSFORMATION (a role-family lane) is unaffected.
@@ -1864,7 +1895,9 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
   const laneConfidence: LaneRoutingConfidence =
     bestLane === "UNCLASSIFIED"
       ? "None"
-      : bestScore >= selectedThreshold + 0.2
+      : waivedLaneKeys.has(bestLane)
+        ? "Low"
+        : bestScore >= selectedThreshold + 0.2
         ? "High"
         : bestScore >= selectedThreshold + 0.1
           ? "Medium"
@@ -1925,6 +1958,9 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
       ? [...laneEvidence, "NO_ACTIVE_LANE_MATCH"]
       : [
           ...laneEvidence,
+          ...(waivedLaneKeys.has(bestLane)
+            ? [`${bestLane}:function_waived;semantic_margin=${(bestScore - selectedThreshold).toFixed(3)}`]
+            : []),
           `${bestLane}:domain_score=${(domainScoreMap[bestLane] ?? 0).toFixed(3)}`,
           `${bestLane}:function_score=${(functionScoreMap[bestLane] ?? 0).toFixed(3)}`,
           ...(sectorEvidenceByLane[bestLane]?.kind === "SECTOR"
