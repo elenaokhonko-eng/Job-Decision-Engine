@@ -347,6 +347,20 @@ describe.skipIf(skipReal)("migration 122: deterministic ranking composite (Postg
   });
 
   it("shows a job without a current AI evaluation in the Top 10 flagged AI notes pending, and AI labels as display-only", async () => {
+    // Diagnostic split: if the Top 10 is empty, say whether the snapshots or the read-model prerequisites are at fault.
+    const diagnostics = await upgradePool.query<{ is_top_ten_ready: boolean; ranking_confidence: string; readiness: string | null; apply_now: boolean }>(
+      `SELECT snapshot.is_top_ten_ready, snapshot.ranking_confidence::text,
+              (SELECT readiness.readiness_status FROM v_application_readiness_current readiness
+                WHERE readiness.workspace_id = snapshot.workspace_id AND readiness.canonical_job_id = snapshot.canonical_job_id) AS readiness,
+              EXISTS (SELECT 1 FROM v_apply_now_jobs_scoped apply_now
+                       WHERE apply_now.workspace_id = snapshot.workspace_id AND apply_now.canonical_job_id = snapshot.canonical_job_id) AS apply_now
+         FROM job_ranking_snapshots snapshot
+        WHERE snapshot.workspace_id = $1 AND snapshot.ranking_policy_version = $2`,
+      [workspace.workspaceId, await latestPolicyVersion(upgradePool, workspace.workspaceId)],
+    );
+    expect(diagnostics.rows, "new-policy snapshots, readiness and Apply Now membership").toEqual(
+      Array.from({ length: 3 }, () => ({ is_top_ten_ready: true, ranking_confidence: "100.00", readiness: "READY", apply_now: true })),
+    );
     const { rows } = await upgradePool.query<{
       canonical_job_id: string; ai_evaluation_id: string | null; ai_notes_pending: boolean;
       ai_label_autonomy_score: string | null; ai_label_evidence: Array<{ signal: string; quote: string | null }>;

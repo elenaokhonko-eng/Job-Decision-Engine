@@ -402,7 +402,7 @@ WITH current_rankings AS (
    AND decision.match_run_id = match_run.id
    AND decision.context_fingerprint IS NOT NULL
   LEFT JOIN LATERAL (
-    SELECT evaluation.*
+    SELECT evaluation.id
     FROM ai_evaluations AS evaluation
     WHERE evaluation.workspace_id = job.workspace_id
       AND evaluation.canonical_job_id = job.id
@@ -426,7 +426,27 @@ WITH current_rankings AS (
   -- the one without. A job therefore stays in the Top 10 between its evaluation completing and the next
   -- materializer run (it never has zero rows in that window).
   JOIN LATERAL (
-    SELECT snapshot.*
+    SELECT
+      snapshot.id,
+      snapshot.ai_evaluation_id,
+      snapshot.ranking_policy_version,
+      snapshot.context_fingerprint,
+      snapshot.overall_rank_score,
+      snapshot.ranking_confidence,
+      snapshot.is_top_ten_ready,
+      snapshot.policy_recheck_required,
+      snapshot.computed_at,
+      snapshot.requirement_fit_score,
+      snapshot.requirement_coverage_score,
+      snapshot.evidence_completeness_score,
+      snapshot.lane_confidence_score,
+      snapshot.autonomy_score,
+      snapshot.politics_risk_score,
+      snapshot.sensory_workload_risk_score,
+      snapshot.strategic_value_score,
+      snapshot.focus_protection_score,
+      snapshot.building_ratio_score,
+      snapshot.interaction_burden_score
     FROM job_ranking_snapshots AS snapshot
     WHERE snapshot.workspace_id = job.workspace_id
       AND snapshot.canonical_job_id = job.id
