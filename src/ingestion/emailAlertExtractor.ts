@@ -3,6 +3,7 @@ import { simpleParser } from "mailparser";
 import { decodeHTML } from "entities";
 import { isUnknownEmployerName, MAX_EMPLOYER_NAME_CHARS } from "./postingIdentity.js";
 import { linkedInJobIdFromUrl } from "./searchApi/searchApiClient.js";
+import { aggregatorHostOf, type AlertLeadKind } from "./aggregatorHosts.js";
 
 const MAX_EMAIL_BYTES = 10 * 1024 * 1024;
 const MAX_MIME_PARTS = 256;
@@ -350,7 +351,7 @@ function isImageAssetUrl(url: URL): boolean {
 }
 
 type LinkClassification =
-  | { readonly kind: "JOB"; readonly key: string; readonly canonicalUrl: string }
+  | { readonly kind: "JOB"; readonly key: string; readonly canonicalUrl: string; readonly lead: boolean }
   | { readonly kind: "NON_JOB" };
 
 /**
@@ -373,20 +374,44 @@ function classifyLink(url: string, text: string, context: string): LinkClassific
   if (isLinkedInHost(parsed.hostname)) {
     const jobId = /\/(?:comm\/)?jobs\/view\//i.test(parsed.pathname) ? linkedInJobIdFromUrl(parsed.toString()) : null;
     if (!jobId) return { kind: "NON_JOB" };
-    return { kind: "JOB", key: "linkedin:" + jobId, canonicalUrl: "https://www.linkedin.com/jobs/view/" + jobId };
+    return { kind: "JOB", key: "linkedin:" + jobId, canonicalUrl: "https://www.linkedin.com/jobs/view/" + jobId, lead: true };
   }
   // MyCareersFuture alerts also link the home page, search results, "Remove this
   // job alert" and feedback; only /job/<category>/<slug> names one posting.
   if (isMyCareersFutureHost(parsed.hostname)) {
     if (!/^\/job\/[^/]+\/[^/]+\/?$/i.test(parsed.pathname)) return { kind: "NON_JOB" };
     const canonicalUrl = "https://www.mycareersfuture.gov.sg" + parsed.pathname.replace(/\/$/, "");
-    return { kind: "JOB", key: "url:" + canonicalUrl, canonicalUrl };
+    return { kind: "JOB", key: "url:" + canonicalUrl, canonicalUrl, lead: true };
   }
   if (isCareerSiteNavigation(parsed, text)) return { kind: "NON_JOB" };
   if (isNavigationOrTrackingLink(url, text) || !isLikelyVacancyLink(url, text, context)) return { kind: "NON_JOB" };
+  // Another aggregator's posting is a lead. An employer's alert must link one full posting: a careers landing
+  // page, a search page or a bare company page is not a posting.
+  const lead = aggregatorHostOf(parsed.hostname) !== null;
+  if (!lead && !isFullPostingUrl(parsed)) return { kind: "NON_JOB" };
   // A click-tracking wrapper is not the posting's identity; stage the destination.
   const canonicalUrl = withoutCampaignParameters(/(?:^|\.)awstrack\.me$/i.test(new URL(url).hostname) ? parsed.toString() : url);
-  return { kind: "JOB", key: "url:" + canonicalUrl, canonicalUrl };
+  return { kind: "JOB", key: "url:" + canonicalUrl, canonicalUrl, lead };
+}
+
+/** Path segments that name a posting collection; a posting link continues past one of them with a slug or id. */
+const POSTING_COLLECTION_SEGMENT = /^(?:jobs?|positions?|openings?|roles?|vacanc(?:y|ies)|requisitions?|opportunit(?:y|ies)|postings?)$/i;
+const ATS_HOST = /(?:^|\.)(?:lever\.co|greenhouse\.io|ashbyhq\.com|myworkdayjobs\.com|smartrecruiters\.com|workable\.com|recruitee\.com|teamtailor\.com)$/i;
+const UUID_SEGMENT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Whether an employer link names exactly one posting (a full posting link): it carries a posting identifier
+ * (a numeric id, a UUID, a requisition-id parameter), or sits on an applicant-tracking host below the company
+ * board, or continues past a jobs/positions/openings segment with a slug. A careers home, a landing page or a
+ * search page is not one.
+ */
+export function isFullPostingUrl(url: URL): boolean {
+  if (hasPostingIdentifier(url)) return true;
+  const segments = url.pathname.split("/").filter(Boolean);
+  if (segments.some((segment) => UUID_SEGMENT.test(segment))) return true;
+  if (ATS_HOST.test(url.hostname)) return segments.length >= 2 && !isCareersLandingPath(url.pathname);
+  const collection = segments.findIndex((segment) => POSTING_COLLECTION_SEGMENT.test(segment));
+  return collection >= 0 && segments.slice(collection + 1).some((segment) => !/^(?:search|all|list|results?|[a-z]{2}(?:[-_][a-z]{2,4})?)$/i.test(segment));
 }
 
 function isLikelyVacancyLink(urlValue: string, text: string, context: string): boolean {
@@ -576,6 +601,8 @@ interface CardGroup {
   linkCount: number;
   /** True for a LinkedIn `/jobs/view/<id>` card. */
   readonly linkedIn: boolean;
+  /** True for an aggregator posting (a lead, not a company posting). */
+  readonly lead: boolean;
   /** Offset of the job's first HTML anchor, or null when it was only linked from plain text. */
   htmlStart: number | null;
   /** Decoded alt texts of images inside the job's anchors (the LinkedIn company logo). */
@@ -617,6 +644,8 @@ function anchorImageAlts(innerHtml: string): string[] {
 export interface EmailLinkSummary {
   readonly linksSeen: number;
   readonly jobCards: number;
+  /** Of `jobCards`, the cards that are aggregator leads rather than company postings. */
+  readonly leadCards: number;
   readonly nonJobLinksSkipped: number;
   readonly duplicateLinksCollapsed: number;
 }
@@ -628,6 +657,8 @@ export interface CollapsedEmailJobCard extends EmailJobCard {
   readonly linkCount: number;
   /** Where `companyName` came from; null when it is "" (unknown). */
   readonly companySource: DiscoveredCompanySource | null;
+  /** COMPANY_POSTING: a full posting link on the employer's own site. AGGREGATOR_LEAD: a lead from an aggregator. */
+  readonly leadKind: AlertLeadKind;
 }
 
 function isKnownTitle(title: string): boolean {
@@ -669,6 +700,7 @@ function mergeCardGroup(group: CardGroup, senderName: string): CollapsedEmailJob
     descriptionRaw: evidence.context || evidence.text || "Posting link discovered in Gmail alert; employer content retrieval is pending.",
     linkCount: group.linkCount,
     companySource: cardCompany ? "EMAIL_CARD" : senderCompany ? "EMAIL_SENDER" : null,
+    leadKind: group.lead ? "AGGREGATOR_LEAD" : "COMPANY_POSTING",
   };
 }
 
@@ -722,6 +754,7 @@ export async function extractEmailJobCardsWithLinkSummary(
       occurrences: [{ text: visibleText, context }],
       linkCount: 1,
       linkedIn: classification.key.startsWith("linkedin:"),
+      lead: classification.lead,
       htmlStart: anchor ? anchor.index : null,
       imageAlts: imageAlts.slice(0, MAX_IMAGE_ALTS_PER_CARD),
       cardLines: [],
@@ -760,11 +793,17 @@ export async function extractEmailJobCardsWithLinkSummary(
   const cards = [...groups.values()].map((group) => mergeCardGroup(group, bodies.senderName));
   return {
     cards,
-    links: { linksSeen, jobCards: cards.length, nonJobLinksSkipped, duplicateLinksCollapsed },
+    links: {
+      linksSeen,
+      jobCards: cards.length,
+      leadCards: cards.filter((card) => card.leadKind === "AGGREGATOR_LEAD").length,
+      nonJobLinksSkipped,
+      duplicateLinksCollapsed,
+    },
   };
 }
 
 export async function extractEmailJobCards(raw: string): Promise<EmailJobCard[]> {
   const { cards } = await extractEmailJobCardsWithLinkSummary(raw);
-  return cards.map(({ linkCount: _linkCount, companySource: _companySource, ...card }) => card);
+  return cards.map(({ linkCount: _linkCount, companySource: _companySource, leadKind: _leadKind, ...card }) => card);
 }

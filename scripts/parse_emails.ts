@@ -11,6 +11,7 @@ import {
 } from "../src/ingestion/emailAlertExtractor.js";
 import { ExtractedJobSchema, SCHEMA_VERSION } from "../src/contracts/index.js";
 import { enqueuePipelineTask } from "../src/tasks/pipelineTasks.js";
+import { blockLeadObservations } from "../src/ingestion/leadStaging.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import {
@@ -30,7 +31,10 @@ const GmailDiscoveryCardSchema = ExtractedJobSchema.extend({ company_name: z.str
 
 export interface ParseEmailsSummary {
   parsedEmails: number;
+  /** Vacancy links staged as observations: company postings plus aggregator leads. */
   extractedJobs: number;
+  /** Of `extractedJobs`, the aggregator leads (FETCH_BLOCKED, no fetch task, never a job on their own). */
+  leadObservations: number;
   failedEmails: number;
   /**
    * Alerts that decoded but contain no vacancy link (e.g. a non-job email filed under the alerts label).
@@ -76,7 +80,7 @@ export function isNoVacancyFunnelBroken(parsedEmails: number, noVacancyEmails: n
 }
 
 type EmailOutcome =
-  | { readonly kind: "STAGED"; readonly links: number; readonly linkSummary: EmailLinkSummary }
+  | { readonly kind: "STAGED"; readonly links: number; readonly leads: number; readonly linkSummary: EmailLinkSummary }
   | { readonly kind: "NO_VACANCY"; readonly linkSummary: EmailLinkSummary }
   | { readonly kind: "BLOCKED"; readonly code: string; readonly linkSummary: EmailLinkSummary | null }
   | { readonly kind: "FAILED"; readonly linkSummary: EmailLinkSummary };
@@ -167,6 +171,7 @@ async function stageEmail(
   try {
     await client.query("BEGIN");
     const observationIds: string[] = [];
+    const leadObservationIds: string[] = [];
     for (const card of cards) {
       const messageIdentity = String(email.gmail_message_id || alertId);
       const sourceExternalId = "gmail-" + messageIdentity + "-" + stableLinkId(card.sourceUrl);
@@ -212,6 +217,7 @@ async function stageEmail(
           gmailMessageId,
           rawPayload: {
             source_content_status: "DISCOVERY_ONLY",
+            ...(card.leadKind === "AGGREGATOR_LEAD" ? { lead_kind: card.leadKind } : {}),
             raw_email_alert_id: alertId,
             gmail_message_id: gmailMessageId,
             source_url: card.sourceUrl,
@@ -226,6 +232,7 @@ async function stageEmail(
         {
           ...job,
           source_content_status: "DISCOVERY_ONLY",
+          ...(card.leadKind === "AGGREGATOR_LEAD" ? { lead_kind: card.leadKind } : {}),
           raw_email_alert_id: alertId,
           gmail_message_id: gmailMessageId,
           source_url: card.sourceUrl,
@@ -239,6 +246,14 @@ async function stageEmail(
         throw new Error("Gmail discovery observation did not receive a durable id.");
       }
       observationIds.push(staged.observationId);
+
+      // An aggregator alert is a lead, not a job: its page cannot be fetched, so there is no fetch task and the
+      // observation waits as FETCH_BLOCKED. It becomes a job only when the employer's own posting is resolved
+      // and verified open, or a saved-jobs export supplies the full text (linkedInSavedImport reactivates it).
+      if (card.leadKind === "AGGREGATOR_LEAD") {
+        leadObservationIds.push(staged.observationId);
+        continue;
+      }
 
       const taskKey = "FETCH_JOB_CONTENT:" + staged.observationId + ":posting_fetch_v1";
       await enqueuePipelineTask(
@@ -257,7 +272,8 @@ async function stageEmail(
     }
 
     // One status update per alert instead of one database round trip per card.
-    const distinctIds = [...new Set(observationIds)];
+    const leadIds = new Set(leadObservationIds);
+    const distinctIds = [...new Set(observationIds)].filter((id) => !leadIds.has(id));
     const pending = await client.query(
       "UPDATE raw_job_observations SET processing_status = 'FETCH_PENDING' WHERE workspace_id = $1 AND id = ANY($2::uuid[])",
       [ctx.workspaceId, distinctIds],
@@ -267,13 +283,14 @@ async function stageEmail(
         `Gmail discovery marked ${pending.rowCount ?? 0} of ${distinctIds.length} observations FETCH_PENDING.`,
       );
     }
+    await blockLeadObservations(client, ctx.workspaceId, [...leadIds]);
 
     await client.query(
       "UPDATE raw_email_alerts SET processed = TRUE, lifecycle_status = 'SOURCE_PENDING', last_error = NULL WHERE workspace_id = $1 AND id = $2",
       [ctx.workspaceId, alertId],
     );
     await client.query("COMMIT");
-    return { kind: "STAGED", links: observationIds.length, linkSummary: extractedLinks };
+    return { kind: "STAGED", links: observationIds.length, leads: leadIds.size, linkSummary: extractedLinks };
   } catch (error) {
     await client.query("ROLLBACK");
     const message = error instanceof Error ? error.message : String(error);
@@ -347,6 +364,7 @@ export async function parseEmails(
   let batches = 0;
   let parsedEmails = 0;
   let extractedJobs = 0;
+  let leadObservations = 0;
   let failedEmails = 0;
   let noVacancyEmails = 0;
   let deferredEmails = 0;
@@ -390,6 +408,7 @@ export async function parseEmails(
       if (outcome.kind === "STAGED") {
         parsedEmails += 1;
         extractedJobs += outcome.links;
+        leadObservations += outcome.leads;
         detail = `staged ${outcome.links} vacancy link(s)`;
       } else if (outcome.kind === "NO_VACANCY") {
         noVacancyEmails += 1;
@@ -423,7 +442,7 @@ export async function parseEmails(
         : "No eligible email alerts found.",
     );
     return {
-      parsedEmails: 0, extractedJobs: 0, failedEmails: 0, noVacancyEmails: 0, noVacancyFunnelBroken: false,
+      parsedEmails: 0, extractedJobs: 0, leadObservations: 0, failedEmails: 0, noVacancyEmails: 0, noVacancyFunnelBroken: false,
       linksSeen: 0, nonJobLinksSkipped: 0, duplicateLinksCollapsed: 0,
       batches: 0, deferredEmails: 0, remainingBacklog, stoppedForRuntimeBudget,
     };
@@ -446,13 +465,13 @@ export async function parseEmails(
     );
   }
   log(
-    "Email discovery complete. Parsed alerts: " + parsedEmails + ", vacancy links staged: " + extractedJobs +
+    "Email discovery complete. Parsed alerts: " + parsedEmails + ", vacancy links staged: " + extractedJobs + " (aggregator leads: " + leadObservations + ")" +
     ", alerts without vacancies: " + noVacancyEmails + ", failed alerts: " + failedEmails + ", links seen: " + linksSeen + ", non-job links skipped: " + nonJobLinksSkipped +
     ", duplicate links collapsed: " + duplicateLinksCollapsed + ", batches: " + batches + ", unprocessed alerts remaining: " + remainingBacklog +
     ", elapsed: " + elapsed(),
   );
   return {
-    parsedEmails, extractedJobs, failedEmails, noVacancyEmails, noVacancyFunnelBroken, linksSeen, nonJobLinksSkipped, duplicateLinksCollapsed,
+    parsedEmails, extractedJobs, leadObservations, failedEmails, noVacancyEmails, noVacancyFunnelBroken, linksSeen, nonJobLinksSkipped, duplicateLinksCollapsed,
     batches, deferredEmails, remainingBacklog, stoppedForRuntimeBudget,
   };
 }

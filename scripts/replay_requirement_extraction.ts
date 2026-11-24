@@ -1,5 +1,5 @@
 /**
- * Replay of requirement extraction (`deterministic_v4`) on a STAGING branch.
+ * Replay of requirement extraction (the current `DETERMINISTIC_EXTRACTOR_VERSION`) on a STAGING branch.
  *
  * Re-extracts requirements for the saved jobs and the non-fit jobs, publishes the new
  * requirement embeddings, re-matches and re-decides, then prints the ranking measurement
@@ -12,6 +12,10 @@
  *    and never a known production host or branch.
  *  - Without --apply nothing is written: it prints the plan and the "before" measurement.
  *  - Stops if more than 5% of embedding inputs fail.
+ *  - A dropped connection is reconnected and the interrupted chunk is retried (pg 'error' events are handled, never unhandled).
+ *  - Resumes where it stopped: a job whose active requirement set is already on the current extractor version is not re-extracted
+ *    (pass --force-all to re-extract everything). Matching and deciding are idempotent and run for every job in scope.
+ *  - Exits non-zero on ANY failed or incomplete stage (extraction, embeddings, matching, deciding, re-gate) and prints the totals line only on success.
  *  - Spend cap: REPLAY_SPEND_CAP_USD (default 5). The estimate is printed before anything runs and the script stops
  *    (also in the read-only run) when it exceeds the cap. Extraction is deterministic_only (no model call); only embeddings cost money.
  *
@@ -27,6 +31,14 @@ import dotenv from 'dotenv';
 import pg from 'pg';
 
 dotenv.config({ path: '.env.local' });
+
+// Anything that escapes main() must fail the run, never leave a half-finished replay with a success code.
+for (const event of ['uncaughtException', 'unhandledRejection'] as const) {
+  process.on(event, (error) => {
+    console.error(`Replay failed (${event}): ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  });
+}
 
 const replayUrl = process.env.REPLAY_DATABASE_URL?.trim();
 if (!replayUrl) {
@@ -44,7 +56,7 @@ const EMBEDDING_USD_PER_MILLION_TOKENS = 0.15;
 // Re-extraction can find more requirements than are stored today; the estimate is doubled to stay on the safe side.
 const ESTIMATE_SAFETY_FACTOR = 2;
 
-async function estimateReplayCost(client: pg.Client, jobVersionIds: string[]): Promise<{ tokens: number; usd: number }> {
+async function estimateReplayCost(client: { query: pg.Client["query"] }, jobVersionIds: string[]): Promise<{ tokens: number; usd: number }> {
   const { rows } = await client.query<{ chars: string }>(
     `SELECT COALESCE(SUM(LENGTH(requirement_text)), 0)::text AS chars FROM job_requirements WHERE job_version_id = ANY($1::uuid[])`,
     [jobVersionIds],
@@ -53,6 +65,7 @@ async function estimateReplayCost(client: pg.Client, jobVersionIds: string[]): P
   return { tokens, usd: (tokens / 1_000_000) * EMBEDDING_USD_PER_MILLION_TOKENS };
 }
 const MAX_EMBEDDING_FAILURE_SHARE = 0.05;
+const MAX_CHUNK_RETRIES = 3;
 
 async function main(): Promise<void> {
   const apply = process.argv.includes('--apply');
@@ -67,10 +80,19 @@ async function main(): Promise<void> {
   const { loadCandidateJobs, loadSavedObservations } = await import('../src/reporting/rankingMeasurementQueries.js');
   const { formatReport } = await import('./measure_ranking.js');
 
-  const client = new pg.Client(pgConnectionConfig(replayUrl!));
+  const {
+    ResilientClient, attachPoolErrorHandler, retryOnConnectionLoss,
+    emptyReplayTotals, assessReplay, loadJobsOnExtractorVersion, countGatePassedLeftBeforeMatching,
+    runReplayChunk, addChunkTotals, assertFirstChunkReachedMatcher,
+  } = await import('../src/reporting/replayResilience.js');
+  const { DETERMINISTIC_EXTRACTOR_VERSION } = await import('../src/requirements/deterministicExtractors.js');
+
+  // A client that handles its 'error' events and reconnects after a dropped connection.
+  const client = new ResilientClient(() => new pg.Client(pgConnectionConfig(replayUrl!)));
   await client.connect();
   // The stage runners take a pool (they check out their own connection), not a connected client.
   const pool = new pg.Pool({ ...pgConnectionConfig(replayUrl!), max: 4 });
+  attachPoolErrorHandler(pool);
   try {
     const identity = await client.query<{ database_name: string | null; branch_id: string | null }>(
       `SELECT current_database() AS database_name, current_setting('neon.branch_id', TRUE) AS branch_id`,
@@ -97,14 +119,17 @@ async function main(): Promise<void> {
     const workspace = await resolveWorkspaceContext(client as never);
 
     const measure = async (label: string): Promise<void> => {
-      await client.query('BEGIN READ ONLY');
-      try {
-        const saved = await loadSavedObservations(client as never, workspace.workspaceId, LINKEDIN_SAVED_SOURCE_NAME);
-        const candidates = await loadCandidateJobs(client as never, workspace.workspaceId);
-        console.log(`\n===== ${label} =====\n${formatReport(buildMeasurementReport(saved, candidates))}`);
-      } finally {
-        await client.query('ROLLBACK');
-      }
+      // A drop inside the read-only transaction loses it; the whole unit is retried on a fresh connection.
+      await retryOnConnectionLoss(async () => {
+        await client.query('BEGIN READ ONLY');
+        try {
+          const saved = await loadSavedObservations(client as never, workspace.workspaceId, LINKEDIN_SAVED_SOURCE_NAME);
+          const candidates = await loadCandidateJobs(client as never, workspace.workspaceId);
+          console.log(`\n===== ${label} =====\n${formatReport(buildMeasurementReport(saved, candidates))}`);
+        } finally {
+          await client.query('ROLLBACK').catch(() => undefined);
+        }
+      });
     };
 
     // --regate (needs --apply): run the hard gates again on every live job with the current rules, before the scope is
@@ -158,7 +183,7 @@ async function main(): Promise<void> {
     console.log(
       `Replay scope: ${scope.length} jobs (${scope.filter((r) => r.saved).length} saved, ${scope.filter((r) => r.live_pass && !r.saved).length} live gate-passed, ${scope.filter((r) => !r.saved && !r.live_pass).length} non-fit)`,
     );
-    const estimate = await estimateReplayCost(client, scope.map((row) => row.job_version_id));
+    const estimate = await estimateReplayCost(client as never, scope.map((row) => row.job_version_id));
     console.log(`Cost estimate (embeddings only; extraction makes no model call): ~${estimate.tokens.toLocaleString('en-US')} tokens, about US$${estimate.usd.toFixed(2)} (cap US$${spendCapUsd.toFixed(2)})`);
     if (estimate.usd > spendCapUsd) {
       throw new Error(`Estimated cost US$${estimate.usd.toFixed(2)} exceeds the cap US$${spendCapUsd.toFixed(2)}. Stopping before any write.`);
@@ -175,54 +200,67 @@ async function main(): Promise<void> {
     const { runDeterministicMatcher } = await import('../src/pipeline/deterministicMatcher.js');
     const { runRecommendationDecider } = await import('../src/pipeline/recommendationDecider.js');
 
-    const totals = { routed: 0, extracted: 0, extractionErrors: 0, embeddingsOk: 0, embeddingsFailed: 0, matched: 0, matchErrors: 0, decisionErrors: 0 };
+    const totals = emptyReplayTotals();
+    // Resume: jobs already on the current extractor version are not re-extracted (their embeddings stay valid).
+    const forceAll = process.argv.includes('--force-all');
+    const alreadyExtracted = rematchOnly || forceAll
+      ? new Set<string>()
+      : await loadJobsOnExtractorVersion(client, workspace.workspaceId, scope.map((row) => row.canonical_job_id), DETERMINISTIC_EXTRACTOR_VERSION);
+    totals.resumedSkipped = alreadyExtracted.size;
+    let extractionDiscovered = 0;
+    if (alreadyExtracted.size > 0) {
+      console.log(`Resuming: ${alreadyExtracted.size} of ${scope.length} jobs are already on ${DETERMINISTIC_EXTRACTOR_VERSION} and are not re-extracted (--force-all to redo them).`);
+    }
+
     for (let at = 0; at < scope.length; at += CHUNK) {
       const chunk = scope.slice(at, at + CHUNK);
-      const jobVersionIds = chunk.map((row) => row.job_version_id);
       const canonicalJobIds = chunk.map((row) => row.canonical_job_id);
+      const toExtract = chunk.filter((row) => !alreadyExtracted.has(row.canonical_job_id));
 
-      if (!rematchOnly) {
-      const extraction = await runRequirementsExtraction(pool as never, {
-        context: workspace,
-        jobVersionIds,
-        reprocess: true,
-        ignoreRetryWindow: true,
-        quotedMode: 'deterministic_only',
-        limit: CHUNK,
-      });
-      totals.extracted += extraction.processed;
-      totals.extractionErrors += extraction.errors;
-
-      const embeddings = await runEmbeddingBatchWithFallback(2000, pool as never, { context: workspace, jobVersionIds });
-      totals.embeddingsOk += embeddings.primary.succeeded;
-      totals.embeddingsFailed += embeddings.primary.failed;
-      }
+      const { runLaneRouting } = await import('../src/pipeline/laneRouter.js');
+      const result = await runReplayChunk(
+        {
+          extract: (ids) => runRequirementsExtraction(pool as never, {
+            context: workspace,
+            jobVersionIds: ids,
+            reprocess: true,
+            ignoreRetryWindow: true,
+            quotedMode: 'deterministic_only',
+            limit: CHUNK,
+          }),
+          embed: async (ids) => (await runEmbeddingBatchWithFallback(2000, pool as never, { context: workspace, jobVersionIds: ids })).primary,
+          // A re-gate leaves jobs before lane routing; the matcher only takes routed jobs. Route again with the active lane revisions.
+          route: regate ? (ids) => runLaneRouting(pool as never, { context: workspace, canonicalJobIds: ids, limit: CHUNK, reprocessExisting: true }) : undefined,
+          match: (ids) => runDeterministicMatcher(pool as never, { context: workspace, canonicalJobIds: ids }),
+          decide: (ids) => runRecommendationDecider(pool as never, { context: workspace, canonicalJobIds: ids }),
+        },
+        { canonicalJobIds, jobVersionIds: chunk.map((row) => row.job_version_id), extractJobVersionIds: toExtract.map((row) => row.job_version_id) },
+        { rematchOnly, maxRetries: MAX_CHUNK_RETRIES },
+      );
+      totals.chunksRetried += result.retries;
+      extractionDiscovered += result.extractionDiscovered;
+      addChunkTotals(totals, result.totals);
 
       const attempted = totals.embeddingsOk + totals.embeddingsFailed;
       if (attempted > 0 && totals.embeddingsFailed / attempted > MAX_EMBEDDING_FAILURE_SHARE) {
         throw new Error(`Stopping: ${totals.embeddingsFailed} of ${attempted} embedding inputs failed (limit ${MAX_EMBEDDING_FAILURE_SHARE * 100}%).`);
       }
-
-      if (regate) {
-        // A re-gate leaves jobs before lane routing; the matcher only takes routed jobs. Route again with the active lane revisions.
-        const { runLaneRouting } = await import('../src/pipeline/laneRouter.js');
-        const routing = await runLaneRouting(pool as never, { context: workspace, canonicalJobIds, limit: CHUNK, reprocessExisting: true });
-        totals.routed += routing.routed;
-      }
-
-      const matching = await runDeterministicMatcher(pool as never, { context: workspace, canonicalJobIds });
-      totals.matched += matching.matchedJobs;
-      // Broken-funnel guard: a first chunk that matches nothing means the jobs never reached the matcher.
-      if (at === 0 && totals.matched === 0) throw new Error('The first chunk matched 0 jobs: they did not reach the matcher. Stopping.');
-      totals.matchErrors += matching.errors;
-      const decisions = await runRecommendationDecider(pool as never, { context: workspace, canonicalJobIds });
-      totals.decisionErrors += decisions.errors;
+      assertFirstChunkReachedMatcher(totals, at === 0);
       console.error(`Replayed ${Math.min(at + CHUNK, scope.length)}/${scope.length}`);
     }
-    console.log(`\nReplay totals: ${JSON.stringify(totals)}`);
-    await measure('AFTER (deterministic_v4)');
+
+    // Any failed or incomplete stage fails the run (AGENTS.md invariant 7). The totals line is for a complete run only.
+    const failures = assessReplay(totals, { extractionDiscovered, rematchOnly });
+    if (failures.length > 0) {
+      console.error(`Replay totals (INCOMPLETE): ${JSON.stringify(totals)}`);
+      throw new Error(`Replay did not complete: ${failures.join('; ')}.`);
+    }
+    const leftBehind = await countGatePassedLeftBeforeMatching(client, workspace.workspaceId, scope.map((row) => row.canonical_job_id));
+    if (leftBehind > 0) console.error(`WARNING: ${leftBehind} gate-passed job(s) in scope were left before matching (PREQUALIFIED or LANE_ROUTED); not a replay failure, but they have no match.`);
+    console.log(`\nReplay totals: ${JSON.stringify(totals)} (scope ${scope.length}, extracted ${totals.extracted}/${extractionDiscovered} selected, matched ${totals.matched + totals.matchHeldBack})`);
+    await measure(`AFTER (${DETERMINISTIC_EXTRACTOR_VERSION})`);
   } finally {
-    await pool.end();
+    await pool.end().catch(() => undefined);
     await client.end();
   }
 }
