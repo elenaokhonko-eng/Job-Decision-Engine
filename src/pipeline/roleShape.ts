@@ -93,7 +93,11 @@ const PEOPLE_MANAGEMENT_CUES: RegExp[] = [
 ];
 
 /** Cues that say the job is to run people. "performance reviews" and "hire and develop" also appear in individual-contributor postings. */
-const STRONG_PEOPLE_CUES: RegExp[] = [PEOPLE_MANAGEMENT_CUES[0]!, PEOPLE_MANAGEMENT_CUES[1]!, PEOPLE_MANAGEMENT_CUES[2]!, PEOPLE_MANAGEMENT_CUES[3]!];
+const DIRECT_REPORTS_CUE = /\bdirect reports?\b/i;
+const LINE_MANAGEMENT_CUE = /\bline[- ]manag(?:e|er|ement|ing)\b/i;
+const PEOPLE_MANAGEMENT_PHRASE_CUE = /\bpeople[- ]manag(?:e|er|ement|ing)\b/i;
+const TEAM_OF_CUE = /\b(?:manage|lead|build|grow) (?:and (?:lead|develop|grow) )?a (?:global |distributed )?team of\b/i;
+const STRONG_PEOPLE_CUES: RegExp[] = [DIRECT_REPORTS_CUE, LINE_MANAGEMENT_CUE, PEOPLE_MANAGEMENT_PHRASE_CUE, TEAM_OF_CUE];
 
 export const detectPeopleManagementCore: RoleShapeDetector = ({ title, description }) => {
   // Managing a team is the core of the role only when the description says so: two separate cues, or a management title plus
@@ -117,19 +121,25 @@ const CONTRACT_DESCRIPTION =
   /\b(?:(?:\d{1,2}|six|twelve|twelve|nine|three)[- ]months?(?: fixed[- ]term)? contract|fixed[- ]term contract|contract (?:role|position|basis|opportunity)|freelance(?:r)?|independent contractor|contractor position)\b/i;
 
 const CONTRACT_NOT_CONTRACT_BEFORE = /\b(?:not|no|non|isn'?t|is not|without|never)\b[^.\n]{0,24}$/i;
-const CONTRACT_PERMANENT_NEAR = /\b(?:permanent|non[- ]?fixed|open[- ]ended|indefinite)\b/i;
+// "permanent" only counts when it is not negated ("non-permanent", "not permanent"): the lookbehinds keep "non-permanent" a contract.
+const PERMANENT_WORD = String.raw`(?<!non[- ]?)(?<!not )(?<!un)\b(?:permanent|open[- ]ended|indefinite)\b`;
+/** Permanent wording that modifies the contract itself ("permanent contract basis"): directly before the contract phrase. */
+const PERMANENT_BEFORE_CONTRACT = new RegExp(`${PERMANENT_WORD}[\\s,-]*$`, "i");
+const PERMANENT_IN_TYPE = new RegExp(PERMANENT_WORD, "i");
 
 export const detectContractEmployment: RoleShapeDetector = ({ description, employmentType }) => {
   // "Permanent contract" is a permanent job: an employment type that says permanent is not a contract.
-  if (/\b(?:CONTRACT|CONTRACTOR|FIXED[_ -]?TERM|FREELANCE)\b/i.test(employmentType) && !CONTRACT_PERMANENT_NEAR.test(employmentType)) {
+  if (/\b(?:CONTRACT|CONTRACTOR|FIXED[_ -]?TERM|FREELANCE)\b/i.test(employmentType) && !PERMANENT_IN_TYPE.test(employmentType)) {
     return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "EMPLOYMENT_TYPE", quote: employmentType.slice(0, EVIDENCE_QUOTE_MAX) };
   }
   for (const hit of description.matchAll(new RegExp(CONTRACT_DESCRIPTION.source, "gi"))) {
     const index = hit.index ?? 0;
     const before = description.slice(Math.max(0, index - 40), index);
-    const around = description.slice(Math.max(0, index - 40), index + hit[0].length + 40);
-    if (CONTRACT_NOT_CONTRACT_BEFORE.test(before)) continue; // "not a fixed-term contract"
-    if (CONTRACT_PERMANENT_NEAR.test(around)) continue; // "permanent contract basis"
+    // "not a fixed-term contract" is not a contract; "non-permanent" / "not permanent" is a negated permanent, not a negated contract.
+    const beforeWithoutNegatedPermanent = before.replace(/\b(?:non[- ]?|not )(?:permanent|open[- ]ended|indefinite)\b/gi, "");
+    if (CONTRACT_NOT_CONTRACT_BEFORE.test(beforeWithoutNegatedPermanent)) continue;
+    // "permanent contract basis" is a permanent job. "contract role, may convert to permanent" is still a contract.
+    if (PERMANENT_BEFORE_CONTRACT.test(before)) continue;
     return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "DESCRIPTION", quote: excerpt(description, index, hit[0].length) };
   }
   return null;
