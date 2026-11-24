@@ -183,6 +183,7 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     expect(shaped.trace.notes).toContain("role_downrank:CUSTOMER_FACING_DELIVERY");
     // No current match exists for this fixture, so the policy has no scores: the concrete outcome is TRACK (the downrank does not reject or skip).
     expect(shaped.outputs.outcome).toBe("TRACK");
+    expect(shaped.trace.evidence_confidence).toMatchObject({ level: "NORMAL", requirement_count: null });
     const stored = await q(`SELECT recommendation_outcome FROM canonical_jobs WHERE id = $1`, [JOB_ID]);
     expect(stored.rows[0].recommendation_outcome).toBe(shaped.outputs.outcome);
 
@@ -247,6 +248,57 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     expect(notFull.outputs.recommendation_requirement_score).toBeGreaterThanOrEqual(0.75);
     expect(notFull.outputs.outcome).toBe("REVIEW");
     expect(notFull.trace.notes).toContain("priority_downgraded_semantic_pending");
+  });
+
+  it("records LOW confidence for a thin posting, keeps the score, and never leaves PRIORITY standing", async () => {
+    const { runRecommendationDecider } = await import("../../pipeline/recommendationDecider.js");
+    const workspace = await q(`SELECT workspace_id FROM canonical_jobs WHERE id = $1`, [JOB_ID]);
+    const workspaceId = workspace.rows[0].workspace_id;
+    const profile = await q(
+      `INSERT INTO candidate_profiles (workspace_id, profile_key, display_name) VALUES ($1, 'thin_fixture', 'Thin Fixture') RETURNING id`,
+      [workspaceId],
+    );
+    const profileVersion = await q(
+      `INSERT INTO profile_versions (workspace_id, candidate_profile_id, version_number, schema_version, source_hash, status)
+       VALUES ($1, $2, 1, '2.3.0', $3, 'ACTIVE') RETURNING id`,
+      [workspaceId, profile.rows[0].id, "c".repeat(64)],
+    );
+    const identity = await q(
+      `INSERT INTO requirement_set_identities (workspace_id, canonical_job_id, identity_hash, job_content_hash, deterministic_extractor_version, quoted_extractor_version, quoted_prompt_hash, normalizer_hash)
+       VALUES ($1, $2, 'thin-identity', 'h', 'v', 'v', 'p', 'n') RETURNING id`,
+      [workspaceId, JOB_ID],
+    );
+    const set = await q(
+      `INSERT INTO requirement_sets (workspace_id, requirement_identity_id, canonical_job_id, job_version_id, revision_number, source_type)
+       VALUES ($1, $2, $3, $4, 2, 'EXTRACTED') RETURNING id`,
+      [workspaceId, identity.rows[0].id, JOB_ID, VERSION_ID],
+    );
+    await q(`UPDATE job_versions SET active_requirement_set_id = $2 WHERE id = $1`, [VERSION_ID, set.rows[0].id]);
+    const hash = await q(`SELECT content_hash FROM job_versions WHERE id = $1`, [VERSION_ID]);
+    const run = await q(
+      `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, requirement_set_id, job_content_hash, context_fingerprint,
+                               status, requirement_count, matched_count, coverage_score, overall_match_score)
+       VALUES ($1, $2, $3, $4, $5, $6, 'thin-context', 'COMPLETED', 2, 2, 100, 95) RETURNING id`,
+      [workspaceId, JOB_ID, VERSION_ID, profileVersion.rows[0].id, set.rows[0].id, hash.rows[0].content_hash],
+    );
+    await q(
+      `UPDATE canonical_jobs SET latest_match_run_id = $2, deterministic_match_score = 95, deterministic_match_coverage = 100,
+              profile_match_status = 'POSITIVE_MATCH', gate_decision = 'PASS', normalized_title = 'Data Scientist',
+              workplace_type = 'REMOTE', workability_facts = '{"employment_type":"PERMANENT"}'::jsonb WHERE id = $1`,
+      [JOB_ID, run.rows[0].id],
+    );
+    expect((await runRecommendationDecider(client)).errors).toBe(0);
+    const res = await q(`SELECT decision_json FROM deterministic_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [JOB_ID]);
+    const json = typeof res.rows[0].decision_json === "string" ? JSON.parse(res.rows[0].decision_json) : res.rows[0].decision_json;
+    expect(json.trace.evidence_confidence).toMatchObject({ level: "LOW", reason: "THIN_POSTING", requirement_count: 2 });
+    expect(json.trace.notes).toContain("thin_posting_low_confidence");
+    // The score is untouched by thinness; and the outcome is never PRIORITY on two requirements.
+    expect(json.outputs.recommendation_requirement_score).toBeCloseTo(0.95, 2);
+    expect(json.outputs.outcome).not.toBe("PRIORITY");
+    // Two requirements is thin, yet the policy alone would have made this PRIORITY (score, coverage and evidence all above
+    // the thresholds): the cap is what holds it at REVIEW, so it is not dead code.
+    expect(json.trace.notes).toContain("priority_downgraded_thin_posting");
+    expect(json.outputs.outcome).toBe("REVIEW");
   });
 
   it("records the career-track assessment from the active profile's experience_by_track", async () => {

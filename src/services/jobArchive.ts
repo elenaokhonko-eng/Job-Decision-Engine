@@ -72,7 +72,7 @@ const archiveHoldDatabaseRowSchema = z.object({
   release_reason: z.string().nullable(),
 });
 
-interface ArchiveSchemaCapabilities {
+export interface ArchiveSchemaCapabilities {
   readonly archiveColumns: boolean;
   readonly archiveRunTable: boolean;
   readonly archiveHoldTable: boolean;
@@ -229,7 +229,7 @@ function parseVersions(value: unknown): JobArchiveVersionEvidence[] {
  * running pipeline/evaluation lease, manual review, and an active archive hold. `$1` is the run
  * start time; `canonical` is the canonical_jobs alias.
  */
-function protectionColumnsSql(capabilities: ArchiveSchemaCapabilities): string {
+export function protectionColumnsSql(capabilities: ArchiveSchemaCapabilities): string {
   const holdExists = capabilities.archiveHoldTable
     ? `EXISTS (
         SELECT 1 FROM job_archive_holds hold
@@ -360,7 +360,7 @@ function candidateSelectSql(capabilities: ArchiveSchemaCapabilities, whereClause
   `;
 }
 
-async function readSchemaCapabilities(client: pg.PoolClient): Promise<ArchiveSchemaCapabilities> {
+export async function readSchemaCapabilities(client: pg.PoolClient): Promise<ArchiveSchemaCapabilities> {
   const result = await client.query<{
     archive_columns: boolean;
     archive_run_table: boolean;
@@ -397,7 +397,7 @@ async function readSchemaCapabilities(client: pg.PoolClient): Promise<ArchiveSch
   };
 }
 
-type ArchiveProtectionFlags = Pick<CandidateRow,
+export type ArchiveProtectionFlags = Pick<CandidateRow,
   | "has_active_application"
   | "has_active_document_run"
   | "has_active_document_task"
@@ -406,7 +406,7 @@ type ArchiveProtectionFlags = Pick<CandidateRow,
   | "has_manual_review"
   | "has_active_archive_hold">;
 
-function isProtected(row: ArchiveProtectionFlags): boolean {
+export function isProtected(row: ArchiveProtectionFlags): boolean {
   return row.has_active_application || row.has_active_document_run ||
     row.has_active_document_task || row.has_running_pipeline_lease ||
     row.has_running_evaluation_lease || row.has_manual_review || row.has_active_archive_hold;

@@ -48,6 +48,8 @@ const CONTEXT_PAYLOAD_KEYS = [
   "career_track_assessment_hash",
   "role_downrank_policy_version",
   "role_downrank_assessment_hash",
+  "evidence_confidence_policy_version",
+  "evidence_confidence_min_requirements",
   "evaluation_schema_version",
   "prompt_hash",
   "model_route",
