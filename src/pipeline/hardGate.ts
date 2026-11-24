@@ -995,121 +995,123 @@ export async function runHardGates(
     typeof (value as pg.Pool).connect === 'function' && !('release' in value);
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;
+  // Everything after the connection is acquired is inside the try, so any failure (a missing
+  // workability policy file, a failed query) gives the pooled client back.
+  try {
 
-  const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
-  const preferenceContext = await resolveWorkspacePreferenceContext(client as pg.PoolClient, ctx, ['stage3']);
-  const stage3Preferences: Stage3PolicyPreferences = preferenceContext.stage3 ?? {};
-  const pipelineRunId = crypto.randomUUID();
-  // One effective policy (workspace policy + stage3 on-site exception employers)
-  // shared with the recommendation decider, so gate and readiness agree.
-  const policyResolution = await resolveEffectiveWorkabilityPolicy(client as any, {
-    context: ctx,
-    stage3: stage3Preferences,
-  });
-  const territoryScope = remoteTerritoryScopeForPolicy(policyResolution.policy);
-  console.log(
-    `Hard Gate workability policy: ${policyResolution.source}` +
-      `${policyResolution.modeKey ? ` mode=${policyResolution.modeKey}` : ""}` +
-      ` hash=${policyResolution.policyHash.slice(0, 12)}`
-  );
-
-  const requestedAnswerJobVersionId = options?.verificationJobVersionId
-    ?? options?.jobVersionId
-    ?? (options?.jobVersionIds?.length === 1 ? options.jobVersionIds[0] : null);
-  let answerContext = options?.verificationAnswerContext ?? options?.answerContext ?? null;
-  if (!answerContext && options?.verificationAnswerRevisionId) {
-    answerContext = await loadVerificationAnswerContext(client as any, {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    const preferenceContext = await resolveWorkspacePreferenceContext(client as pg.PoolClient, ctx, ['stage3']);
+    const stage3Preferences: Stage3PolicyPreferences = preferenceContext.stage3 ?? {};
+    const pipelineRunId = crypto.randomUUID();
+    // One effective policy (workspace policy + stage3 on-site exception employers)
+    // shared with the recommendation decider, so gate and readiness agree.
+    const policyResolution = await resolveEffectiveWorkabilityPolicy(client as any, {
       context: ctx,
-      answerRevisionId: options.verificationAnswerRevisionId,
-      jobVersionId: requestedAnswerJobVersionId,
+      stage3: stage3Preferences,
     });
-  }
-  if (answerContext && !isVerificationAnswerContextApplicable(answerContext, {
-    answerRevisionId: options?.verificationAnswerRevisionId,
-  })) {
-    answerContext = null;
-  }
+    const territoryScope = remoteTerritoryScopeForPolicy(policyResolution.policy);
+    console.log(
+      `Hard Gate workability policy: ${policyResolution.source}` +
+        `${policyResolution.modeKey ? ` mode=${policyResolution.modeKey}` : ""}` +
+        ` hash=${policyResolution.policyHash.slice(0, 12)}`
+    );
 
-  const reprocess = options?.reprocess === true;
-  const params: unknown[] = [ctx.workspaceId, reprocess];
-  const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
-  const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
-  const jobVersionFilter = jobVersionIds.length > 0
-    ? `AND jv.id = ANY($${params.push(jobVersionIds)}::uuid[])`
-    : "";
-  const canonicalJobFilter = canonicalJobIds.length > 0
-    ? `AND c.id = ANY($${params.push(canonicalJobIds)}::uuid[])`
-    : "";
-  const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
-    ? Number(options?.limit)
-    : null;
-  const limitClause = limit ? `LIMIT $${params.push(limit)}` : "";
+    const requestedAnswerJobVersionId = options?.verificationJobVersionId
+      ?? options?.jobVersionId
+      ?? (options?.jobVersionIds?.length === 1 ? options.jobVersionIds[0] : null);
+    let answerContext = options?.verificationAnswerContext ?? options?.answerContext ?? null;
+    if (!answerContext && options?.verificationAnswerRevisionId) {
+      answerContext = await loadVerificationAnswerContext(client as any, {
+        context: ctx,
+        answerRevisionId: options.verificationAnswerRevisionId,
+        jobVersionId: requestedAnswerJobVersionId,
+      });
+    }
+    if (answerContext && !isVerificationAnswerContextApplicable(answerContext, {
+      answerRevisionId: options?.verificationAnswerRevisionId,
+    })) {
+      answerContext = null;
+    }
 
-  const { rows: stagedJobs } = await client.query(
-    `
-      SELECT c.*, jv.description_text, jv.id AS job_version_id,
-             jv.source_published_at AS posted_at,
-             jv.reposted_at,
-             jv.source_updated_at,
-             jv.freshness_basis,
-             jv.first_seen_at,
-             jv.last_seen_at,
-             source_observation.compensation_raw,
-             source_observation.source_name AS source_observation_name,
-             source_observation.location_raw AS source_location_raw,
-             source_evidence.normalized_evidence AS source_normalized_evidence
-      FROM canonical_jobs c
-      JOIN job_versions jv ON jv.id = COALESCE(
-        c.latest_job_version_id,
-        (
-          SELECT jv2.id
-          FROM job_versions jv2
-          WHERE jv2.workspace_id = $1
-            AND jv2.canonical_job_id = c.id
-          ORDER BY jv2.observed_at DESC
-          LIMIT 1
-        )
-      )
-      LEFT JOIN LATERAL (
-        SELECT observation.compensation_raw, observation.source_name, observation.location_raw
-        FROM raw_job_observations AS observation
-        WHERE observation.workspace_id = jv.workspace_id
-          AND observation.job_version_id = jv.id
-        ORDER BY observation.retrieved_at DESC, observation.id DESC
-        LIMIT 1
-      ) AS source_observation ON TRUE
-      -- Latest normalized source evidence of the version, read only by the confirmed-fact check.
-      LEFT JOIN LATERAL (
-        SELECT observation.normalized_evidence
-        FROM raw_job_observations AS observation
-        WHERE observation.workspace_id = jv.workspace_id
-          AND observation.job_version_id = jv.id
-          AND observation.normalized_evidence IS NOT NULL
-        ORDER BY observation.retrieved_at DESC, observation.id DESC
-        LIMIT 1
-      ) AS source_evidence ON TRUE
-      WHERE c.workspace_id = $1
-        AND c.archived_at IS NULL
-        AND jv.workspace_id = $1
-        AND (
-          COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
-          OR (
-            $2::boolean = TRUE
-            AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+    const reprocess = options?.reprocess === true;
+    const params: unknown[] = [ctx.workspaceId, reprocess];
+    const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
+    const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
+    const jobVersionFilter = jobVersionIds.length > 0
+      ? `AND jv.id = ANY($${params.push(jobVersionIds)}::uuid[])`
+      : "";
+    const canonicalJobFilter = canonicalJobIds.length > 0
+      ? `AND c.id = ANY($${params.push(canonicalJobIds)}::uuid[])`
+      : "";
+    const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
+      ? Number(options?.limit)
+      : null;
+    const limitClause = limit ? `LIMIT $${params.push(limit)}` : "";
+
+    const { rows: stagedJobs } = await client.query(
+      `
+        SELECT c.*, jv.description_text, jv.id AS job_version_id,
+               jv.source_published_at AS posted_at,
+               jv.reposted_at,
+               jv.source_updated_at,
+               jv.freshness_basis,
+               jv.first_seen_at,
+               jv.last_seen_at,
+               source_observation.compensation_raw,
+               source_observation.source_name AS source_observation_name,
+               source_observation.location_raw AS source_location_raw,
+               source_evidence.normalized_evidence AS source_normalized_evidence
+        FROM canonical_jobs c
+        JOIN job_versions jv ON jv.id = COALESCE(
+          c.latest_job_version_id,
+          (
+            SELECT jv2.id
+            FROM job_versions jv2
+            WHERE jv2.workspace_id = $1
+              AND jv2.canonical_job_id = c.id
+            ORDER BY jv2.observed_at DESC
+            LIMIT 1
           )
         )
-        ${jobVersionFilter}
-        ${canonicalJobFilter}
-        AND c.description_quality_status = 'COMPLETE'
-        AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
-      ORDER BY c.created_at ASC, c.id ASC
-      ${limitClause}
-    `,
-    params
-  );
+        LEFT JOIN LATERAL (
+          SELECT observation.compensation_raw, observation.source_name, observation.location_raw
+          FROM raw_job_observations AS observation
+          WHERE observation.workspace_id = jv.workspace_id
+            AND observation.job_version_id = jv.id
+          ORDER BY observation.retrieved_at DESC, observation.id DESC
+          LIMIT 1
+        ) AS source_observation ON TRUE
+        -- Latest normalized source evidence of the version, read only by the confirmed-fact check.
+        LEFT JOIN LATERAL (
+          SELECT observation.normalized_evidence
+          FROM raw_job_observations AS observation
+          WHERE observation.workspace_id = jv.workspace_id
+            AND observation.job_version_id = jv.id
+            AND observation.normalized_evidence IS NOT NULL
+          ORDER BY observation.retrieved_at DESC, observation.id DESC
+          LIMIT 1
+        ) AS source_evidence ON TRUE
+        WHERE c.workspace_id = $1
+          AND c.archived_at IS NULL
+          AND jv.workspace_id = $1
+          AND (
+            COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
+            OR (
+              $2::boolean = TRUE
+              AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+            )
+          )
+          ${jobVersionFilter}
+          ${canonicalJobFilter}
+          AND c.description_quality_status = 'COMPLETE'
+          AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
+        ORDER BY c.created_at ASC, c.id ASC
+        ${limitClause}
+      `,
+      params
+    );
 
-  console.log(`Found ${stagedJobs.length} canonical jobs to gate.`);
-  try {
+    console.log(`Found ${stagedJobs.length} canonical jobs to gate.`);
     for (const job of stagedJobs) {
       await client.query("BEGIN");
       try {
