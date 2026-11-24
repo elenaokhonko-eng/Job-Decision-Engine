@@ -1,0 +1,24 @@
+[
+  {
+    "source_key": "cv_current",
+    "source_type": "CV",
+    "label": "Current CV (replace with your own file name)",
+    "uri": null,
+    "source_date": "2025-01-01",
+    "verification_status": "SELF_ATTESTED",
+    "metadata": {
+      "note": "Replace every value in this file with your own career facts, then run: npm run profile:import"
+    }
+  },
+  {
+    "source_key": "linkedin_export",
+    "source_type": "LINKEDIN_EXPORT",
+    "label": "LinkedIn data export (Settings -> Data privacy -> Get a copy of your data)",
+    "uri": null,
+    "source_date": null,
+    "verification_status": "UNVERIFIED",
+    "metadata": {
+      "note": "source_date must be YYYY-MM-DD or null"
+    }
+  }
+]
