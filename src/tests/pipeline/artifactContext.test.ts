@@ -147,4 +147,13 @@ describe("pipeline artifact context", () => {
     });
     expect(first).not.toBe(second);
   });
+
+  it("the role-downrank policy version and assessment hash are part of the decision context", () => {
+    const base = { workspaceId: "w", taskType: "DECIDE_RECOMMENDATION" as const, taskVersion: "recommendation_decider_v1" };
+    const none = buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j", role_downrank_policy_version: "role_shape_v1", role_downrank_assessment_hash: "a" } });
+    const other = buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j", role_downrank_policy_version: "role_shape_v1", role_downrank_assessment_hash: "b" } });
+    const newPolicy = buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j", role_downrank_policy_version: "role_shape_v2", role_downrank_assessment_hash: "a" } });
+    expect(other).not.toBe(none);
+    expect(newPolicy).not.toBe(none);
+  });
 });
