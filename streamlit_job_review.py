@@ -4,6 +4,8 @@ Nothing here reads the database or calls Streamlit, so the category, review
 and verification rules can be tested without a running app.
 """
 
+import json
+import math
 from collections.abc import Iterable, Mapping, Sequence
 
 from streamlit_application_workflow import (
@@ -301,3 +303,89 @@ def page_count(total: object, page_size: int = PAGE_SIZE) -> int:
     except (TypeError, ValueError):
         return 1
     return max(1, (count + page_size - 1) // page_size)
+
+
+_ROLE_SIGNAL_LABELS = {
+    "CUSTOMER_FACING_DELIVERY": "customer-facing delivery",
+    "PEOPLE_MANAGEMENT_CORE": "people management",
+    "CONTRACT_EMPLOYMENT": "contract role",
+    "INFRASTRUCTURE_BY_DESCRIPTION": "infrastructure-heavy",
+    "DEGREE_GAP_FLAGGED": "degree gap",
+}
+_LABEL_MAX_CHARS = 80
+_QUOTE_MAX_CHARS = 200
+_MAX_ROLE_SIGNAL_LABELS = 8
+
+
+def ranking_sort_key(job: Mapping[str, object]) -> tuple[int, float]:
+    """Sort key for the stored adjusted score (``ranking_score``), highest first.
+
+    The score is written by the decider and read through v_job_ranking_scoped;
+    nothing is computed here. A job without one sorts after every scored job.
+    The raw match score is never a sort input.
+    """
+    value = job.get("ranking_score")
+    if value is None or isinstance(value, bool):
+        return (1, 0.0)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return (1, 0.0)
+    if not math.isfinite(number):
+        return (1, 0.0)
+    return (0, -number)
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "..."
+
+
+def role_signal_labels(job: Mapping[str, object]) -> list[str]:
+    """Short markdown-safe labels for the job's stored role signals.
+
+    Each ``role_signals`` item is a ``{code, penalty, source, quote}`` object
+    written by the decider. The text is untrusted: it is clipped and escaped, and
+    an unknown code is shown as its own escaped text, never guessed at. A JSON
+    string holding an array is parsed; malformed text gives no labels.
+    """
+    signals = job.get("role_signals")
+    if isinstance(signals, str):
+        # A driver that returns JSONB as text: accept a JSON array, anything else is empty.
+        try:
+            signals = json.loads(signals)
+        except ValueError:
+            return []
+        if not isinstance(signals, list):
+            return []
+    if not isinstance(signals, Iterable) or isinstance(signals, Mapping):
+        return []
+    labels: list[str] = []
+    for signal in signals:
+        if not isinstance(signal, Mapping):
+            continue
+        code = signal.get("code")
+        if not isinstance(code, str) or not code.strip():
+            continue
+        label = _ROLE_SIGNAL_LABELS.get(code) or _clip(
+            code.strip().lower().replace("_", " "), _LABEL_MAX_CHARS
+        )
+        labels.append(escape_markdown(label))
+        if len(labels) >= _MAX_ROLE_SIGNAL_LABELS:
+            break
+    return labels
+
+
+def degree_asked_for_label(job: Mapping[str, object]) -> str | None:
+    """The posting's own degree wording as an escaped label, or ``None``."""
+    quote = job.get("degree_asked_for")
+    if not isinstance(quote, str) or not quote.strip():
+        return None
+    clipped = _clip(" ".join(quote.split()), _QUOTE_MAX_CHARS)
+    return f"degree asked for: {escape_markdown(clipped)}"
+
+
+def low_confidence_label(job: Mapping[str, object]) -> str | None:
+    """A visible label when the decider marked the posting evidence as thin."""
+    if job.get("evidence_confidence") == "LOW":
+        return "LOW CONFIDENCE: thin posting evidence"
+    return None

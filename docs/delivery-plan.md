@@ -28,7 +28,7 @@ Not started this round:
 | Phase | Why it waits |
 |---|---|
 | Rest of Phase 2 (prompt registry, `evaluation` module) | Needs the gateway from W5 |
-| Phase 3 (one writer per decision) | Rewrites the gate, router, matcher and decider, which W1 to W3 are changing |
+| Phase 3 (one writer per decision) | Rewrites the gate, router, matcher and decider, which W1 to W3 are changing. Includes one read model that assigns each job to exactly one list with the reason, so no screen applies its own filter. Availability, list ordering and staleness of kept results were all the same gap (each list had its own filter). Do not build it before the restart |
 | Phase 4 (pure stages, one recompute command) | Follows Phase 3 |
 | Phase 5 (persistence), Phase 6 (concept graph), Phase 7 (retire and shrink) | Follow Phase 4 |
 
@@ -44,7 +44,11 @@ Not started this round:
    | `src/ingestion/`, `scripts/run_adapters.ts`, `scripts/parse_emails.ts` | W4 |
    | `src/services/agent.ts`, `src/services/llmFallback.ts`, `src/services/modelCallResilience.ts` | W5 |
    | `src/security/`, `src/reporting/` | W6 |
-   | `package.json`, `package-lock.json`, `.github/workflows/` | Orchestrator only |
+   | `scripts/reconcile_pipeline.ts`, `scripts/check_integrity.ts`, `src/tasks/completedWithoutResult.ts`, and the zero-check modules once merged (the integrity zero-check and repair modules in `src/tasks/`) | W10 (the zero-check stream; it took these over from W1 and W7) |
+| `src/tasks/availabilityRecheck.ts`, `src/tasks/pipelineTaskCurrentness.ts`, `src/services/jobArchive.ts` | W1 stream (carried by W10 while W1 has no budget) |
+| `src/architecture/boundary-baseline.json`, `docs/architecture.md` | W5 |
+| `.agents/DATA-FLOW-CONTRACT.md` | Append-only for every stream: add your own row, never edit another stream's row; on a conflict keep both sides |
+| `package.json`, `package-lock.json`, `.github/workflows/` | Orchestrator only |
 
 2. **Reserved migration numbers.** The latest migration on `main` is 120 (118 prompt identity columns, 119 availability re-check state, 120 awaiting-content read model). 115 to 117 are unused and stay unused (see `migrations/README.md`). The next free number is 121, reserved for W3's adjusted-score read model. A stream that needs a number asks the orchestrator; CI rejects any pending number at or below the highest applied one.
 3. **One database copy per stream.** Each stream rehearses on its own Neon branch, named `replay-<stream>`. Two streams never write to the same copy. No stream reads or writes production.

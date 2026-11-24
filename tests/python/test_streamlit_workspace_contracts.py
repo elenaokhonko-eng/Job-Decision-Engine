@@ -296,6 +296,26 @@ def test_top_ten_contract_requires_all_current_artifacts_and_no_recheck():
     }
     validate_ranked_job_row(row, WORKSPACE_ID)
 
+    # A ranked job without an AI evaluation has a NULL ai_evaluation_id and still validates.
+    validate_ranked_job_row(row | {"ai_evaluation_id": None}, WORKSPACE_ID)
+    # The column itself, and the other identity fields, stay required.
+    missing_column = {
+        key: value for key, value in row.items() if key != "ai_evaluation_id"
+    }
+    for bad_row, error in (
+        (missing_column, ValueError),
+        (row | {"ai_evaluation_id": ""}, ValueError),
+        (row | {"ai_evaluation_id": 7}, TypeError),
+        (row | {"match_run_id": None}, TypeError),
+        (row | {"deterministic_decision_id": None}, TypeError),
+    ):
+        try:
+            validate_ranked_job_row(bad_row, WORKSPACE_ID)
+        except error:
+            pass
+        else:
+            raise AssertionError("Top 10 contract accepted an invalid identity row")
+
     try:
         validate_ranked_job_row(row | {"policy_recheck_required": True}, WORKSPACE_ID)
     except ValueError:
