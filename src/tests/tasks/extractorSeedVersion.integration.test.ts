@@ -51,7 +51,7 @@ let candidateProfileId = "";
 let profileV1 = "";
 let profileV2 = "";
 let policySnapshotId = "";
-const jobs: Record<"stale" | "current" | "archived", FixtureJob> = {} as never;
+const jobs: Record<"stale" | "current" | "archived" | "saved" | "held", FixtureJob> = {} as never;
 
 function db(): pg.PoolClient {
   if (!client) throw new Error("The integration test database client is not initialized.");
@@ -257,6 +257,21 @@ describe.skipIf(skipReal)("EXTRACT_DETERMINISTIC_REQUIREMENTS seed follows the e
       `UPDATE requirement_set_identities SET deterministic_extractor_version = $2 WHERE workspace_id = $3 AND canonical_job_id = $1`,
       [jobs.current.canonicalJobId, DETERMINISTIC_EXTRACTOR_VERSION, ctx().workspaceId],
     );
+    jobs.saved = await seedRoutableJob("saved", [requirement]);
+    jobs.held = await seedRoutableJob("held", [requirement]);
+    // Intended behaviour: a saved or held job is re-queued like any other stale job (re-computing is not
+    // archiving); the protection only stops an automatic archive. Archived jobs are skipped.
+    await db().query(
+      `INSERT INTO raw_job_observations (workspace_id, source_name, source_external_id, source_url, retrieved_at, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id)
+       VALUES ($1, 'LINKEDIN_SAVED', $2, $3, NOW(), 'Seed Test Co', 'fixture role', 'x', '{}'::jsonb, $4, 'PROCESSED', $5)`,
+      [ctx().workspaceId, `s-${crypto.randomUUID()}`, `https://example.test/s/${crypto.randomUUID()}`, crypto.randomUUID().replaceAll("-", "").padEnd(64, "0"), jobs.saved.jobVersionId],
+    );
+    await db().query(
+      `INSERT INTO job_archive_holds (workspace_id, canonical_job_id, hold_reason, hold_type, created_by, expires_at)
+       VALUES ($1, $2, 'owner keeps it', 'USER_PRESERVE', 'test', NOW() + INTERVAL '30 days')`,
+      [ctx().workspaceId, jobs.held.canonicalJobId],
+    );
     const run = await db().query<{ id: string }>(
       `INSERT INTO job_archive_runs (run_started_at, cutoff_at, mode, status) VALUES (NOW(), NOW() - INTERVAL '1 second', 'APPLY', 'RUNNING') RETURNING id::text`,
     );
@@ -299,17 +314,18 @@ describe.skipIf(skipReal)("EXTRACT_DETERMINISTIC_REQUIREMENTS seed follows the e
 
   it("first deploy: only the job extracted by an older version is reopened, once, and it recomputes; the current and the archived job get nothing", async () => {
     const first = await seed();
-    expect(first.byType.EXTRACT_DETERMINISTIC_REQUIREMENTS?.inserted).toBe(1);
+    expect(first.byType.EXTRACT_DETERMINISTIC_REQUIREMENTS?.inserted).toBe(3);
     const rows = await tasks();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.payload).toMatchObject({ job_version_id: jobs.stale.jobVersionId, reprocess: true });
+    expect(rows.map((row) => row.payload.job_version_id).sort()).toEqual(
+      [jobs.stale.jobVersionId, jobs.saved.jobVersionId, jobs.held.jobVersionId].sort());
+    for (const row of rows) expect(row.payload.reprocess).toBe(true);
     expect(rows[0]!.task_key).toContain(`:${DETERMINISTIC_EXTRACTOR_VERSION}:`);
   });
 
   it("the same version enqueues nothing more, even after the task completed", async () => {
     await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE workspace_id = $1 AND task_type = 'EXTRACT_DETERMINISTIC_REQUIREMENTS'`, [ctx().workspaceId]);
     expect((await seed()).byType.EXTRACT_DETERMINISTIC_REQUIREMENTS?.inserted ?? 0).toBe(0);
-    expect(await tasks()).toHaveLength(1);
+    expect(await tasks()).toHaveLength(3);
   });
 
   it("a new extractor version makes the previously current job stale and reopens it once", async () => {
