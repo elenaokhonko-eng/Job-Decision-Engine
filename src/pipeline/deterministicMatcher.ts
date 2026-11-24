@@ -861,6 +861,8 @@ export async function runDeterministicMatcher(
             versionId
           );
           if (requirementsStageComplete) {
+            // Extraction finished but found no requirement: nothing was compared, so the fit is UNKNOWN and unscored
+            // (NULL), never a 0 / NO_PROFILE_MATCH that the decider would turn into a SKIP (AGENTS.md invariant 4).
             await client.query(
               `UPDATE match_runs
                SET status = 'COMPLETED',
@@ -876,10 +878,10 @@ export async function runDeterministicMatcher(
 
             const canonicalUpdate = await client.query(
               `UPDATE canonical_jobs
-               SET deterministic_match_score = 0,
-                   deterministic_match_coverage = 0,
+               SET deterministic_match_score = NULL,
+                   deterministic_match_coverage = NULL,
                    latest_match_run_id = $2,
-                   profile_match_status = 'NO_PROFILE_MATCH',
+                   profile_match_status = 'UNKNOWN',
                    processing_state = 'MATCHED',
                    processing_status = 'MATCHED',
                    updated_at = NOW()
