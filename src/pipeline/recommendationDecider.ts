@@ -29,6 +29,7 @@ import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import { APPROXIMATE_DATE_UNIT_MS, isRepostFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
 import { MIN_CONFIRMED_REQUIREMENTS } from "../requirements/requirementKinds.js";
+import { DECIDER_VERSION } from "./deciderVersion.js";
 import { applyRoleShapePenalty, assessRoleShape, roleShapeFingerprint, ROLE_SHAPE_POLICY_VERSION } from "./roleShape.js";
 import { assessCareerTrack, capOutcome, CAREER_TRACK_POLICY_VERSION, parseTrackExperience, type TrackRequirement } from "./careerTrack.js";
 import {
@@ -380,6 +381,7 @@ export async function runRecommendationDecider(
       match_status: string | null;
       match_matched_count: number | null;
       match_requirement_count: number | null;
+      match_policy_version: string | null;
       match_profile_version_id: string | null;
       match_requirement_set_id: string | null;
       match_job_content_hash: string | null;
@@ -436,6 +438,7 @@ export async function runRecommendationDecider(
         mr.status AS match_status,
         mr.matched_count AS match_matched_count,
         mr.requirement_count AS match_requirement_count,
+        mr.policy_version AS match_policy_version,
         mr.profile_version_id AS match_profile_version_id,
         mr.requirement_set_id AS match_requirement_set_id,
         mr.job_content_hash AS match_job_content_hash,
@@ -1133,7 +1136,7 @@ export async function runRecommendationDecider(
         const decisionContextFingerprint = buildPipelineTaskContextFingerprint({
           workspaceId: ctx.workspaceId,
           taskType: "DECIDE_RECOMMENDATION",
-          taskVersion: "recommendation_decider_v1",
+          taskVersion: DECIDER_VERSION,
           payload: {
             canonical_job_id: job.canonical_job_id,
             job_version_id: job.job_version_id,
@@ -1152,6 +1155,9 @@ export async function runRecommendationDecider(
             workability_policy_hash: workabilityPolicyResolution.policyHash,
             career_track_policy_version: CAREER_TRACK_POLICY_VERSION,
             career_track_assessment_hash: sha256Json(careerTrack),
+            // decider_version in the context separates a decision made after migration 121 from an unstamped row with
+            // the same inputs (decisions are immutable, so an old row cannot be stamped in place).
+            decider_version: DECIDER_VERSION,
             role_downrank_policy_version: ROLE_SHAPE_POLICY_VERSION,
             evidence_confidence_policy_version: EVIDENCE_CONFIDENCE_POLICY_VERSION,
             evidence_confidence_min_requirements: MIN_CONFIRMED_REQUIREMENTS,
@@ -1179,9 +1185,10 @@ export async function runRecommendationDecider(
               preference_context_id,
               readiness_json,
               evidence_revision_hash,
-              readiness_fingerprint
+              readiness_fingerprint,
+              decider_version
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT (
               workspace_id,
               canonical_job_id,
@@ -1220,6 +1227,7 @@ export async function runRecommendationDecider(
             JSON.stringify(readiness),
             evidenceRevisionHash,
             readiness.readiness_fingerprint,
+            DECIDER_VERSION,
           ]
         );
 
@@ -1240,6 +1248,10 @@ export async function runRecommendationDecider(
               recommendation_requirement_score = $4,
               recommendation_coverage_score = $5,
               recommendation_evidence_completeness = $6,
+              recommendation_score_policy = $10,
+              recommendation_degree_asked_for = $11,
+              recommendation_role_signals = $12::jsonb,
+              recommendation_evidence_confidence = $13,
               recommendation_decided_at = NOW(),
               latest_deterministic_decision_id = $7,
               updated_at = NOW()
@@ -1253,6 +1265,10 @@ export async function runRecommendationDecider(
               OR c.recommendation_requirement_score IS DISTINCT FROM $4
               OR c.recommendation_coverage_score IS DISTINCT FROM $5
               OR c.recommendation_evidence_completeness IS DISTINCT FROM $6
+              OR c.recommendation_score_policy IS DISTINCT FROM $10
+              OR c.recommendation_degree_asked_for IS DISTINCT FROM $11
+              OR c.recommendation_role_signals IS DISTINCT FROM $12::jsonb
+              OR c.recommendation_evidence_confidence IS DISTINCT FROM $13
               OR c.latest_deterministic_decision_id IS DISTINCT FROM $7
               OR c.recommendation_decided_at IS NULL
             )
@@ -1268,6 +1284,10 @@ export async function runRecommendationDecider(
             decisionId,
             job.canonical_job_id,
             job.job_version_id,
+            requirementScore === null ? null : `${job.match_policy_version ?? "unknown_match_policy"}|${shape.policy_version}`,
+            shape.signals.find((signal) => signal.code === "DEGREE_GAP_FLAGGED")?.quote ?? null,
+            JSON.stringify(shape.signals),
+            confidence.level,
           ]
         );
 
