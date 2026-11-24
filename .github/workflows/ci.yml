@@ -103,6 +103,10 @@ jobs:
     - name: Import boundaries (new violations fail)
       run: npm run lint:boundaries
 
+    - name: Ranking benchmark (information only)
+      continue-on-error: true
+      run: npm run benchmark:ranking >> "$GITHUB_STEP_SUMMARY"
+
     - name: Verify generated contract schemas
       run: npm run contracts:check
 

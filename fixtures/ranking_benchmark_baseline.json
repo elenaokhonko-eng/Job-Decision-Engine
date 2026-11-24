@@ -1,0 +1,13 @@
+{
+  "fitCount": 14,
+  "nonFitCount": 14,
+  "separationMatchScore": 0.826530612244898,
+  "separationCoverage": 0.8443877551020408,
+  "precisionAt5": 1,
+  "precisionAt10": 0.8,
+  "firstFitReciprocalRank": 1,
+  "medianMatchScoreFit": 69.5,
+  "medianMatchScoreNonFit": 40,
+  "fitInReviewOrPriorityShare": 0.7142857142857143,
+  "nonFitInReviewOrPriorityShare": 0.21428571428571427
+}

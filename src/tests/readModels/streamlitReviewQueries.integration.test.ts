@@ -432,4 +432,41 @@ describe.skipIf(skipReal)("Streamlit review and verification read-model queries 
     // List plus count account for every REVIEW job.
     expect(visible.length + (await awaiting())).toBe(await allReview());
   });
+  it("hides TRACK jobs whose posting is not confirmed open, and counts them so nothing disappears silently", async () => {
+    const database = db();
+    const { workspaceId } = workspace();
+    const trackIds = async () => (await database.query<{ canonical_job_id: string }>(
+      streamlitQuery("TRACK_JOBS_QUERY"), [workspaceId],
+    )).rows.map((row) => row.canonical_job_id);
+    const awaiting = async () => (await database.query<{ awaiting_count: number }>(
+      streamlitQuery("TRACK_AWAITING_AVAILABILITY_COUNT_QUERY"), [workspaceId],
+    )).rows[0]!.awaiting_count;
+    const allTrack = async () => Number((await database.query<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM v_track_jobs_scoped WHERE workspace_id = $1`, [workspaceId],
+    )).rows[0]!.n);
+
+    const awaitingBefore = await awaiting();
+    const seed = (title: string) => seedJob({
+      title, gate: "PASS", eligibility: "VERIFY", outcome: "TRACK", readiness: "NEEDS_VERIFICATION",
+    });
+    const open = await seed("Track Availability Open Fixture");
+    const windowRanOut = await seed("Track Availability Window Ran Out Fixture");
+    const closed = await seed("Track Availability Closed Fixture");
+    const neverChecked = await seed("Track Availability Never Checked Fixture");
+    await database.query(
+      `UPDATE job_versions SET availability_recheck_at = NOW() - INTERVAL '1 hour' WHERE id = $1`,
+      [windowRanOut.jobVersionId],
+    );
+    await database.query(`UPDATE job_versions SET availability_status = 'CLOSED' WHERE id = $1`, [closed.jobVersionId]);
+    await database.query(
+      `UPDATE job_versions SET availability_status = NULL, availability_verified_at = NULL, availability_recheck_at = NULL WHERE id = $1`,
+      [neverChecked.jobVersionId],
+    );
+
+    const visible = await trackIds();
+    expect(visible).toContain(open.canonicalJobId);
+    for (const hidden of [windowRanOut, closed, neverChecked]) expect(visible).not.toContain(hidden.canonicalJobId);
+    expect(await awaiting()).toBe(awaitingBefore + 3);
+    expect(visible.length + (await awaiting())).toBe(await allTrack());
+  });
 });
