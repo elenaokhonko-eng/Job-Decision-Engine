@@ -768,11 +768,27 @@ export interface AutomaticArchiveProtection {
  */
 export async function readAutomaticArchiveProtection(
   client: pg.PoolClient,
-  input: { workspaceId: string; canonicalJobId: string; now: Date; /** Lock the job row (FOR UPDATE OF canonical) so a concurrent save, application or hold waits; call inside the archive transaction. */ lock?: boolean },
+  input: { workspaceId: string; canonicalJobId: string; now: Date;
+    /**
+     * Lock the job row with its own SELECT ... FOR UPDATE before the protection read, so the read (a separate
+     * statement, so a fresh snapshot) sees anything committed while the lock waited. Call inside the archive
+     * transaction. The lock serialises writers that lock canonical_jobs; a saved observation or hold is a row
+     * in another table and is not blocked by it, so a save that commits after the read is not excluded.
+     */
+    lock?: boolean;
+    /** The caller's own running task: its lease is not a reason to leave the job alone. */
+    excludeTaskId?: string | null;
+  },
 ): Promise<AutomaticArchiveProtection> {
   uuidSchema.parse(input.workspaceId);
   uuidSchema.parse(input.canonicalJobId);
   const capabilities = await readSchemaCapabilities(client);
+  if (input.lock) {
+    await client.query(
+      `SELECT 1 FROM canonical_jobs WHERE workspace_id = $1::uuid AND id = $2::uuid FOR UPDATE`,
+      [input.workspaceId, input.canonicalJobId],
+    );
+  }
   const { rows } = await client.query<ArchiveProtectionFlags & { has_saved_source_observation: boolean }>(
     `SELECT ${protectionColumnsSql(capabilities)},
             EXISTS (
@@ -786,7 +802,7 @@ export async function readAutomaticArchiveProtection(
                 AND UPPER(saved_observation.source_name) = ANY($4::text[])
             ) AS has_saved_source_observation
        FROM canonical_jobs canonical
-      WHERE canonical.workspace_id = $2::uuid AND canonical.id = $3::uuid${input.lock ? " FOR UPDATE OF canonical" : ""}`,
+      WHERE canonical.workspace_id = $2::uuid AND canonical.id = $3::uuid`,
     [input.now, input.workspaceId, input.canonicalJobId, [...OWNER_SAVED_SOURCE_NAMES]],
   );
   const row = rows[0];
@@ -796,7 +812,24 @@ export async function readAutomaticArchiveProtection(
   if (row.has_active_application) reasons.push("ACTIVE_APPLICATION");
   if (row.has_active_archive_hold) reasons.push("ARCHIVE_HOLD");
   if (row.has_active_document_run || row.has_active_document_task) reasons.push("ACTIVE_DOCUMENT_WORK");
-  if (row.has_running_pipeline_lease || row.has_running_evaluation_lease) reasons.push("ACTIVE_LEASE");
+  let runningLease = row.has_running_pipeline_lease;
+  if (runningLease && input.excludeTaskId) {
+    // The caller is itself a RUNNING task for this job; only another live lease counts.
+    const others = await client.query<{ other: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM pipeline_tasks running_task
+          WHERE running_task.workspace_id = $1::uuid AND running_task.status = 'RUNNING' AND running_task.lease_expires_at > $2
+            AND running_task.id <> $3::uuid
+            AND (running_task.payload->>'canonical_job_id' = $4::text
+              OR EXISTS (SELECT 1 FROM job_versions running_version
+                          WHERE running_version.workspace_id = $1::uuid AND running_version.canonical_job_id = $4::uuid
+                            AND running_task.payload->>'job_version_id' = running_version.id::text))
+       ) AS other`,
+      [input.workspaceId, input.now, input.excludeTaskId, input.canonicalJobId],
+    );
+    runningLease = others.rows[0]?.other === true;
+  }
+  if (runningLease || row.has_running_evaluation_lease) reasons.push("ACTIVE_LEASE");
   if (row.has_manual_review) reasons.push("MANUAL_REVIEW");
   return { protected: reasons.length > 0, reasons };
 }

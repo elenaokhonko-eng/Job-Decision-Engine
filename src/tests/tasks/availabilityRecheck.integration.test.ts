@@ -388,6 +388,31 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     }
   });
 
+  it("the re-check's own running task does not protect the job; another live lease does", async () => {
+    const claimed = async (job: Fixture, key: string): Promise<string> => {
+      const id = randomUUID();
+      await db().query(
+        `INSERT INTO pipeline_tasks (id, workspace_id, task_type, task_key, payload, status, lease_id, lease_expires_at)
+         VALUES ($1, $2, 'RECHECK_AVAILABILITY', $3, $4::jsonb, 'RUNNING', $5, NOW() + INTERVAL '30 days')`,
+        [id, ctx().workspaceId, key, JSON.stringify(payload(job)), randomUUID()]);
+      return id;
+    };
+    const unreadable = (now: Date) => deps({ now, fetchJobContent: async () => ({ kind: "BLOCKED", reason: "AUTH_REQUIRED" }) });
+
+    const own = await createJob({ windowEndedDaysAgo: 1, board: "own-lease" });
+    const ownTask = await claimed(own, `RECHECK_AVAILABILITY:${own.jobVersionId}:own`);
+    const cycle = at(0);
+    for (let day = 0; day <= 3; day += 1) await runAvailabilityRecheck(db(), ctx(), payload(own, cycle), ownTask, unreadable(at(day)));
+    expect((await archiveInfo(own)).archived).toBe(true);
+
+    const other = await createJob({ windowEndedDaysAgo: 1, board: "other-lease" });
+    const otherTask = await claimed(other, `RECHECK_AVAILABILITY:${other.jobVersionId}:mine`);
+    await claimed(other, `APPLY_HARD_GATES:${other.jobVersionId}:someone-else`);
+    for (let day = 0; day <= 3; day += 1) await runAvailabilityRecheck(db(), ctx(), payload(other, cycle), otherTask, unreadable(at(day)));
+    expect((await archiveInfo(other)).archived).toBe(false);
+    expect((await events(other)).at(-1)?.decision).toBe("KEPT_PROTECTED");
+  });
+
   it("page read: gone closes at once; open renews the window; login is cannot-tell", async () => {
     const gone = await createJob({ windowEndedDaysAgo: 1, board: "page-board" });
     const closed = await runAvailabilityRecheck(db(), ctx(), payload(gone), null, deps({
@@ -520,10 +545,8 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     expect(contradicted).toMatchObject({ action: "MARK_OPEN", factsChanged: false });
     expect(await state(known)).toMatchObject({ workplace_type: "ONSITE", location: "Singapore" });
     expect(await pendingTasks(known, "APPLY_HARD_GATES")).toHaveLength(0);
-    // The conflict flags the job for verification with a routable stored reason; it is not rejected.
-    const flagged = await db().query(`SELECT processing_state, gate_decision, rejection_reason FROM canonical_jobs WHERE id = $1`, [known.canonicalJobId]);
-    expect(flagged.rows[0]).toMatchObject({ processing_state: "NEEDS_VERIFICATION", gate_decision: "NEEDS_VERIFICATION", rejection_reason: "GATE_UNKNOWN_WORK_MODE" });
-    expect((await eventDetails(known)).flagged_for_verification).toMatchObject({ reason_code: "GATE_UNKNOWN_WORK_MODE", flagged: true });
+    // The conflict is on the event only: the re-check writes no job status column.
+    expect((await db().query(`SELECT processing_state FROM canonical_jobs WHERE id = $1`, [known.canonicalJobId])).rows[0]?.processing_state).toBe("MATCHED");
     expect((await eventDetails(known)).facts_conflict).toMatchObject({
       work_mode: { known: "ONSITE", page: "HYBRID" }, territory: { known: "singapore", page: "london" }, source_name: "GREENHOUSE",
     });
