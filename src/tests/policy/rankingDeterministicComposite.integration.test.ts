@@ -110,10 +110,12 @@ async function createReadyJob(
        workspace_id, company_name, normalized_title, canonical_url, location_summary, workplace_type,
        employment_type, primary_lane, processing_state, processing_status, gate_decision,
        recommendation_eligibility, recommendation_outcome, lane_confidence,
-       deterministic_match_score, deterministic_match_coverage, recommendation_evidence_completeness
+       deterministic_match_score, deterministic_match_coverage, recommendation_evidence_completeness,
+       recommendation_requirement_score
      ) VALUES ($1, 'Composite Fixture', 'Data Engineer', $2, 'Remote', 'REMOTE', 'PERMANENT', 'CORE_AI_DATA',
-       'MATCHED', 'MATCHED', 'PASS', 'ELIGIBLE', 'REVIEW', $3, $4, 90, 0.95) RETURNING id`,
-    [ws, `https://example.test/composite/${crypto.randomUUID()}`, options.laneConfidence, options.matchScore],
+       'MATCHED', 'MATCHED', 'PASS', 'ELIGIBLE', 'REVIEW', $3, $4, 90, 0.95, $5) RETURNING id`,
+    // Requirement fit is the stored ADJUSTED score (migration 121), a 0-1 fraction.
+    [ws, `https://example.test/composite/${crypto.randomUUID()}`, options.laneConfidence, options.matchScore, options.matchScore / 100],
   );
   const canonicalJobId = canonical.rows[0]!.id;
   const jobContentHash = `job-content-${crypto.randomUUID()}`;
