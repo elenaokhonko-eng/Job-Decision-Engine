@@ -12,7 +12,7 @@ import * as path from 'path';
 import { loadProfile } from '../src/profile/loader.js';
 import { generateCapabilityProfile } from '../src/profile/capabilityProfileGenerator.js';
 import { compareProfiles } from '../src/profile/profileDiff.js';
-import { rematchActionableJobs } from '../src/pipeline/deterministicMatcher.js';
+import { assertMatchSummaryComplete, rematchActionableJobs } from '../src/pipeline/deterministicMatcher.js';
 
 async function main() {
   const args = process.argv.slice(2);
@@ -67,9 +67,12 @@ async function main() {
     console.log('\n--- Running Bounded Actionable Jobs Rematch ---');
     try {
       const summary = await rematchActionableJobs();
+      assertMatchSummaryComplete(summary, 'stage1_capability_profile rematch');
       console.log(`✓ Bounded rematch complete:`, summary);
     } catch (error: any) {
+      // A failed or blocked rematch must fail the script (invariant 7): log it, then rethrow to the top-level handler (exit 1).
       console.error('Bounded rematch error:', error?.message || error);
+      throw error;
     }
   }
 

@@ -3,7 +3,7 @@ import dotenv from "dotenv";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { runLaneRouting } from "../src/pipeline/laneRouter.js";
-import { runDeterministicMatcher } from "../src/pipeline/deterministicMatcher.js";
+import { assertMatchSummaryComplete, runDeterministicMatcher } from "../src/pipeline/deterministicMatcher.js";
 import { runRecommendationDecider } from "../src/pipeline/recommendationDecider.js";
 
 dotenv.config();
@@ -105,6 +105,7 @@ export async function replayPolicyNoMatch(options?: { apply?: boolean; limit?: n
     });
     matchedCount = matchRes.matchedJobs;
     console.log(`Matcher result: ${JSON.stringify(matchRes)}`);
+    assertMatchSummaryComplete(matchRes, "replay_policy_no_match");
 
     console.log(`Running recommendation decider...`);
     const recRes = await runRecommendationDecider(pool, {

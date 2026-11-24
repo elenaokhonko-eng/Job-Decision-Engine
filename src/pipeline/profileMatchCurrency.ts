@@ -89,8 +89,11 @@ export function uniqueActiveProfileSql(canonicalAlias: string): string {
  * deterministic_v2: the best fact is chosen by credited contribution (score x evidence strength)
  * instead of raw similarity, and a structured DEGREE/CREDENTIAL match is credited by verification
  * status only, not by the hands-on evidence tier.
+ *
+ * deterministic_v3: a MUST DEGREE gap is no longer a mandatory-qualification failure (it no longer persists
+ * UNMATCHED / INELIGIBLE / SKIP with a rejection reason); the job is ranked lower and flagged instead (#247).
  */
-export const DETERMINISTIC_MATCHER_POLICY_VERSION = "deterministic_v2";
+export const DETERMINISTIC_MATCHER_POLICY_VERSION = "deterministic_v3";
 
 /**
  * matcher_version written into the MATCH_PROFILE_EVIDENCE context fingerprint. It moves with
@@ -98,7 +101,7 @@ export const DETERMINISTIC_MATCHER_POLICY_VERSION = "deterministic_v2";
  * also treats an older-rules match as not current. The stage task version used in task keys
  * (deterministic_matcher_v1) is deliberately unchanged.
  */
-export const DETERMINISTIC_MATCHER_FINGERPRINT_VERSION = "deterministic_matcher_v2";
+export const DETERMINISTIC_MATCHER_FINGERPRINT_VERSION = "deterministic_matcher_v3";
 
 /**
  * The matcher policy version in force: the legacy version, or the legacy version plus the top-K
