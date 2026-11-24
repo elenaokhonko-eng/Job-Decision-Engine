@@ -106,7 +106,7 @@ jobs:
         timeout-minutes: 5
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-before.json
+        run: npx tsx scripts/reconcile_pipeline.ts --phase=pre --json > pipeline-reconciliation-before.json
 
       - name: Process saved discovery backlog
         id: process_pipeline_worker
