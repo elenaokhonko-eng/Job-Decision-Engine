@@ -209,6 +209,9 @@ def _read_model_query(query, params):
         connection.close()
 
 
+# Shown wherever a list is sorted by the composite overall rank (Apply Now, Top 10). No weights are described here.
+OVERALL_RANK_NOTE = "Overall rank is a combined rank: requirement fit after downranks plus other inputs."
+
 SHORTLIST_READ_MODEL_QUERY = """
     SELECT
       s.canonical_job_id,
@@ -2253,6 +2256,7 @@ with tab_dashboard:
     st.header("Application command centre")
     st.caption("PRIORITY = strongest opportunity; REVIEW = apply after review; TRACK = more fit evidence needed; SKIP = completed negative decision.")
     st.markdown("## Top 10 — apply first")
+    st.caption(f"Sorted by overall rank, highest first. {OVERALL_RANK_NOTE}")
 
     if top_ten_ready_jobs is None:
         st.error("Ranked opportunities could not be loaded from the current ranking read model.")
@@ -2664,10 +2668,10 @@ with tab_dashboard:
                 st.caption("Sorted by the stored adjusted match score (highest first, unscored last). These jobs have a current match and decision, but stay out of READY and document generation until the open workability question is resolved.")
             elif workspace_category == REVIEW_CATEGORY:
                 st.caption("Every current REVIEW decision, sorted by the stored adjusted match score (highest first, unscored last). Each card says why the job is, or is not, also in Apply Now.")
-            elif workspace_category == "Apply Now":
-                st.caption("Ordered by the overall rank, then decision outcome and pipeline status, then the stored adjusted match score.")
-            elif workspace_category == "Track":
-                st.caption("Grouped by decision eligibility and pipeline status, then the stored adjusted match score (highest first, unscored last).")
+            elif workspace_category in ("Apply Now", "Top 10"):
+                st.caption(f"Sorted by overall rank, highest first. {OVERALL_RANK_NOTE} Ties: decision outcome, pipeline status, then the adjusted match score.")
+            elif workspace_category in ("Track", "All", "Processing", "Skip"):
+                st.caption("Grouped by decision and pipeline status, then the stored adjusted match score (highest first, unscored last).")
         if workspace_category == "Archive":
             pass
         elif not active_jobs and not rejected_jobs:
@@ -2733,13 +2737,18 @@ with tab_dashboard:
 
                         coverage = job.get("deterministic_match_coverage")
                         adjusted_str = format_percent(job.get("ranking_score"), fraction=True)
+                        overall_rank_text = (
+                            f"**Overall rank:** `{format_score(job.get('overall_rank_score'))}` (list order) | "
+                            if job.get("overall_rank_score") is not None
+                            else ""
+                        )
                         raw_str = format_score(job.get("raw_match_score"))
                         cov_str = format_percent(coverage)
 
                         evidence_pct = job.get("decision_evidence_completeness")
                         evidence_str = format_percent(evidence_pct, fraction=True, decimals=0)
 
-                        st.markdown(f"**Adjusted match:** `{adjusted_str}` (list order) | **Raw match:** `{raw_str}` (display only) | **Coverage:** `{cov_str}` | **Evidence completeness:** `{evidence_str}`")
+                        st.markdown(f"{overall_rank_text}**Adjusted match:** `{adjusted_str}` | **Raw match:** `{raw_str}` (display only) | **Coverage:** `{cov_str}` | **Evidence completeness:** `{evidence_str}`")
 
                         ranking_flags = [
                             label for label in (degree_asked_for_label(job), low_confidence_label(job)) if label
