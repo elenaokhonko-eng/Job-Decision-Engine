@@ -47,6 +47,7 @@ const CONTEXT_PAYLOAD_KEYS = [
   "career_track_policy_version",
   "career_track_assessment_hash",
   "decider_version",
+  "gate_outcome_hash",
   "role_downrank_policy_version",
   "role_downrank_assessment_hash",
   "evidence_confidence_policy_version",

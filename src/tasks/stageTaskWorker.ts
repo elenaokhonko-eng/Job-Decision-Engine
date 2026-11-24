@@ -1,3 +1,4 @@
+import { GATE_VERSION } from "../contracts/version.js";
 import crypto from "crypto";
 import pg from "pg";
 import dotenv from "dotenv";
@@ -2805,10 +2806,23 @@ async function maybeEnqueueAfterTask(
   const stagePayload = {
     canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
     job_version_id: jobVersionId,
-    ...(payload.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
+    // A gate-version refresh whose outcome changed re-runs the downstream stages for the SAME job version: its successors need
+    // repair-variant task keys, or the completed tasks of the first run would suppress them and the job would wait forever.
+    ...(payload.reprocess_existing_state === true || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
+      ? { reprocess_existing_state: true }
+      : {}),
+    ...(payload.repair_existing_state === true || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
+      ? { repair_existing_state: true }
+      : {}),
     ...(typeof payload.repair_dependency === "string" ? { repair_dependency: payload.repair_dependency } : {}),
     ...(typeof payload.repair_generation === "string" ? { repair_generation: payload.repair_generation } : {}),
     ...(typeof payload.repair_match_run_id === "string" ? { repair_match_run_id: payload.repair_match_run_id } : {}),
+    // Each gate version gets its own successor identities: a COMPLETED repair-variant task of the same job version (an earlier
+    // repair seed, or an earlier gate-version flip) must not turn this changed-outcome successor into a silent no-op.
+    // repair_generation is whitelisted into the task context and propagates down the chain.
+    ...(taskType === "APPLY_HARD_GATES" && payload.version_refresh === true
+      ? { repair_generation: typeof payload.gate_rule_version === "string" && payload.gate_rule_version.trim() !== "" ? payload.gate_rule_version.trim() : GATE_VERSION }
+      : {}),
   };
 
   if (taskType === "APPLY_HARD_GATES") {
@@ -2919,6 +2933,7 @@ async function executeStageTask(
   budgetRunId: string,
   onSuccessorTaskCreated: () => void,
   onTaskRerouted: () => void,
+  onStampOnly: () => void = () => undefined,
 ): Promise<string | void> {
   if (taskType === "RECHECK_AVAILABILITY") {
     // The read result (verdict, counters, next read) is recorded by the task itself; it has no successor stage.
@@ -3197,8 +3212,11 @@ async function executeStageTask(
   if (taskType === "APPLY_HARD_GATES") {
     const payload = (task.payload || {}) as Record<string, unknown>;
     const verificationAnswerRevisionId = optionalStringPayload(task, "verification_answer_revision_id");
+    // A gate-version refresh: re-evaluate, and when the outcome is unchanged only stamp the audit row (see runHardGates).
+    const versionRefresh = payload.version_refresh === true;
     const reprocess = payload.force_policy_recalculation === true ||
       payload.reprocess === true ||
+      versionRefresh ||
       verificationAnswerRevisionId !== undefined;
     const currentState = await lookupJobState(clientOrPool, ctx, jobVersionId);
 
@@ -3233,6 +3251,7 @@ async function executeStageTask(
       jobVersionIds: [jobVersionId],
       limit: 1,
       reprocess,
+      ...(versionRefresh ? { versionRefresh: true } : {}),
       verificationJobVersionId: jobVersionId,
       ...(verificationAnswerRevisionId
         ? { verificationAnswerRevisionId }
@@ -3240,6 +3259,12 @@ async function executeStageTask(
     });
     if (summary.errors > 0) {
       throw new Error(`Hard gate failed for job_version_id=${jobVersionId}.`);
+    }
+    if (versionRefresh && (summary.stamped ?? 0) > 0) {
+      // Stamp-only re-gate: the job keeps its state and its downstream work. Nothing to enqueue and nothing to verify; the
+      // after-complete successor logic is skipped too (it would enqueue PUBLISH_EMBEDDING / DECIDE_RECOMMENDATION from the state).
+      onStampOnly();
+      return;
     }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (!["PREQUALIFIED", "HARD_REJECTED", "NEEDS_VERIFICATION"].includes(state.processingState || "")) {
@@ -3591,6 +3616,8 @@ async function executeStageTask(
 interface PipelineTaskRunMetrics {
   successorTasksCreated: number;
   rerouted: boolean;
+  /** A version-refresh gate stamp: the task completes without any successor enqueue. */
+  stampOnly?: boolean;
 }
 
 async function processClaimedTask(
@@ -3693,11 +3720,12 @@ async function processClaimedTask(
       options.budgetRunId,
       () => { metrics.successorTasksCreated += 1; },
       () => { metrics.rerouted = true; },
+      () => { metrics.stampOnly = true; },
     );
     await completePipelineTaskAndRun(task, clientOrPool, {
       context: ctx,
       afterComplete: async (transactionClient) => {
-        if (!metrics.rerouted) {
+        if (!metrics.rerouted && !metrics.stampOnly) {
           metrics.successorTasksCreated += await maybeEnqueueAfterTask(
             taskType,
             task,
