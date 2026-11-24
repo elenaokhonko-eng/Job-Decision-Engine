@@ -898,6 +898,34 @@ export function evaluateHardGatesForJob(input: {
   );
 }
 
+/**
+ * True when the stored gate decision for this job version has the same decision and the same set of codes as the gate result
+ * just computed (the canonical gate_decision must agree too). Used by the version-refresh path.
+ */
+async function gateOutcomeUnchanged(
+  client: { query: (text: string, values?: unknown[]) => Promise<{ rows: any[] }> },
+  workspaceId: string,
+  jobId: string,
+  jobVersionId: string,
+  result: { status: string; rejection_codes: readonly string[] },
+): Promise<boolean> {
+  const { rows } = await client.query(
+    `SELECT gd.decision, gd.rejection_codes, c.gate_decision
+       FROM canonical_jobs c
+       JOIN LATERAL (
+         SELECT decision, rejection_codes FROM gate_decisions
+          WHERE workspace_id = c.workspace_id AND canonical_job_id = c.id AND job_version_id = $3
+          ORDER BY created_at DESC, id DESC LIMIT 1
+       ) gd ON TRUE
+      WHERE c.workspace_id = $1 AND c.id = $2`,
+    [workspaceId, jobId, jobVersionId],
+  );
+  const stored = rows[0];
+  if (!stored || stored.decision !== result.status || stored.gate_decision !== result.status) return false;
+  const codes = (value: unknown): string => (Array.isArray(value) ? [...new Set(value.map(String))].sort().join("|") : "");
+  return codes(stored.rejection_codes) === codes(result.rejection_codes);
+}
+
 export async function runHardGates(
   clientOrPool?: pg.Pool | pg.PoolClient,
   options?: {
@@ -906,6 +934,13 @@ export async function runHardGates(
     canonicalJobIds?: string[];
     limit?: number;
     reprocess?: boolean;
+    /**
+     * A re-gate caused by a gate VERSION change (not a forced recalculation). If the gate outcome (decision plus
+     * rejection and needs-verification codes) is unchanged from the stored one, only the audit row with the new gate_version
+     * is written: processing state, lane, match, decision, score and evaluation are left untouched. A changed outcome takes the
+     * normal reset path.
+     */
+    versionRefresh?: boolean;
     /** Optional immutable answer context supplied by a task caller. */
     verificationAnswerContext?: VerificationAnswerContext | null;
     /** Answer revision identity from the task payload; stale revisions are ignored. */
@@ -1197,8 +1232,12 @@ export async function runHardGates(
             passedCount++;
         }
 
+        // Version refresh with an unchanged outcome: stamp the new gate_version in the audit row only.
+        const stampOnly = options?.versionRefresh === true
+          && await gateOutcomeUnchanged(client as any, ctx.workspaceId, job.id, job.job_version_id, gateResult);
+
         // Update canonical job with gate outcome + structured workability facts + evidence
-        const canonicalUpdate = await client.query(
+        const canonicalUpdate = stampOnly ? { rowCount: 1 } : await client.query(
           `UPDATE canonical_jobs
            SET gate_decision      = $1::varchar,
                processing_state   = $2,
