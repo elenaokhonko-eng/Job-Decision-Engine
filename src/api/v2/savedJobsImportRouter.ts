@@ -19,6 +19,7 @@ import express from "express";
 import pg from "pg";
 import { z } from "zod";
 import { loadStructuredFile } from "../../config/structuredLoader.js";
+import { configPath } from "../../config/configPaths.js";
 import { SourcePluginSchema, type SourcePlugin } from "../../contracts/index.js";
 import {
   LINKEDIN_SAVED_PLUGIN_KEY,
@@ -159,7 +160,7 @@ export interface SavedJobsImportRouterDeps {
 
 async function loadPluginFromDisk(pluginKey: string): Promise<SourcePlugin> {
   return (await loadStructuredFile(
-    path.resolve(process.cwd(), "config", "source-plugins", `${pluginKey}.yml`),
+    configPath("source-plugins", `${pluginKey}.yml`),
     SourcePluginSchema,
   )).data;
 }

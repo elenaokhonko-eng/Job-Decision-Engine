@@ -26,7 +26,33 @@ export interface ExpiredSnippetCandidate {
   protected: boolean;
   /** A FETCH_JOB_CONTENT task is still pending, running or retrying within its attempt budget: the fetch may yet succeed. */
   fetchInFlight: boolean;
+  /**
+   * Some fetch task of the job (dead-lettered, retry-waiting or parked) ended with anything that is not a recorded
+   * content or source outcome (CONTENT_OUTCOME_FETCH_ERROR_PATTERN), including an empty error. That is not evidence
+   * about the posting, so the job is not archived for it (invariant 1); it waits until the fetch is retried and ends
+   * with a content outcome. A mix of a 404 and a later timeout therefore defers.
+   */
+  fetchInfraFailure: boolean;
 }
+
+/**
+ * Error text that records a content or source OUTCOME of a posting fetch: what the stage worker stores when the page or
+ * the source answered and the answer is about the posting (stageTaskWorker.ts: POSTING_CONTENT_UNAVAILABLE,
+ * POSTING_IDENTITY_CONFLICT, POSTING_CONTENT_BLOCKED with a content reason) or when the owner retired the source
+ * (SOURCE_RETIRED_BY_USER, parked for a saved export). Only these let a job expire.
+ *
+ * Fail-closed (invariant 1): every other text, including NULL, empty, a lease reclaim, a request time limit, any
+ * network, TLS or DNS error, a provider 5xx or rate limit, and a bot block on our side (POSTING_CONTENT_BLOCKED:
+ * BOT_BLOCKED), counts as infrastructure and defers the archive. The worker keeps no structured error class, so an
+ * allowlist of outcomes is safer than a denylist of error wordings. Prefix match only (anchored with ^), so a
+ * wording that merely contains an outcome name defers. Written without backslash escapes.
+ *
+ * Consequence, deliberately fail-safe (invariant 1): a fetch task parked with a reason this list does not know, or
+ * dead-lettered on an infrastructure failure, keeps its job from expiring until someone retries the task and it
+ * ends with a content or source outcome. `deferredInfraFailure` makes those jobs visible in every report.
+ */
+export const CONTENT_OUTCOME_FETCH_ERROR_PATTERN =
+  "^(POSTING_CONTENT_UNAVAILABLE:|POSTING_IDENTITY_CONFLICT:|SOURCE_RETIRED_BY_USER:|POSTING_CONTENT_BLOCKED: (AUTH_REQUIRED|UNSUPPORTED_SOURCE|UNSAFE_REDIRECT|MISSING_POSTING_URL))";
 
 /**
  * Live snippet-only jobs whose content never arrived and whose time is up: every observation is a bare Gmail
@@ -50,7 +76,7 @@ export async function findExpiredSnippetOnlyJobs(
   if (firstSeenDays < lastSeenDays) throw new RangeError("The first-seen limit cannot be shorter than the last-seen limit.");
   const capabilities = await readSchemaCapabilities(client);
   const result = await client.query<
-    ArchiveProtectionFlags & { canonical_job_id: string; first_seen_at: Date; last_seen_at: Date; last_seen_expired: boolean; fetch_in_flight: boolean }
+    ArchiveProtectionFlags & { canonical_job_id: string; first_seen_at: Date; last_seen_at: Date; last_seen_expired: boolean; fetch_in_flight: boolean; fetch_infra_failure: boolean }
   >(
     `SELECT canonical.id::text AS canonical_job_id,
             seen.first_seen_at,
@@ -70,6 +96,21 @@ export async function findExpiredSnippetOnlyJobs(
                  AND fetch_task.attempt_count < fetch_task.max_attempts
                  AND fetch_version.canonical_job_id = canonical.id
             ) AS fetch_in_flight,
+            EXISTS (
+              SELECT 1
+                FROM pipeline_tasks fetch_task
+                JOIN raw_job_observations fetch_observation
+                  ON fetch_observation.workspace_id = fetch_task.workspace_id
+                 AND fetch_observation.id::text = fetch_task.payload->>'observation_id'
+                JOIN job_versions fetch_version
+                  ON fetch_version.workspace_id = fetch_observation.workspace_id
+                 AND fetch_version.id = fetch_observation.job_version_id
+               WHERE fetch_task.workspace_id = canonical.workspace_id
+                 AND fetch_task.task_type = 'FETCH_JOB_CONTENT'
+                 AND fetch_task.status IN ('DEAD_LETTER', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+                 AND fetch_version.canonical_job_id = canonical.id
+                 AND NOT (COALESCE(NULLIF(fetch_task.blocked_reason, ''), fetch_task.last_error, '') ~ $5)
+            ) AS fetch_infra_failure,
             ${protectionColumnsSql(capabilities)}
        FROM canonical_jobs canonical
        JOIN v_job_content_state content_state
@@ -98,7 +139,7 @@ export async function findExpiredSnippetOnlyJobs(
              AND o.source_name <> 'GMAIL_ALERT'
         )
       ORDER BY canonical.id`,
-    [input.now ?? new Date(), input.workspaceId, lastSeenDays, firstSeenDays],
+    [input.now ?? new Date(), input.workspaceId, lastSeenDays, firstSeenDays, CONTENT_OUTCOME_FETCH_ERROR_PATTERN],
   );
   return result.rows.map((row) => ({
     canonicalJobId: row.canonical_job_id,
@@ -107,6 +148,7 @@ export async function findExpiredSnippetOnlyJobs(
     lastSeenAt: row.last_seen_at,
     protected: isProtected(row),
     fetchInFlight: row.fetch_in_flight,
+    fetchInfraFailure: row.fetch_infra_failure,
   }));
 }
 
@@ -130,6 +172,10 @@ export interface SnippetExpiryReport {
   protectedSkipped: number;
   /** Candidates left alone because their fetch task is still within its retry budget. */
   deferredFetchInFlight: number;
+  /** Candidates left alone because their last fetch failed for an infrastructure reason (not about the posting). */
+  deferredInfraFailure: number;
+  /** Candidates that became protected, or stopped qualifying, between the first read and the locked re-check. */
+  droppedAtApply: number;
   byTrigger: Record<SnippetExpiryTrigger, number>;
   archived: number;
   /** Ids only, never titles or employers. */
@@ -147,13 +193,68 @@ export interface SnippetExpiryInput {
   firstSeenDays?: number;
 }
 
+/** Test seam for the in-transaction function; not part of SnippetExpiryInput. */
+export interface SnippetExpiryHooks {
+  /** Called after the first read and before the candidate rows are locked. */
+  beforeLock?: () => Promise<void>;
+}
+
+/**
+ * Row locks last only until the end of the transaction. Outside a transaction block each statement commits at once and
+ * the lock is gone, so the apply step refuses to run there. SAVEPOINT is accepted only inside a transaction block.
+ */
+async function assertInTransaction(client: pg.PoolClient): Promise<void> {
+  try {
+    await client.query("SAVEPOINT snippet_expiry_in_transaction");
+    await client.query("RELEASE SAVEPOINT snippet_expiry_in_transaction");
+  } catch (error) {
+    throw new Error("expireSnippetOnlyJobsInTransaction must run inside a transaction: the row locks end with it.", { cause: error });
+  }
+}
+
+/**
+ * Dry run: reads only (the caller may wrap it in a read-only transaction). Apply: runs in its own transaction, so the
+ * row locks below last until the archive commits; a failure rolls everything back.
+ */
 export async function expireSnippetOnlyJobs(client: pg.PoolClient, input: SnippetExpiryInput): Promise<SnippetExpiryReport> {
+  if (!input.apply) return expireSnippetOnlyJobsInTransaction(client, input);
+  await client.query("BEGIN");
+  try {
+    const report = await expireSnippetOnlyJobsInTransaction(client, input);
+    await client.query("COMMIT");
+    return report;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
+}
+
+/**
+ * The apply step inside a transaction the caller has opened (tests drive the timing with it; production calls
+ * expireSnippetOnlyJobs). Lock scope, stated exactly: the locked rows are the canonical_jobs rows, and a foreign key
+ * to canonical_jobs takes a share lock on that row when a child is inserted, so an INSERT into application_records,
+ * job_archive_holds, evaluation_queue or document_runs for a candidate waits until this transaction ends (and is
+ * seen by the re-read if it committed first). pipeline_tasks have NO foreign key to canonical_jobs (they name the
+ * job in their JSON payload), so a lease claimed or a fetch task queued concurrently is not blocked: it is caught by
+ * the locked re-read only if it committed before that read. The residual window (a lease claimed after the re-read and
+ * before commit) is narrow and harmless: applyArchiveTransition completes the job's open tasks as SKIPPED_ARCHIVED_JOB
+ * and the worker refuses tasks for an archived job (jobArchiveGuard); the archive is reversible.
+ */
+export async function expireSnippetOnlyJobsInTransaction(
+  client: pg.PoolClient,
+  input: SnippetExpiryInput,
+  hooks: SnippetExpiryHooks = {},
+): Promise<SnippetExpiryReport> {
+  if (input.apply) await assertInTransaction(client);
   const lastSeenDays = input.lastSeenDays ?? SNIPPET_EXPIRY_LAST_SEEN_DAYS;
   const firstSeenDays = input.firstSeenDays ?? SNIPPET_EXPIRY_FIRST_SEEN_DAYS;
   const candidates = await findExpiredSnippetOnlyJobs(client, { workspaceId: input.workspaceId, now: input.now, lastSeenDays, firstSeenDays });
-  const eligible = candidates.filter((candidate) => !candidate.protected && !candidate.fetchInFlight);
+  const isEligible = (candidate: ExpiredSnippetCandidate): boolean =>
+    !candidate.protected && !candidate.fetchInFlight && !candidate.fetchInfraFailure;
+  const eligible = candidates.filter(isEligible);
   const protectedSkipped = candidates.filter((candidate) => candidate.protected).length;
   const deferredFetchInFlight = candidates.filter((candidate) => !candidate.protected && candidate.fetchInFlight).length;
+  const deferredInfraFailure = candidates.filter((candidate) => !candidate.protected && !candidate.fetchInFlight && candidate.fetchInfraFailure).length;
   const byTrigger: Record<SnippetExpiryTrigger, number> = { LAST_SEEN: 0, FIRST_SEEN: 0 };
   for (const candidate of eligible) byTrigger[candidate.trigger] += 1;
   const report: SnippetExpiryReport = {
@@ -162,14 +263,35 @@ export async function expireSnippetOnlyJobs(client: pg.PoolClient, input: Snippe
     toArchive: eligible.length,
     protectedSkipped,
     deferredFetchInFlight,
+    deferredInfraFailure,
+    droppedAtApply: 0,
     byTrigger,
     archived: 0,
     archivedJobIds: [],
   };
   if (!input.apply) return report;
 
+  // The first read and the archive are separate steps: an application, hold, lease or fetch may appear in between.
+  // Lock the candidate rows (a foreign-key insert such as an application waits for the lock), then read again and
+  // archive only the jobs that still qualify and are still unprotected.
+  if (hooks.beforeLock) await hooks.beforeLock();
+  const candidateIds = eligible.map((candidate) => candidate.canonicalJobId);
+  if (candidateIds.length > 0) {
+    await client.query(
+      `SELECT id FROM canonical_jobs WHERE workspace_id = $1::uuid AND id = ANY($2::uuid[]) ORDER BY id FOR UPDATE`,
+      [input.workspaceId, candidateIds],
+    );
+  }
+  const fresh = (await findExpiredSnippetOnlyJobs(client, { workspaceId: input.workspaceId, now: input.now, lastSeenDays, firstSeenDays }))
+    .filter(isEligible);
+  const stillEligible = new Map(fresh.filter((candidate) => candidateIds.includes(candidate.canonicalJobId)).map((candidate) => [candidate.canonicalJobId, candidate]));
+  report.droppedAtApply = candidateIds.length - stillEligible.size;
+  report.toArchive = stillEligible.size;
+  report.byTrigger = { LAST_SEEN: 0, FIRST_SEEN: 0 };
+  for (const candidate of stillEligible.values()) report.byTrigger[candidate.trigger] += 1;
+
   for (const trigger of ["LAST_SEEN", "FIRST_SEEN"] as const) {
-    const ids = eligible.filter((candidate) => candidate.trigger === trigger).map((candidate) => candidate.canonicalJobId);
+    const ids = [...stillEligible.values()].filter((candidate) => candidate.trigger === trigger).map((candidate) => candidate.canonicalJobId);
     if (ids.length === 0) continue;
     const archived = await archiveJobsAsPostingNotConfirmable(client, {
       workspaceId: input.workspaceId,
