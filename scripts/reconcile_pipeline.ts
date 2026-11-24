@@ -5,7 +5,10 @@ import {
   DEAD_LETTER_CLASSIFICATION_SQL,
   DEAD_LETTER_LINEAGE_JOINS_SQL,
 } from "../src/tasks/deadLetterPolicy.js";
+import { completedWithoutResultExitCode, findTasksCompletedWithoutResult, type CompletedWithoutResultReport } from "../src/tasks/completedWithoutResult.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import { reportAwaitingContentOutputs } from "../src/ingestion/contentCompleteness.js";
+import { reportContentWithoutFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -36,6 +39,15 @@ interface ReconciliationReport {
     dead_letter_tasks: number;
     actionable_dead_letter_tasks: number;
     stale_historical_dead_letter_tasks: number;
+  };
+  /** Tasks marked COMPLETED whose result row is missing. Any count above zero is an error. */
+  completed_without_result: CompletedWithoutResultReport;
+  /** Awaiting-content jobs (live, no complete posting text). Violations are listed by scripts/check_integrity.ts. */
+  content_completeness: {
+    awaiting_content_jobs: number;
+    awaiting_with_gate_lane_or_recommendation: number;
+    awaiting_without_fetch_task: number;
+    awaiting_with_only_dead_lettered_fetch: number;
   };
   samples: {
     pass_missing_current_requirements: string[];
@@ -433,6 +445,9 @@ async function run(): Promise<void> {
       [ctx.workspaceId, activeProfileVersionId]
     );
 
+    const awaitingOutputs = await reportAwaitingContentOutputs(client, ctx.workspaceId);
+    const fetchCoverage = await reportContentWithoutFetchTask(client, ctx.workspaceId);
+
     const report: ReconciliationReport = {
       mode: "read_only",
       generated_at: new Date().toISOString(),
@@ -442,6 +457,13 @@ async function run(): Promise<void> {
       task_states: taskStates,
       evaluation_queue_states: evaluationQueueStates,
       funnel: { ...funnel.rows[0] },
+      completed_without_result: await findTasksCompletedWithoutResult(client, ctx.workspaceId),
+      content_completeness: {
+        awaiting_content_jobs: awaitingOutputs.awaitingContentJobs,
+        awaiting_with_gate_lane_or_recommendation: awaitingOutputs.violations.length,
+        awaiting_without_fetch_task: fetchCoverage.withoutFetchTask.length,
+        awaiting_with_only_dead_lettered_fetch: fetchCoverage.fetchDeadLetteredOnly,
+      },
       samples: samples.rows[0] ?? {
         pass_missing_current_requirements: [],
         pass_missing_current_matches: [],
@@ -454,6 +476,13 @@ async function run(): Promise<void> {
     } else {
       console.log("PIPELINE RECONCILIATION (READ ONLY)");
       console.log(JSON.stringify(report, null, 2));
+    }
+    if (completedWithoutResultExitCode(report.completed_without_result) !== 0) {
+      console.error(
+        `ERROR: ${report.completed_without_result.total} pipeline task(s) are COMPLETED with no result recorded ` +
+        `(${JSON.stringify(report.completed_without_result.byTaskType)}).`,
+      );
+      process.exitCode = 1;
     }
   } finally {
     client.release();

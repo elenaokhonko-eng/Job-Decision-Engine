@@ -23,6 +23,8 @@
       "job_archive_events",
       "job_archive_holds",
       "job_archive_runs",
+      "job_availability_recheck_events",
+      "job_availability_recheck_state",
       "job_confirmed_facts",
       "job_support_actions",
       "job_versions",
