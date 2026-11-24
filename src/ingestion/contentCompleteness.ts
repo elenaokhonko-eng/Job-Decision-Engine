@@ -7,7 +7,7 @@ import type pg from "pg";
  * start for it (src/pipeline/hardGate.ts requires description_quality_status = 'COMPLETE' and
  * sourceContentEvidencePredicate). This module is the other half: it finds outputs that exist anyway (left by an
  * older rule or by a description that changed), so a reconciliation can fail loudly instead of the owner finding
- * them in Review. It only reads. The read models hide the same jobs through v_job_content_state (migration 117).
+ * them in Review. It only reads. The read models hide the same jobs through v_job_content_state (migration 120).
  */
 
 export type AwaitingContentReason = "DESCRIPTION_NOT_COMPLETE" | "NO_RETRIEVED_POSTING_EVIDENCE";
