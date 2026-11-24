@@ -27,21 +27,27 @@ export interface ExpiredSnippetCandidate {
   /** A FETCH_JOB_CONTENT task is still pending, running or retrying within its attempt budget: the fetch may yet succeed. */
   fetchInFlight: boolean;
   /**
-   * The job's latest fetch task ended (dead-lettered, retry-waiting or parked) with an infrastructure error: a
-   * provider outage, rate limit, timeout or our own block. That is not evidence about the posting, so the job is
-   * not archived for it (invariant 1); it waits until the fetch is retried or fails for a content reason.
+   * Some fetch task of the job (dead-lettered, retry-waiting or parked) ended with anything that is not a recorded
+   * content or source outcome (CONTENT_OUTCOME_FETCH_ERROR_PATTERN), including an empty error. That is not evidence
+   * about the posting, so the job is not archived for it (invariant 1); it waits until the fetch is retried and ends
+   * with a content outcome. A mix of a 404 and a later timeout therefore defers.
    */
   fetchInfraFailure: boolean;
 }
 
 /**
- * Error text of a fetch that failed for infrastructure reasons: provider HTTP 5xx or 408, rate limiting, timeouts,
- * network errors, a bot block on our side. Matches the reasons src/ingestion/jobContentFetcher.ts and the stage worker
- * record. Anything else (unsupported source, parked for a saved export, identity mismatch, unavailable) is a content
- * or source outcome. Digits are written as classes so no backslash escape is needed.
+ * Error text that records a content or source OUTCOME of a posting fetch: what the stage worker stores when the page or
+ * the source answered and the answer is about the posting (stageTaskWorker.ts: POSTING_CONTENT_UNAVAILABLE,
+ * POSTING_IDENTITY_CONFLICT, POSTING_CONTENT_BLOCKED with a content reason) or when the owner retired the source
+ * (SOURCE_RETIRED_BY_USER, parked for a saved export). Only these let a job expire.
+ *
+ * Fail-closed (invariant 1): every other text, including NULL, empty, a lease reclaim, a request time limit, any
+ * network, TLS or DNS error, a provider 5xx or rate limit, and a bot block on our side (POSTING_CONTENT_BLOCKED:
+ * BOT_BLOCKED), counts as infrastructure and defers the archive. The worker keeps no structured error class, so an
+ * allowlist of outcomes is safer than a denylist of error wordings. Written without backslash escapes.
  */
-export const INFRASTRUCTURE_FETCH_ERROR_PATTERN =
-  "(rate[ _-]?limit|HTTP 5[0-9][0-9]|HTTP 408|time[ -]?out|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed|network|BOT_BLOCKED|temporar|provider returned)";
+export const CONTENT_OUTCOME_FETCH_ERROR_PATTERN =
+  "(POSTING_CONTENT_UNAVAILABLE:|POSTING_IDENTITY_CONFLICT:|SOURCE_RETIRED_BY_USER:|POSTING_CONTENT_BLOCKED: (AUTH_REQUIRED|UNSUPPORTED_SOURCE|UNSAFE_REDIRECT|MISSING_POSTING_URL))";
 
 /**
  * Live snippet-only jobs whose content never arrived and whose time is up: every observation is a bare Gmail
@@ -85,25 +91,21 @@ export async function findExpiredSnippetOnlyJobs(
                  AND fetch_task.attempt_count < fetch_task.max_attempts
                  AND fetch_version.canonical_job_id = canonical.id
             ) AS fetch_in_flight,
-            COALESCE((
-              SELECT (COALESCE(latest_fetch.last_error, '') || ' ' || COALESCE(latest_fetch.blocked_reason, '')) ~* $5
-                FROM (
-                  SELECT fetch_task.last_error, fetch_task.blocked_reason
-                    FROM pipeline_tasks fetch_task
-                    JOIN raw_job_observations fetch_observation
-                      ON fetch_observation.workspace_id = fetch_task.workspace_id
-                     AND fetch_observation.id::text = fetch_task.payload->>'observation_id'
-                    JOIN job_versions fetch_version
-                      ON fetch_version.workspace_id = fetch_observation.workspace_id
-                     AND fetch_version.id = fetch_observation.job_version_id
-                   WHERE fetch_task.workspace_id = canonical.workspace_id
-                     AND fetch_task.task_type = 'FETCH_JOB_CONTENT'
-                     AND fetch_task.status IN ('DEAD_LETTER', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
-                     AND fetch_version.canonical_job_id = canonical.id
-                   ORDER BY fetch_task.updated_at DESC, fetch_task.id DESC
-                   LIMIT 1
-                ) latest_fetch
-            ), FALSE) AS fetch_infra_failure,
+            EXISTS (
+              SELECT 1
+                FROM pipeline_tasks fetch_task
+                JOIN raw_job_observations fetch_observation
+                  ON fetch_observation.workspace_id = fetch_task.workspace_id
+                 AND fetch_observation.id::text = fetch_task.payload->>'observation_id'
+                JOIN job_versions fetch_version
+                  ON fetch_version.workspace_id = fetch_observation.workspace_id
+                 AND fetch_version.id = fetch_observation.job_version_id
+               WHERE fetch_task.workspace_id = canonical.workspace_id
+                 AND fetch_task.task_type = 'FETCH_JOB_CONTENT'
+                 AND fetch_task.status IN ('DEAD_LETTER', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+                 AND fetch_version.canonical_job_id = canonical.id
+                 AND NOT (COALESCE(NULLIF(fetch_task.blocked_reason, ''), fetch_task.last_error, '') ~ $5)
+            ) AS fetch_infra_failure,
             ${protectionColumnsSql(capabilities)}
        FROM canonical_jobs canonical
        JOIN v_job_content_state content_state
@@ -132,7 +134,7 @@ export async function findExpiredSnippetOnlyJobs(
              AND o.source_name <> 'GMAIL_ALERT'
         )
       ORDER BY canonical.id`,
-    [input.now ?? new Date(), input.workspaceId, lastSeenDays, firstSeenDays, INFRASTRUCTURE_FETCH_ERROR_PATTERN],
+    [input.now ?? new Date(), input.workspaceId, lastSeenDays, firstSeenDays, CONTENT_OUTCOME_FETCH_ERROR_PATTERN],
   );
   return result.rows.map((row) => ({
     canonicalJobId: row.canonical_job_id,
@@ -184,11 +186,47 @@ export interface SnippetExpiryInput {
   restorePoint?: string;
   lastSeenDays?: number;
   firstSeenDays?: number;
-  /** Test hook, called after the first read and before the rows are locked. */
+}
+
+/** Test seam for the in-transaction function; not part of SnippetExpiryInput. */
+export interface SnippetExpiryHooks {
+  /** Called after the first read and before the candidate rows are locked. */
   beforeLock?: () => Promise<void>;
 }
 
+/**
+ * Dry run: reads only (the caller may wrap it in a read-only transaction). Apply: runs in its own transaction, so the
+ * row locks below last until the archive commits; a failure rolls everything back.
+ */
 export async function expireSnippetOnlyJobs(client: pg.PoolClient, input: SnippetExpiryInput): Promise<SnippetExpiryReport> {
+  if (!input.apply) return expireSnippetOnlyJobsInTransaction(client, input);
+  await client.query("BEGIN");
+  try {
+    const report = await expireSnippetOnlyJobsInTransaction(client, input);
+    await client.query("COMMIT");
+    return report;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
+}
+
+/**
+ * The apply step inside a transaction the caller has opened (tests drive the timing with it; production calls
+ * expireSnippetOnlyJobs). Lock scope, stated exactly: the locked rows are the canonical_jobs rows, and a foreign key
+ * to canonical_jobs takes a share lock on that row when a child is inserted, so an INSERT into application_records,
+ * job_archive_holds, evaluation_queue or document_runs for a candidate waits until this transaction ends (and is
+ * seen by the re-read if it committed first). pipeline_tasks have NO foreign key to canonical_jobs (they name the
+ * job in their JSON payload), so a lease claimed or a fetch task queued concurrently is not blocked: it is caught by
+ * the locked re-read only if it committed before that read. The residual window (a lease claimed after the re-read and
+ * before commit) is narrow and harmless: applyArchiveTransition completes the job's open tasks as SKIPPED_ARCHIVED_JOB
+ * and the worker refuses tasks for an archived job (jobArchiveGuard); the archive is reversible.
+ */
+export async function expireSnippetOnlyJobsInTransaction(
+  client: pg.PoolClient,
+  input: SnippetExpiryInput,
+  hooks: SnippetExpiryHooks = {},
+): Promise<SnippetExpiryReport> {
   const lastSeenDays = input.lastSeenDays ?? SNIPPET_EXPIRY_LAST_SEEN_DAYS;
   const firstSeenDays = input.firstSeenDays ?? SNIPPET_EXPIRY_FIRST_SEEN_DAYS;
   const candidates = await findExpiredSnippetOnlyJobs(client, { workspaceId: input.workspaceId, now: input.now, lastSeenDays, firstSeenDays });
@@ -217,7 +255,7 @@ export async function expireSnippetOnlyJobs(client: pg.PoolClient, input: Snippe
   // The first read and the archive are separate steps: an application, hold, lease or fetch may appear in between.
   // Lock the candidate rows (a foreign-key insert such as an application waits for the lock), then read again and
   // archive only the jobs that still qualify and are still unprotected.
-  if (input.beforeLock) await input.beforeLock();
+  if (hooks.beforeLock) await hooks.beforeLock();
   const candidateIds = eligible.map((candidate) => candidate.canonicalJobId);
   if (candidateIds.length > 0) {
     await client.query(

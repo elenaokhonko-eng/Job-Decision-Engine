@@ -34,8 +34,16 @@ function db(): pg.PoolClient {
   return client;
 }
 
-async function seedAlertJob(label: string): Promise<{ canonicalJobId: string; observationId: string }> {
-  const workspaceId = context!.workspaceId;
+async function newContext(): Promise<WorkspaceContext> {
+  const key = `coverage-${randomUUID()}`;
+  const inserted = await db().query<{ id: string }>(`INSERT INTO workspaces (workspace_key, display_name) VALUES ($1, 'Coverage') RETURNING id::text`, [key]);
+  const user = await db().query<{ id: string }>(`SELECT id::text FROM workspace_users WHERE user_key = 'local_user' LIMIT 1`);
+  await db().query(`INSERT INTO workspace_memberships (workspace_id, user_id, role, status) VALUES ($1, $2, 'OWNER', 'ACTIVE') ON CONFLICT (workspace_id, user_id) DO NOTHING`, [inserted.rows[0]!.id, user.rows[0]!.id]);
+  return resolveWorkspaceContext(db(), { workspaceKey: key, userKey: "local_user" });
+}
+
+async function seedAlertJob(label: string, ctx: WorkspaceContext = context!): Promise<{ canonicalJobId: string; observationId: string }> {
+  const workspaceId = ctx.workspaceId;
   const canonical = await db().query<{ id: string }>(
     `INSERT INTO canonical_jobs (workspace_id, company_name, normalized_title, canonical_url, processing_state, processing_status, description_quality_status)
      VALUES ($1, 'Coverage Fixture Co', $2, $3, 'RAW_STAGED', 'RAW_STAGED', 'INCOMPLETE') RETURNING id`,
@@ -102,16 +110,18 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
   });
 
   it("assertObservationsHaveFetchTask fails when a task is missing, so staging would roll the alert back", async () => {
-    const { observationId } = await seedAlertJob("assert-missing");
-    await expect(assertObservationsHaveFetchTask(db(), context!.workspaceId, [observationId])).rejects.toThrow(/without a FETCH_JOB_CONTENT task/);
-    await enqueueAlertFetchTask(db(), context!, { observationId, producer: "test" });
-    await expect(assertObservationsHaveFetchTask(db(), context!.workspaceId, [observationId])).resolves.toBeUndefined();
+    const ctx = await newContext();
+    const { observationId } = await seedAlertJob("assert-missing", ctx);
+    await expect(assertObservationsHaveFetchTask(db(), ctx.workspaceId, [observationId])).rejects.toThrow(/without a FETCH_JOB_CONTENT task/);
+    await enqueueAlertFetchTask(db(), ctx, { observationId, producer: "test" });
+    await expect(assertObservationsHaveFetchTask(db(), ctx.workspaceId, [observationId])).resolves.toBeUndefined();
   });
 
   it("enqueueAlertFetchTask is idempotent on the shared key", async () => {
-    const { observationId } = await seedAlertJob("idempotent");
-    const first = await enqueueAlertFetchTask(db(), context!, { observationId, producer: "test" });
-    const second = await enqueueAlertFetchTask(db(), context!, { observationId, producer: "test" });
+    const ctx = await newContext();
+    const { observationId } = await seedAlertJob("idempotent", ctx);
+    const first = await enqueueAlertFetchTask(db(), ctx, { observationId, producer: "test" });
+    const second = await enqueueAlertFetchTask(db(), ctx, { observationId, producer: "test" });
     expect(first.inserted).toBe(true);
     expect(second.inserted).toBe(false);
     expect(second.taskId).toBe(first.taskId);
@@ -149,46 +159,49 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
   });
 
   it("an aggregator lead without a fetch task is not a coverage violation, a legacy snippet job is", async () => {
-    const lead = await seedAlertJob("lead-backed");
+    const ctx = await newContext();
+    const lead = await seedAlertJob("lead-backed", ctx);
     await db().query(
       `UPDATE raw_job_observations SET processing_status = 'FETCH_BLOCKED', raw_payload = '{"lead_kind":"AGGREGATOR_LEAD"}'::jsonb WHERE id = $1`,
       [lead.observationId]);
-    const legacy = await seedAlertJob("legacy-snippet");
-    const report = await reportContentWithoutFetchTask(db(), context!.workspaceId);
+    const legacy = await seedAlertJob("legacy-snippet", ctx);
+    const report = await reportContentWithoutFetchTask(db(), ctx.workspaceId);
     expect(report.withoutFetchTask).not.toContain(lead.canonicalJobId);
     expect(report.withoutFetchTask).toContain(legacy.canonicalJobId);
   });
 
   it("ensureFetchTasksForAwaitingContent queues tasks additively, dry run first, and is idempotent", async () => {
+    const ctx = await newContext();
     // Independent of the rows other tests left: the expected count is whatever is missing a task right now, plus this job.
-    const existing = (await reportContentWithoutFetchTask(db(), context!.workspaceId)).withoutFetchTask.length;
-    const job = await seedAlertJob("ensure");
+    const existing = (await reportContentWithoutFetchTask(db(), ctx.workspaceId)).withoutFetchTask.length;
+    const job = await seedAlertJob("ensure", ctx);
     const expected = existing + 1;
-    const dry = await ensureFetchTasksForAwaitingContent(db(), context!, { apply: false, producer: "test" });
+    const dry = await ensureFetchTasksForAwaitingContent(db(), ctx, { apply: false, producer: "test" });
     expect(dry.candidates).toBe(expected);
     expect(dry.queued).toBe(0);
-    expect((await reportContentWithoutFetchTask(db(), context!.workspaceId)).withoutFetchTask).toContain(job.canonicalJobId);
-    const applied = await ensureFetchTasksForAwaitingContent(db(), context!, { apply: true, producer: "test" });
+    expect((await reportContentWithoutFetchTask(db(), ctx.workspaceId)).withoutFetchTask).toContain(job.canonicalJobId);
+    const applied = await ensureFetchTasksForAwaitingContent(db(), ctx, { apply: true, producer: "test" });
     expect(applied.queued).toBe(expected);
-    expect((await reportContentWithoutFetchTask(db(), context!.workspaceId)).withoutFetchTask).not.toContain(job.canonicalJobId);
-    const again = await ensureFetchTasksForAwaitingContent(db(), context!, { apply: true, producer: "test" });
+    expect((await reportContentWithoutFetchTask(db(), ctx.workspaceId)).withoutFetchTask).not.toContain(job.canonicalJobId);
+    const again = await ensureFetchTasksForAwaitingContent(db(), ctx, { apply: true, producer: "test" });
     expect(again.queued).toBe(0);
     const state = await db().query<{ state: string }>(`SELECT processing_state AS state FROM canonical_jobs WHERE id = $1`, [job.canonicalJobId]);
     expect(state.rows[0]!.state).toBe("RAW_STAGED");
   });
 
   it("reconciliation lists exactly the live jobs with neither complete content nor a fetch task", async () => {
-    const withoutTask = await seedAlertJob("no-task");
-    const withTask = await seedAlertJob("with-task");
-    await enqueueAlertFetchTask(db(), context!, { observationId: withTask.observationId, producer: "test" });
-    const deadLettered = await seedAlertJob("dead-lettered");
-    await enqueueAlertFetchTask(db(), context!, { observationId: deadLettered.observationId, producer: "test" });
+    const ctx = await newContext();
+    const withoutTask = await seedAlertJob("no-task", ctx);
+    const withTask = await seedAlertJob("with-task", ctx);
+    await enqueueAlertFetchTask(db(), ctx, { observationId: withTask.observationId, producer: "test" });
+    const deadLettered = await seedAlertJob("dead-lettered", ctx);
+    await enqueueAlertFetchTask(db(), ctx, { observationId: deadLettered.observationId, producer: "test" });
     await db().query(
       `UPDATE pipeline_tasks SET status = 'DEAD_LETTER' WHERE workspace_id = $1 AND payload->>'observation_id' = $2`,
-      [context!.workspaceId, deadLettered.observationId],
+      [ctx.workspaceId, deadLettered.observationId],
     );
 
-    const report = await reportContentWithoutFetchTask(db(), context!.workspaceId);
+    const report = await reportContentWithoutFetchTask(db(), ctx.workspaceId);
     expect(report.withoutFetchTask).toContain(withoutTask.canonicalJobId);
     expect(report.withoutFetchTask).not.toContain(withTask.canonicalJobId);
     expect(report.withoutFetchTask).not.toContain(deadLettered.canonicalJobId);
@@ -197,7 +210,7 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
     // Complete content clears the job from the report even with no task.
     await db().query(`UPDATE canonical_jobs SET description_quality_status = 'COMPLETE' WHERE id = $1`, [withoutTask.canonicalJobId]);
     await db().query(`UPDATE raw_job_observations SET raw_payload = '{"source_content_status":"COMPLETE"}'::jsonb WHERE id = $1`, [withoutTask.observationId]);
-    const after = await reportContentWithoutFetchTask(db(), context!.workspaceId);
+    const after = await reportContentWithoutFetchTask(db(), ctx.workspaceId);
     expect(after.withoutFetchTask).not.toContain(withoutTask.canonicalJobId);
   });
 });

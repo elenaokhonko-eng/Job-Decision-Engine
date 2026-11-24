@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
-import { expireSnippetOnlyJobs } from "../../ingestion/snippetExpiry.js";
+import { expireSnippetOnlyJobs, expireSnippetOnlyJobsInTransaction } from "../../ingestion/snippetExpiry.js";
 import { createArchiveHold, restoreArchivedJob } from "../../services/jobArchive.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
@@ -41,7 +41,8 @@ interface JobOptions {
   readonly fetchAttempts?: number;
   /** The fetch task's last error text. */
   readonly fetchError?: string;
-  readonly fetchStatus?: string;
+  /** More fetch tasks for the same observation (e.g. an old 404 and a newer timeout). */
+  readonly extraFetchTasks?: readonly { readonly status: string; readonly error: string | null }[];
   readonly state?: string;
 }
 
@@ -92,6 +93,13 @@ async function seedJob(label: string, options: JobOptions, workspaceId: string =
       [workspaceId, `FETCH_JOB_CONTENT:${firstObservation}:posting_fetch_v1`, JSON.stringify({ observation_id: firstObservation }), options.fetchTask, options.fetchAttempts ?? 0, options.fetchError ?? null],
     );
   }
+  for (const [index, extra] of (options.extraFetchTasks ?? []).entries()) {
+    await db().query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, attempt_count, max_attempts, last_error)
+       VALUES ($1, 'FETCH_JOB_CONTENT', $2, $3::jsonb, $4, 8, 8, $5)`,
+      [workspaceId, `FETCH_JOB_CONTENT:${firstObservation}:extra:${index}`, JSON.stringify({ observation_id: firstObservation }), extra.status, extra.error],
+    );
+  }
   return canonicalJobId;
 }
 
@@ -119,8 +127,8 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
     ids.resighted22 = await seedJob("first-seen-22-days-resighted", { seen: [22 * DAY, DAY] });
     ids.resighted20 = await seedJob("first-seen-20-days-resighted", { seen: [20 * DAY, DAY] });
     ids.pendingFetch = await seedJob("fetch-within-budget-deferred", { seen: [9 * DAY], fetchTask: "RETRY_WAIT", fetchAttempts: 3 });
-    ids.exhaustedFetch = await seedJob("fetch-budget-exhausted-expires", { seen: [9 * DAY], fetchTask: "RETRY_WAIT", fetchAttempts: 8 });
-    ids.parkedFetch = await seedJob("fetch-parked-expires", { seen: [9 * DAY], fetchTask: "BLOCKED_DEPENDENCY" });
+    ids.exhaustedFetch = await seedJob("fetch-budget-exhausted-expires", { seen: [9 * DAY], fetchTask: "RETRY_WAIT", fetchAttempts: 8, fetchError: "POSTING_CONTENT_BLOCKED: UNSUPPORTED_SOURCE" });
+    ids.parkedFetch = await seedJob("fetch-parked-expires", { seen: [9 * DAY], fetchTask: "BLOCKED_DEPENDENCY", fetchError: "SOURCE_RETIRED_BY_USER: content comes from the saved-jobs export" });
     ids.applied = await seedJob("has-application", { seen: [30 * DAY] });
     ids.held = await seedJob("has-hold", { seen: [30 * DAY] });
     ids.saved = await seedJob("saved-export", { seen: [30 * DAY], extraSource: "LINKEDIN_SAVED" });
@@ -212,9 +220,19 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
       `INSERT INTO workspaces (workspace_key, display_name) VALUES ($1, 'Expiry') RETURNING id::text`, [`expiry-${randomUUID()}`]);
     return inserted.rows[0]!.id;
   }
-  const applyIn = (workspaceId: string, extra: { beforeLock?: () => Promise<void> } = {}) => expireSnippetOnlyJobs(db(), {
-    workspaceId, apply: true, now: NOW, actor: "test:snippet_expiry", restorePoint: "test-restore-point", ...extra,
-  });
+  const applyIn = async (workspaceId: string, hooks: { beforeLock?: () => Promise<void> } = {}) => {
+    await db().query("BEGIN");
+    try {
+      const report = await expireSnippetOnlyJobsInTransaction(db(), {
+        workspaceId, apply: true, now: NOW, actor: "test:snippet_expiry", restorePoint: "test-restore-point",
+      }, hooks);
+      await db().query("COMMIT");
+      return report;
+    } catch (error) {
+      await db().query("ROLLBACK");
+      throw error;
+    }
+  };
 
   it("an application created between the first read and the archive stops the archive (locked re-check)", async () => {
     const ws = await newWorkspace();
@@ -258,17 +276,141 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
     expect((await archiveState(review)).archived).toBe(false);
   });
 
-  it("a fetch that failed for an infrastructure reason defers the archive; a content or source failure does not", async () => {
+  it("only a recorded content or source outcome lets a job expire; every other fetch error, including no text, defers", async () => {
     const ws = await newWorkspace();
-    const outage = await seedJob("provider-outage", { seen: [30 * DAY], fetchTask: "DEAD_LETTER", fetchAttempts: 8, fetchError: "Posting provider returned HTTP 503." }, ws);
-    const rateLimited = await seedJob("rate-limited", { seen: [30 * DAY], fetchTask: "DEAD_LETTER", fetchAttempts: 8, fetchError: "RATE_LIMITED: slow down" }, ws);
-    const timeout = await seedJob("timeout", { seen: [30 * DAY], fetchTask: "RETRY_WAIT", fetchAttempts: 8, fetchError: "request timed out" }, ws);
-    const unsupported = await seedJob("unsupported-source", { seen: [30 * DAY], fetchTask: "DEAD_LETTER", fetchAttempts: 8, fetchError: "UNSUPPORTED_SOURCE" }, ws);
-    const parked = await seedJob("parked", { seen: [30 * DAY], fetchTask: "BLOCKED_DEPENDENCY", fetchError: "SOURCE_RETIRED_BY_USER: content comes from the saved-jobs export" }, ws);
+    const base = { seen: [30 * DAY], fetchTask: "DEAD_LETTER" as const, fetchAttempts: 8 };
+    const infraWordings: (string | null)[] = [
+      "Posting provider returned HTTP 503.",
+      "Posting retrieval is retryable: Posting provider rate limited the request.",
+      "Posting fetch exceeded its total request time limit.",
+      "Previous task lease expired before completion; reclaiming.",
+      "request timed out", "connect ECONNABORTED", "write EPIPE", "connect EHOSTUNREACH", "connect ENETUNREACH",
+      "unable to verify the first certificate", "DNS resolution failed", "getaddrinfo ENOTFOUND example.test",
+      "POSTING_CONTENT_BLOCKED: BOT_BLOCKED", "something nobody has seen before", "", null,
+    ];
+    const deferred: string[] = [];
+    for (const [index, text] of infraWordings.entries()) {
+      deferred.push(await seedJob(`infra-${index}`, { ...base, fetchError: text as string }, ws));
+    }
+    deferred.push(await seedJob("timeout-retry-wait", { seen: [30 * DAY], fetchTask: "RETRY_WAIT", fetchAttempts: 8, fetchError: "Posting fetch exceeded its total request time limit." }, ws));
+    // A 404 followed by a timeout: the job is not archived on the strength of the older content outcome.
+    deferred.push(await seedJob("not-found-then-timeout", {
+      ...base, fetchError: "POSTING_CONTENT_UNAVAILABLE: The exact posting URL returned HTTP 404.",
+      extraFetchTasks: [{ status: "DEAD_LETTER", error: "Posting fetch exceeded its total request time limit." }],
+    }, ws));
+    const outcomes = [
+      await seedJob("unsupported-source", { ...base, fetchError: "POSTING_CONTENT_BLOCKED: UNSUPPORTED_SOURCE" }, ws),
+      await seedJob("auth-required", { ...base, fetchError: "POSTING_CONTENT_BLOCKED: AUTH_REQUIRED" }, ws),
+      await seedJob("not-found", { ...base, fetchError: "POSTING_CONTENT_UNAVAILABLE: The exact posting URL returned HTTP 410." }, ws),
+      await seedJob("identity-conflict", { ...base, fetchError: "POSTING_IDENTITY_CONFLICT: employer differs" }, ws),
+      await seedJob("parked", { seen: [30 * DAY], fetchTask: "BLOCKED_DEPENDENCY", fetchError: "SOURCE_RETIRED_BY_USER: content comes from the saved-jobs export" }, ws),
+    ];
     const report = await applyIn(ws);
-    expect(report.deferredInfraFailure).toBe(3);
-    expect([...report.archivedJobIds].sort()).toEqual([unsupported, parked].sort());
-    for (const id of [outage, rateLimited, timeout]) expect((await archiveState(id)).archived).toBe(false);
+    expect(report.deferredInfraFailure).toBe(deferred.length);
+    expect([...report.archivedJobIds].sort()).toEqual([...outcomes].sort());
+    for (const id of deferred) expect((await archiveState(id)).archived).toBe(false);
+  });
+
+  async function otherConnection(): Promise<pg.PoolClient> {
+    const connection = await pool!.connect();
+    await connection.query(`SET search_path TO ${schemaName}, public`);
+    return connection;
+  }
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const settledWithin = async (promise: Promise<unknown>, ms: number): Promise<boolean> =>
+    Promise.race([promise.then(() => true, () => true), sleep(ms).then(() => false)]);
+
+  it("a concurrent application insert waits for the archive transaction (second connection)", async () => {
+    const ws = await newWorkspace();
+    const job = await seedJob("insert-waits", { seen: [30 * DAY] }, ws);
+    const archiver = await otherConnection();
+    const writer = await otherConnection();
+    try {
+      await archiver.query("BEGIN");
+      const report = await expireSnippetOnlyJobsInTransaction(archiver, { workspaceId: ws, apply: true, now: NOW, actor: "t" });
+      expect(report.archivedJobIds).toEqual([job]);
+      // The archive transaction is open and holds the row lock; the application insert must wait.
+      const insert = writer.query(
+        `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status)
+         SELECT $1, $2, $3, latest_job_version_id, 'APPLIED' FROM canonical_jobs WHERE id = $3`,
+        [ws, context!.userId, job],
+      );
+      expect(await settledWithin(insert, 500)).toBe(false);
+      await archiver.query("COMMIT");
+      await insert;
+      expect((await archiveState(job)).archived).toBe(true);
+    } finally {
+      archiver.release();
+      writer.release();
+    }
+  });
+
+  it("an application insert in flight makes the archive wait, and the job is then not archived (second connection)", async () => {
+    const ws = await newWorkspace();
+    const job = await seedJob("archive-waits", { seen: [30 * DAY] }, ws);
+    const archiver = await otherConnection();
+    const writer = await otherConnection();
+    try {
+      await writer.query("BEGIN");
+      await writer.query(
+        `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status)
+         SELECT $1, $2, $3, latest_job_version_id, 'APPLIED' FROM canonical_jobs WHERE id = $3`,
+        [ws, context!.userId, job],
+      );
+      await archiver.query("BEGIN");
+      const run = expireSnippetOnlyJobsInTransaction(archiver, { workspaceId: ws, apply: true, now: NOW, actor: "t" });
+      expect(await settledWithin(run, 500)).toBe(false);
+      await writer.query("COMMIT");
+      const report = await run;
+      await archiver.query("COMMIT");
+      expect(report.droppedAtApply).toBe(1);
+      expect(report.archivedJobIds).toEqual([]);
+      expect((await archiveState(job)).archived).toBe(false);
+    } finally {
+      archiver.release();
+      writer.release();
+    }
+  });
+
+  it("an archive hold inserted concurrently is respected the same way (second connection)", async () => {
+    const ws = await newWorkspace();
+    const job = await seedJob("hold-race", { seen: [30 * DAY] }, ws);
+    const archiver = await otherConnection();
+    const writer = await otherConnection();
+    try {
+      await writer.query("BEGIN");
+      await createArchiveHold(writer, {
+        workspaceId: ws, canonicalJobId: job, holdReason: "synthetic hold", holdType: "USER_PRESERVE", createdBy: "test",
+        expiresAt: new Date(Date.now() + 30 * DAY),
+      });
+      await archiver.query("BEGIN");
+      const run = expireSnippetOnlyJobsInTransaction(archiver, { workspaceId: ws, apply: true, now: NOW, actor: "t" });
+      expect(await settledWithin(run, 500)).toBe(false);
+      await writer.query("COMMIT");
+      const report = await run;
+      await archiver.query("COMMIT");
+      expect(report.archivedJobIds).toEqual([]);
+      expect((await archiveState(job)).archived).toBe(false);
+    } finally {
+      archiver.release();
+      writer.release();
+    }
+  });
+
+  it("a lease that committed before the locked re-read stops the archive (pipeline_tasks have no foreign key, so it cannot block)", async () => {
+    const ws = await newWorkspace();
+    const job = await seedJob("lease-race", { seen: [30 * DAY] }, ws);
+    const report = await applyIn(ws, {
+      beforeLock: async () => {
+        await db().query(
+          `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, lease_id, lease_expires_at)
+           VALUES ($1, 'NORMALIZE_OBSERVATION', $2, $3::jsonb, 'RUNNING', $4, NOW() + INTERVAL '1 hour')`,
+          [ws, `lease-${randomUUID()}`, JSON.stringify({ canonical_job_id: job }), randomUUID()],
+        );
+      },
+    });
+    expect(report.droppedAtApply).toBe(1);
+    expect((await archiveState(job)).archived).toBe(false);
   });
 
   it("the limits must be whole days and the first-seen limit cannot be shorter", async () => {
