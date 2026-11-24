@@ -5,7 +5,7 @@ import {
   DEAD_LETTER_CLASSIFICATION_SQL,
   DEAD_LETTER_LINEAGE_JOINS_SQL,
 } from "../src/tasks/deadLetterPolicy.js";
-import { completedWithoutResultExitCode, findTasksCompletedWithoutResult, type CompletedWithoutResultReport } from "../src/tasks/completedWithoutResult.js";
+import { runZeroChecks, zeroChecksExitCode, type ZeroCheckResult } from "../src/tasks/integrityZeroChecks.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { reportAwaitingContentOutputs } from "../src/ingestion/contentCompleteness.js";
 import { reportContentWithoutFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
@@ -43,7 +43,8 @@ interface ReconciliationReport {
     stale_historical_dead_letter_tasks: number;
   };
   /** Tasks marked COMPLETED whose result row is missing. Any count above zero is an error. */
-  completed_without_result: CompletedWithoutResultReport;
+  /** Must-be-zero checks (src/tasks/integrityZeroChecks.ts). Any total above zero is an error. */
+  zero_checks: ZeroCheckResult[];
   /** Awaiting-content jobs (live, no complete posting text). Violations are listed by scripts/check_integrity.ts. */
   content_completeness: {
     awaiting_content_jobs: number;
@@ -62,8 +63,10 @@ function parseArgs(argv: string[]): {
   workspaceKey?: string;
   userKey?: string;
   json: boolean;
+  /** "pre" (before a drain) leaves out the stale-stage check; the default "post" is strict. */
+  phase: "pre" | "post";
 } {
-  const out: { workspaceKey?: string; userKey?: string; json: boolean } = { json: false };
+  const out: { workspaceKey?: string; userKey?: string; json: boolean; phase: "pre" | "post" } = { json: false, phase: "post" };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--workspace-key" && argv[i + 1]) {
@@ -72,6 +75,10 @@ function parseArgs(argv: string[]): {
       out.userKey = String(argv[++i]).trim();
     } else if (arg === "--json") {
       out.json = true;
+    } else if (arg === "--phase=pre" || arg === "--phase=post") {
+      out.phase = arg === "--phase=pre" ? "pre" : "post";
+    } else if (arg.startsWith("--phase=")) {
+      throw new Error("--phase must be pre or post.");
     }
   }
   return out;
@@ -460,7 +467,7 @@ async function run(): Promise<void> {
       task_states: taskStates,
       evaluation_queue_states: evaluationQueueStates,
       funnel: { ...funnel.rows[0] },
-      completed_without_result: await findTasksCompletedWithoutResult(client, ctx.workspaceId),
+      zero_checks: await runZeroChecks(client, ctx.workspaceId, { phase: args.phase }),
       content_completeness: {
         awaiting_content_jobs: awaitingOutputs.awaitingContentJobs,
         awaiting_with_gate_lane_or_recommendation: awaitingOutputs.violations.length,
@@ -490,13 +497,10 @@ async function run(): Promise<void> {
       );
       process.exitCode = 1;
     }
-    if (completedWithoutResultExitCode(report.completed_without_result) !== 0) {
-      console.error(
-        `ERROR: ${report.completed_without_result.total} pipeline task(s) are COMPLETED with no result recorded ` +
-        `(${JSON.stringify(report.completed_without_result.byTaskType)}).`,
-      );
-      process.exitCode = 1;
+    for (const check of report.zero_checks.filter((entry) => entry.total > 0)) {
+      console.error(`ERROR: zero-check ${check.name} found ${check.total} (sample ${check.sample.join(", ")}).`);
     }
+    if (zeroChecksExitCode(report.zero_checks) !== 0) process.exitCode = 1;
   } finally {
     client.release();
     await pool.end();
