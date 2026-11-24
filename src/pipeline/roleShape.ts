@@ -100,7 +100,24 @@ export const detectPeopleManagementCore: RoleShapeDetector = ({ title, descripti
   return null;
 };
 
-const DETECTORS: RoleShapeDetector[] = [detectCustomerFacingDelivery, detectPeopleManagementCore];
+
+// ---------------------------------------------------------------------------------------------------------------
+// Contract employment: kept allowed (the owner accepts contracts), ranked below equivalent permanent roles.
+// ---------------------------------------------------------------------------------------------------------------
+
+const CONTRACT_DESCRIPTION =
+  /\b(?:(?:\d{1,2}|six|twelve|twelve|nine|three)[- ]months?(?: fixed[- ]term)? contract|fixed[- ]term contract|contract (?:role|position|basis|opportunity)|freelance(?:r)?|independent contractor|contractor position)\b/i;
+
+export const detectContractEmployment: RoleShapeDetector = ({ description, employmentType }) => {
+  if (/\b(?:CONTRACT|CONTRACTOR|FIXED[_ -]?TERM|FREELANCE)\b/i.test(employmentType)) {
+    return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "EMPLOYMENT_TYPE", quote: employmentType.slice(0, EVIDENCE_QUOTE_MAX) };
+  }
+  const hit = description.match(CONTRACT_DESCRIPTION);
+  if (hit) return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "DESCRIPTION", quote: excerpt(description, hit.index ?? 0, hit[0].length) };
+  return null;
+};
+
+const DETECTORS: RoleShapeDetector[] = [detectCustomerFacingDelivery, detectPeopleManagementCore, detectContractEmployment];
 
 export function assessRoleShape(input: RoleShapeInput, detectors: RoleShapeDetector[] = DETECTORS): RoleShapeAssessment {
   const normalized = {
