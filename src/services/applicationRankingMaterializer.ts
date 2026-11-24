@@ -458,7 +458,8 @@ function buildComponents(
     cultureEvidence.find((evidence) => evidence.signal === signal)?.score ?? null;
 
   return {
-    requirementFit: toFiniteNumber(row.deterministic_match_score),
+    // The stored ADJUSTED score (raw match score lowered by the role-shape downranks), on the 0-100 scale of the raw one.
+    requirementFit: scoreFromFraction(row.recommendation_requirement_score),
     requirementCoverage: toFiniteNumber(row.deterministic_match_coverage),
     evidenceCompleteness: scoreFromFraction(row.recommendation_evidence_completeness),
     laneConfidence: laneConfidenceScore(row.lane_confidence),
@@ -538,7 +539,7 @@ function componentProvenance(
       evidence: mobility.evidence,
     },
     culture_score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION,
-    requirement_fit: "canonical_jobs.deterministic_match_score",
+    requirement_fit: "canonical_jobs.recommendation_requirement_score",
     requirement_coverage: "canonical_jobs.deterministic_match_coverage",
     evidence_completeness: "canonical_jobs.recommendation_evidence_completeness",
     lane_confidence: {
