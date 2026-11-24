@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { safeErrorText } from "./migrationTarget.js";
 import { isPooledPostgresConnectionString, pgPoolConfig } from "./pgSsl.js";
 
 // Keep local CLI execution consistent with the other database scripts while
@@ -208,6 +209,10 @@ export async function runMigrations(
   }
 }
 
+// LEGACY ENTRY POINT. The scheduled workflows (ingest, process_backlog, queue_worker, daily-job-archiving) still run
+// `npx tsx src/db/migrate.ts` and rely on this block to migrate the database named by their DATABASE_URL secrets, so it
+// cannot be removed until each workflow is moved to scripts/run_migration.ts (explicit --target, branch gate). Deleting it
+// now would turn those steps into silent no-ops. Do not add new callers; use scripts/run_migration.ts.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const migrationDatabaseUrl = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
   if (isPooledPostgresConnectionString(migrationDatabaseUrl)) {
@@ -224,7 +229,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       process.exit(0);
     })
     .catch((err) => {
-      console.error("Migration runner failed:", err);
+      // Class and code only: a connection error message can carry the host name.
+      console.error("Migration runner failed:", safeErrorText(err));
       process.exit(1);
     });
 }
