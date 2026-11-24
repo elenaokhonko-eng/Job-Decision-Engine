@@ -251,7 +251,12 @@ async function seedJob(options: SeedOptions): Promise<{ canonicalJobId: string; 
  * Gives a seeded, matched job a current AI evaluation and a Stage 3 ranking snapshot with the given overall rank, so
  * v_apply_now_jobs_stage3_scoped exposes a non-null overall_rank_score for it.
  */
-async function seedRankingSnapshot(canonicalJobId: string, overallRank: number): Promise<void> {
+async function seedRankingSnapshot(
+  canonicalJobId: string,
+  overallRank: number,
+  options: { withEvaluation?: boolean; autonomyScore?: number; evidence?: unknown[] } = {},
+): Promise<void> {
+  const withEvaluation = options.withEvaluation ?? true;
   const database = db();
   const { workspaceId } = workspace();
   const context = await database.query<{
@@ -267,23 +272,26 @@ async function seedRankingSnapshot(canonicalJobId: string, overallRank: number):
     [workspaceId, canonicalJobId],
   );
   const row = context.rows[0]!;
-  const evaluation = await database.query<{ id: string }>(
+  const evaluation = withEvaluation ? await database.query<{ id: string }>(
     `INSERT INTO ai_evaluations (
        workspace_id, canonical_job_id, job_version_id, profile_version_id, match_run_id,
        deterministic_decision_id, job_content_hash, context_fingerprint, prompt_id, prompt_version
      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'job_evaluation', '1') RETURNING id`,
     [workspaceId, canonicalJobId, row.job_version_id, profileVersionId, row.match_run_id, row.decision_id,
       row.content_hash, row.context_fingerprint],
-  );
+  ) : undefined;
   await database.query(
     `INSERT INTO job_ranking_snapshots (
        workspace_id, canonical_job_id, job_version_id, profile_version_id, match_run_id,
        deterministic_decision_id, ai_evaluation_id, ranking_policy_version, context_fingerprint,
-       overall_rank_score, ranking_confidence
+       overall_rank_score, ranking_confidence, autonomy_score, component_provenance,
+       is_top_ten_ready, policy_recheck_required,
+       requirement_fit_score, requirement_coverage_score, evidence_completeness_score, lane_confidence_score
      ) VALUES ($1, $2, $3, $4, $5, $6, $7,
-       (SELECT MAX(policy_version) FROM ranking_policies WHERE workspace_id = $1), $8, $9, 90)`,
+       (SELECT MAX(policy_version) FROM ranking_policies WHERE workspace_id = $1), $8, $9, 90, $10, $11::jsonb, TRUE, FALSE, 80, 80, 80, 80)`,
     [workspaceId, canonicalJobId, row.job_version_id, profileVersionId, row.match_run_id, row.decision_id,
-      evaluation.rows[0]!.id, row.context_fingerprint, overallRank],
+      evaluation?.rows[0]!.id ?? null, row.context_fingerprint, overallRank, options.autonomyScore ?? null,
+      JSON.stringify(options.evidence ? { culture_evidence: options.evidence } : {})],
   );
 }
 
@@ -608,5 +616,42 @@ describe.skipIf(skipReal)("Streamlit review and verification read-model queries 
     const mine = rows.filter((row) => ids.includes(row.canonical_job_id));
     expect(mine.map((row) => Number(row.overall_rank_score))).toEqual([90, 75, 75, 60]); // no hidden tie: ranks really differ
     expect(mine.map((row) => row.canonical_job_id)).toEqual([highRankLowAdjusted, tiedLowRaw, tiedHighRaw, lowRankHighAdjusted]);
+  });
+
+  it("Top 10 and Apply Now return the AI note columns; a job ranked without an AI evaluation is flagged pending", async () => {
+    const database = db();
+    const { workspaceId } = workspace();
+    const seed = async (title: string, options: Parameters<typeof seedRankingSnapshot>[2]) => {
+      const job = await seedJob({
+        title, gate: "PASS", eligibility: "ELIGIBLE", outcome: "REVIEW", readiness: "READY", scores: { adjusted: 0.6, raw: 60 },
+      });
+      await seedRankingSnapshot(job.canonicalJobId, 70, options);
+      return job.canonicalJobId;
+    };
+    const quote = "You decide how the work is done.";
+    const evaluated = await seed("AI Notes Evaluated Fixture", {
+      withEvaluation: true, autonomyScore: 72.5, evidence: [{ signal: "AUTONOMY", quote, source: "JOB_DESCRIPTION", score: 72.5 }],
+    });
+    const pending = await seed("AI Notes Pending Fixture", { withEvaluation: false });
+
+    for (const name of ["TOP_TEN_READY_QUERY", "APPLY_NOW_JOBS_QUERY"]) {
+      const result = await database.query<Record<string, unknown> & { canonical_job_id: string }>(streamlitQuery(name), [workspaceId]);
+      const columns = result.fields.map((field) => field.name);
+      for (const column of [
+        "ai_notes_pending", "ai_label_autonomy_score", "ai_label_politics_risk_score", "ai_label_sensory_workload_risk_score",
+        "ai_label_focus_protection_score", "ai_label_culture_priority_score", "ai_label_evidence",
+      ]) expect(columns, `${name} selects ${column}`).toContain(column);
+      const pendingRow = rowFor(result.rows, pending);
+      const evaluatedRow = rowFor(result.rows, evaluated);
+      expect(pendingRow, `${name} lists the job without an AI evaluation`).toBeDefined();
+      expect(pendingRow).toMatchObject({ ai_notes_pending: true, ai_label_autonomy_score: null, ai_label_evidence: [] });
+      expect(evaluatedRow).toMatchObject({ ai_notes_pending: false });
+      expect(Number(evaluatedRow?.ai_label_autonomy_score)).toBeCloseTo(72.5, 1);
+      expect(evaluatedRow?.ai_label_evidence).toEqual([expect.objectContaining({ signal: "AUTONOMY", quote })]);
+    }
+    const top = await database.query<{ canonical_job_id: string; ai_evaluation_id: string | null }>(
+      streamlitQuery("TOP_TEN_READY_QUERY"), [workspaceId],
+    );
+    expect(rowFor(top.rows, pending)?.ai_evaluation_id).toBeNull();
   });
 });

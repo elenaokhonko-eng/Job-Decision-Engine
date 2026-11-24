@@ -22,6 +22,8 @@ from streamlit_formatters import as_number, format_percent, format_score, format
 from streamlit_formatters import format_career_track, safe_http_url
 from streamlit_job_review import (
     CATEGORY_OPTIONS,
+    AI_NOTES_HEADING,
+    AI_NOTES_PENDING_LABEL,
     CLOSED_OUT_CATEGORY_BUCKETS,
     DEFAULT_CATEGORY_INDEX,
     PAGE_SIZE,
@@ -29,6 +31,8 @@ from streamlit_job_review import (
     SELF_SOURCED_CATEGORIES,
     SERVER_PAGED_CATEGORIES,
     VERIFY_THEN_APPLY_CATEGORY,
+    ai_note_lines,
+    ai_notes_pending,
     apply_now_exclusion_summary,
     degree_asked_for_label,
     escape_markdown,
@@ -210,7 +214,7 @@ def _read_model_query(query, params):
 
 
 # Shown wherever a list is sorted by the composite overall rank (Apply Now, Top 10). No weights are described here.
-OVERALL_RANK_NOTE = "Overall rank is a combined rank: requirement fit after downranks plus other inputs."
+OVERALL_RANK_NOTE = "Overall rank is requirement fit (about half), requirement coverage, evidence completeness and lane confidence. AI notes on autonomy, politics and sensory load are shown as labels and do not change the rank."
 
 SHORTLIST_READ_MODEL_QUERY = """
     SELECT
@@ -434,7 +438,10 @@ TOP_TEN_READY_QUERY = """
            current_readiness.application_readiness, current_readiness.readiness_status,
            current_readiness.readiness_fingerprint,
            current_readiness.readiness_expires_at, current_readiness.readiness_reason_codes,
-           current_readiness.availability_status, current_readiness.availability_recheck_at
+           current_readiness.availability_status, current_readiness.availability_recheck_at,
+           jobs.ai_notes_pending, jobs.ai_label_autonomy_score, jobs.ai_label_politics_risk_score,
+           jobs.ai_label_sensory_workload_risk_score, jobs.ai_label_focus_protection_score,
+           jobs.ai_label_culture_priority_score, jobs.ai_label_evidence
     FROM v_top_ten_ready_jobs_stage3_scoped AS jobs
     LEFT JOIN LATERAL (
       SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
@@ -477,7 +484,10 @@ APPLY_NOW_JOBS_QUERY = """
            current_readiness.readiness_reason_codes, current_readiness.availability_status,
            current_readiness.availability_recheck_at,
            r.ranking_score, r.raw_match_score, r.score_policy, r.degree_asked_for,
-           r.role_signals, r.evidence_confidence
+           r.role_signals, r.evidence_confidence,
+           jobs.ai_notes_pending, jobs.ai_label_autonomy_score, jobs.ai_label_politics_risk_score,
+           jobs.ai_label_sensory_workload_risk_score, jobs.ai_label_focus_protection_score,
+           jobs.ai_label_culture_priority_score, jobs.ai_label_evidence
     FROM v_apply_now_jobs_stage3_scoped AS jobs
     LEFT JOIN LATERAL (
       SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
@@ -851,6 +861,18 @@ def fetch_support_issues():
     workspace_id = _active_workspace_id()
     rows = _read_model_query(SUPPORT_ISSUES_QUERY, (workspace_id,))
     return _validate_workspace_rows(rows, workspace_id, validate_support_issue_row)
+
+
+def render_ai_notes(job):
+    """Show the AI labels as display-only notes; the text comes from the database and is escaped."""
+    if ai_notes_pending(job):
+        st.markdown(f"**{AI_NOTES_PENDING_LABEL}**")
+        return
+    lines = ai_note_lines(job)
+    if lines:
+        st.markdown(f"**{AI_NOTES_HEADING}**")
+        for line in lines:
+            st.markdown(f"- {line}")
 
 
 def fetch_top_ten_ready_jobs():
@@ -2281,11 +2303,8 @@ with tab_dashboard:
                 score_columns[1].metric("Ranking confidence", format_percent(ranked_job.get("ranking_confidence")))
                 score_columns[2].metric("Requirement fit", format_score(ranked_job.get("requirement_fit_score")))
                 score_columns[3].metric("Coverage", format_percent(ranked_job.get("requirement_coverage_score")))
-                detail_columns = st.columns(4)
-                detail_columns[0].metric("Evidence completeness", format_percent(ranked_job.get("evidence_completeness_score")))
-                detail_columns[1].metric("Autonomy", format_signal(ranked_job.get("autonomy_score")))
-                detail_columns[2].metric("Politics risk", format_signal(ranked_job.get("politics_risk_score")))
-                detail_columns[3].metric("Sensory/workload risk", format_signal(ranked_job.get("sensory_workload_risk_score")))
+                st.metric("Evidence completeness", format_percent(ranked_job.get("evidence_completeness_score")))
+                render_ai_notes(ranked_job)
                 st.caption(
                     f"Stage 3 — base: {format_score(ranked_job.get('base_rank_score'))} · "
                     f"freshness: {format_score(ranked_job.get('freshness_score'))} · "
@@ -2293,7 +2312,6 @@ with tab_dashboard:
                     f"employment verifiability: {format_score(ranked_job.get('employment_verifiability_score'))}"
                 )
                 st.caption(
-                    f"Focus protection: {format_signal(ranked_job.get('focus_protection_score'))} · "
                     f"Building/research: {format_percent(ranked_job.get('building_ratio_score'))} · "
                     f"Interaction burden: {format_percent(ranked_job.get('interaction_burden_score'))} · "
                     f"Strategic value: {format_percent(ranked_job.get('strategic_value_score'))}"
@@ -2758,6 +2776,7 @@ with tab_dashboard:
                         role_labels = role_signal_labels(job)
                         if role_labels:
                             st.markdown("**Role signals:** " + " | ".join(role_labels))
+                        render_ai_notes(job)
 
                         aut = job.get("nd_friendly_score")
                         pol = job.get("politics_stress_score")
@@ -2932,6 +2951,7 @@ with tab_dashboard:
                 st.metric("Match Coverage", format_percent(coverage))
             with metric_c:
                 st.metric("Evidence Completeness", format_percent(evidence_pct, fraction=True, decimals=0))
+            render_ai_notes(job_to_show)
 
             st.markdown("#### Gate Evidence")
             st.text(f"Gate status: {job_to_show.get('gate_status') or 'N/A'}")

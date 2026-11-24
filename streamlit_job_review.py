@@ -12,6 +12,7 @@ from streamlit_application_workflow import (
     CURRENT_DETERMINISTIC_CONTEXTS,
     has_current_ready_assessment,
 )
+from streamlit_formatters import format_signal
 
 VERIFY_THEN_APPLY_CATEGORY = "Verify, then apply"
 REVIEW_CATEGORY = "Review"
@@ -340,6 +341,20 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "..."
 
 
+def _json_list(value: object) -> list[object]:
+    """A read-model array as a list; JSON text holding an array is parsed, anything else is empty."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
+        if not isinstance(value, list):
+            return []
+    if not isinstance(value, Iterable) or isinstance(value, (Mapping, str, bytes)):
+        return []
+    return list(value)
+
+
 def role_signal_labels(job: Mapping[str, object]) -> list[str]:
     """Short markdown-safe labels for the job's stored role signals.
 
@@ -348,19 +363,8 @@ def role_signal_labels(job: Mapping[str, object]) -> list[str]:
     an unknown code is shown as its own escaped text, never guessed at. A JSON
     string holding an array is parsed; malformed text gives no labels.
     """
-    signals = job.get("role_signals")
-    if isinstance(signals, str):
-        # A driver that returns JSONB as text: accept a JSON array, anything else is empty.
-        try:
-            signals = json.loads(signals)
-        except ValueError:
-            return []
-        if not isinstance(signals, list):
-            return []
-    if not isinstance(signals, Iterable) or isinstance(signals, Mapping):
-        return []
     labels: list[str] = []
-    for signal in signals:
+    for signal in _json_list(job.get("role_signals")):
         if not isinstance(signal, Mapping):
             continue
         code = signal.get("code")
@@ -389,3 +393,54 @@ def low_confidence_label(job: Mapping[str, object]) -> str | None:
     if job.get("evidence_confidence") == "LOW":
         return "LOW CONFIDENCE: thin posting evidence"
     return None
+
+
+AI_NOTES_HEADING = "AI notes (do not change the rank)"
+AI_NOTES_PENDING_LABEL = "AI notes pending"
+# (read-model column, label, evidence signal whose quote is shown beside it)
+_AI_NOTE_FIELDS = (
+    ("ai_label_autonomy_score", "Autonomy", "AUTONOMY"),
+    ("ai_label_politics_risk_score", "Politics risk", "POLITICS_RISK"),
+    (
+        "ai_label_sensory_workload_risk_score",
+        "Sensory/workload risk",
+        "SENSORY_WORKLOAD_RISK",
+    ),
+    ("ai_label_focus_protection_score", "Focus protection", "FOCUS_PROTECTION"),
+    ("ai_label_culture_priority_score", "Culture priority", None),
+)
+
+
+def ai_notes_pending(job: Mapping[str, object]) -> bool:
+    """True only when the read model says the job is ranked without an AI evaluation."""
+    return job.get("ai_notes_pending") is True
+
+
+def ai_note_lines(job: Mapping[str, object]) -> list[str]:
+    """Markdown-safe display lines for the stored AI labels and the AI's own quotes.
+
+    The labels are display-only: they never enter the rank. A missing value shows as
+    UNKNOWN, never as a number. The quote text is untrusted: it is clipped and escaped.
+    """
+    quotes: dict[str, str] = {}
+    for item in _json_list(job.get("ai_label_evidence")):
+        if not isinstance(item, Mapping):
+            continue
+        signal = item.get("signal")
+        quote = item.get("quote")
+        if (
+            isinstance(signal, str)
+            and isinstance(quote, str)
+            and quote.strip()
+            and signal not in quotes
+        ):
+            quotes[signal] = _clip(" ".join(quote.split()), _QUOTE_MAX_CHARS)
+    lines: list[str] = []
+    for column, label, signal in _AI_NOTE_FIELDS:
+        if column not in job:
+            continue
+        line = f"{label}: {format_signal(job.get(column))}"
+        if signal in quotes:
+            line += f' - AI quote: "{escape_markdown(quotes[signal])}"'
+        lines.append(line)
+    return lines

@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 
 from streamlit_job_review import (
+    ai_note_lines,
+    ai_notes_pending,
     degree_asked_for_label,
     low_confidence_label,
     ranking_sort_key,
@@ -220,3 +222,106 @@ def test_role_signal_labels_parse_a_json_string_array():
     text = '[{"code": "DEGREE_GAP_FLAGGED", "penalty": 0.06}, {"code": "CONTRACT_EMPLOYMENT"}, 7]'
     assert role_signal_labels({"role_signals": text}) == ["degree gap", "contract role"]
     assert role_signal_labels({"role_signals": []}) == []
+
+
+# --- AI notes (migration 122): display-only labels that never enter the rank ---
+
+AI_COLUMNS = (
+    "ai_notes_pending",
+    "ai_label_autonomy_score",
+    "ai_label_politics_risk_score",
+    "ai_label_sensory_workload_risk_score",
+    "ai_label_focus_protection_score",
+    "ai_label_culture_priority_score",
+    "ai_label_evidence",
+)
+
+
+def test_top_ten_and_apply_now_queries_select_the_ai_note_columns():
+    for name in ("TOP_TEN_READY_QUERY", "APPLY_NOW_JOBS_QUERY"):
+        query = read_query_constant(name)
+        for column in AI_COLUMNS:
+            assert column in query, f"{name} does not select {column}"
+
+
+def test_overall_rank_note_is_the_agreed_wording():
+    module = _module()
+    values = [
+        ast.literal_eval(node.value)
+        for node in module.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "OVERALL_RANK_NOTE"
+    ]
+    assert values == [
+        (
+            "Overall rank is requirement fit (about half), requirement coverage, "
+            "evidence completeness and lane confidence. AI notes on autonomy, politics "
+            "and sensory load are shown as labels and do not change the rank."
+        )
+    ]
+
+
+def test_pending_row_is_flagged_and_has_no_numbers_to_show():
+    pending = {
+        "ai_notes_pending": True,
+        "ai_label_autonomy_score": None,
+        "ai_label_politics_risk_score": None,
+        "ai_label_sensory_workload_risk_score": None,
+        "ai_label_focus_protection_score": None,
+        "ai_label_culture_priority_score": None,
+        "ai_label_evidence": [],
+    }
+    assert ai_notes_pending(pending) is True
+    assert all("UNKNOWN" in line for line in ai_note_lines(pending))
+    assert ai_notes_pending({"ai_notes_pending": False}) is False
+    assert ai_notes_pending({}) is False
+    assert ai_notes_pending({"ai_notes_pending": "true"}) is False
+
+
+def test_labelled_row_shows_scores_and_the_escaped_clipped_quote():
+    row = {
+        "ai_notes_pending": False,
+        "ai_label_autonomy_score": 72.5,
+        "ai_label_politics_risk_score": None,
+        "ai_label_sensory_workload_risk_score": 30,
+        "ai_label_focus_protection_score": 55,
+        "ai_label_culture_priority_score": 60,
+        "ai_label_evidence": [
+            {
+                "signal": "AUTONOMY",
+                "quote": "You own it [click](https://evil.test) <b>x</b>\n" + "y" * 500,
+                "source": "JOB_DESCRIPTION",
+                "score": 72.5,
+            },
+            {"signal": "AUTONOMY", "quote": "second quote is ignored"},
+            {"signal": "POLITICS_RISK", "quote": None},
+            "not a mapping",
+        ],
+    }
+    lines = ai_note_lines(row)
+    assert lines[0].startswith("Autonomy: 72.5%")
+    assert "AI quote" in lines[0]
+    assert "second quote" not in " ".join(lines)
+    assert "<b>" not in lines[0]
+    assert "\n" not in lines[0]
+    assert "](" not in lines[0].replace(r"\]\(", "")
+    assert len(lines[0]) < 400
+    assert lines[1] == "Politics risk: UNKNOWN"
+    assert [line.split(":")[0] for line in lines] == [
+        "Autonomy",
+        "Politics risk",
+        "Sensory/workload risk",
+        "Focus protection",
+        "Culture priority",
+    ]
+
+
+def test_ai_notes_accept_json_text_and_ignore_malformed_evidence():
+    text = '[{"signal": "FOCUS_PROTECTION", "quote": "Quiet focus time."}]'
+    lines = ai_note_lines(
+        {"ai_label_focus_protection_score": 80, "ai_label_evidence": text}
+    )
+    assert lines == [r'Focus protection: 80.0% - AI quote: "Quiet focus time\."']
+    assert ai_note_lines({"ai_label_evidence": "not json"}) == []
+    assert ai_note_lines({}) == []
