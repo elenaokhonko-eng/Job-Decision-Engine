@@ -78,17 +78,18 @@ try {
       if (!restorePoint) throw new Error('Refusing to apply: --restore-point=<Neon restore point or branch id> is required (take it first).');
       if (argValue('confirm-workspace') !== context.workspaceId) throw new Error('Refusing to apply: --confirm-workspace must equal the resolved workspace id.');
     }
-    await client.query(apply ? 'BEGIN' : 'BEGIN READ ONLY');
+    // Apply manages its own transaction (the row locks must last until the archive commits); a dry run is read only.
+    if (!apply) await client.query('BEGIN READ ONLY');
     try {
       const report = await expireSnippetOnlyJobs(client as unknown as pg.PoolClient, {
         workspaceId: context.workspaceId, apply, actor: 'script:archive_snippet_only_jobs:expiry', restorePoint: argValue('restore-point') ?? undefined,
       });
-      await client.query(apply ? 'COMMIT' : 'ROLLBACK');
+      if (!apply) await client.query('ROLLBACK');
       console.log(JSON.stringify(report, null, 2));
       console.log(apply ? `APPLIED: archived ${report.archived} of ${report.toArchive}.` : 'DRY RUN: nothing was written.');
       if (apply && report.archived !== report.toArchive) process.exitCode = 1;
     } catch (error) {
-      await client.query('ROLLBACK');
+      if (!apply) await client.query('ROLLBACK');
       throw error;
     }
     await client.end();
