@@ -619,11 +619,13 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       const weights = Object.values(policy.weights);
       expect(weights.every((weight) => Number.isFinite(weight) && weight >= 0)).toBe(true);
       const total = weights.reduce((sum, weight) => sum + weight, 0);
-      if (policy.weights.autonomy === 0 && policy.weights.politicsRisk === 0 && policy.weights.sensoryWorkloadRisk === 0) {
-        // Migration 122: AI terms are display-only (weight 0); the four deterministic terms total 72.5.
+      expect(Object.keys(policy.weights).sort()).toEqual([...requiredWeights].sort());
+      if (Math.abs(total - 100) > 1e-8) {
+        // Migration 122 shape: every AI weight is exactly 0 and the deterministic terms total 72.5.
+        for (const aiWeight of ['autonomy', 'politicsRisk', 'sensoryWorkloadRisk', 'strategicValue']) {
+          expect(policy.weights[aiWeight]).toBe(0);
+        }
         expect(total).toBeCloseTo(72.5, 8);
-      } else {
-        expect(total).toBeCloseTo(100, 8);
       }
     }
 

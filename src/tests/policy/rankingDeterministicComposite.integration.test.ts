@@ -512,3 +512,191 @@ describe.skipIf(skipReal)("migration 122 on a fresh schema (PostgreSQL)", () => 
     expect(rows[0]!.weights.autonomy).toBe(0);
   });
 });
+
+async function addEvaluation(pool: pg.Pool, workspace: WorkspaceContext, profileVersionId: string, job: JobIds): Promise<string> {
+  const evaluation = await pool.query<{ id: string }>(
+    `INSERT INTO ai_evaluations (workspace_id, canonical_job_id, job_version_id, profile_version_id, match_run_id,
+       deterministic_decision_id, job_content_hash, context_fingerprint, full_evaluation_payload)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb) RETURNING id`,
+    [workspace.workspaceId, job.canonicalJobId, job.jobVersionId, profileVersionId, job.matchRunId, job.decisionId,
+      job.jobContentHash, job.decisionFingerprint,
+      JSON.stringify({ culture_evidence: [{ signal: "AUTONOMY", quote: AUTONOMY_QUOTE }] })],
+  );
+  return evaluation.rows[0]!.id;
+}
+
+describe.skipIf(skipReal)("Top 10 never loses a job while its evaluation arrives (PostgreSQL)", () => {
+  let pool: pg.Pool;
+  let workspace: WorkspaceContext;
+  let profileVersionId = "";
+
+  beforeAll(async () => {
+    pool = (await newSchemaPool("ranking_sequence")).pool;
+    workspace = await migrate(pool);
+    profileVersionId = await createProfile(pool, workspace);
+  }, 240_000);
+
+  afterAll(async () => {
+    await pool?.end();
+  });
+
+  const topTenRows = async (jobId: string) => (await pool.query<{ ai_evaluation_id: string | null; ai_notes_pending: boolean }>(
+    `SELECT ai_evaluation_id, ai_notes_pending FROM v_top_ten_ready_jobs_stage3_scoped
+      WHERE workspace_id = $1 AND canonical_job_id = $2`,
+    [workspace.workspaceId, jobId],
+  )).rows;
+  const applyNowRows = async (jobId: string) => (await pool.query(
+    `SELECT 1 FROM v_apply_now_jobs_stage3_scoped WHERE workspace_id = $1 AND canonical_job_id = $2`,
+    [workspace.workspaceId, jobId],
+  )).rowCount;
+
+  it("ranked without evaluation -> evaluation arrives -> materializer runs: exactly one Top 10 row at every step", async () => {
+    const job = await createReadyJob(pool, workspace, profileVersionId, { laneConfidence: "High", matchScore: 80, withEvaluation: false });
+
+    await materializeApplicationRankings(pool, workspace.workspaceId, { preferenceContext: null });
+    expect(await topTenRows(job.canonicalJobId)).toEqual([{ ai_evaluation_id: null, ai_notes_pending: true }]);
+
+    // The evaluation completes; the materializer has not run yet. The job must not vanish.
+    const evaluationId = await addEvaluation(pool, workspace, profileVersionId, job);
+    expect(await topTenRows(job.canonicalJobId)).toEqual([{ ai_evaluation_id: null, ai_notes_pending: true }]);
+    expect(await applyNowRows(job.canonicalJobId)).toBe(1);
+
+    const result = await materializeApplicationRankings(pool, workspace.workspaceId, { preferenceContext: null });
+    expect(result).toMatchObject({ snapshotsInserted: 1, missingCurrentEvaluations: 0 });
+    expect(await topTenRows(job.canonicalJobId)).toEqual([{ ai_evaluation_id: evaluationId, ai_notes_pending: false }]);
+    expect(await applyNowRows(job.canonicalJobId)).toBe(1);
+    const snapshots = await pool.query(`SELECT 1 FROM job_ranking_snapshots WHERE canonical_job_id = $1`, [job.canonicalJobId]);
+    expect(snapshots.rowCount).toBe(2);
+  });
+
+  it("refuses an invalid latest policy with an explicit policyError and writes nothing", async () => {
+    const before = await pool.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM job_ranking_snapshots`);
+    // Total 100 with an AI weight: the table check admits it (old rows need that), the materializer must not.
+    await pool.query(
+      `INSERT INTO ranking_policies (workspace_id, policy_version, schema_version, weights, minimum_ranking_confidence)
+       SELECT workspace_id, policy_version + 1, '5.5.0',
+              '{"requirementFit":35,"requirementCoverage":15,"evidenceCompleteness":10,"laneConfidence":10,"autonomy":10,"politicsRisk":7.5,"sensoryWorkloadRisk":5,"strategicValue":7.5}'::jsonb,
+              minimum_ranking_confidence
+         FROM ranking_policies WHERE workspace_id = $1 ORDER BY policy_version DESC LIMIT 1`,
+      [workspace.workspaceId],
+    );
+    const result = await materializeApplicationRankings(pool, workspace.workspaceId, { preferenceContext: null });
+    expect(result.policyError).toMatch(/display-only/);
+    expect(result.snapshotsInserted).toBe(0);
+    const after = await pool.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM job_ranking_snapshots`);
+    expect(after.rows[0]!.n).toBe(before.rows[0]!.n);
+  });
+});
+
+describe.skipIf(skipReal)("ranking_policies_weights_chk after migration 122 (PostgreSQL)", () => {
+  let pool: pg.Pool;
+  let workspace: WorkspaceContext;
+  let version = 100;
+
+  beforeAll(async () => {
+    pool = (await newSchemaPool("ranking_check")).pool;
+    workspace = await migrate(pool);
+  }, 240_000);
+
+  afterAll(async () => {
+    await pool?.end();
+  });
+
+  const insertPolicy = (weights: Record<string, unknown>) => pool.query(
+    `INSERT INTO ranking_policies (workspace_id, policy_version, schema_version, weights, minimum_ranking_confidence)
+     VALUES ($1, $2, '5.5.0', $3::jsonb, 90)`,
+    [workspace.workspaceId, version++, JSON.stringify(weights)],
+  );
+  const base = {
+    requirementFit: 37.5, requirementCoverage: 15, evidenceCompleteness: 10, laneConfidence: 10,
+    autonomy: 0, politicsRisk: 0, sensoryWorkloadRisk: 0, strategicValue: 0,
+  };
+
+  it("accepts the deterministic shape and a classic total-100 shape", async () => {
+    await insertPolicy(base);
+    await insertPolicy({ ...base, requirementFit: 100, requirementCoverage: 0, evidenceCompleteness: 0, laneConfidence: 0 });
+    await insertPolicy({ ...base, requirementFit: 35, requirementCoverage: 15, evidenceCompleteness: 10, laneConfidence: 10, autonomy: 10, politicsRisk: 7.5, sensoryWorkloadRisk: 5, strategicValue: 7.5 });
+  });
+
+  it.each([
+    ["deterministic total above 100", { ...base, requirementFit: 100.5 }],
+    ["all weights zero", { ...base, requirementFit: 0, requirementCoverage: 0, evidenceCompleteness: 0, laneConfidence: 0 }],
+    ["autonomy with a total that is not 100", { ...base, autonomy: 5 }],
+    ["politicsRisk with a total that is not 100", { ...base, politicsRisk: 1 }],
+    ["sensoryWorkloadRisk with a total that is not 100", { ...base, sensoryWorkloadRisk: 1 }],
+    ["strategicValue with a total that is not 100", { ...base, strategicValue: 1 }],
+    ["a missing key", Object.fromEntries(Object.entries(base).filter(([key]) => key !== "laneConfidence"))],
+    ["an unknown key", { ...base, culturePriorityFit: 0 }],
+    ["a negative weight", { ...base, requirementFit: -1, requirementCoverage: 52.5 }],
+    ["a non-number weight", { ...base, requirementFit: "37.5" }],
+  ])("rejects %s", async (_label, weights) => {
+    await expect(insertPolicy(weights)).rejects.toMatchObject({ code: "23514" });
+  });
+});
+
+describe.skipIf(skipReal)("migration 122 rollback (PostgreSQL)", () => {
+  let pool: pg.Pool;
+  let workspace: WorkspaceContext;
+  let before: Record<string, string[]> = {};
+
+  /** One CREATE OR REPLACE VIEW statement of a migration file, up to its terminating semicolon. */
+  function viewStatement(file: string, view: string): string {
+    const text = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
+    const marker = `CREATE OR REPLACE VIEW ${view} AS`;
+    const start = text.lastIndexOf(marker);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const rest = text.slice(start);
+    const end = rest.search(/;[ \t]*\r?\n(?=\s*(CREATE|COMMENT|DROP|ALTER|INSERT|--|$))/);
+    return rest.slice(0, end + 1);
+  }
+
+  beforeAll(async () => {
+    pool = (await newSchemaPool("ranking_rollback")).pool;
+    workspace = await migrate(pool, migrationsBefore122());
+    before = await viewColumns(pool);
+    await migrate(pool); // applies 122
+  }, 240_000);
+
+  afterAll(async () => {
+    await pool?.end();
+  });
+
+  it("runs the documented rollback steps and restores the previous views, nullability and active weights", async () => {
+    const header = fs.readFileSync(path.join(MIGRATIONS_DIR, MIGRATION_122), "utf8");
+    expect(header).toContain("DROP VIEW IF EXISTS v_apply_now_jobs_stage3_scoped;");
+    expect(header).toContain("needs human approval");
+    expect((await viewColumns(pool)).v_apply_now_jobs_stage3_scoped).toContain("ai_notes_pending");
+
+    // a. views
+    await pool.query("DROP VIEW IF EXISTS v_apply_now_jobs_stage3_scoped");
+    await pool.query("DROP VIEW IF EXISTS v_top_ten_ready_jobs_stage3_scoped");
+    await pool.query(viewStatement("078_evidence_readiness_discovery.sql", "v_apply_now_jobs_scoped"));
+    await pool.query(viewStatement("078_evidence_readiness_discovery.sql", "v_top_ten_ready_jobs_scoped"));
+    await pool.query(viewStatement("104_apply_now_career_track.sql", "v_apply_now_jobs_stage3_scoped"));
+    await pool.query(viewStatement("075_user_preference_lineage_freshness_company_policy.sql", "v_top_ten_ready_jobs_stage3_scoped"));
+    // b. previous weights as a new, higher policy version
+    await pool.query(
+      `INSERT INTO ranking_policies (workspace_id, policy_version, schema_version, weights, minimum_ranking_confidence)
+       SELECT workspace_id, policy_version + 1, '5.2.0',
+              '{"requirementFit":37.5,"requirementCoverage":15,"evidenceCompleteness":10,"laneConfidence":10,"autonomy":10,"politicsRisk":7.5,"sensoryWorkloadRisk":5,"strategicValue":5}'::jsonb,
+              minimum_ranking_confidence
+         FROM ranking_policies WHERE workspace_id = $1 ORDER BY policy_version DESC LIMIT 1`,
+      [workspace.workspaceId],
+    );
+    // c. nullability, valid while no NULL-evaluation snapshot exists
+    await pool.query("ALTER TABLE job_ranking_snapshots ALTER COLUMN ai_evaluation_id SET NOT NULL");
+
+    expect(await viewColumns(pool)).toEqual(before);
+    const column = await pool.query<{ is_nullable: string }>(
+      `SELECT is_nullable FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'job_ranking_snapshots' AND column_name = 'ai_evaluation_id'`,
+    );
+    expect(column.rows[0]?.is_nullable).toBe("NO");
+    const { rows } = await pool.query<{ weights: Record<string, number> }>(
+      `SELECT weights FROM ranking_policies WHERE workspace_id = $1 ORDER BY policy_version DESC LIMIT 1`,
+      [workspace.workspaceId],
+    );
+    expect(rows[0]?.weights.autonomy).toBe(10);
+    for (const view of VIEWS) await pool.query(`SELECT * FROM ${view} LIMIT 1`);
+  });
+});

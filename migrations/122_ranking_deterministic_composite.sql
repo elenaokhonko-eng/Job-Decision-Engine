@@ -35,19 +35,26 @@
 --      ai_label_sensory_workload_risk_score, ai_label_focus_protection_score,
 --      ai_label_culture_priority_score, ai_label_evidence (the AI culture evidence with its quote).
 --
--- Rollback (no data changes needed; policy rows are immutable and stay as history):
---   a. Re-run the CREATE OR REPLACE VIEW statements of v_apply_now_jobs_scoped and
+-- Rollback (src/tests/policy/rankingDeterministicComposite.integration.test.ts runs exactly these steps):
+--   a. DROP VIEW IF EXISTS v_apply_now_jobs_stage3_scoped;
+--      DROP VIEW IF EXISTS v_top_ten_ready_jobs_stage3_scoped;
+--      then re-run the CREATE OR REPLACE VIEW statements of v_apply_now_jobs_scoped and
 --      v_top_ten_ready_jobs_scoped from migrations/078_evidence_readiness_discovery.sql, of
 --      v_apply_now_jobs_stage3_scoped from migrations/104_apply_now_career_track.sql and of
 --      v_top_ten_ready_jobs_stage3_scoped from
---      migrations/075_user_preference_lineage_freshness_company_policy.sql. The appended Stage 3
---      columns can only be removed with DROP VIEW and re-creation.
---   b. Append a ranking_policies row (latest + 1) copying the migration 076 weights, then restore the
---      migration 066 ranking_policies_weights_chk (total exactly 100). That needs the migration 122 policy
---      rows (total 72.5) out of the way, and policy rows are immutable, so restoring the strict check
---      needs human approval (use ADD CONSTRAINT ... NOT VALID to keep the history rows).
+--      migrations/075_user_preference_lineage_freshness_company_policy.sql.
+--   b. Append a ranking_policies row (latest + 1) copying the migration 076 weights:
+--        INSERT INTO ranking_policies (workspace_id, policy_version, schema_version, weights, minimum_ranking_confidence)
+--        SELECT workspace_id, policy_version + 1, '5.2.0', <the migration 076 weights>, minimum_ranking_confidence
+--        FROM (latest policy per workspace) ...
 --   c. Only when no snapshot has a NULL ai_evaluation_id:
 --        ALTER TABLE job_ranking_snapshots ALTER COLUMN ai_evaluation_id SET NOT NULL;
+--   Restoring the strict ranking_policies_weights_chk (total exactly 100) is NOT part of the rollback and
+--   needs human approval: policy rows are append-only, so the 72.5-total rows of this migration stay as
+--   history and the strict check cannot be re-added without NOT VALID. In practice this migration is a
+--   one-way door for the CHECK only; the views, column nullability and active policy are reversible.
+--   The CHECK still admits a total-100 row with AI weights above 0 (existing rows need that branch); the
+--   materializer refuses such a policy per workspace with an explicit policyError and writes nothing.
 
 DO $$
 DECLARE
@@ -76,7 +83,7 @@ COMMENT ON COLUMN job_ranking_snapshots.ai_evaluation_id IS
 
 -- ranking_policies_weights_chk (migration 066) requires the eight weights to total exactly 100. The
 -- deterministic composite totals 72.5 with the four AI terms at 0, so the total rule is relaxed to
--- "100, or the four AI terms are all 0 and the deterministic terms total more than 0". Every existing row
+-- "100, or the four AI terms are all 0 and the deterministic terms total more than 0 and at most 100". Every existing row
 -- satisfies the old rule and therefore the new one; the key set and non-negativity rules are unchanged.
 ALTER TABLE ranking_policies DROP CONSTRAINT ranking_policies_weights_chk;
 ALTER TABLE ranking_policies ADD CONSTRAINT ranking_policies_weights_chk CHECK (
@@ -126,7 +133,7 @@ ALTER TABLE ranking_policies ADD CONSTRAINT ranking_policies_weights_chk CHECK (
         + (weights ->> 'requirementCoverage')::NUMERIC
         + (weights ->> 'evidenceCompleteness')::NUMERIC
         + (weights ->> 'laneConfidence')::NUMERIC
-      ) > 0
+      ) BETWEEN 0.000001 AND 100
     )
   )
 );
@@ -347,7 +354,7 @@ WITH current_rankings AS (
     active_profile.id AS profile_version_id,
     match_run.id AS match_run_id,
     decision.id AS deterministic_decision_id,
-    ai_evaluation.id AS ai_evaluation_id,
+    ranking.ai_evaluation_id AS ai_evaluation_id,
     ranking.requirement_fit_score,
     ranking.requirement_coverage_score,
     ranking.evidence_completeness_score,
@@ -415,16 +422,39 @@ WITH current_rankings AS (
     ORDER BY policy.policy_version DESC
     LIMIT 1
   ) AS current_policy ON TRUE
-  JOIN job_ranking_snapshots AS ranking
-    ON ranking.workspace_id = job.workspace_id
-   AND ranking.canonical_job_id = job.id
-   AND ranking.job_version_id = job_version.id
-   AND ranking.profile_version_id = active_profile.id
-   AND ranking.match_run_id = match_run.id
-   AND ranking.deterministic_decision_id = decision.id
-   AND ranking.ai_evaluation_id IS NOT DISTINCT FROM ai_evaluation.id
-   AND ranking.ranking_policy_version = current_policy.policy_version
-   AND ranking.context_fingerprint = decision.context_fingerprint
+  -- Same snapshot choice as Apply Now: prefer a snapshot that carries a current AI evaluation, fall back to
+  -- the one without. A job therefore stays in the Top 10 between its evaluation completing and the next
+  -- materializer run (it never has zero rows in that window).
+  JOIN LATERAL (
+    SELECT snapshot.*
+    FROM job_ranking_snapshots AS snapshot
+    WHERE snapshot.workspace_id = job.workspace_id
+      AND snapshot.canonical_job_id = job.id
+      AND snapshot.job_version_id = job_version.id
+      AND snapshot.profile_version_id = active_profile.id
+      AND snapshot.match_run_id = match_run.id
+      AND snapshot.deterministic_decision_id = decision.id
+      AND snapshot.ranking_policy_version = current_policy.policy_version
+      AND snapshot.context_fingerprint = decision.context_fingerprint
+      AND (
+        snapshot.ai_evaluation_id IS NULL
+        OR EXISTS (
+          SELECT 1
+          FROM ai_evaluations AS current_evaluation
+          WHERE current_evaluation.id = snapshot.ai_evaluation_id
+            AND current_evaluation.workspace_id = job.workspace_id
+            AND current_evaluation.canonical_job_id = job.id
+            AND current_evaluation.job_version_id = job_version.id
+            AND current_evaluation.profile_version_id = active_profile.id
+            AND current_evaluation.match_run_id = match_run.id
+            AND current_evaluation.deterministic_decision_id = decision.id
+            AND current_evaluation.job_content_hash = job_version.content_hash
+            AND current_evaluation.context_fingerprint = decision.context_fingerprint
+        )
+      )
+    ORDER BY (snapshot.ai_evaluation_id IS NOT NULL) DESC, snapshot.computed_at DESC, snapshot.id
+    LIMIT 1
+  ) AS ranking ON TRUE
   WHERE shortlist.gate_status = 'PASS'
     AND shortlist.current_artifact_status IN (
       'CURRENT_OR_NOT_APPLICABLE',

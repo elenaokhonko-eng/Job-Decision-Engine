@@ -191,11 +191,15 @@ describe("application ranking materializer", () => {
   });
 
   it("refuses to materialize under a policy that gives an AI term a weight", async () => {
-    const { pool } = createPool([
+    const { pool, calls } = createPool([
       currentApplyNowRow({ ranking_weights: { ...POLICY_WEIGHTS, autonomy: 10 } }),
     ]);
 
-    await expect(materializeApplicationRankings(pool, "workspace-1")).rejects.toThrow(/display-only/);
+    const result = await materializeApplicationRankings(pool, "workspace-1");
+
+    expect(result.policyError).toMatch(/display-only/);
+    expect(result.snapshotsInserted).toBe(0);
+    expect(calls.some((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"))).toBe(false);
   });
 
   it("reads the policy for the latest version only when no version is requested", async () => {

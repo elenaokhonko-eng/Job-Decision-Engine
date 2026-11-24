@@ -82,6 +82,8 @@ export interface RankingMaterializationResult {
   readonly snapshotsAlreadyCurrent: number;
   readonly missingCurrentEvaluations: number;
   readonly incompleteRequiredInputs: number;
+  /** Set when the workspace's latest ranking policy is invalid; nothing was written and the caller must fail loudly. */
+  readonly policyError?: string;
 }
 
 export const CURRENT_APPLY_NOW_CONTEXT_QUERY = `
@@ -706,7 +708,7 @@ export async function materializeApplicationRankings(
       options.jobVersionIds ?? [],
       null,
     ]);
-    const result = {
+    const result: { -readonly [K in keyof RankingMaterializationResult]: RankingMaterializationResult[K] } = {
       dryRun: options.dryRun === true,
       eligibleApplyNowJobs: rows.length,
       snapshotsWouldInsert: 0,
@@ -715,6 +717,18 @@ export async function materializeApplicationRankings(
       missingCurrentEvaluations: 0,
       incompleteRequiredInputs: 0,
     };
+
+    // An invalid latest policy (for example one that weights an AI term) stops this workspace with an
+    // explicit error and no writes; it does not throw out of the call mid-transaction.
+    if (rows.length > 0) {
+      try {
+        parseRankingWeights(rows[0]!.ranking_weights);
+      } catch (error) {
+        await client.query("ROLLBACK");
+        committed = true;
+        return { ...result, policyError: error instanceof Error ? error.message : String(error) };
+      }
+    }
 
     for (const row of rows) {
       if (

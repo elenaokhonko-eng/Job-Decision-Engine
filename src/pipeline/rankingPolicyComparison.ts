@@ -78,7 +78,11 @@ function legacyWeights(raw: unknown): Record<LegacyWeightName, number> {
   return weights;
 }
 
-/** The retired composite, reproduced for comparison: AI terms weighted, culture priorities move the AI budget. */
+/**
+ * COMPARISON ONLY, DO NOT USE FOR RANKING. The retired composite, reproduced so the old side of a policy
+ * comparison can be shown: AI terms weighted, culture priorities move the AI budget. The live formula is
+ * calculateRanking in src/services/applicationRanking.ts (deterministic terms only).
+ */
 export function legacyCompositeScore(
   components: RankingComponents,
   aiLabels: RankingAiLabels,
