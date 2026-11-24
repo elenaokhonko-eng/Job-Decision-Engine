@@ -4,7 +4,6 @@ import pg from "pg";
 
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
-import { GATE_VERSION } from "../../contracts/version.js";
 import { LANE_ROUTER_RULE_VERSION } from "../../pipeline/laneRouter.js";
 import { currentMatcherPolicyVersion } from "../../pipeline/profileMatchCurrency.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../../requirements/deterministicExtractors.js";
@@ -267,16 +266,8 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     const check = await protectedJobsAutoArchived(db(), ws);
     expect([...check.sample].sort()).toEqual([savedThenArchived.canonicalJobId, heldThenArchived.canonicalJobId, appliedThenArchived.canonicalJobId].sort());
   });
-  it("stage result older than the current rule version: gate, matcher and lane router are reported per stage; current results are not", async () => {
+  it("stage result older than the current rule version: matcher and lane router are reported per stage; current results are not", async () => {
     const ws = await newWorkspace();
-    const staleGate = await job(ws);
-    const currentGate = await job(ws);
-    const gate = (j: { canonicalJobId: string; jobVersionId: string }, version: string) => db().query(
-      `INSERT INTO gate_decisions (canonical_job_id, job_version_id, decision, gate_version, workspace_id) VALUES ($1, $2, 'PASS', $3, $4)`,
-      [j.canonicalJobId, j.jobVersionId, version, ws]);
-    await gate(staleGate, "gate-old");
-    await gate(currentGate, GATE_VERSION);
-
     const profile = await db().query<{ id: string }>(
       `INSERT INTO candidate_profiles (workspace_id, profile_key, display_name) VALUES ($1, $2, 'Fixture') RETURNING id`, [ws, `fixture-${randomUUID()}`]);
     const version = await db().query<{ id: string }>(
@@ -302,9 +293,9 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
 
     const check = await staleStageResults(db(), ws);
     expect([...check.sample].sort()).toEqual([
-      `gate:${staleGate.canonicalJobId}`, `lane_router:${staleLane.canonicalJobId}`, `matcher:${staleMatch.canonicalJobId}`,
+      `lane_router:${staleLane.canonicalJobId}`, `matcher:${staleMatch.canonicalJobId}`,
     ].sort());
-    expect(check.detail).toEqual({ extractor: 0, gate: 1, matcher: 1, lane_router: 1 });
+    expect(check.detail).toEqual({ extractor: 0, matcher: 1, lane_router: 1 });
     expect(DETERMINISTIC_EXTRACTOR_VERSION).toBeTruthy();
   });
 
@@ -327,5 +318,23 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     const pre = await runZeroChecks(db(), ws, { phase: "pre" });
     expect(pre.map((entry) => entry.name)).not.toContain("stage_result_older_than_rule_version");
     expect(zeroChecksExitCode(pre)).toBe(0);
+  });
+});
+
+describe("process_backlog.yml wiring", () => {
+  it("the reconcile step before the drain passes --phase=pre, the one after does not (strict)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { load } = await import("js-yaml");
+    const workflow = load(readFileSync(".github/workflows/process_backlog.yml", "utf8")) as { jobs: Record<string, { steps: Array<{ name?: string; run?: string }> }> };
+    const steps = Object.values(workflow.jobs).flatMap((job) => job.steps);
+    const before = steps.find((step) => step.name === "Reconcile pipeline before drain");
+    const after = steps.find((step) => step.name === "Reconcile pipeline after drain");
+    expect(before?.run).toContain("reconcile_pipeline.ts");
+    expect(before?.run).toContain("--phase=pre");
+    expect(after?.run).toContain("reconcile_pipeline.ts");
+    expect(after?.run).not.toContain("--phase=pre");
+    const drain = steps.findIndex((step) => step.name === "Process saved discovery backlog");
+    expect(steps.indexOf(before!)).toBeLessThan(drain);
+    expect(steps.indexOf(after!)).toBeGreaterThan(drain);
   });
 });
