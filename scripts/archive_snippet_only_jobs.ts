@@ -16,6 +16,18 @@
  *   ARCHIVE_SNIPPET_APPLY_ALLOWED=true npx tsx scripts/archive_snippet_only_jobs.ts --target production --apply \
  *     --confirm-workspace=<workspace uuid> --restore-point=<Neon restore point / branch id>
  *
+ * EXPIRY RULE (--rule=expiry, src/ingestion/snippetExpiry.ts): a snippet-only job whose fetch has not succeeded
+ * is archived 7 days after it was last seen, or 21 days after it was first seen, unless a fetch is still within its
+ * retry budget (a pending fetch
+ * task still within its retry budget defers the archive; once the task is exhausted, parked or dead-lettered the
+ * job expires). Same guards, same reversibility, idempotent. Manual and env-gated: nothing schedules this script.
+ * --restore-point is an audit label recorded on the archive run (the owner takes the Neon restore point first; the
+ * script cannot verify it exists, so it only requires a non-empty value).
+ *
+ *   npx tsx scripts/archive_snippet_only_jobs.ts --target replay --rule=expiry                        # dry run
+ *   SNIPPET_EXPIRY_APPLY_ALLOWED=true npx tsx scripts/archive_snippet_only_jobs.ts --target production --rule=expiry --apply \
+ *     --confirm-workspace=<workspace uuid> --restore-point=<Neon restore point / branch id>
+ *
  * Output prints counts and job ids only; no employer names or titles.
  */
 import dotenv from 'dotenv';
@@ -24,6 +36,7 @@ import { pgConnectionConfig } from '../src/db/pgSsl.js';
 import { requireApprovedReplayTarget } from '../src/reporting/replayGuard.js';
 import { resolveWorkspaceContext } from '../src/workspace/context.js';
 import { archiveJobsAsPostingNotConfirmable, findSnippetOnlyArchiveCandidates } from '../src/services/jobArchive.js';
+import { expireSnippetOnlyJobs } from '../src/ingestion/snippetExpiry.js';
 
 dotenv.config({ path: '.env.local' });
 
@@ -35,6 +48,8 @@ const argValue = (name: string): string | null => {
 const target = argv.includes('--target') ? argv[argv.indexOf('--target') + 1] : '';
 if (target !== 'replay' && target !== 'production') throw new Error('usage: --target replay|production [--min-age-days=7] [--apply ...]');
 const apply = argv.includes('--apply');
+const rule = argValue('rule') ?? 'never-fetched';
+if (rule !== 'never-fetched' && rule !== 'expiry') throw new Error('--rule must be never-fetched or expiry');
 const minAgeDays = Number(argValue('min-age-days') ?? '7');
 
 const url = (target === 'replay' ? process.env.REPLAY_DATABASE_URL : process.env.DATABASE_URL)?.trim();
@@ -55,6 +70,30 @@ try {
   console.log(`target=${target} database=${id.rows[0].d} branch=${id.rows[0].b} mode=${apply ? 'APPLY' : 'DRY RUN'} min_age_days=${minAgeDays}`);
   const context = await resolveWorkspaceContext(client as unknown as pg.PoolClient);
   console.log(`workspace=${context.workspaceId}`);
+  if (rule === 'expiry') {
+    await client.query('ROLLBACK');
+    if (apply) {
+      if (process.env.SNIPPET_EXPIRY_APPLY_ALLOWED !== 'true') throw new Error('Refusing to apply: set SNIPPET_EXPIRY_APPLY_ALLOWED=true after the owner approves the dry-run numbers.');
+      const restorePoint = argValue('restore-point');
+      if (!restorePoint) throw new Error('Refusing to apply: --restore-point=<Neon restore point or branch id> is required (take it first).');
+      if (argValue('confirm-workspace') !== context.workspaceId) throw new Error('Refusing to apply: --confirm-workspace must equal the resolved workspace id.');
+    }
+    await client.query(apply ? 'BEGIN' : 'BEGIN READ ONLY');
+    try {
+      const report = await expireSnippetOnlyJobs(client as unknown as pg.PoolClient, {
+        workspaceId: context.workspaceId, apply, actor: 'script:archive_snippet_only_jobs:expiry', restorePoint: argValue('restore-point') ?? undefined,
+      });
+      await client.query(apply ? 'COMMIT' : 'ROLLBACK');
+      console.log(JSON.stringify(report, null, 2));
+      console.log(apply ? `APPLIED: archived ${report.archived} of ${report.toArchive}.` : 'DRY RUN: nothing was written.');
+      if (apply && report.archived !== report.toArchive) process.exitCode = 1;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    }
+    await client.end();
+    process.exit(process.exitCode ?? 0);
+  }
   const candidates = await findSnippetOnlyArchiveCandidates(client as unknown as pg.PoolClient, { workspaceId: context.workspaceId, minAgeDays });
   await client.query('ROLLBACK');
 
