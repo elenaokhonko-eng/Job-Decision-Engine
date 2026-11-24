@@ -44,7 +44,7 @@ Not started this round:
    | `src/ingestion/`, `scripts/run_adapters.ts`, `scripts/parse_emails.ts` | W4 |
    | `src/services/agent.ts`, `src/services/llmFallback.ts`, `src/services/modelCallResilience.ts` | W5 |
    | `src/security/`, `src/reporting/` | W6 |
-   | `scripts/reconcile_pipeline.ts`, `scripts/check_integrity.ts`, `src/tasks/integrityZeroChecks.ts`, `src/tasks/zeroCheckRepair.ts`, `src/tasks/completedWithoutResult.ts` | W10 (the zero-check stream; it took these over from W1 and W7) |
+   | `scripts/reconcile_pipeline.ts`, `scripts/check_integrity.ts`, `src/tasks/completedWithoutResult.ts`, and the zero-check modules once merged (the integrity zero-check and repair modules in `src/tasks/`) | W10 (the zero-check stream; it took these over from W1 and W7) |
 | `src/tasks/availabilityRecheck.ts`, `src/tasks/pipelineTaskCurrentness.ts`, `src/services/jobArchive.ts` | W1 stream (carried by W10 while W1 has no budget) |
 | `src/architecture/boundary-baseline.json`, `docs/architecture.md` | W5 |
 | `.agents/DATA-FLOW-CONTRACT.md` | Append-only for every stream: add your own row, never edit another stream's row; on a conflict keep both sides |
