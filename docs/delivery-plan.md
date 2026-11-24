@@ -28,7 +28,7 @@ Not started this round:
 | Phase | Why it waits |
 |---|---|
 | Rest of Phase 2 (prompt registry, `evaluation` module) | Needs the gateway from W5 |
-| Phase 3 (one writer per decision) | Rewrites the gate, router, matcher and decider, which W1 to W3 are changing |
+| Phase 3 (one writer per decision) | Rewrites the gate, router, matcher and decider, which W1 to W3 are changing. Includes one read model that assigns each job to exactly one list with the reason, so no screen applies its own filter. Availability, list ordering and staleness of kept results were all the same gap (each list had its own filter). Do not build it before the restart |
 | Phase 4 (pure stages, one recompute command) | Follows Phase 3 |
 | Phase 5 (persistence), Phase 6 (concept graph), Phase 7 (retire and shrink) | Follow Phase 4 |
 
