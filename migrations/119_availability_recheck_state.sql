@@ -1,4 +1,4 @@
--- Migration 115: durable state and audit trail for the RECHECK_AVAILABILITY task (workstream W1).
+-- Migration 119: durable state and audit trail for the RECHECK_AVAILABILITY task (workstream W1).
 --
 -- When a job's 7-day availability window runs out, one posting read re-evaluates whether the posting
 -- is open, its work mode and its hiring territory. Two facts must survive between reads and must be

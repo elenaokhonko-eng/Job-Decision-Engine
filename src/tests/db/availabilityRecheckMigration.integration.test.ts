@@ -6,7 +6,7 @@ import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
-// Migration 115: the state and audit tables for RECHECK_AVAILABILITY. Synthetic data only.
+// Migration 119: the state and audit tables for RECHECK_AVAILABILITY. Synthetic data only.
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
 
@@ -27,16 +27,16 @@ async function insertJob(): Promise<string> {
   const row = await db().query<{ id: string }>(
     `INSERT INTO canonical_jobs (workspace_id, company_name, normalized_title, canonical_url)
      VALUES ($1, 'Migration Fixture Co', 'Fixture Role', $2) RETURNING id`,
-    [context!.workspaceId, `https://example.test/m115/${crypto.randomUUID()}`],
+    [context!.workspaceId, `https://example.test/m119/${crypto.randomUUID()}`],
   );
   return row.rows[0]!.id;
 }
 
-describe.skipIf(skipReal)("migration 115: availability re-check state (PostgreSQL)", () => {
+describe.skipIf(skipReal)("migration 119: availability re-check state (PostgreSQL)", () => {
   beforeAll(async () => {
     pool = new pg.Pool(pgConnectionConfig(databaseUrl));
     client = await pool.connect();
-    const schemaName = `m115_${crypto.randomUUID().replaceAll("-", "")}`;
+    const schemaName = `m119_${crypto.randomUUID().replaceAll("-", "")}`;
     await client.query(`CREATE SCHEMA ${schemaName}`);
     await client.query(`SET search_path TO ${schemaName}, public`);
     await runMigrations(client);
