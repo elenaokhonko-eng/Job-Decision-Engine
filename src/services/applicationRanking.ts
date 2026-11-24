@@ -1,13 +1,13 @@
+/**
+ * Terms of the composite rank. Only deterministic terms may appear here (AGENTS.md invariant 11):
+ * the AI culture terms (autonomy, politics risk, sensory workload risk, focus protection, culture
+ * priority fit) are display-only labels, see RankingAiLabels, and never enter the sort.
+ */
 export type RankingComponentName =
   | 'requirementFit'
   | 'requirementCoverage'
   | 'evidenceCompleteness'
-  | 'laneConfidence'
-  | 'autonomy'
-  | 'politicsRisk'
-  | 'sensoryWorkloadRisk'
-  | 'strategicValue'
-  | 'culturePriorityFit';
+  | 'laneConfidence';
 
 export type RankingWeights = Readonly<Record<RankingComponentName, number>>;
 
@@ -16,19 +16,25 @@ export interface RankingComponents {
   readonly requirementCoverage: number | null;
   readonly evidenceCompleteness: number | null;
   readonly laneConfidence: number | null;
+}
+
+/** Display-only AI labels stored beside the rank. Nothing here is read by calculateRanking. */
+export interface RankingAiLabels {
   readonly autonomy: number | null;
   readonly politicsRisk: number | null;
   readonly sensoryWorkloadRisk: number | null;
-  readonly strategicValue: number | null;
-  readonly culturePriorityFit?: number | null;
+  readonly focusProtection: number | null;
+  readonly culturePriorityFit: number | null;
 }
+
+/** Version of the composite formula; recorded in snapshot provenance. Bump when the output changes. */
+export const RANKING_COMPOSITE_VERSION = 'deterministic_composite_v2';
 
 export interface RankingReadinessContext {
   readonly gatePassed: boolean;
   readonly laneCurrent: boolean;
   readonly matchCurrent: boolean;
   readonly deterministicDecisionCurrent: boolean;
-  readonly aiEvaluationCurrent: boolean;
   readonly contextVersionMismatch: boolean;
   readonly policyRecheckRequired: boolean;
 }
@@ -49,28 +55,14 @@ const RANKING_COMPONENTS: readonly RankingComponentName[] = [
   'requirementCoverage',
   'evidenceCompleteness',
   'laneConfidence',
-  'autonomy',
-  'politicsRisk',
-  'sensoryWorkloadRisk',
-  'strategicValue',
-  'culturePriorityFit',
 ];
 
-const INVERSE_RISK_COMPONENTS: ReadonlySet<RankingComponentName> = new Set([
-  'politicsRisk',
-  'sensoryWorkloadRisk',
-]);
-
+/** Composite weights (total 72.5; the rank is a weighted average over the available terms). */
 export const INITIAL_RANKING_WEIGHTS: RankingWeights = Object.freeze({
   requirementFit: 37.5,
   requirementCoverage: 15,
   evidenceCompleteness: 10,
   laneConfidence: 10,
-  autonomy: 10,
-  politicsRisk: 7.5,
-  sensoryWorkloadRisk: 5,
-  strategicValue: 5,
-  culturePriorityFit: 0,
 });
 
 function validateScores(components: RankingComponents): void {
@@ -133,8 +125,7 @@ function calculateOverallRankScore(
       return weightedScore;
     }
 
-    const adjustedScore = INVERSE_RISK_COMPONENTS.has(component) ? 100 - score : score;
-    return weightedScore + adjustedScore * (policy.weights[component] / availableWeight);
+    return weightedScore + score * (policy.weights[component] / availableWeight);
   }, 0);
 }
 
@@ -155,7 +146,6 @@ function isTopTenReady(
     readiness.laneCurrent === true &&
     readiness.matchCurrent === true &&
     readiness.deterministicDecisionCurrent === true &&
-    readiness.aiEvaluationCurrent === true &&
     readiness.contextVersionMismatch === false &&
     readiness.policyRecheckRequired === false &&
     rankingConfidence >= policy.minimumRankingConfidence
