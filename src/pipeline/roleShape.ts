@@ -117,7 +117,34 @@ export const detectContractEmployment: RoleShapeDetector = ({ description, emplo
   return null;
 };
 
-const DETECTORS: RoleShapeDetector[] = [detectCustomerFacingDelivery, detectPeopleManagementCore, detectContractEmployment];
+
+// ---------------------------------------------------------------------------------------------------------------
+// Infrastructure by description: the title does not say so (title rules reject those), but the duties are operating
+// infrastructure. Needs four different cues so a passing mention of one tool does not count.
+// ---------------------------------------------------------------------------------------------------------------
+
+const INFRASTRUCTURE_CUES: RegExp[] = [
+  /\bkubernetes\b/i,
+  /\bterraform\b/i,
+  /\bansible\b/i,
+  /\bhelm\b/i,
+  /\bon[- ]call\b/i,
+  /\bci\/cd\b/i,
+  /\binfrastructure as code\b/i,
+  /\bsite reliability\b|\bSRE\b/,
+  /\bdevops\b/i,
+  /\bincident (?:response|management)\b/i,
+  /\bprometheus\b|\bgrafana\b|\bobservability\b/i,
+  /\bcloud infrastructure\b/i,
+];
+
+export const detectInfrastructureByDescription: RoleShapeDetector = ({ description }) => {
+  const hits = INFRASTRUCTURE_CUES.map((cue) => description.match(cue)).filter((match): match is RegExpMatchArray => match !== null);
+  if (hits.length < 4) return null;
+  return { code: "INFRASTRUCTURE_BY_DESCRIPTION", penalty: 0.08, source: "DESCRIPTION", quote: excerpt(description, hits[0]!.index ?? 0, hits[0]![0].length) };
+};
+
+const DETECTORS: RoleShapeDetector[] = [detectCustomerFacingDelivery, detectPeopleManagementCore, detectContractEmployment, detectInfrastructureByDescription];
 
 export function assessRoleShape(input: RoleShapeInput, detectors: RoleShapeDetector[] = DETECTORS): RoleShapeAssessment {
   const normalized = {
