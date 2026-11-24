@@ -18,6 +18,10 @@ async function main(): Promise<void> {
     const dryRun = process.argv.includes("--dry-run");
     const result = await materializeApplicationRankings(pool, context.workspaceId, { dryRun, context });
     console.log(JSON.stringify(result, null, 2));
+    if (result.policyError) {
+      console.error("Ranking policy is invalid; nothing was materialized:", result.policyError);
+      process.exitCode = 1;
+    }
     if (result.missingCurrentEvaluations > 0 || result.incompleteRequiredInputs > 0) {
       console.warn(
         "Some Apply Now jobs remain outside Top 10 until their exact current evaluation and required ranking inputs are available."
