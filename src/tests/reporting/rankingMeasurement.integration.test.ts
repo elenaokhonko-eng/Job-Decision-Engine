@@ -108,8 +108,8 @@ describe.skipIf(!enabled)("ranking measurement queries (Postgres)", () => {
       const runId = randomUUID();
       await client.query(
         `INSERT INTO match_runs (id, workspace_id, canonical_job_id, job_version_id, profile_version_id, status,
-                                 coverage_score, overall_match_score)
-         VALUES ($1, $2, $3, $4, $5, 'COMPLETED', $6, $6)`,
+                                 coverage_score, overall_match_score, requirement_count)
+         VALUES ($1, $2, $3, $4, $5, 'COMPLETED', $6, $6, 5)`,
         [runId, workspace, jobId, versionId, profileVersionId, options.score],
       );
       await client.query(`UPDATE canonical_jobs SET latest_match_run_id = $2 WHERE id = $1`, [jobId, runId]);
@@ -221,6 +221,18 @@ describe.skipIf(!enabled)("ranking measurement queries (Postgres)", () => {
       NO_DECISION: 1,
     });
     expect(Object.values(report.exclusionCounts).reduce((a, b) => a + b, 0)).toBe(rows.length);
+  });
+
+  it("keeps a zero-requirement match (nothing compared, stored 0) out of score statistics", async () => {
+    const compared = await seedJob({ title: "Compared Role", score: 62, outcome: "REVIEW", source: SOURCE, similarity: 0.7 });
+    const empty = await seedJob({ title: "No Requirement Role", score: 0, outcome: "TRACK", source: SOURCE });
+    await client.query(`UPDATE match_runs SET requirement_count = 0 WHERE canonical_job_id = $1`, [empty.jobId]);
+    const rows = await loadSavedObservations(client, workspaceId, SOURCE);
+    const byObservation = new Map(rows.map((row) => [row.observationId, row]));
+    expect(byObservation.get(compared.observationId!)!.job?.matchScore).toBe(62);
+    expect(byObservation.get(empty.observationId!)!.job).toBeNull();
+    const candidates = await loadCandidateJobs(client, workspaceId);
+    expect(candidates.some((row) => row.jobId === empty.jobId)).toBe(false);
   });
 
   it("loads candidate jobs only when they are complete, current and in this workspace", async () => {
