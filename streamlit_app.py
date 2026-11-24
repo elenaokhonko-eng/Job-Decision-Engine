@@ -30,13 +30,17 @@ from streamlit_job_review import (
     SERVER_PAGED_CATEGORIES,
     VERIFY_THEN_APPLY_CATEGORY,
     apply_now_exclusion_summary,
+    degree_asked_for_label,
     escape_markdown,
     filter_by_sidebar,
     job_eligibility,
     job_outcome,
+    low_confidence_label,
     page_count,
+    ranking_sort_key,
     review_option_label,
     review_selector_options,
+    role_signal_labels,
     string_list,
     unresolved_readiness_checks,
     verification_action_applies,
@@ -205,6 +209,9 @@ def _read_model_query(query, params):
         connection.close()
 
 
+# Shown wherever a list is sorted by the composite overall rank (Apply Now, Top 10). No weights are described here.
+OVERALL_RANK_NOTE = "Overall rank is a combined rank: requirement fit after downranks plus other inputs."
+
 SHORTLIST_READ_MODEL_QUERY = """
     SELECT
       s.canonical_job_id,
@@ -268,8 +275,17 @@ SHORTLIST_READ_MODEL_QUERY = """
       s.user_action_category,
       s.user_action_status,
       s.technical_error_count,
-      s.pipeline_display_category
+      s.pipeline_display_category,
+      r.ranking_score,
+      r.raw_match_score,
+      r.score_policy,
+      r.degree_asked_for,
+      r.role_signals,
+      r.evidence_confidence
     FROM v_canonical_shortlist_actions_scoped s
+    LEFT JOIN v_job_ranking_scoped r
+      ON r.workspace_id = s.workspace_id
+     AND r.canonical_job_id = s.canonical_job_id
     LEFT JOIN v_application_readiness_current readiness
       ON readiness.workspace_id = s.workspace_id
      AND readiness.canonical_job_id = s.canonical_job_id
@@ -435,13 +451,13 @@ TOP_TEN_READY_QUERY = """
 """
 
 APPLY_NOW_JOBS_QUERY = """
-    SELECT workspace_id, canonical_job_id, job_version_id, title, company,
+    SELECT jobs.workspace_id, jobs.canonical_job_id, jobs.job_version_id, title, company,
            canonical_url, source, location, workplace_type, employment_type,
            description, gate_status, rejection_codes, gate_evidence_quotes,
            primary_lane, secondary_lanes, lane_confidence, priority_score,
            deterministic_match_score, deterministic_match_coverage,
-           processing_state, processing_status, recommendation_eligibility,
-           recommendation_outcome, recommendation_requirement_score,
+           processing_state, processing_status, jobs.recommendation_eligibility,
+           jobs.recommendation_outcome, recommendation_requirement_score,
            recommendation_coverage_score, recommendation_evidence_completeness,
            recommendation_decided_at, nd_friendly_score, politics_stress_score,
            sensory_overload_index, next_action, strategic_value, evaluation_summary,
@@ -459,7 +475,9 @@ APPLY_NOW_JOBS_QUERY = """
            current_readiness.readiness_status,
            current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
            current_readiness.readiness_reason_codes, current_readiness.availability_status,
-           current_readiness.availability_recheck_at
+           current_readiness.availability_recheck_at,
+           r.ranking_score, r.raw_match_score, r.score_policy, r.degree_asked_for,
+           r.role_signals, r.evidence_confidence
     FROM v_apply_now_jobs_stage3_scoped AS jobs
     LEFT JOIN LATERAL (
       SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
@@ -470,10 +488,15 @@ APPLY_NOW_JOBS_QUERY = """
         AND readiness.job_version_id::text = jobs.job_version_id::text
       LIMIT 1
     ) AS current_readiness ON TRUE
+    -- Stored adjusted score and role-shape evidence (migration 121). LEFT JOIN: a job the decider
+    -- has not scored yet stays listed, with a NULL ranking_score that sorts last.
+    LEFT JOIN v_job_ranking_scoped AS r
+      ON r.workspace_id = jobs.workspace_id
+     AND r.canonical_job_id = jobs.canonical_job_id
     WHERE jobs.workspace_id = %s
     ORDER BY overall_rank_score DESC NULLS LAST,
-             CASE recommendation_outcome WHEN 'PRIORITY' THEN 0 ELSE 1 END,
-             deterministic_match_score DESC NULLS LAST,
+             CASE jobs.recommendation_outcome WHEN 'PRIORITY' THEN 0 ELSE 1 END,
+             r.ranking_score DESC NULLS LAST,
              observed_at DESC NULLS LAST
     LIMIT 5000
 """
@@ -499,20 +522,24 @@ VERIFY_THEN_APPLY_JOBS_QUERY = """
            jobs.blocked_task_count,
            current_readiness.application_readiness,
            current_readiness.readiness_status,
-           current_readiness.readiness_reason_codes
+           current_readiness.readiness_reason_codes,
+           r.ranking_score, r.raw_match_score, r.score_policy, r.degree_asked_for,
+           r.role_signals, r.evidence_confidence
     FROM v_canonical_shortlist_scoped AS jobs
     JOIN v_application_readiness_current AS current_readiness
       ON current_readiness.workspace_id = jobs.workspace_id
      AND current_readiness.canonical_job_id = jobs.canonical_job_id
      AND current_readiness.job_version_id::text = jobs.job_version_id::text
+    LEFT JOIN v_job_ranking_scoped AS r
+      ON r.workspace_id = jobs.workspace_id
+     AND r.canonical_job_id = jobs.canonical_job_id
     WHERE jobs.workspace_id = %s
       AND jobs.gate_status = 'NEEDS_VERIFICATION'
       AND jobs.processing_state = 'MATCHED'
       AND jobs.recommendation_eligibility = 'VERIFY'
       AND jobs.recommendation_outcome = 'REVIEW'
       AND current_readiness.readiness_status = 'NEEDS_VERIFICATION'
-    ORDER BY jobs.deterministic_match_score DESC NULLS LAST,
-             jobs.recommendation_requirement_score DESC NULLS LAST,
+    ORDER BY r.ranking_score DESC NULLS LAST,
              jobs.recommendation_coverage_score DESC NULLS LAST,
              jobs.lane_confidence DESC NULLS LAST,
              jobs.observed_at DESC NULLS LAST
@@ -537,7 +564,9 @@ TRACK_JOBS_QUERY = """
            current_readiness.readiness_status,
            current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
            current_readiness.readiness_reason_codes, current_readiness.availability_status,
-           current_readiness.availability_recheck_at
+           current_readiness.availability_recheck_at,
+           r.ranking_score, r.raw_match_score, r.score_policy, r.degree_asked_for,
+           r.role_signals, r.evidence_confidence
     FROM v_track_jobs_scoped AS jobs
     LEFT JOIN LATERAL (
       SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
@@ -548,6 +577,9 @@ TRACK_JOBS_QUERY = """
         AND readiness.job_version_id::text = jobs.job_version_id::text
       LIMIT 1
     ) AS current_readiness ON TRUE
+    LEFT JOIN v_job_ranking_scoped AS r
+      ON r.workspace_id = jobs.workspace_id
+     AND r.canonical_job_id = jobs.canonical_job_id
     -- Same single read-model statement of "currently open" as Review (migration 114). A Track job
     -- whose posting is not confirmed open leaves this list and is counted by
     -- TRACK_AWAITING_AVAILABILITY_COUNT_QUERY, so list plus count equal every TRACK job.
@@ -557,7 +589,7 @@ TRACK_JOBS_QUERY = """
      AND availability.job_version_id::text = jobs.job_version_id::text
      AND availability.availability_current
     WHERE jobs.workspace_id = %s
-    ORDER BY jobs.deterministic_match_score DESC NULLS LAST, jobs.observed_at DESC NULLS LAST
+    ORDER BY r.ranking_score DESC NULLS LAST, jobs.observed_at DESC NULLS LAST
     LIMIT 5000
 """
 
@@ -603,7 +635,9 @@ REVIEW_JOBS_QUERY = """
              WHERE apply_now.workspace_id = jobs.workspace_id
                AND apply_now.canonical_job_id = jobs.canonical_job_id
                AND apply_now.job_version_id::text = jobs.job_version_id::text
-           ) AS in_apply_now
+           ) AS in_apply_now,
+           r.ranking_score, r.raw_match_score, r.score_policy, r.degree_asked_for,
+           r.role_signals, r.evidence_confidence
     FROM v_canonical_shortlist_scoped AS jobs
     LEFT JOIN LATERAL (
       SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
@@ -614,6 +648,9 @@ REVIEW_JOBS_QUERY = """
         AND readiness.job_version_id::text = jobs.job_version_id::text
       LIMIT 1
     ) AS current_readiness ON TRUE
+    LEFT JOIN v_job_ranking_scoped AS r
+      ON r.workspace_id = jobs.workspace_id
+     AND r.canonical_job_id = jobs.canonical_job_id
     -- One read-model statement of "currently open" (migration 114). A job whose posting
     -- is not confirmed open leaves this list and is counted by
     -- REVIEW_AWAITING_AVAILABILITY_COUNT_QUERY, so list plus count equal every REVIEW job.
@@ -624,8 +661,7 @@ REVIEW_JOBS_QUERY = """
      AND availability.availability_current
     WHERE jobs.workspace_id = %s
       AND jobs.recommendation_outcome = 'REVIEW'
-    ORDER BY jobs.deterministic_match_score DESC NULLS LAST,
-             jobs.recommendation_requirement_score DESC NULLS LAST,
+    ORDER BY r.ranking_score DESC NULLS LAST,
              jobs.observed_at DESC NULLS LAST
     LIMIT 5000
 """
@@ -2220,6 +2256,7 @@ with tab_dashboard:
     st.header("Application command centre")
     st.caption("PRIORITY = strongest opportunity; REVIEW = apply after review; TRACK = more fit evidence needed; SKIP = completed negative decision.")
     st.markdown("## Top 10 — apply first")
+    st.caption(f"Sorted by overall rank, highest first. {OVERALL_RANK_NOTE}")
 
     if top_ten_ready_jobs is None:
         st.error("Ranked opportunities could not be loaded from the current ranking read model.")
@@ -2568,24 +2605,19 @@ with tab_dashboard:
                 "ROUTING_DEFERRED": 7,
             }.get(status, 99)
 
-            match_score = as_number(j.get("deterministic_match_score"))
-            match_sort = -(match_score if match_score is not None else -1)
-
             priority_score = as_number(j.get("priority_score"))
             priority_sort = -(priority_score if priority_score is not None else -1)
             rank_score = as_number(j.get("overall_rank_score"))
             rank_sort = -(rank_score if rank_score is not None else -1)
             rank_missing = 1 if rank_score is None else 0
 
-            return (rank_missing, rank_sort, outcome_rank, eligibility_rank, status_rank, match_sort, priority_sort)
+            return (rank_missing, rank_sort, outcome_rank, eligibility_rank, status_rank, ranking_sort_key(j), priority_sort)
 
         if workspace_category in SELF_SOURCED_CATEGORIES:
             sorted_filtered_jobs = sorted(
                 filtered_jobs,
                 key=lambda job: (
-                    as_number(job.get("deterministic_match_score")) is None,
-                    -(as_number(job.get("deterministic_match_score")) or 0),
-                    -(as_number(job.get("recommendation_requirement_score")) or 0),
+                    ranking_sort_key(job),
                     -(as_number(job.get("recommendation_coverage_score")) or 0),
                     job.get("observed_at") or "",
                 ),
@@ -2633,9 +2665,13 @@ with tab_dashboard:
         else:
             st.subheader(f"{workspace_category} opportunities")
             if workspace_category == VERIFY_THEN_APPLY_CATEGORY:
-                st.caption("Sorted by deterministic profile-match score. These jobs have a current match and decision, but stay out of READY and document generation until the open workability question is resolved.")
+                st.caption("Sorted by the stored adjusted match score (highest first, unscored last). These jobs have a current match and decision, but stay out of READY and document generation until the open workability question is resolved.")
             elif workspace_category == REVIEW_CATEGORY:
-                st.caption("Every current REVIEW decision, sorted by deterministic profile-match score. Each card says why the job is, or is not, also in Apply Now.")
+                st.caption("Every current REVIEW decision, sorted by the stored adjusted match score (highest first, unscored last). Each card says why the job is, or is not, also in Apply Now.")
+            elif workspace_category in ("Apply Now", "Top 10"):
+                st.caption(f"Sorted by overall rank, highest first. {OVERALL_RANK_NOTE} Ties: decision outcome, pipeline status, then the adjusted match score.")
+            elif workspace_category in ("Track", "All", "Processing", "Skip"):
+                st.caption("Grouped by decision and pipeline status, then the stored adjusted match score (highest first, unscored last).")
         if workspace_category == "Archive":
             pass
         elif not active_jobs and not rejected_jobs:
@@ -2699,15 +2735,29 @@ with tab_dashboard:
                         else:
                             st.markdown("**Verification Link:** N/A")
 
-                        match_score = job.get("deterministic_match_score")
                         coverage = job.get("deterministic_match_coverage")
-                        match_str = format_score(match_score)
+                        adjusted_str = format_percent(job.get("ranking_score"), fraction=True)
+                        overall_rank_text = (
+                            f"**Overall rank:** `{format_score(job.get('overall_rank_score'))}` (list order) | "
+                            if job.get("overall_rank_score") is not None
+                            else ""
+                        )
+                        raw_str = format_score(job.get("raw_match_score"))
                         cov_str = format_percent(coverage)
 
                         evidence_pct = job.get("decision_evidence_completeness")
                         evidence_str = format_percent(evidence_pct, fraction=True, decimals=0)
 
-                        st.markdown(f"**Deterministic match:** `{match_str}` | **Coverage:** `{cov_str}` | **Evidence completeness:** `{evidence_str}`")
+                        st.markdown(f"{overall_rank_text}**Adjusted match:** `{adjusted_str}` | **Raw match:** `{raw_str}` (display only) | **Coverage:** `{cov_str}` | **Evidence completeness:** `{evidence_str}`")
+
+                        ranking_flags = [
+                            label for label in (degree_asked_for_label(job), low_confidence_label(job)) if label
+                        ]
+                        if ranking_flags:
+                            st.markdown(" | ".join(f"**{flag}**" for flag in ranking_flags))
+                        role_labels = role_signal_labels(job)
+                        if role_labels:
+                            st.markdown("**Role signals:** " + " | ".join(role_labels))
 
                         aut = job.get("nd_friendly_score")
                         pol = job.get("politics_stress_score")
@@ -2869,7 +2919,6 @@ with tab_dashboard:
             if job_outcome(job_to_show) == "REVIEW":
                 st.text(apply_now_exclusion_summary(job_to_show))
 
-            match_score = job_to_show.get("deterministic_match_score")
             coverage = job_to_show.get("deterministic_match_coverage")
             evidence_pct = job_to_show.get("decision_evidence_completeness")
             if evidence_pct is None:
@@ -2877,7 +2926,8 @@ with tab_dashboard:
 
             metric_a, metric_b, metric_c = st.columns(3)
             with metric_a:
-                st.metric("Deterministic Match", format_score(match_score))
+                st.metric("Adjusted match", format_percent(job_to_show.get("ranking_score"), fraction=True))
+                st.caption(f"Raw match (display only): {format_score(job_to_show.get('raw_match_score'))}")
             with metric_b:
                 st.metric("Match Coverage", format_percent(coverage))
             with metric_c:
