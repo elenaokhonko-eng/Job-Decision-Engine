@@ -1140,17 +1140,26 @@ export async function seedRecoverablePipelineTasks(
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
        WHERE c.workspace_id = $1
          AND c.archived_at IS NULL
+         AND ($6::boolean OR c.is_test_fixture IS NOT TRUE)
          AND jv.active_requirement_set_id IS NOT NULL
          AND COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'HARD_REJECTED', 'MANUALLY_REMOVED')
+         -- One attempt per requirement set: a task for this set in ANY state (completed or failed included)
+         -- ends the candidacy, so attempted jobs cannot sit ahead of fresh ones under the cap.
+         AND NOT EXISTS (
+           SELECT 1 FROM pipeline_tasks attempted
+            WHERE attempted.workspace_id = c.workspace_id AND attempted.task_type = 'PUBLISH_EMBEDDING'
+              AND attempted.task_key LIKE 'PUBLISH_EMBEDDING:' || jv.id::text || ':%:embed-' || jv.active_requirement_set_id::text)
          AND EXISTS (
            SELECT 1 FROM job_requirements r
             WHERE r.workspace_id = c.workspace_id AND r.requirement_set_id = jv.active_requirement_set_id
+              -- The embedding builder embeds only VALIDATED requirements; others can never be published.
+              AND r.status = 'VALIDATED'
               AND NOT EXISTS (
                 SELECT 1 FROM embedding_inputs ei
                  WHERE ei.workspace_id = r.workspace_id AND ei.source_type = 'JOB_REQUIREMENT' AND ei.source_id = r.id AND ei.is_current
                    AND EXISTS (
                      SELECT 1 FROM v_published_semantic_embeddings se
-                       JOIN embedding_spaces sp ON sp.id = se.embedding_space_id
+                       JOIN embedding_spaces sp ON sp.workspace_id = se.workspace_id AND sp.id = se.embedding_space_id
                       WHERE se.workspace_id = ei.workspace_id AND se.embedding_input_id = ei.id
                         AND sp.active = TRUE AND sp.is_fallback_space = FALSE AND LOWER(sp.provider) = LOWER($3)
                         AND sp.model = $4 AND sp.dimensions = $5)))
@@ -1161,7 +1170,7 @@ export async function seedRecoverablePipelineTasks(
               AND inflight.payload->>'job_version_id' = jv.id::text)
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
-      [ctx.workspaceId, maxPerType, embeddingConfiguration.primary.provider, embeddingConfiguration.primary.model, embeddingConfiguration.primary.dimensions],
+      [ctx.workspaceId, maxPerType, embeddingConfiguration.primary.provider, embeddingConfiguration.primary.model, embeddingConfiguration.primary.dimensions, includeTestFixtures],
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
         payload: {

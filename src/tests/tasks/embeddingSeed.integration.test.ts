@@ -95,6 +95,7 @@ async function seedRoutableJob(
   key: string,
   requirementTexts: readonly string[],
   facts: { workplaceType: string; location: string } = { workplaceType: "REMOTE", location: "Remote" },
+  requirementStatus = "VALIDATED",
 ): Promise<FixtureJob> {
   const workspaceId = ctx().workspaceId;
   const description = [
@@ -161,8 +162,8 @@ async function seedRoutableJob(
          requirement_key, requirement_type, importance, requirement_text,
          extractor_type, extractor_version, confidence, status
        ) VALUES ($1, $2, $3, $4, $5, 'FUNCTION', 'MUST', $6,
-                 'DETERMINISTIC', 'deterministic-fixture-v1', 1, 'VALIDATED')`,
-      [workspaceId, canonicalJobId, jobVersionId, requirementSetId, `function-${index + 1}`, text],
+                 'DETERMINISTIC', 'deterministic-fixture-v1', 1, $7)`,
+      [workspaceId, canonicalJobId, jobVersionId, requirementSetId, `function-${index + 1}`, text, requirementStatus],
     );
   }
   await db().query(
@@ -365,6 +366,49 @@ describe.skipIf(skipReal)("PUBLISH_EMBEDDING seed follows the active requirement
     expect(await counts()).toBe(3); // the third job is reached; the two with a task in flight were skipped, not duplicated
     await capped();
     expect(await counts()).toBe(3);
+  });
+
+  const seedScoped = (versionIds: string[], extra: { maxSeedPerType?: number; includeTestFixtures?: boolean } = {}) =>
+    seedRecoverablePipelineTasks(db(), { context: ctx(), taskTypes: ["PUBLISH_EMBEDDING"], jobVersionIds: versionIds, includeTestFixtures: extra.includeTestFixtures ?? true, maxSeedPerType: extra.maxSeedPerType });
+  const setKeyed = async (versionIds: string[]) => (await embedTasks()).filter((row) => versionIds.includes(row.payload.job_version_id)).length;
+
+  it("requirements the builder never embeds (EXTRACTED, REJECTED) do not make a job a candidate", async () => {
+    const remote = { workplaceType: "REMOTE", location: "Remote" };
+    const extracted = await seedRoutableJob("status-extracted", ["Zebra extracted only"], remote, "EXTRACTED");
+    const rejected = await seedRoutableJob("status-rejected", ["Zebra rejected only"], remote, "REJECTED");
+    const ids = [extracted.jobVersionId, rejected.jobVersionId];
+    await seedScoped(ids);
+    console.log('DBG', JSON.stringify((await db().query(`select task_key, status from pipeline_tasks where payload->>'job_version_id' = ANY($1::text[])`, [ids])).rows), JSON.stringify((await db().query(`select status from job_requirements where job_version_id = ANY($1::uuid[])`, [ids])).rows));
+    expect(await setKeyed(ids)).toBe(0);
+  });
+
+  it("an attempted set (any task state, failed or completed) leaves the candidate set, so fresh jobs are reached under the cap", async () => {
+    const attempted = [await seedRoutableJob("att-1", ["Zebra attempted one"]), await seedRoutableJob("att-2", ["Zebra attempted two"])];
+    const attemptedIds = attempted.map((job) => job.jobVersionId);
+    await seedScoped(attemptedIds);
+    expect(await setKeyed(attemptedIds)).toBe(2);
+    // Both attempts end in different non-pending states; neither embedded anything.
+    await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE task_key LIKE ANY($1::text[]) AND payload ? 'embedding_requirement_set_id'`, [[`%${attemptedIds[0]}%`]]);
+    await db().query(`UPDATE pipeline_tasks SET status = 'DEAD_LETTER' WHERE task_key LIKE ANY($1::text[]) AND payload ? 'embedding_requirement_set_id'`, [[`%${attemptedIds[1]}%`]]);
+    await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE payload->>'job_version_id' = ANY($1::text[]) AND status IN ('PENDING', 'RETRY_WAIT')`, [attemptedIds]);
+    const fresh = [await seedRoutableJob("fresh-1", ["Zebra fresh one"]), await seedRoutableJob("fresh-2", ["Zebra fresh two"])];
+    const freshIds = fresh.map((job) => job.jobVersionId);
+    await seedScoped([...attemptedIds, ...freshIds], { maxSeedPerType: 2 });
+    expect(await setKeyed(attemptedIds)).toBe(2); // not selected again
+    expect(await setKeyed(freshIds)).toBe(2); // the cap went to the fresh jobs
+  });
+
+  it("test fixtures are excluded in SQL before the cap unless fixtures are included", async () => {
+    const fixture = await seedRoutableJob("fixture", ["Zebra fixture requirement"]);
+    await db().query(`UPDATE canonical_jobs SET is_test_fixture = TRUE WHERE id = $1`, [fixture.canonicalJobId]);
+    // The fixture is observed first; under a cap of 1 it must not consume the slot before a real job.
+    await db().query(`UPDATE job_versions SET observed_at = NOW() - INTERVAL '30 days' WHERE id = $1`, [fixture.jobVersionId]);
+    const real = await seedRoutableJob("fixture-real", ["Zebra real behind fixture"]);
+    await seedScoped([fixture.jobVersionId, real.jobVersionId], { includeTestFixtures: false, maxSeedPerType: 1 });
+    expect(await setKeyed([fixture.jobVersionId])).toBe(0);
+    expect(await setKeyed([real.jobVersionId])).toBe(1);
+    await seedScoped([fixture.jobVersionId], { includeTestFixtures: true });
+    expect(await setKeyed([fixture.jobVersionId])).toBe(1);
   });
 
   it("after PUBLISH_EMBEDDING completes, a task blocked on the missing embedding resumes and the ROUTE_LANE successor exists", async () => {
