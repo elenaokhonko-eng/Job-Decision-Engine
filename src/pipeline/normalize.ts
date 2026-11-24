@@ -10,7 +10,11 @@ import { extractFreshnessEvidence } from "../ingestion/freshnessEvidence.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../contracts/jobSourceEvidence.js";
 import { approximateFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
 import { assessJobArchiveAge, referenceIsOlderThanCutoff, subtractCalendarMonths } from "../services/jobArchivePolicy.js";
-import { reactivateGenuineRepost, restoreHardRejectedArchiveForOwnerSavedObservation } from "../services/jobArchive.js";
+import {
+  reactivateGenuineRepost,
+  restoreAvailabilityArchivedJob,
+  restoreHardRejectedArchiveForOwnerSavedObservation,
+} from "../services/jobArchive.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import { employerTitleMatches } from "../ingestion/jobContentFetcher.js";
 
@@ -638,6 +642,17 @@ export async function runNormalization(
             observationId: obs.id ? String(obs.id) : null,
             sourceName: obs.source_name ? String(obs.source_name) : null,
             context: ctx,
+          });
+        }
+
+        // A job the availability re-check archived as not confirmable comes back when a new observation
+        // of it carries OPEN availability evidence. Any other archive reason is left alone.
+        if (archiveState.archived_at !== null && normalizedEvidence?.availability.status === "OPEN") {
+          await restoreAvailabilityArchivedJob(client, {
+            workspaceId: ctx.workspaceId,
+            canonicalJobId,
+            context: ctx,
+            details: { observation_id: obs.id ? String(obs.id) : null },
           });
         }
 

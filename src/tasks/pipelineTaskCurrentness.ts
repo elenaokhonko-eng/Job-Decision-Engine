@@ -139,6 +139,7 @@ export function pipelineTaskStageVersion(taskType: string): string | null {
     case "MATCH_PROFILE_EVIDENCE": return "deterministic_matcher_v1";
     case "DECIDE_RECOMMENDATION": return "recommendation_decider_v1";
     case "ENQUEUE_EXPLANATION": return "explanation_queue_v2";
+    case "RECHECK_AVAILABILITY": return "availability_recheck_v1";
     default: return null;
   }
 }
@@ -743,6 +744,10 @@ export async function classifyPipelineTaskCurrentness(
       });
     }
     return classifyNormalizationTask(client, context, payload);
+  }
+  if (task.task_type === "RECHECK_AVAILABILITY") {
+    // A re-check is a fresh read of the posting: it is never superseded by another stage's artifact.
+    return result("CURRENT", "AVAILABILITY_RECHECK_DUE", { taskType: task.task_type });
   }
   if (!lineageTaskTypes.has(task.task_type)) {
     return result("UNRESOLVED", "TASK_TYPE_UNSUPPORTED", { taskType: task.task_type });

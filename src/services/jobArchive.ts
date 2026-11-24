@@ -753,6 +753,88 @@ export async function archiveJobsAsPostingNotConfirmable(
   return archived;
 }
 
+/** Archive details marker for jobs archived by the availability re-check; the restore path keys on it. */
+export const AVAILABILITY_RECHECK_ARCHIVE_RULE = "availability-recheck";
+
+export interface AutomaticArchiveProtection {
+  readonly protected: boolean;
+  /** Why the job must not be archived automatically: saved, applied, held, or in active work. */
+  readonly reasons: readonly string[];
+}
+
+/**
+ * Whether a job must be left alone by an automatic archive: the owner saved it, applied to it, an
+ * archive hold covers it, or it is in active work (document run, lease, manual review). Read only.
+ */
+export async function readAutomaticArchiveProtection(
+  client: pg.PoolClient,
+  input: { workspaceId: string; canonicalJobId: string; now: Date },
+): Promise<AutomaticArchiveProtection> {
+  uuidSchema.parse(input.workspaceId);
+  uuidSchema.parse(input.canonicalJobId);
+  const capabilities = await readSchemaCapabilities(client);
+  const { rows } = await client.query<ArchiveProtectionFlags & { has_saved_source_observation: boolean }>(
+    `SELECT ${protectionColumnsSql(capabilities)},
+            EXISTS (
+              SELECT 1
+              FROM job_versions saved_version
+              JOIN raw_job_observations saved_observation
+                ON saved_observation.workspace_id = saved_version.workspace_id
+               AND saved_observation.job_version_id = saved_version.id
+              WHERE saved_version.workspace_id = canonical.workspace_id
+                AND saved_version.canonical_job_id = canonical.id
+                AND UPPER(saved_observation.source_name) = ANY($4::text[])
+            ) AS has_saved_source_observation
+       FROM canonical_jobs canonical
+      WHERE canonical.workspace_id = $2::uuid AND canonical.id = $3::uuid`,
+    [input.now, input.workspaceId, input.canonicalJobId, [...OWNER_SAVED_SOURCE_NAMES]],
+  );
+  const row = rows[0];
+  if (!row) return { protected: false, reasons: [] };
+  const reasons: string[] = [];
+  if (row.has_saved_source_observation) reasons.push("SAVED_BY_OWNER");
+  if (row.has_active_application) reasons.push("ACTIVE_APPLICATION");
+  if (row.has_active_archive_hold) reasons.push("ARCHIVE_HOLD");
+  if (row.has_active_document_run || row.has_active_document_task) reasons.push("ACTIVE_DOCUMENT_WORK");
+  if (row.has_running_pipeline_lease || row.has_running_evaluation_lease) reasons.push("ACTIVE_LEASE");
+  if (row.has_manual_review) reasons.push("MANUAL_REVIEW");
+  return { protected: reasons.length > 0, reasons };
+}
+
+/**
+ * Restores a job that the availability re-check archived as not confirmable, once the posting is
+ * seen open again. Only an archive made by this rule is restored here; age and hard-reject archives
+ * and the Himalayas link repair are left as they are. Audited through restoreArchivedJob.
+ */
+export async function restoreAvailabilityArchivedJob(
+  client: pg.PoolClient,
+  input: { workspaceId: string; canonicalJobId: string; context: WorkspaceContext; details?: Record<string, unknown> },
+): Promise<RestoreArchivedJobResult | null> {
+  const marker = await client.query<{ archive_reason: string | null; rule: string | null }>(
+    `SELECT canonical.archive_reason,
+            (SELECT event.details->>'rule'
+               FROM job_archive_events event
+              WHERE event.workspace_id = canonical.workspace_id
+                AND event.canonical_job_id = canonical.id
+                AND event.action = 'ARCHIVED'
+              ORDER BY event.event_at DESC, event.id DESC
+              LIMIT 1) AS rule
+       FROM canonical_jobs canonical
+      WHERE canonical.workspace_id = $1::uuid AND canonical.id = $2::uuid AND canonical.archived_at IS NOT NULL`,
+    [input.workspaceId, input.canonicalJobId],
+  );
+  const row = marker.rows[0];
+  if (!row || row.archive_reason !== "POSTING_NOT_CONFIRMABLE" || row.rule !== AVAILABILITY_RECHECK_ARCHIVE_RULE) return null;
+  return restoreArchivedJob(client, {
+    workspaceId: input.workspaceId,
+    canonicalJobId: input.canonicalJobId,
+    actor: "system:availability-recheck",
+    reason: "POSTING_SEEN_OPEN_AGAIN",
+    context: input.context,
+    details: { restore_trigger: "POSTING_SEEN_OPEN_AGAIN", ...(input.details ?? {}) },
+  });
+}
+
 export interface SnippetOnlyArchiveCandidate {
   canonicalJobId: string;
   gateDecision: string | null;
