@@ -11,6 +11,7 @@ import {
   ensureFetchTasksForAwaitingContent,
   reportContentWithoutFetchTask,
 } from "../../ingestion/fetchTaskCoverage.js";
+import { archiveJobsAsPostingNotConfirmable } from "../../services/jobArchive.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { parseEmails, parseEmailsExitCode } from "../../../scripts/parse_emails.js";
 import { digestAlertRaw } from "../fixtures/gmailDigestAlerts.js";
@@ -187,6 +188,44 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
     expect(again.queued).toBe(0);
     const state = await db().query<{ state: string }>(`SELECT processing_state AS state FROM canonical_jobs WHERE id = $1`, [job.canonicalJobId]);
     expect(state.rows[0]!.state).toBe("RAW_STAGED");
+  });
+
+  it("ensureFetchTasksForAwaitingContent leaves owner-saved, non-alert, aggregator-lead and archived jobs alone and honours the cap", async () => {
+    const ctx = await newContext();
+    const alert = await seedAlertJob("alert-1", ctx);
+    const alertTwo = await seedAlertJob("alert-2", ctx);
+    const alertThree = await seedAlertJob("alert-3", ctx);
+    // Owner saved: an alert card plus a saved-export observation on the same job version.
+    const saved = await seedAlertJob("owner-saved", ctx);
+    const savedVersion = await db().query<{ job_version_id: string }>(`SELECT job_version_id FROM raw_job_observations WHERE id = $1`, [saved.observationId]);
+    const savedObservation = randomUUID();
+    await db().query(
+      `INSERT INTO raw_job_observations (id, workspace_id, source_name, source_external_id, source_url, retrieved_at, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id)
+       VALUES ($1, $2, 'MCF_SAVED', $3, 'https://example.test/saved', NOW(), 'Coverage Fixture Co', 'saved', 'Short.', '{}'::jsonb, $4, 'PROCESSED', $5)`,
+      [savedObservation, ctx.workspaceId, `saved-${savedObservation}`, `raw-${savedObservation}`, savedVersion.rows[0]!.job_version_id],
+    );
+    // Aggregator lead: deliberately no fetch task.
+    const lead = await seedAlertJob("lead", ctx);
+    await db().query(`UPDATE raw_job_observations SET processing_status = 'FETCH_BLOCKED', raw_payload = '{"lead_kind":"AGGREGATOR_LEAD"}'::jsonb WHERE id = $1`, [lead.observationId]);
+    // Not an alert job at all (a feed observation): nothing this fetch can retrieve.
+    const feed = await seedAlertJob("feed-only", ctx);
+    await db().query(`UPDATE raw_job_observations SET source_name = 'HIMALAYAS' WHERE id = $1`, [feed.observationId]);
+    // Archived: not live.
+    const archivedJob = await seedAlertJob("archived", ctx);
+    await archiveJobsAsPostingNotConfirmable(db(), { workspaceId: ctx.workspaceId, canonicalJobIds: [archivedJob.canonicalJobId], actor: "test:ensure", details: { rule: "test" } });
+
+    const capped = await ensureFetchTasksForAwaitingContent(db(), ctx, { apply: true, producer: "test", limit: 2 });
+    expect(capped.queued).toBe(2);
+    expect(capped.skippedOwnerSaved).toBe(1);
+    const rest = await ensureFetchTasksForAwaitingContent(db(), ctx, { apply: true, producer: "test", limit: 10 });
+    expect(rest.queued).toBe(1);
+    const tasks = await db().query<{ observation_id: string }>(
+      `SELECT payload->>'observation_id' AS observation_id FROM pipeline_tasks WHERE workspace_id = $1 AND task_type = 'FETCH_JOB_CONTENT'`, [ctx.workspaceId]);
+    expect(tasks.rows.map((row) => row.observation_id).sort()).toEqual([alert, alertTwo, alertThree].map((job) => job.observationId).sort());
+    for (const untouched of [saved, lead, feed, archivedJob]) {
+      expect(tasks.rows.map((row) => row.observation_id)).not.toContain(untouched.observationId);
+    }
   });
 
   it("reconciliation lists exactly the live jobs with neither complete content nor a fetch task", async () => {
