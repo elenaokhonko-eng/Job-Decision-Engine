@@ -1329,7 +1329,10 @@ export async function runHardGates(
             JSON.stringify(gateResult.workability_facts),
             ctx.workspaceId,
             job.id,
-            reprocess
+            // A version-refresh re-gate whose outcome changed keeps lane, match, decision, score and ranking columns until the
+            // recompute overwrites them (they are only cleared for HARD_REJECT, by the SQL above). A plain forced reprocess
+            // is an explicit operator reset and clears them.
+            reprocess && options?.versionRefresh !== true
           ]
         );
         if (canonicalUpdate.rowCount !== 1) {

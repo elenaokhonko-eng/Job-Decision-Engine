@@ -134,21 +134,31 @@ describe.skipIf(skipReal)("hard gate: version-refresh stamp and flagNeedsVerific
       expect(rowsAfter[1]!.rejection_codes).toEqual(rowsBefore[0]!.rejection_codes);
     });
 
-    it("a changed outcome takes the normal reset path (downstream cleared)", async () => {
-      const { jobId } = await gatedJobWithDownstream("MATCHED");
-      // A posting that now states an on-site Singapore role changes the gate outcome.
+    it("changed to HARD_REJECT: decision, score and the four ranking columns are cleared (invariant 5), lane and match are kept", async () => {
+      const { jobId, before } = await gatedJobWithDownstream("MATCHED");
       await db().query(`UPDATE canonical_jobs SET workplace_type = 'ONSITE', location = 'London' WHERE id = $1`, [jobId]);
-      const stored = (await db().query(`SELECT gate_decision FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0].gate_decision;
-
       await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId], reprocess: true, versionRefresh: true });
       const after = (await db().query(`SELECT * FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
       const rows = await auditRows(jobId);
       expect(rows).toHaveLength(2);
-      expect(rows[1]!.decision, `stored decision was ${stored}`).not.toBe(rows[0]!.decision);
-      for (const column of ["primary_lane", "deterministic_match_score", "recommendation_outcome", "recommendation_requirement_score", "recommendation_score_policy", "recommendation_degree_asked_for", "recommendation_evidence_confidence"]) {
+      expect(rows[1]!.decision).not.toBe(rows[0]!.decision);
+      for (const column of ["recommendation_eligibility", "recommendation_outcome", "recommendation_requirement_score", "recommendation_coverage_score", "recommendation_evidence_completeness", "recommendation_score_policy", "recommendation_degree_asked_for", "recommendation_evidence_confidence"]) {
         expect(after[column], column).toBeNull();
       }
       expect(after.recommendation_role_signals).toEqual([]);
+      for (const column of ["primary_lane", "lane_confidence", "deterministic_match_score", "deterministic_match_coverage"]) expect(after[column], column).toEqual(before[column]);
+    });
+
+    it("changed to PASS from NEEDS_VERIFICATION: the state goes back to PREQUALIFIED and lane, match, decision, score and ranking columns keep their old values", async () => {
+      const { jobId, before } = await gatedJobWithDownstream("MATCHED");
+      await db().query(`UPDATE gate_decisions SET decision = 'NEEDS_VERIFICATION' WHERE canonical_job_id = $1`, [jobId]);
+      await db().query(`UPDATE canonical_jobs SET gate_decision = 'NEEDS_VERIFICATION' WHERE id = $1`, [jobId]);
+      const summary = await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId], reprocess: true, versionRefresh: true });
+      expect(summary.stamped).toBe(0);
+      const after = (await db().query(`SELECT * FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
+      expect(after).toMatchObject({ gate_decision: "PASS", processing_state: "PREQUALIFIED" });
+      for (const column of DOWNSTREAM.filter((c) => c !== "processing_state")) expect(after[column], column).toEqual(before[column]);
+      expect(after.latest_deterministic_decision_id).toEqual(before.latest_deterministic_decision_id);
     });
 
     it("without versionRefresh a forced re-gate still resets downstream even when the outcome is unchanged", async () => {
@@ -296,15 +306,43 @@ describe.skipIf(skipReal)("hard gate: version-refresh stamp and flagNeedsVerific
       expect(job.workability_facts.facts_conflict).toBeUndefined();
     });
 
-    it("a changed outcome resets exactly the downstream columns and nothing is stamped", async () => {
+    it("a changed outcome is not stamped and a failed run leaves the previous results intact", async () => {
       const { jobId } = await seedJob("RAW_STAGED", { gateDecision: null });
       await gate(jobId);
-      await db().query(`UPDATE canonical_jobs SET processing_state = 'MATCHED', processing_status = 'MATCHED', primary_lane = 'CORE_AI_DATA', deterministic_match_score = 70, recommendation_outcome = 'REVIEW', recommendation_score_policy = 'p', recommendation_role_signals = '[{"code":"X"}]'::jsonb, workplace_type = 'ONSITE', location = 'London' WHERE id = $1`, [jobId]);
-      const summary = await gate(jobId, { reprocess: true, versionRefresh: true });
-      expect(summary.stamped).toBe(0);
-      const job = (await db().query(`SELECT processing_state, primary_lane, deterministic_match_score, recommendation_outcome, recommendation_score_policy, recommendation_role_signals FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
-      expect(job).toMatchObject({ primary_lane: null, deterministic_match_score: null, recommendation_outcome: null, recommendation_score_policy: null, recommendation_role_signals: [] });
-      expect(job.processing_state).not.toBe("MATCHED");
+      await db().query(`UPDATE canonical_jobs SET processing_state = 'MATCHED', processing_status = 'MATCHED', primary_lane = 'CORE_AI_DATA', deterministic_match_score = 70, recommendation_outcome = 'REVIEW', recommendation_score_policy = 'p', recommendation_role_signals = '[{"code":"X"}]'::jsonb WHERE id = $1`, [jobId]);
+      // A failing audit insert (violates a NOT NULL column through an invalid version id) must roll the whole job back.
+      await db().query(`UPDATE canonical_jobs SET workplace_type = 'ONSITE', location = 'London' WHERE id = $1`, [jobId]);
+      await db().query(`CREATE OR REPLACE FUNCTION ${schemaName}.fail_gate_audit() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'forced audit failure'; END; $$ LANGUAGE plpgsql`);
+      await db().query(`CREATE TRIGGER fail_gate_audit_trg BEFORE INSERT ON gate_decisions FOR EACH ROW EXECUTE FUNCTION ${schemaName}.fail_gate_audit()`);
+      try {
+        const summary = await gate(jobId, { reprocess: true, versionRefresh: true });
+        expect(summary.errors).toBe(1);
+      } finally {
+        await db().query(`DROP TRIGGER fail_gate_audit_trg ON gate_decisions`);
+      }
+      const job = (await db().query(`SELECT processing_state, primary_lane, deterministic_match_score, recommendation_outcome, recommendation_score_policy, recommendation_role_signals, gate_decision FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
+      expect(job).toMatchObject({ processing_state: "MATCHED", primary_lane: "CORE_AI_DATA", recommendation_outcome: "REVIEW", recommendation_score_policy: "p", gate_decision: "PASS" });
+      expect(Number(job.deterministic_match_score)).toBe(70);
+      expect(job.recommendation_role_signals).toEqual([{ code: "X" }]);
+    });
+
+    it("saved, applied and held jobs keep their application status through a changed-outcome re-gate", async () => {
+      const { jobId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await gate(jobId);
+      await db().query(`UPDATE canonical_jobs SET processing_state = 'MATCHED', processing_status = 'MATCHED' WHERE id = $1`, [jobId]);
+      await db().query(`UPDATE gate_decisions SET decision = 'NEEDS_VERIFICATION' WHERE canonical_job_id = $1`, [jobId]);
+      await db().query(`UPDATE canonical_jobs SET gate_decision = 'NEEDS_VERIFICATION' WHERE id = $1`, [jobId]);
+      const { jobId: _unused, versionId } = { jobId, versionId: (await db().query(`SELECT latest_job_version_id AS id FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0].id as string };
+      const userId = (await db().query(`INSERT INTO workspace_users (user_key, display_name) VALUES ($1, $1) RETURNING id`, [`gate-test-${randomUUID()}`])).rows[0].id as string;
+      await db().query(
+        `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status) VALUES ($1, $2, $3, $4, 'SUBMITTED')`,
+        [ctx().workspaceId, userId, jobId, versionId],
+      );
+      await gate(jobId, { reprocess: true, versionRefresh: true });
+      const after = (await db().query(`SELECT gate_decision, processing_state, archived_at FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
+      expect(after).toMatchObject({ gate_decision: "PASS", processing_state: "PREQUALIFIED", archived_at: null });
+      const record = (await db().query(`SELECT status FROM application_records WHERE canonical_job_id = $1`, [jobId])).rows;
+      expect(record).toEqual([{ status: "SUBMITTED" }]);
     });
 
     it("flagNeedsVerification inside the callers transaction commits or rolls back the lock, the job update and the audit row together", async () => {
@@ -315,6 +353,31 @@ describe.skipIf(skipReal)("hard gate: version-refresh stamp and flagNeedsVerific
       await db().query("ROLLBACK");
       expect((await db().query(`SELECT gate_decision FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0].gate_decision).toBe("PASS");
       expect(await auditRows(jobId)).toHaveLength(0);
+    });
+
+    it("a changed-outcome refresh through the handler queues the downstream chain under repair keys (a completed first-run task does not suppress it) and keeps the old values until the recompute", async () => {
+      const { jobId, versionId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await gate(jobId);
+      await db().query(`UPDATE canonical_jobs SET processing_state = 'MATCHED', processing_status = 'MATCHED', primary_lane = 'CORE_AI_DATA', deterministic_match_score = 70, recommendation_outcome = 'REVIEW', recommendation_requirement_score = 0.61 WHERE id = $1`, [jobId]);
+      await db().query(`UPDATE gate_decisions SET decision = 'NEEDS_VERIFICATION' WHERE canonical_job_id = $1`, [jobId]);
+      await db().query(`UPDATE canonical_jobs SET gate_decision = 'NEEDS_VERIFICATION' WHERE id = $1`, [jobId]);
+      // The first run of this job version already completed its embedding task under the plain key.
+      const firstRun = await enqueuePipelineTask({
+        taskType: "PUBLISH_EMBEDDING", taskKey: `PUBLISH_EMBEDDING:${versionId}:first-run`,
+        payload: { canonical_job_id: jobId, job_version_id: versionId },
+      }, db(), { context: ctx() });
+      await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED' WHERE id = $1`, [firstRun.taskId]);
+      await enqueuePipelineTask({
+        taskType: "APPLY_HARD_GATES", taskKey: `APPLY_HARD_GATES:${versionId}:gate-refresh-changed`,
+        payload: { canonical_job_id: jobId, job_version_id: versionId, version_refresh: true },
+      }, db(), { context: ctx() });
+      const run = await runPipelineStageTaskWorker(db(), { context: ctx(), seed: false, reconcileStalePending: false, taskTypes: ["APPLY_HARD_GATES"], maxTasks: 1, heartbeatSeconds: 0 });
+      expect(run).toMatchObject({ claimed: 1, completed: 1, failed: 0 });
+      const job = (await db().query(`SELECT gate_decision, processing_state, primary_lane, recommendation_outcome, recommendation_requirement_score::float AS score FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
+      expect(job).toMatchObject({ gate_decision: "PASS", processing_state: "PREQUALIFIED", primary_lane: "CORE_AI_DATA", recommendation_outcome: "REVIEW", score: 0.61 });
+      const successors = (await db().query(`SELECT task_type, task_key FROM pipeline_tasks WHERE payload->>'job_version_id' = $1 AND task_type = 'PUBLISH_EMBEDDING' AND status <> 'COMPLETED'`, [versionId])).rows;
+      expect(successors).toHaveLength(1);
+      expect(successors[0].task_key).toContain("repair");
     });
 
     it("the APPLY_HARD_GATES handler accepts version_refresh: a stamped MATCHED job keeps its state and gets no downstream task", async () => {

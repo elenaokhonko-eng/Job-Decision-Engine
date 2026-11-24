@@ -2720,7 +2720,14 @@ async function maybeEnqueueAfterTask(
   const stagePayload = {
     canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
     job_version_id: jobVersionId,
-    ...(payload.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
+    // A gate-version refresh whose outcome changed re-runs the downstream stages for the SAME job version: its successors need
+    // repair-variant task keys, or the completed tasks of the first run would suppress them and the job would wait forever.
+    ...(payload.reprocess_existing_state === true || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
+      ? { reprocess_existing_state: true }
+      : {}),
+    ...(payload.repair_existing_state === true || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
+      ? { repair_existing_state: true }
+      : {}),
     ...(typeof payload.repair_dependency === "string" ? { repair_dependency: payload.repair_dependency } : {}),
     ...(typeof payload.repair_generation === "string" ? { repair_generation: payload.repair_generation } : {}),
     ...(typeof payload.repair_match_run_id === "string" ? { repair_match_run_id: payload.repair_match_run_id } : {}),
