@@ -5,6 +5,7 @@
  */
 import type pg from "pg";
 
+import { AVAILABILITY_RECHECK_ARCHIVE_RULE } from "../services/jobArchive.js";
 import { OWNER_SAVED_SOURCE_NAMES } from "../services/jobArchiveHardRejectedPolicy.js";
 import { routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
 import { findTasksCompletedWithoutResult } from "./completedWithoutResult.js";
@@ -84,43 +85,59 @@ export async function completedTasksWithoutResult(db: Queryable, workspaceId: st
 
 /** A routable NEEDS_VERIFICATION job with no active task and no match run: nothing will carry it on. */
 export async function routableVerificationJobsStranded(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  // Active task targets are collected once; each job is then matched by equality (two hashed semi-joins),
+  // not by an OR over JSON keys inside a per-job scan.
   const { rows } = await db.query<{ id: string }>(
-    `SELECT c.id::text AS id
+    `WITH active AS (
+       SELECT task.payload->>'canonical_job_id' AS canonical_job_id, task.payload->>'job_version_id' AS job_version_id
+         FROM pipeline_tasks task
+        WHERE task.workspace_id = $1::uuid AND task.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY'))
+     SELECT c.id::text AS id
        FROM canonical_jobs c
       WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
         AND ${routableWorkabilityVerificationSql("c")}
-        AND NOT EXISTS (
-          SELECT 1 FROM pipeline_tasks task
-           WHERE task.workspace_id = c.workspace_id
-             AND task.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
-             AND (task.payload->>'canonical_job_id' = c.id::text OR task.payload->>'job_version_id' = c.latest_job_version_id::text))
         AND c.latest_match_run_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM active a WHERE a.canonical_job_id = c.id::text)
+        AND NOT EXISTS (SELECT 1 FROM active a WHERE a.job_version_id = c.latest_job_version_id::text)
       ORDER BY c.id`,
     [workspaceId],
   );
   return result("routable_verification_job_stranded", rows.map((row) => row.id));
 }
 
-/** A job the owner saved, applied to or holds that is archived as not confirmable (availability re-check, snippet or link rules). */
+/**
+ * A job the owner saved, applied to or held BEFORE the availability re-check archived it as not
+ * confirmable. Only archives made by that rule (latest ARCHIVED event details.rule) count, and the
+ * protection must predate the archive and have been in force at that moment (a hold counts only if not
+ * released and not expired then). A job saved or held after a legitimate archive is not a violation.
+ */
 export async function protectedJobsAutoArchived(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
   const { rows } = await db.query<{ id: string }>(
     `SELECT c.id::text AS id
        FROM canonical_jobs c
+       JOIN LATERAL (
+         SELECT event.details->>'rule' AS rule
+           FROM job_archive_events event
+          WHERE event.workspace_id = c.workspace_id AND event.canonical_job_id = c.id AND event.action = 'ARCHIVED'
+          ORDER BY event.event_at DESC, event.id DESC
+          LIMIT 1
+       ) archived_by ON archived_by.rule = $3
       WHERE c.workspace_id = $1::uuid AND c.archived_at IS NOT NULL AND c.archive_reason = 'POSTING_NOT_CONFIRMABLE'
         AND (
           EXISTS (SELECT 1 FROM job_versions v JOIN raw_job_observations o
                     ON o.workspace_id = v.workspace_id AND o.job_version_id = v.id
                    WHERE v.workspace_id = c.workspace_id AND v.canonical_job_id = c.id
-                     AND UPPER(o.source_name) = ANY($2::text[]))
+                     AND UPPER(o.source_name) = ANY($2::text[]) AND o.retrieved_at < c.archived_at)
           OR EXISTS (SELECT 1 FROM application_records a
                       WHERE a.workspace_id = c.workspace_id AND a.canonical_job_id = c.id
-                        AND a.status NOT IN ('REJECTED', 'WITHDRAWN', 'CLOSED'))
+                        AND a.created_at < c.archived_at AND a.status NOT IN ('REJECTED', 'WITHDRAWN', 'CLOSED'))
           OR EXISTS (SELECT 1 FROM job_archive_holds h
                       WHERE h.workspace_id = c.workspace_id AND h.canonical_job_id = c.id
-                        AND h.released_at IS NULL AND h.hold_type = 'USER_PRESERVE')
+                        AND h.hold_type = 'USER_PRESERVE' AND h.created_at < c.archived_at
+                        AND h.expires_at > c.archived_at AND (h.released_at IS NULL OR h.released_at > c.archived_at))
         )
       ORDER BY c.id`,
-    [workspaceId, [...OWNER_SAVED_SOURCE_NAMES]],
+    [workspaceId, [...OWNER_SAVED_SOURCE_NAMES], AVAILABILITY_RECHECK_ARCHIVE_RULE],
   );
   return result("protected_job_auto_archived", rows.map((row) => row.id), { POSTING_NOT_CONFIRMABLE: rows.length });
 }

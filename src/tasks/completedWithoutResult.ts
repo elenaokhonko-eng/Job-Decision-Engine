@@ -22,7 +22,7 @@ export const COMPLETED_RESULT_PREDICATES: Readonly<Record<string, string>> = {
   DECIDE_RECOMMENDATION: `EXISTS (SELECT 1 FROM deterministic_decisions result
                                    WHERE result.workspace_id = task.workspace_id AND result.job_version_id::text = task.payload->>'job_version_id')`,
   RECHECK_AVAILABILITY: `EXISTS (SELECT 1 FROM job_availability_recheck_events result
-                                  WHERE result.workspace_id = task.workspace_id AND result.task_id = task.id)`,
+                                  WHERE result.workspace_id = task.workspace_id AND result.canonical_job_id::text = task.payload->>'canonical_job_id' AND result.task_id = task.id)`,
 };
 
 export const COMPLETED_RESULT_TASK_TYPES: readonly string[] = Object.keys(COMPLETED_RESULT_PREDICATES);
@@ -72,6 +72,10 @@ export async function findTasksCompletedWithoutResult(
         AND COALESCE(canonical.processing_state, canonical.processing_status) <> 'MANUALLY_REMOVED'
         -- A technically deferred route (ROUTING_DEFERRED) leaves no lane decision by design; it is its own waiting state.
         AND NOT (task.task_type = 'ROUTE_LANE' AND COALESCE(canonical.processing_state, canonical.processing_status) = 'ROUTING_DEFERRED')
+        -- RECHECK_AVAILABILITY skips (and completes without an event) a job that has no observation to read.
+        AND NOT (task.task_type = 'RECHECK_AVAILABILITY' AND NOT EXISTS (
+          SELECT 1 FROM raw_job_observations skip_observation
+           WHERE skip_observation.workspace_id = version.workspace_id AND skip_observation.job_version_id = version.id))
         AND (${missing})
       ORDER BY task.completed_at ASC NULLS FIRST, task.id ASC`,
     [workspaceId, [...COMPLETED_RESULT_TASK_TYPES]],
