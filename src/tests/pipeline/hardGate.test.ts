@@ -227,6 +227,7 @@ describe('Pipeline Stage: Hard Gates', () => {
       hardRejected: 0,
       needsVerification: 0,
       errors: 1,
+      stamped: 0,
     });
     expect((mPool.query as any).mock.calls.some((call: any[]) => call[0] === 'ROLLBACK')).toBe(true);
   });
