@@ -16,8 +16,11 @@ import { fileURLToPath } from "node:url";
  *      it is never ignored, because then edits to a user's own lanes would silently have no effect.
  *   2. `<resourcesPath>/config`, where `extraResources` puts the shipped config in an installed app.
  *   3. `<resourcesPath>/app.asar/config`.
- *   4. Fixed parents of this module (`../../config`, `../config`), which cover running from source
- *      and a bundle placed in `desktop/electron/dist-backend`.
+ *   4. Fixed parents of this module: `../../config` covers running from source (`src/config` to the
+ *      repository root) and `../config` a bundle one level below the project root. These do NOT
+ *      cover `desktop/electron/dist-backend`: an installed app resolves only through
+ *      `<resourcesPath>/config` (extraResources), and a source checkout running that bundle
+ *      resolves only through `<cwd>/config`, so it must be started from the project root.
  *   5. `<cwd>/config`.
  * A directory only counts as a config root when it contains `lanes/registry.yml`. There is no
  * search up the directory tree: that could pick up another project's `config` folder.
