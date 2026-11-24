@@ -1097,7 +1097,11 @@ export async function seedRecoverablePipelineTasks(
       `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
        FROM canonical_jobs c
        JOIN job_versions jv
-         ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
+         ON jv.workspace_id = c.workspace_id
+        AND jv.id = COALESCE(c.latest_job_version_id, (
+          SELECT jv2.id FROM job_versions jv2
+           WHERE jv2.workspace_id = c.workspace_id AND jv2.canonical_job_id = c.id
+           ORDER BY jv2.observed_at DESC LIMIT 1))
        JOIN LATERAL (
          SELECT gate.gate_version
          FROM gate_decisions gate
@@ -1108,7 +1112,23 @@ export async function seedRecoverablePipelineTasks(
        WHERE c.workspace_id = $1
          AND c.archived_at IS NULL
          AND COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'MANUALLY_REMOVED')
-         AND latest_gate.gate_version IS DISTINCT FROM $3
+         -- The gate skips a job whose posting is incomplete or has no source content; selecting it would only
+         -- refill the cap every run.
+         AND c.description_quality_status = 'COMPLETE'
+         AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
+         -- "Older than", not "different from": a job a newer worker (desktop, rollback target) gated under a
+         -- newer version is never reopened. A version that does not parse as a dotted number counts as older.
+         AND CASE WHEN latest_gate.gate_version ~ '^(gate-)?[0-9]+([-.][0-9]+)*$'
+             THEN regexp_split_to_array(regexp_replace(latest_gate.gate_version, '^gate-', ''), '[-.]')::int[]
+                  < regexp_split_to_array(regexp_replace($3::text, '^gate-', ''), '[-.]')::int[]
+             ELSE TRUE END
+         -- One forced gate per job version: skip a job that already has a gate task in flight (for example the
+         -- successor of a forced re-extraction).
+         AND NOT EXISTS (
+           SELECT 1 FROM pipeline_tasks inflight
+            WHERE inflight.workspace_id = c.workspace_id AND inflight.task_type = 'APPLY_HARD_GATES'
+              AND inflight.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+              AND inflight.payload->>'job_version_id' = jv.id::text)
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
       [ctx.workspaceId, maxPerType, GATE_VERSION],

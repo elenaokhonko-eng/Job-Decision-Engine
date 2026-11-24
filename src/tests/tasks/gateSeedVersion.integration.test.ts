@@ -347,4 +347,24 @@ describe.skipIf(skipReal)("APPLY_HARD_GATES seed follows the gate version", () =
     const rows = await gateTasks();
     expect(rows.filter((row) => row.payload.job_version_id === jobs.current.jobVersionId)).toHaveLength(1);
   });
+  it("older-than semantics: a job a newer worker gated is not reopened; an in-flight gate task blocks a second one; incomplete postings are skipped", async () => {
+    await db().query(`UPDATE gate_decisions SET gate_version = 'gate-2999-01.1' WHERE canonical_job_id = $1`, [jobs.current.canonicalJobId]);
+    await db().query(`DELETE FROM pipeline_tasks WHERE workspace_id = $1 AND task_type = 'APPLY_HARD_GATES' AND payload->>'job_version_id' = $2`, [ctx().workspaceId, jobs.current.jobVersionId]);
+    await seed();
+    expect((await gateTasks()).filter((row) => row.payload.job_version_id === jobs.current.jobVersionId)).toHaveLength(0);
+
+    // A forced gate already in flight for the version (the successor of a forced re-extraction) is not doubled.
+    await db().query(`UPDATE gate_decisions SET gate_version = 'gate-old-version' WHERE canonical_job_id = $1`, [jobs.current.canonicalJobId]);
+    await db().query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status) VALUES ($1, 'APPLY_HARD_GATES', $2, $3::jsonb, 'PENDING')`,
+      [ctx().workspaceId, `APPLY_HARD_GATES:${jobs.current.jobVersionId}:hard_gate_v1:repair`, JSON.stringify({ canonical_job_id: jobs.current.canonicalJobId, job_version_id: jobs.current.jobVersionId, reprocess: true })]);
+    await seed();
+    expect((await gateTasks()).filter((row) => row.payload.job_version_id === jobs.current.jobVersionId)).toHaveLength(1);
+
+    // The gate skips a posting that is not COMPLETE: it must not be re-selected.
+    await db().query(`UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE id = $1`, [jobs.held.canonicalJobId]);
+    await db().query(`DELETE FROM pipeline_tasks WHERE workspace_id = $1 AND task_type = 'APPLY_HARD_GATES' AND payload->>'job_version_id' = $2`, [ctx().workspaceId, jobs.held.jobVersionId]);
+    await seed();
+    expect((await gateTasks()).filter((row) => row.payload.job_version_id === jobs.held.jobVersionId)).toHaveLength(0);
+  });
 });
