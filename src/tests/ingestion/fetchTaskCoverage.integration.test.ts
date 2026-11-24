@@ -264,6 +264,29 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
     expect(report.awaitingContentJobs).toBe(4);
   });
 
+  it("an aggregator lead (marked, or an older card on an aggregator host) gets no fetch task and is not counted by check 9", async () => {
+    const ctx = await newContext();
+    const marked = await seedAlertJob("marked-lead", ctx);
+    await db().query(`UPDATE raw_job_observations SET processing_status = 'FETCH_BLOCKED', raw_payload = '{"lead_kind":"AGGREGATOR_LEAD"}'::jsonb WHERE id = $1`, [marked.observationId]);
+    const legacyHost = await seedAlertJob("legacy-aggregator-host", ctx);
+    await db().query(`UPDATE raw_job_observations SET source_url = 'https://www.linkedin.com/jobs/view/4900000555' WHERE id = $1`, [legacyHost.observationId]);
+    const subdomain = await seedAlertJob("legacy-aggregator-subdomain", ctx);
+    await db().query(`UPDATE raw_job_observations SET source_url = 'https://sg.indeed.com/viewjob?jk=abc' WHERE id = $1`, [subdomain.observationId]);
+    const lookalike = await seedAlertJob("lookalike-host-is-fetchable", ctx);
+    await db().query(`UPDATE raw_job_observations SET source_url = 'https://notlinkedin.com/jobs/view/1' WHERE id = $1`, [lookalike.observationId]);
+
+    const report = await reportContentWithoutFetchTask(db(), ctx.workspaceId);
+    expect(report.withoutFetchTask).toEqual([lookalike.canonicalJobId]);
+    expect(report.notFetchableWithoutTask).toBe(3);
+    expect(report.awaitingContentJobs).toBe(4);
+
+    const ensured = await ensureFetchTasksForAwaitingContent(db(), ctx, { apply: true, producer: "test" });
+    expect(ensured.queued).toBe(1);
+    const tasks = await db().query<{ observation_id: string }>(
+      `SELECT payload->>'observation_id' AS observation_id FROM pipeline_tasks WHERE workspace_id = $1 AND task_type = 'FETCH_JOB_CONTENT'`, [ctx.workspaceId]);
+    expect(tasks.rows.map((row) => row.observation_id)).toEqual([lookalike.observationId]);
+  });
+
   it("reconciliation lists exactly the live jobs with neither complete content nor a fetch task", async () => {
     const ctx = await newContext();
     const withoutTask = await seedAlertJob("no-task", ctx);

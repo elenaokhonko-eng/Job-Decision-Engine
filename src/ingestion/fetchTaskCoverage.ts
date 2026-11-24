@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { aggregatorUrlPattern } from "./aggregatorHosts.js";
 import type { Queryable } from "./contentCompleteness.js";
 import { enqueuePipelineTask } from "../tasks/pipelineTasks.js";
 import type { WorkspaceContext } from "../workspace/context.js";
@@ -73,7 +74,7 @@ export interface FetchTaskCoverageReport {
   /** Live jobs without complete content. */
   awaitingContentJobs: number;
   /**
-   * Of those, alert-backed jobs (a Gmail alert observation, no owner-saved observation, not an aggregator lead) with no
+   * Of those, alert-backed jobs (a Gmail alert observation, no owner-saved observation, no aggregator lead: a card marked lead_kind AGGREGATOR_LEAD or a link on an aggregator host) with no
    * FETCH_JOB_CONTENT task for any of their observations (each is a violation: a fetch could serve them).
    */
   withoutFetchTask: string[];
@@ -108,6 +109,16 @@ export async function reportContentWithoutFetchTask(
                 WHERE saved.workspace_id = awaiting.workspace_id
                   AND saved_version.canonical_job_id = awaiting.canonical_job_id
                   AND saved.source_name IN ('LINKEDIN_SAVED', 'MCF_SAVED')
+             ) AND NOT EXISTS (
+               -- An aggregator lead has no fetch task by design (FETCH_BLOCKED, see leadStaging.ts) and a retired aggregator page cannot be
+               -- fetched: a card marked lead_kind AGGREGATOR_LEAD, or an older alert card whose link is on an aggregator host.
+               SELECT 1 FROM raw_job_observations lead
+                 JOIN job_versions lead_version
+                   ON lead_version.workspace_id = lead.workspace_id AND lead_version.id = lead.job_version_id
+                WHERE lead.workspace_id = awaiting.workspace_id
+                  AND lead_version.canonical_job_id = awaiting.canonical_job_id
+                  AND lead.source_name = 'GMAIL_ALERT'
+                  AND (lead.raw_payload->>'lead_kind' = 'AGGREGATOR_LEAD' OR lead.source_url ~* $2)
              )) AS fetchable,
             COALESCE(tasks.task_count, 0)::int AS task_count,
             COALESCE(tasks.live_task_count, 0)::int AS live_task_count
@@ -127,20 +138,8 @@ export async function reportContentWithoutFetchTask(
             AND version.canonical_job_id = awaiting.canonical_job_id
        ) tasks ON TRUE
       WHERE awaiting.workspace_id = $1::uuid
-        -- An aggregator lead deliberately has no fetch task (FETCH_BLOCKED, see leadStaging.ts): it waits for the
-        -- employer's posting or a saved-jobs export. Such a job is not a coverage violation.
-        AND NOT EXISTS (
-          SELECT 1
-            FROM raw_job_observations lead
-            JOIN job_versions lead_version
-              ON lead_version.workspace_id = lead.workspace_id AND lead_version.id = lead.job_version_id
-           WHERE lead.workspace_id = awaiting.workspace_id
-             AND lead_version.canonical_job_id = awaiting.canonical_job_id
-             AND lead.processing_status = 'FETCH_BLOCKED'
-             AND lead.raw_payload->>'lead_kind' = 'AGGREGATOR_LEAD'
-        )
       ORDER BY awaiting.canonical_job_id`,
-    [workspaceId],
+    [workspaceId, aggregatorUrlPattern()],
   );
   return {
     awaitingContentJobs: result.rows.length,
