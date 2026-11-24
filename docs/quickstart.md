@@ -92,13 +92,6 @@ npm run db:init
 
 Embedding spaces and model routes are created on first use; there is no separate command for them.
 
-`npm run setup` does the environment and database steps together: it asks for the database connection string (or reads
-`DATABASE_URL`), applies the migrations, seeds the embedding spaces and lanes, and writes the
-provider key to `.env.local`. Use `npm run setup -- --docker` to start a local PostgreSQL first.
-Config files are found in the install directory; set `JDEC_CONFIG_DIR` to use your own copy of
-`config/` (it must contain `lanes/registry.yml`, otherwise startup fails instead of using another copy).
-Starting points for your own lanes and profile are in `templates/`.
-
 ### 4. Run the Desktop Application
 ```bash
 # Run Electron desktop app in development mode
