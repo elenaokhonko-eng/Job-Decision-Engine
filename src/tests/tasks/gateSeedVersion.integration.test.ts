@@ -424,4 +424,34 @@ describe.skipIf(skipReal)("APPLY_HARD_GATES seed follows the gate version", () =
     await seedFor([fixture.jobVersionId], { includeTestFixtures: true });
     expect(await seededFor([fixture.jobVersionId])).toHaveLength(1);
   });
+
+  it("an unparseable RUNNING gate version selects nothing and does not abort the seed (no query is issued)", async () => {
+    const stale = await stampedJob("running-bad", "gate-old-version");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      for (const gateVersion of ["", "not-a-version", "gate-123456789012345678901"]) {
+        const summary = await seedRecoverablePipelineTasks(db(), { context: ctx(), timeBudgetMs: 60_000, taskTypes: ["APPLY_HARD_GATES"], includeTestFixtures: true, jobVersionIds: [stale.jobVersionId], gateVersion });
+        expect(summary.byType.APPLY_HARD_GATES?.inserted ?? 0).toBe(0);
+      }
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await seededFor([stale.jobVersionId])).toHaveLength(0);
+    // The same job IS seeded under a parseable running version, so the empty result above is the guard, not the data.
+    await seedRecoverablePipelineTasks(db(), { context: ctx(), timeBudgetMs: 60_000, taskTypes: ["APPLY_HARD_GATES"], includeTestFixtures: true, jobVersionIds: [stale.jobVersionId], gateVersion: "gate-2999-01.1" });
+    expect(await seededFor([stale.jobVersionId])).toHaveLength(1);
+  });
+
+  it("a NEEDS_MANUAL_REVIEW job is still seeded, and its rejection_reason is untouched by seeding", async () => {
+    const job = await stampedJob("manual-review", "gate-old-version");
+    await db().query(
+      `UPDATE canonical_jobs SET processing_state = 'NEEDS_MANUAL_REVIEW', processing_status = 'NEEDS_MANUAL_REVIEW', rejection_reason = 'KEEP_ME' WHERE id = $1`,
+      [job.canonicalJobId]);
+    await seedFor([job.jobVersionId]);
+    expect(await seededFor([job.jobVersionId])).toHaveLength(1);
+    const { rows } = await db().query<{ rejection_reason: string | null; processing_state: string }>(
+      `SELECT rejection_reason, processing_state FROM canonical_jobs WHERE id = $1`, [job.canonicalJobId]);
+    expect(rows[0]).toEqual({ rejection_reason: "KEEP_ME", processing_state: "NEEDS_MANUAL_REVIEW" });
+    // TODO(after #275 merges): run the stamp handler on this task and assert rejection_reason is still KEEP_ME.
+  });
 });

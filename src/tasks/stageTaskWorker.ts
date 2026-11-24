@@ -754,6 +754,8 @@ export async function seedRecoverablePipelineTasks(
     includeTestFixtures?: boolean;
     routingDeferredReplayVersion?: string;
     timeBudgetMs?: number;
+    /** The running gate version; defaults to GATE_VERSION. Injectable so the unparseable-version path is testable. */
+    gateVersion?: string;
   } = {}
 ): Promise<SeedPipelineTasksSummary> {
   const pool = clientOrPool || defaultPool;
@@ -1088,6 +1090,13 @@ export async function seedRecoverablePipelineTasks(
     maxPerType,
     );
 
+    // The running gate version is parsed here, not in SQL: Postgres does not guarantee AND short-circuit, so a
+    // bad running version could make the cast error instead of selecting nothing. Unparseable: no query at all
+    // (an empty type set makes selectAndEnqueue return before querying).
+    const runningGateVersion = options.gateVersion ?? GATE_VERSION;
+    const runningGateVersionParses = /^(gate-)?[0-9]{1,17}([-.][0-9]{1,17})*$/.test(runningGateVersion);
+    if (!runningGateVersionParses) console.warn("APPLY_HARD_GATES version seed skipped: the running gate version does not parse as a dotted number.");
+    const gateVersionSeedTypes = runningGateVersionParses ? enabledTypes : new Set<PipelineStageTaskType>();
     // Jobs last gated under an older gate version get a stamp-only version refresh, bounded by
     // the per-type cap. The task key carries the gate version, so an unchanged version enqueues nothing.
     await selectAndEnqueue(
@@ -1120,9 +1129,8 @@ export async function seedRecoverablePipelineTasks(
          AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
          -- "Older than", not "different from": a job a newer worker (desktop, rollback target) gated under a
          -- newer version is never reopened. A stored version that does not parse as a dotted number (segments of
-         -- 1 to 17 digits, so the bigint cast cannot overflow) counts as older. The running version must parse,
-         -- or nothing is selected (fail closed).
-         AND $3::text ~ '^(gate-)?[0-9]{1,17}([-.][0-9]{1,17})*$'
+         -- 1 to 17 digits, so the bigint cast cannot overflow) counts as older. The running version ($3) is
+         -- parsed in JS before this query is issued; an unparseable one selects nothing.
          AND CASE WHEN latest_gate.gate_version ~ '^(gate-)?[0-9]{1,17}([-.][0-9]{1,17})*$'
              THEN regexp_split_to_array(regexp_replace(latest_gate.gate_version, '^gate-', ''), '[-.]')::bigint[]
                   < regexp_split_to_array(regexp_replace($3::text, '^gate-', ''), '[-.]')::bigint[]
@@ -1136,7 +1144,7 @@ export async function seedRecoverablePipelineTasks(
               AND inflight.payload->>'job_version_id' = jv.id::text)
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
-      [ctx.workspaceId, maxPerType, GATE_VERSION, includeTestFixtures],
+      [ctx.workspaceId, maxPerType, runningGateVersion, includeTestFixtures],
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
         payload: {
@@ -1145,10 +1153,10 @@ export async function seedRecoverablePipelineTasks(
           // Stamp-only refresh: the handler (gate 11.6, #275) records the new gate version without clearing
           // lane, match, decision or ranking state. Never force_policy_recalculation here.
           version_refresh: true,
-          gate_rule_version: GATE_VERSION,
+          gate_rule_version: runningGateVersion,
         },
       }),
-      enabledTypes,
+      gateVersionSeedTypes,
       includeTestFixtures,
       deadlineAt,
       seedScope,
