@@ -1,3 +1,4 @@
+import { checkWorkerTaskTypes } from "../src/tasks/workerTaskTypeGuard.js";
 import { appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
@@ -483,6 +484,9 @@ export async function processPipelineTasks(): Promise<void> {
   console.log("          PROCESS PIPELINE TASK WORKER              ");
   console.log("====================================================");
 
+  const taskTypeGuard = checkWorkerTaskTypes(process.env.PIPELINE_TASK_WORKER_TASK_TYPES);
+  if (taskTypeGuard.action === "FAIL") throw new Error(taskTypeGuard.message);
+  if (taskTypeGuard.action === "WARN") console.warn(`WARNING: ${taskTypeGuard.message}`);
   const requestedTaskTypes = parsePipelineTaskTypes(process.env.PIPELINE_TASK_WORKER_TASK_TYPES);
   const quotedExplicitlyRequested = requestedTaskTypes.includes("EXTRACT_QUOTED_REQUIREMENTS") &&
     Boolean(process.env.PIPELINE_TASK_WORKER_TASK_TYPES?.trim());
