@@ -19,15 +19,18 @@ export interface RepairStateSnapshot {
   readonly liveJobsWithLane: number;
   readonly liveJobsWithScore: number;
   readonly protectedJobs: number;
+  /** Live jobs that were HARD_REJECTED or UNMATCHED when the snapshot was taken. */
+  readonly terminalJobIds: readonly string[];
   /** Per live job: which results are stored. */
   readonly results: Readonly<Record<string, Readonly<Record<ResultField, boolean>>>>;
-  /** Per protected job: a status string (archive state, processing state, application statuses, active holds). */
+  /** Per protected job: a status string (archive state, application statuses, active holds; not the processing state). */
   readonly protectedStatus: Readonly<Record<string, string>>;
 }
 
 export async function snapshotRepairState(db: Queryable, workspaceId: string): Promise<RepairStateSnapshot> {
-  const live = await db.query<{ id: string; decision: boolean; match: boolean; lane: boolean; score: boolean }>(
+  const live = await db.query<{ id: string; terminal: boolean; decision: boolean; match: boolean; lane: boolean; score: boolean }>(
     `SELECT c.id::text AS id,
+            COALESCE(c.processing_state, c.processing_status) IN ('HARD_REJECTED', 'UNMATCHED') AS terminal,
             c.latest_deterministic_decision_id IS NOT NULL AS decision,
             c.latest_match_run_id IS NOT NULL AS match,
             c.latest_lane_decision_id IS NOT NULL AS lane,
@@ -37,11 +40,12 @@ export async function snapshotRepairState(db: Queryable, workspaceId: string): P
     [workspaceId],
   );
   const results: Record<string, Record<ResultField, boolean>> = {};
+  const terminalJobIds = live.rows.filter((row) => row.terminal).map((row) => row.id);
   for (const row of live.rows) results[row.id] = { decision: row.decision, match: row.match, lane: row.lane, score: row.score };
 
   const protectedRows = await db.query<{ id: string; status: string }>(
     `SELECT c.id::text AS id,
-            COALESCE(c.processing_state, c.processing_status, '') || '|archived=' || (c.archived_at IS NOT NULL)::text
+            'archived=' || (c.archived_at IS NOT NULL)::text
               || '|applications=' || COALESCE((SELECT string_agg(a.status, ',' ORDER BY a.status) FROM application_records a
                                                 WHERE a.workspace_id = c.workspace_id AND a.canonical_job_id = c.id), '')
               || '|holds=' || COALESCE((SELECT COUNT(*)::text FROM job_archive_holds h
@@ -69,12 +73,18 @@ export async function snapshotRepairState(db: Queryable, workspaceId: string): P
     liveJobsWithLane: count("lane"),
     liveJobsWithScore: count("score"),
     protectedJobs: protectedRows.rows.length,
+    terminalJobIds,
     results,
     protectedStatus,
   };
 }
 
 export interface RepairStateDiff {
+  /**
+   * A requirement score cleared on a job that is HARD_REJECTED or UNMATCHED after the run: expected, not a loss. The
+   * decider takes the score from the match score, which a rejected job does not have, so a recompute clears it.
+   */
+  readonly expectedClears: ReadonlyArray<{ readonly jobId: string; readonly field: ResultField }>;
   /** A live job (in both snapshots) that had a stored result before and has none now. Ids only. */
   readonly lostResults: ReadonlyArray<{ readonly jobId: string; readonly field: ResultField }>;
   /** A protected job whose status string changed, or that is gone from the live protected set. */
@@ -86,16 +96,22 @@ export interface RepairStateDiff {
 
 export function diffRepairSnapshots(before: RepairStateSnapshot, after: RepairStateSnapshot): RepairStateDiff {
   const lostResults: Array<{ jobId: string; field: ResultField }> = [];
+  const expectedClears: Array<{ jobId: string; field: ResultField }> = [];
+  const terminalAfter = new Set(after.terminalJobIds);
   let leftLiveSet = 0;
   for (const [jobId, was] of Object.entries(before.results)) {
     const now = after.results[jobId];
     if (!now) { leftLiveSet += 1; continue; }
-    for (const field of RESULT_FIELDS) if (was[field] && !now[field]) lostResults.push({ jobId, field });
+    for (const field of RESULT_FIELDS) {
+      if (!was[field] || now[field]) continue;
+      if (field === "score" && terminalAfter.has(jobId)) expectedClears.push({ jobId, field });
+      else lostResults.push({ jobId, field });
+    }
   }
   const protectedChanged: Array<{ jobId: string; before: string; after: string }> = [];
   for (const [jobId, was] of Object.entries(before.protectedStatus)) {
     const now = after.protectedStatus[jobId] ?? "MISSING";
     if (now !== was) protectedChanged.push({ jobId, before: was, after: now });
   }
-  return { lostResults, protectedChanged, leftLiveSet, ok: lostResults.length === 0 && protectedChanged.length === 0 };
+  return { expectedClears, lostResults, protectedChanged, leftLiveSet, ok: lostResults.length === 0 && protectedChanged.length === 0 };
 }

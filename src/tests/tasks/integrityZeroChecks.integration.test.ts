@@ -117,10 +117,10 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     const ws = await newWorkspace();
     const results = await runZeroChecks(db(), ws);
     expect(results.map((check) => check.name)).toEqual([
-      "rejected_job_with_recommendation", "listed_job_not_currently_open", "task_completed_without_result",
+      "rejected_job_with_recommendation", "unmatched_job_with_recommendation", "listed_job_not_currently_open", "task_completed_without_result",
       "routable_verification_job_stranded", "canonical_copy_columns_drift", "match_blocked_on_requirement_embedding", "protected_job_auto_archived", "stage_result_older_than_rule_version",
     ]);
-    expect(results.map((check) => check.total)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(results.map((check) => check.total)).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0]);
     expect(zeroChecksExitCode(results)).toBe(0);
     expect(zeroChecksExitCode([{ total: 0 }, { total: 2 }])).toBe(1);
   });

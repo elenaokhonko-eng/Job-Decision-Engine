@@ -72,10 +72,11 @@ function parseArgs(argv: string[]): {
   target?: string;
   confirmWorkspace?: string;
   maxTasks?: number;
+  snapshotFile?: string;
 } {
   const out: {
     workspaceKey?: string; userKey?: string; json: boolean; phase: "pre" | "post";
-    repair: boolean; apply: boolean; target?: string; confirmWorkspace?: string; maxTasks?: number;
+    repair: boolean; apply: boolean; target?: string; confirmWorkspace?: string; maxTasks?: number; snapshotFile?: string;
   } = { json: false, phase: "post", repair: false, apply: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -93,6 +94,8 @@ function parseArgs(argv: string[]): {
       out.target = String(argv[++i]).trim();
     } else if (arg.startsWith("--target=")) {
       out.target = arg.slice("--target=".length).trim();
+    } else if (arg.startsWith("--snapshot-file=")) {
+      out.snapshotFile = arg.slice("--snapshot-file=".length).trim();
     } else if (arg.startsWith("--max-tasks=")) {
       out.maxTasks = Number(arg.slice("--max-tasks=".length));
     } else if (arg.startsWith("--confirm-workspace=")) {
@@ -124,6 +127,7 @@ async function run(): Promise<void> {
       apply: args.apply,
       confirmWorkspace: args.confirmWorkspace,
       maxTasks: args.maxTasks,
+      snapshotFile: args.snapshotFile,
       workspaceKey: args.workspaceKey,
       userKey: args.userKey,
     });

@@ -7,7 +7,7 @@ import { createTaskIntentV2 } from "../../tasks/taskIntent.js";
 import { runPipelineStageTaskWorker, type PipelineStageTaskType } from "../../tasks/stageTaskWorker.js";
 import { runZeroChecks } from "../../tasks/integrityZeroChecks.js";
 import { diffRepairSnapshots, snapshotRepairState } from "../../tasks/repairStateSnapshot.js";
-import { applyZeroCheckRepairs, planZeroCheckRepairs, repairTaskKey } from "../../tasks/zeroCheckRepair.js";
+import { applyZeroCheckRepairs, planZeroCheckRepairs, proveRepairState, repairTaskKey } from "../../tasks/zeroCheckRepair.js";
 import { openPipelineStack, type PipelineStack, type StackJob } from "../fixtures/pipelineStackFixture.js";
 
 // Real PostgreSQL and the real stages (router, matcher, decider): a seeded violation of each repairable kind
@@ -100,12 +100,14 @@ describe.skipIf(skipReal)("zero-check repair (PostgreSQL)", () => {
     await markComplete(job);
     await s().db.query(
       `UPDATE canonical_jobs SET processing_state = 'HARD_REJECTED', processing_status = 'HARD_REJECTED', gate_decision = 'HARD_REJECT',
-              rejection_reason = 'HARD_LOCATION_ONSITE', recommendation_outcome = 'TRACK', recommendation_eligibility = 'VERIFY'
+              rejection_reason = 'HARD_LOCATION_ONSITE', recommendation_outcome = 'TRACK', recommendation_eligibility = 'VERIFY',
+              recommendation_requirement_score = 0.5
         WHERE workspace_id = $1 AND id = $2`,
       [s().ctx.workspaceId, job.canonicalJobId],
     );
     await gateRow(job, "HARD_REJECT");
     expect((await totals()).rejected_job_with_recommendation).toBe(1);
+    const snapshotBefore = await snapshotRepairState(s().db, s().ctx.workspaceId);
 
     const plan = await planZeroCheckRepairs(s().db, s().ctx.workspaceId);
     expect(plan.items.map((item) => [item.kind, item.entry, item.canonicalJobId])).toEqual([
@@ -122,6 +124,24 @@ describe.skipIf(skipReal)("zero-check repair (PostgreSQL)", () => {
     expect(row.outcome).toBe("SKIP");
     expect(row.eligibility).toBe("INELIGIBLE");
     expect((await totals()).rejected_job_with_recommendation).toBe(0);
+    // TRACK -> SKIP. The decider writes the requirement score from the match score, which a rejected job does not have:
+    // the stored 0.5 is expected to clear. The diff reports that as an expected clear, never as a lost result, and the
+    // job gains a decision.
+    const snapshotAfter = await snapshotRepairState(s().db, s().ctx.workspaceId);
+    const diff = diffRepairSnapshots(snapshotBefore, snapshotAfter);
+    expect(diff.expectedClears).toEqual([{ jobId: job.canonicalJobId, field: "score" }]);
+    expect(diff.lostResults).toEqual([]);
+    expect(diff.protectedChanged).toEqual([]);
+    expect(diff.ok).toBe(true);
+    expect(snapshotBefore.results[job.canonicalJobId]!.decision).toBe(false);
+    expect(snapshotAfter.results[job.canonicalJobId]!.decision).toBe(true);
+    expect(snapshotAfter.results[job.canonicalJobId]!.score).toBe(false);
+    // A repair that already ran for this rule version is not queued again when the job violates again: it is reported.
+    await s().db.query(`UPDATE canonical_jobs SET recommendation_outcome = 'TRACK' WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, job.canonicalJobId]);
+    const again = await planZeroCheckRepairs(s().db, s().ctx.workspaceId);
+    expect(again.items).toEqual([]);
+    expect(again.repairedButStillViolating).toEqual({ count: 1, ids: [job.canonicalJobId] });
+    await s().db.query(`UPDATE canonical_jobs SET recommendation_outcome = 'SKIP' WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, job.canonicalJobId]);
     // Once the work has completed the same violation does not enqueue again.
     expect((await planZeroCheckRepairs(s().db, s().ctx.workspaceId)).items).toEqual([]);
   });
@@ -277,6 +297,59 @@ describe.skipIf(skipReal)("zero-check repair (PostgreSQL)", () => {
     expect(after.protectedJobs).toBe(before.protectedJobs);
   });
 
+  it("an UNMATCHED job that still recommends is repaired by a forced decide; one the decider cannot select is reported as awaiting content, not enqueued", async () => {
+    const decidable = await s().seedRoutableJob("unmatched-track");
+    const undecidable = await s().seedRoutableJob("unmatched-track-undecidable");
+    for (const j of [decidable, undecidable]) {
+      await s().db.query(
+        `UPDATE canonical_jobs SET processing_state = 'UNMATCHED', processing_status = 'UNMATCHED', gate_decision = 'PASS', routing_disposition = 'POLICY_NO_MATCH',
+                recommendation_outcome = 'TRACK', recommendation_eligibility = 'ELIGIBLE' WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, j.canonicalJobId]);
+      await gateRow(j, "PASS");
+    }
+    await markComplete(decidable);
+    await s().db.query(`UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, undecidable.canonicalJobId]);
+    const checks = await totals();
+    expect(checks.unmatched_job_with_recommendation).toBe(2);
+
+    const plan = await planZeroCheckRepairs(s().db, s().ctx.workspaceId);
+    const mine = plan.items.filter((item) => [decidable.canonicalJobId, undecidable.canonicalJobId].includes(item.canonicalJobId));
+    expect(mine.map((item) => [item.kind, item.entry, item.canonicalJobId])).toEqual([["unmatched_job_with_recommendation", "DECIDE_RECOMMENDATION", decidable.canonicalJobId]]);
+    expect(plan.unrepairable).toContainEqual({
+      check: "unmatched_job_with_recommendation", reason: "awaiting content: the current version is not decidable", count: 1, ids: [undecidable.canonicalJobId],
+    });
+    expect((await applyZeroCheckRepairs(s().db, s().ctx, plan)).inserted).toBeGreaterThanOrEqual(1);
+    expect((await runWorker()).failed).toBe(0);
+    expect((await copy(decidable)).outcome).toBe("SKIP");
+    expect((await copy(undecidable)).outcome).toBe("TRACK");
+    const queued = await s().db.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM pipeline_tasks WHERE workspace_id = $1 AND payload->>'job_version_id' = $2 AND task_key LIKE '%zero-check-repair%'`, [s().ctx.workspaceId, undecidable.jobVersionId]);
+    expect(queued.rows[0]!.n).toBe(0);
+  });
+
+  it("a snapshot file is written on the first run and diffed on the next, and a processing-state change alone is not a protected-status change", async () => {
+    const file = `${process.env.TEMP ?? process.env.TMPDIR ?? "."}/repair-snapshot-${randomUUID()}.json`;
+    try {
+      const protectedJob = await s().seedRoutableJob("snapshot-protected");
+      await s().db.query(
+        `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status) VALUES ($1, $2, $3, $4, 'SUBMITTED')`,
+        [s().ctx.workspaceId, s().ctx.userId, protectedJob.canonicalJobId, protectedJob.jobVersionId]);
+      const first = await proveRepairState(s().db, s().ctx.workspaceId, file);
+      expect(first.stateDiff).toBeUndefined();
+      const middle = await proveRepairState(s().db, s().ctx.workspaceId, file);
+      expect(middle.stateDiff?.ok).toBe(true);
+      const second = await proveRepairState(s().db, s().ctx.workspaceId, file);
+      expect(second.stateAfter).toBeDefined();
+      await s().db.query(`UPDATE canonical_jobs SET processing_state = 'MATCHED', processing_status = 'MATCHED' WHERE id = $1`, [protectedJob.canonicalJobId]);
+      expect((await proveRepairState(s().db, s().ctx.workspaceId, file)).stateDiff?.protectedChanged).toEqual([]);
+      await s().db.query(`UPDATE application_records SET status = 'INTERVIEW' WHERE canonical_job_id = $1`, [protectedJob.canonicalJobId]);
+      const changed = await proveRepairState(s().db, s().ctx.workspaceId, file);
+      expect(changed.stateDiff?.ok).toBe(false);
+      expect(changed.stateDiff?.protectedChanged.map((entry) => entry.jobId)).toEqual([protectedJob.canonicalJobId]);
+    } finally {
+      try { (await import("node:fs")).unlinkSync(file); } catch { /* best effort */ }
+    }
+  });
+
   it("repairs a match task blocked on a missing requirement embedding past the threshold, and leaves a fresh block alone", async () => {
     const stale = await s().seedRoutableJob("blocked-stale");
     const fresh = await s().seedRoutableJob("blocked-fresh");
@@ -324,7 +397,7 @@ describe.skipIf(skipReal)("zero-check repair (PostgreSQL)", () => {
     const job = await s().seedRoutableJob("gate-no-result");
     await completedTask("APPLY_HARD_GATES", job);
     const plan = await planZeroCheckRepairs(s().db, s().ctx.workspaceId);
-    expect(plan.unrepairable).toEqual([{ check: "task_completed_without_result", reason: "APPLY_HARD_GATES is not repaired here", count: 1 }]);
+    expect(plan.unrepairable).toContainEqual({ check: "task_completed_without_result", reason: "APPLY_HARD_GATES is not repaired here", count: 1 });
     expect(plan.items.filter((item) => item.canonicalJobId === job.canonicalJobId)).toEqual([]);
   });
 });

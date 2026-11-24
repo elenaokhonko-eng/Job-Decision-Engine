@@ -21,9 +21,13 @@ import {
   matchBlockedOnRequirementEmbedding,
   rejectedJobsWithRecommendation,
   routableVerificationJobsStranded,
+  unmatchedJobsWithRecommendation,
 } from "./integrityZeroChecks.js";
 import { findTasksCompletedWithoutResult } from "./completedWithoutResult.js";
-import { snapshotRepairState } from "./repairStateSnapshot.js";
+import fs from "node:fs";
+
+import { decidableJobVersionSql } from "./completedWithoutResult.js";
+import { diffRepairSnapshots, snapshotRepairState, type RepairStateDiff, type RepairStateSnapshot } from "./repairStateSnapshot.js";
 import { enqueuePipelineTask } from "./pipelineTasks.js";
 import { pipelineTaskStageVersion } from "./pipelineTaskCurrentness.js";
 import { createTaskIntentV2 } from "./taskIntent.js";
@@ -35,6 +39,7 @@ export const ZERO_CHECK_REPAIR_RULE_VERSION = "zero-check-repair-v1";
 
 export const REPAIRABLE_VIOLATION_KINDS = [
   "rejected_job_with_recommendation",
+  "unmatched_job_with_recommendation",
   "task_completed_without_result",
   "routable_verification_job_stranded",
   "canonical_copy_columns_drift",
@@ -63,13 +68,17 @@ export interface UnrepairableViolation {
   readonly check: string;
   readonly reason: string;
   readonly count: number;
+  /** First canonical job ids, when the violation is per job. */
+  readonly ids?: readonly string[];
 }
 
 export interface ZeroCheckRepairPlan {
   readonly items: readonly ZeroCheckRepairItem[];
   readonly unrepairable: readonly UnrepairableViolation[];
-  /** Jobs left out because a task of the entry stage is already active or a repair of that stage is already queued. */
+  /** Jobs left out because a task of the entry stage is already active. */
   readonly skippedActive: number;
+  /** Jobs still violating although a repair of the entry stage for this rule version already ran or is queued: not enqueued again. */
+  readonly repairedButStillViolating: { readonly count: number; readonly ids: readonly string[] };
 }
 
 /** Default cap on tasks one apply run inserts. */
@@ -143,6 +152,12 @@ export async function planZeroCheckRepairs(db: Queryable, workspaceId: string): 
     }
   }
 
+  // 2b. An UNMATCHED job that still recommends: the decider recomputes it (UNMATCHED -> SKIP).
+  const unmatched = await unmatchedJobsWithRecommendation(db, workspaceId, { withIds: true });
+  for (const job of (await loadLiveJobs(db, workspaceId, unmatched.ids ?? [])).values()) {
+    candidates.push({ kind: "unmatched_job_with_recommendation", canonicalJobId: job.canonicalJobId, jobVersionId: job.latestJobVersionId, entry: "DECIDE_RECOMMENDATION" });
+  }
+
   // 3. A stranded routable verification job: re-route it; the worker carries it to a match and a decision.
   const stranded = await routableVerificationJobsStranded(db, workspaceId, { withIds: true });
   for (const job of (await loadLiveJobs(db, workspaceId, stranded.ids ?? [])).values()) {
@@ -173,14 +188,38 @@ export async function planZeroCheckRepairs(db: Queryable, workspaceId: string): 
       (ENTRY_RANK[item.entry] === ENTRY_RANK[current.entry] && item.kind < current.kind)
     ) chosen.set(item.canonicalJobId, item);
   }
-  const ordered = [...chosen.values()].sort((a, b) => a.canonicalJobId.localeCompare(b.canonicalJobId));
+  const orderedAll = [...chosen.values()].sort((a, b) => a.canonicalJobId.localeCompare(b.canonicalJobId));
+
+  // A decision cannot be written for a version the decider cannot select (incomplete description or no source
+  // evidence): the job is awaiting content, reported as unrepairable here instead of queueing attempts that cannot succeed.
+  const decideItems = orderedAll.filter((item) => item.entry === "DECIDE_RECOMMENDATION");
+  const undecidable = new Set<string>();
+  if (decideItems.length > 0) {
+    const { rows } = await db.query<{ id: string }>(
+      `SELECT v.id::text AS id FROM job_versions v JOIN canonical_jobs c ON c.workspace_id = v.workspace_id AND c.id = v.canonical_job_id
+        WHERE v.workspace_id = $1::uuid AND v.id = ANY($2::uuid[]) AND ${decidableJobVersionSql("c", "v")}`,
+      [workspaceId, decideItems.map((item) => item.jobVersionId)],
+    );
+    const decidable = new Set(rows.map((row) => row.id));
+    for (const item of decideItems) if (!decidable.has(item.jobVersionId)) undecidable.add(item.jobVersionId);
+  }
+  const awaiting = new Map<string, string[]>();
+  for (const item of orderedAll) if (undecidable.has(item.jobVersionId) && item.entry === "DECIDE_RECOMMENDATION") {
+    (awaiting.get(item.kind) ?? awaiting.set(item.kind, []).get(item.kind)!).push(item.canonicalJobId);
+  }
+  for (const [kind, ids] of awaiting) {
+    unrepairable.push({ check: kind, reason: "awaiting content: the current version is not decidable", count: ids.length, ids: ids.slice(0, 10) });
+  }
+  const ordered = orderedAll.filter((item) => !(item.entry === "DECIDE_RECOMMENDATION" && undecidable.has(item.jobVersionId)));
 
   // A job that already has an active task of the entry stage, or a repair of that stage queued for the same rule
   // version under any kind, gets nothing more: two kinds on one job never queue two forced tasks.
   const busy = new Set<string>();
+  const repaired = new Set<string>();
   if (ordered.length > 0) {
-    const { rows } = await db.query<{ task_type: string; job_version_id: string }>(
-      `SELECT task.task_type, task.payload->>'job_version_id' AS job_version_id
+    const { rows } = await db.query<{ task_type: string; job_version_id: string; active: boolean }>(
+      `SELECT task.task_type, task.payload->>'job_version_id' AS job_version_id,
+              (task.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')) AS active
          FROM pipeline_tasks task
         WHERE task.workspace_id = $1::uuid
           AND task.payload->>'job_version_id' = ANY($2::text[])
@@ -188,10 +227,16 @@ export async function planZeroCheckRepairs(db: Queryable, workspaceId: string): 
                OR task.payload->'zero_check_repair'->>'rule_version' = $3)`,
       [workspaceId, ordered.map((item) => item.jobVersionId), ZERO_CHECK_REPAIR_RULE_VERSION],
     );
-    for (const row of rows) busy.add(`${row.task_type}:${row.job_version_id}`);
+    for (const row of rows) (row.active ? busy : repaired).add(`${row.task_type}:${row.job_version_id}`);
   }
-  const items = ordered.filter((item) => !busy.has(`${item.entry}:${item.jobVersionId}`));
-  return { items, unrepairable, skippedActive: ordered.length - items.length };
+  const keyOf = (item: ZeroCheckRepairItem): string => `${item.entry}:${item.jobVersionId}`;
+  const skippedItems = ordered.filter((item) => busy.has(keyOf(item)));
+  const stillViolating = ordered.filter((item) => !busy.has(keyOf(item)) && repaired.has(keyOf(item)));
+  const items = ordered.filter((item) => !busy.has(keyOf(item)) && !repaired.has(keyOf(item)));
+  return {
+    items, unrepairable, skippedActive: skippedItems.length,
+    repairedButStillViolating: { count: stillViolating.length, ids: stillViolating.slice(0, 10).map((item) => item.canonicalJobId) },
+  };
 }
 
 export function repairTaskKey(item: ZeroCheckRepairItem): string {
@@ -310,11 +355,21 @@ export interface ZeroCheckRepairReport {
   readonly sample: Record<string, string[]>;
   readonly unrepairable: readonly UnrepairableViolation[];
   readonly skippedActive: number;
+  readonly repairedButStillViolating: { count: number; ids: readonly string[] };
   readonly maxTasks: number;
   /** True when the apply cap stopped the run, or (dry run) when the plan is larger than the cap. */
   readonly truncated: boolean;
   /** Counts only, taken before the run: live jobs with a stored decision, match, lane and score, and protected jobs. */
   readonly stateBefore: { liveJobs: number; withDecision: number; withMatch: number; withLane: number; withScore: number; protectedJobs: number };
+  /** Counts and the diff against an earlier snapshot file (--snapshot-file); present on a later run. */
+  readonly stateAfter?: ZeroCheckRepairReport["stateBefore"];
+  readonly stateDiff?: {
+    ok: boolean;
+    lostResults: RepairStateDiff["lostResults"];
+    expectedClears: RepairStateDiff["expectedClears"];
+    protectedChanged: RepairStateDiff["protectedChanged"];
+    leftLiveSet: number;
+  };
   readonly applied?: ZeroCheckRepairApplyResult;
 }
 
@@ -337,17 +392,37 @@ export function summarizeRepairPlan(
   }
   return {
     mode, workspaceId, ruleVersion: ZERO_CHECK_REPAIR_RULE_VERSION, planned: plan.items.length, byKind, byEntry, sample,
-    unrepairable: plan.unrepairable, skippedActive: plan.skippedActive, maxTasks, stateBefore,
+    unrepairable: plan.unrepairable, skippedActive: plan.skippedActive, repairedButStillViolating: plan.repairedButStillViolating, maxTasks, stateBefore,
     truncated: applied ? applied.truncated : plan.items.length > maxTasks,
     ...(applied ? { applied } : {}),
   };
 }
 
-async function stateCounts(db: Queryable, workspaceId: string): Promise<ZeroCheckRepairReport["stateBefore"]> {
-  const snapshot = await snapshotRepairState(db, workspaceId);
+function countsOf(snapshot: RepairStateSnapshot): ZeroCheckRepairReport["stateBefore"] {
   return {
     liveJobs: snapshot.liveJobs, withDecision: snapshot.liveJobsWithDecision, withMatch: snapshot.liveJobsWithMatch,
     withLane: snapshot.liveJobsWithLane, withScore: snapshot.liveJobsWithScore, protectedJobs: snapshot.protectedJobs,
+  };
+}
+
+/** Takes the current snapshot; with a snapshot file, writes it (first run) or diffs against it (later run). */
+export async function proveRepairState(
+  db: Queryable,
+  workspaceId: string,
+  snapshotFile: string | undefined,
+): Promise<{ stateBefore: ZeroCheckRepairReport["stateBefore"]; stateAfter?: ZeroCheckRepairReport["stateBefore"]; stateDiff?: ZeroCheckRepairReport["stateDiff"] }> {
+  const current = await snapshotRepairState(db, workspaceId);
+  const stateBefore = countsOf(current);
+  if (!snapshotFile) return { stateBefore };
+  if (!fs.existsSync(snapshotFile)) {
+    fs.writeFileSync(snapshotFile, JSON.stringify(current));
+    return { stateBefore };
+  }
+  const earlier = JSON.parse(fs.readFileSync(snapshotFile, "utf8")) as RepairStateSnapshot;
+  const diff = diffRepairSnapshots(earlier, current);
+  return {
+    stateBefore, stateAfter: stateBefore,
+    stateDiff: { ok: diff.ok, lostResults: diff.lostResults, expectedClears: diff.expectedClears, protectedChanged: diff.protectedChanged, leftLiveSet: diff.leftLiveSet },
   };
 }
 
@@ -357,6 +432,11 @@ export interface ZeroCheckRepairCommandOptions {
   readonly confirmWorkspace?: string;
   /** Cap on tasks inserted by one apply run; default DEFAULT_MAX_REPAIR_TASKS. */
   readonly maxTasks?: number;
+  /**
+   * A file for the state proof. When it does not exist the run writes its snapshot there (ids and flags only); when it
+   * exists the run reports stateAfter and the diff against it, and leaves the file alone.
+   */
+  readonly snapshotFile?: string;
   readonly workspaceKey?: string;
   readonly userKey?: string;
 }
@@ -387,16 +467,16 @@ export async function runZeroCheckRepairCommand(
     const ctx = await resolveWorkspaceContext(client as never, { workspaceKey: options.workspaceKey, userKey: options.userKey });
     if (options.apply) {
       requireRepairApply({ allowedEnv: env.ZERO_CHECK_REPAIR_ALLOWED, confirmWorkspace: options.confirmWorkspace, workspaceId: ctx.workspaceId });
-      const stateBefore = await stateCounts(client, ctx.workspaceId);
+      const proof = await proveRepairState(client, ctx.workspaceId, options.snapshotFile);
       const plan = await planZeroCheckRepairs(client, ctx.workspaceId);
       const applied = await applyZeroCheckRepairs(client, ctx, plan, maxTasks);
-      return summarizeRepairPlan(ctx.workspaceId, plan, "apply", maxTasks, stateBefore, applied);
+      return { ...summarizeRepairPlan(ctx.workspaceId, plan, "apply", maxTasks, proof.stateBefore, applied), ...(proof.stateAfter ? { stateAfter: proof.stateAfter } : {}), ...(proof.stateDiff ? { stateDiff: proof.stateDiff } : {}) };
     }
     await client.query("BEGIN READ ONLY");
     try {
-      const stateBefore = await stateCounts(client, ctx.workspaceId);
+      const proof = await proveRepairState(client, ctx.workspaceId, options.snapshotFile);
       const plan = await planZeroCheckRepairs(client, ctx.workspaceId);
-      return summarizeRepairPlan(ctx.workspaceId, plan, "dry_run", maxTasks, stateBefore);
+      return { ...summarizeRepairPlan(ctx.workspaceId, plan, "dry_run", maxTasks, proof.stateBefore), ...(proof.stateAfter ? { stateAfter: proof.stateAfter } : {}), ...(proof.stateDiff ? { stateDiff: proof.stateDiff } : {}) };
     } finally {
       await client.query("ROLLBACK");
     }

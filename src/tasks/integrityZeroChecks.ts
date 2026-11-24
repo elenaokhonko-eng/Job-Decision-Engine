@@ -51,6 +51,20 @@ export async function rejectedJobsWithRecommendation(db: Queryable, workspaceId:
   return result("rejected_job_with_recommendation", rows.map((row) => row.id), undefined, options);
 }
 
+/** An UNMATCHED job (no active lane match) still carries a recommendation (PRIORITY, REVIEW or TRACK). */
+export async function unmatchedJobsWithRecommendation(db: Queryable, workspaceId: string, options?: ZeroCheckOptions): Promise<ZeroCheckResult> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT c.id::text AS id
+       FROM canonical_jobs c
+      WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+        AND COALESCE(c.processing_state, c.processing_status) = 'UNMATCHED'
+        AND c.recommendation_outcome IN ('PRIORITY', 'REVIEW', 'TRACK')
+      ORDER BY c.id`,
+    [workspaceId],
+  );
+  return result("unmatched_job_with_recommendation", rows.map((row) => row.id), undefined, options);
+}
+
 /** A job in the Apply Now or Top 10 list whose current version is not confirmed open (v_job_availability_current). */
 export const LISTED_JOB_VIEWS: Readonly<Record<string, string>> = {
   apply_now: "v_apply_now_jobs_stage3_scoped",
@@ -300,6 +314,7 @@ export async function runZeroChecks(
   const stale = options.phase === "pre" ? [] : [await staleStageResults(db, workspaceId)];
   return [
     await rejectedJobsWithRecommendation(db, workspaceId),
+    await unmatchedJobsWithRecommendation(db, workspaceId),
     await listedJobsNotCurrentlyOpen(db, workspaceId),
     await completedTasksWithoutResult(db, workspaceId),
     await routableVerificationJobsStranded(db, workspaceId),
