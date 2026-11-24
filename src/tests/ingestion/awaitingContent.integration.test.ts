@@ -15,7 +15,7 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/
 
 // "Awaiting content": a job without a complete description has no gate result, lane or recommendation in any
 // list. The rule exists in TypeScript (classifyContentCompleteness, sourceContentEvidencePredicate) and in SQL
-// (v_job_content_state, migration 117); this test runs the same synthetic cases through both.
+// (v_job_content_state, migration 120); this test runs the same synthetic cases through both.
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
 if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {

@@ -5,7 +5,7 @@ import { z } from "zod";
  *
  * - `v_job_status_buckets_scoped` gives every current, non-archived job with complete posting content, and every
  *   hard-rejected or removed job, exactly one status bucket. A live job without complete content that carries no
- *   hard rejection is "awaiting content" (migration 117) and is read from `v_job_awaiting_content_scoped`.
+ *   hard rejection is "awaiting content" (migration 120) and is read from `v_job_awaiting_content_scoped`.
  * - `v_job_status_bucket_counts_scoped` counts the buckets per workspace (they sum to total_jobs);
  *   `v_job_awaiting_content_counts_scoped` counts the awaiting jobs. total_jobs + awaiting_count = live jobs.
  * - `v_application_workspace_summary_scoped` keeps `rejected_unmatched_count` and adds
@@ -213,7 +213,7 @@ export type JobSupportRetryAllResult = z.infer<typeof JobSupportRetryAllResultSc
 
 export const AwaitingContentReasonSchema = z.enum(["DESCRIPTION_NOT_COMPLETE", "NO_RETRIEVED_POSTING_EVIDENCE"]);
 
-/** One row of `v_job_awaiting_content_scoped` (migration 117). No gate result, lane or recommendation is exposed. */
+/** One row of `v_job_awaiting_content_scoped` (migration 120). No gate result, lane or recommendation is exposed. */
 export const AwaitingContentRowSchema = z.object({
   workspace_id: UuidSchema,
   canonical_job_id: UuidSchema,

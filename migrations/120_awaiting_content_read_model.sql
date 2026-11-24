@@ -1,4 +1,4 @@
--- Migration 117: "awaiting content". A job whose posting text has not reached the completeness rule has no
+-- Migration 120: "awaiting content". A job whose posting text has not reached the completeness rule has no
 -- gate result, lane or recommendation in any list; it waits until the posting is fetched.
 --
 -- Root cause: the hard gate (src/pipeline/hardGate.ts), lane router and matcher already require
