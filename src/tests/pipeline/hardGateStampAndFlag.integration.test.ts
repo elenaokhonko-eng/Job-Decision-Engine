@@ -380,6 +380,26 @@ describe.skipIf(skipReal)("hard gate: version-refresh stamp and flagNeedsVerific
       expect(successors[0].task_key).toContain("repair");
     });
 
+    it("a second gate-version flip is not suppressed by the COMPLETED repair-variant successor of the first flip (each gate version has its own identity)", async () => {
+      const { jobId, versionId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await gate(jobId);
+      const flip = async (ruleVersion: string) => {
+        await db().query(`UPDATE canonical_jobs SET processing_state = 'MATCHED', processing_status = 'MATCHED', gate_decision = 'NEEDS_VERIFICATION' WHERE id = $1`, [jobId]);
+        await db().query(`UPDATE gate_decisions SET decision = 'NEEDS_VERIFICATION' WHERE id = (SELECT id FROM gate_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1)`, [jobId]);
+        await enqueuePipelineTask({
+          taskType: "APPLY_HARD_GATES", taskKey: `APPLY_HARD_GATES:${versionId}:flip-${ruleVersion}`,
+          payload: { canonical_job_id: jobId, job_version_id: versionId, version_refresh: true, gate_rule_version: ruleVersion },
+        }, db(), { context: ctx() });
+        const run = await runPipelineStageTaskWorker(db(), { context: ctx(), seed: false, reconcileStalePending: false, taskTypes: ["APPLY_HARD_GATES"], maxTasks: 1, heartbeatSeconds: 0 });
+        expect(run).toMatchObject({ claimed: 1, completed: 1, failed: 0 });
+      };
+      await flip("gate-a");
+      await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED' WHERE payload->>'job_version_id' = $1 AND task_type = 'PUBLISH_EMBEDDING'`, [versionId]);
+      await flip("gate-b");
+      const open = (await db().query(`SELECT payload->>'repair_generation' AS generation FROM pipeline_tasks WHERE payload->>'job_version_id' = $1 AND task_type = 'PUBLISH_EMBEDDING' AND status <> 'COMPLETED'`, [versionId])).rows;
+      expect(open).toEqual([{ generation: "gate-b" }]);
+    });
+
     it("the APPLY_HARD_GATES handler accepts version_refresh: a stamped MATCHED job keeps its state and gets no downstream task", async () => {
       const { jobId, versionId } = await seedJob("RAW_STAGED", { gateDecision: null });
       await gate(jobId);

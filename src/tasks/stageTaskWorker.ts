@@ -1,3 +1,4 @@
+import { GATE_VERSION } from "../contracts/version.js";
 import crypto from "crypto";
 import pg from "pg";
 import dotenv from "dotenv";
@@ -2731,6 +2732,12 @@ async function maybeEnqueueAfterTask(
     ...(typeof payload.repair_dependency === "string" ? { repair_dependency: payload.repair_dependency } : {}),
     ...(typeof payload.repair_generation === "string" ? { repair_generation: payload.repair_generation } : {}),
     ...(typeof payload.repair_match_run_id === "string" ? { repair_match_run_id: payload.repair_match_run_id } : {}),
+    // Each gate version gets its own successor identities: a COMPLETED repair-variant task of the same job version (an earlier
+    // repair seed, or an earlier gate-version flip) must not turn this changed-outcome successor into a silent no-op.
+    // repair_generation is whitelisted into the task context and propagates down the chain.
+    ...(taskType === "APPLY_HARD_GATES" && payload.version_refresh === true
+      ? { repair_generation: typeof payload.gate_rule_version === "string" && payload.gate_rule_version.trim() !== "" ? payload.gate_rule_version.trim() : GATE_VERSION }
+      : {}),
   };
 
   if (taskType === "APPLY_HARD_GATES") {
