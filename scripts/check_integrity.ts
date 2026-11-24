@@ -208,7 +208,7 @@ async function runIntegrityChecks() {
     const leadsRanked = await reportAggregatorLeadsInRanking(pool, ctx.workspaceId);
     if (leadsRanked.count > 0) {
       console.error(
-        `Found ${leadsRanked.count} ranked job(s) backed only by an aggregator lead; first ids: ${leadsRanked.sample.slice(0, 5).join(", ")}`,
+        `Found ${leadsRanked.count} ranked job(s) backed only by an aggregator lead; first ids: ${leadsRanked.sample.join(", ")}`,
       );
       errors++;
     } else {

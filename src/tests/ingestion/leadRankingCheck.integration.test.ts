@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
-import { reportAggregatorLeadsInRanking } from "../../ingestion/leadRankingCheck.js";
+import { LEAD_RANKING_SAMPLE_SIZE, reportAggregatorLeadsInRanking } from "../../ingestion/leadRankingCheck.js";
 import { archiveJobsAsPostingNotConfirmable } from "../../services/jobArchive.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
@@ -27,16 +27,17 @@ function db(): pg.PoolClient {
 
 interface Seed {
   readonly outcome: string | null;
+  readonly eligibility?: string | null;
+  readonly fixture?: boolean;
   readonly observations: readonly { readonly source: string; readonly url: string; readonly payload?: Record<string, unknown> }[];
   readonly archived?: boolean;
 }
 
-async function seed(label: string, input: Seed): Promise<string> {
-  const workspaceId = context!.workspaceId;
+async function seed(workspaceId: string, label: string, input: Seed): Promise<string> {
   const canonical = await db().query<{ id: string }>(
-    `INSERT INTO canonical_jobs (workspace_id, company_name, normalized_title, canonical_url, processing_state, processing_status, recommendation_outcome)
-     VALUES ($1, 'Lead Rank Fixture Co', $2, $3, 'MATCHED', 'MATCHED', $4) RETURNING id`,
-    [workspaceId, label, `https://example.test/rank/${randomUUID()}`, input.outcome],
+    `INSERT INTO canonical_jobs (workspace_id, company_name, normalized_title, canonical_url, processing_state, processing_status, recommendation_outcome, recommendation_eligibility, is_test_fixture)
+     VALUES ($1, 'Lead Rank Fixture Co', $2, $3, 'MATCHED', 'MATCHED', $4, $5, $6) RETURNING id`,
+    [workspaceId, label, `https://example.test/rank/${randomUUID()}`, input.outcome, input.eligibility ?? null, input.fixture === true],
   );
   const canonicalJobId = canonical.rows[0]!.id;
   const version = await db().query<{ id: string }>(
@@ -62,9 +63,16 @@ async function seed(label: string, input: Seed): Promise<string> {
   return canonicalJobId;
 }
 
-describe.skipIf(skipReal)("no aggregator lead is in any ranking (PostgreSQL)", () => {
-  const ids: Record<string, string> = {};
+async function newWorkspace(): Promise<string> {
+  const key = `lead-rank-${randomUUID()}`;
+  const inserted = await db().query<{ id: string }>(
+    `INSERT INTO workspaces (workspace_key, display_name) VALUES ($1, 'Lead rank') RETURNING id::text`, [key]);
+  return inserted.rows[0]!.id;
+}
 
+const LINKEDIN = "https://www.linkedin.com/jobs/view/4900000101";
+
+describe.skipIf(skipReal)("no aggregator lead is in any ranking (PostgreSQL)", () => {
   beforeAll(async () => {
     pool = new pg.Pool(pgConnectionConfig(databaseUrl));
     client = await pool.connect();
@@ -73,19 +81,6 @@ describe.skipIf(skipReal)("no aggregator lead is in any ranking (PostgreSQL)", (
     await client.query(`SET search_path TO ${schemaName}, public`);
     await runMigrations(client);
     context = await resolveWorkspaceContext(client);
-
-    const linkedin = "https://www.linkedin.com/jobs/view/4900000101";
-    ids.rankedLinkedInLead = await seed("ranked-linkedin-lead", { outcome: "REVIEW", observations: [{ source: "GMAIL_ALERT", url: linkedin }] });
-    ids.rankedMarkedLead = await seed("ranked-marked-lead", { outcome: "PRIORITY", observations: [{ source: "GMAIL_ALERT", url: "https://careers.example.com/x", payload: { lead_kind: "AGGREGATOR_LEAD" } }] });
-    ids.rankedIndeedSubdomain = await seed("ranked-indeed-subdomain", { outcome: "TRACK", observations: [{ source: "GMAIL_ALERT", url: "https://sg.indeed.com/viewjob?jk=abc" }] });
-    ids.unrankedLead = await seed("unranked-lead", { outcome: null, observations: [{ source: "GMAIL_ALERT", url: linkedin }] });
-    ids.employerResolved = await seed("employer-resolved", { outcome: "REVIEW", observations: [
-      { source: "GMAIL_ALERT", url: linkedin }, { source: "GREENHOUSE", url: "https://boards.greenhouse.io/x/jobs/1" }] });
-    ids.ownerSaved = await seed("owner-saved", { outcome: "REVIEW", observations: [
-      { source: "GMAIL_ALERT", url: linkedin }, { source: "LINKEDIN_SAVED", url: linkedin }] });
-    ids.companyAlert = await seed("company-alert", { outcome: "REVIEW", observations: [{ source: "GMAIL_ALERT", url: "https://careers.example.com/jobs/4900000102" }] });
-    ids.lookalikeHost = await seed("lookalike-host", { outcome: "REVIEW", observations: [{ source: "GMAIL_ALERT", url: "https://notlinkedin.com/jobs/view/1" }] });
-    ids.archivedLead = await seed("archived-lead", { outcome: "REVIEW", observations: [{ source: "GMAIL_ALERT", url: linkedin }], archived: true });
   }, 180_000);
 
   afterAll(async () => {
@@ -97,17 +92,55 @@ describe.skipIf(skipReal)("no aggregator lead is in any ranking (PostgreSQL)", (
     await pool?.end();
   });
 
-  it("reports exactly the ranked jobs backed only by an aggregator lead", async () => {
-    const report = await reportAggregatorLeadsInRanking(db(), context!.workspaceId);
-    expect(report.count).toBe(3);
-    expect([...report.sample].sort()).toEqual([ids.rankedLinkedInLead, ids.rankedMarkedLead, ids.rankedIndeedSubdomain].sort());
+  it("reports exactly the ranked jobs backed only by an aggregator lead or a board feed (each test has its own workspace)", async () => {
+    const ws = await newWorkspace();
+    const violations = [
+      await seed(ws, "ranked-linkedin-lead", { outcome: "REVIEW", observations: [{ source: "GMAIL_ALERT", url: LINKEDIN }] }),
+      await seed(ws, "ranked-marked-lead", { outcome: "PRIORITY", observations: [{ source: "GMAIL_ALERT", url: "https://careers.example.com/x", payload: { lead_kind: "AGGREGATOR_LEAD" } }] }),
+      await seed(ws, "ranked-indeed-subdomain", { outcome: "TRACK", observations: [{ source: "GMAIL_ALERT", url: "https://sg.indeed.com/viewjob?jk=abc" }] }),
+      // A board feed is not the employer's own posting, so an alert plus a feed observation is still a lead.
+      await seed(ws, "ranked-lead-plus-board-feed", { outcome: "REVIEW", observations: [
+        { source: "GMAIL_ALERT", url: LINKEDIN }, { source: "HIMALAYAS", url: "https://himalayas.app/jobs/x" }] }),
+    ];
+    // Not violations.
+    await seed(ws, "verify-eligibility-no-outcome", { outcome: null, eligibility: "VERIFY", observations: [{ source: "GMAIL_ALERT", url: LINKEDIN }] });
+    await seed(ws, "eligible-no-outcome", { outcome: null, eligibility: "ELIGIBLE", observations: [{ source: "GMAIL_ALERT", url: LINKEDIN }] });
+    await seed(ws, "ineligible-skip-near-miss", { outcome: "SKIP", eligibility: "INELIGIBLE", observations: [{ source: "GMAIL_ALERT", url: LINKEDIN }] });
+    await seed(ws, "unranked-lead", { outcome: null, observations: [{ source: "GMAIL_ALERT", url: LINKEDIN }] });
+    await seed(ws, "employer-resolved", { outcome: "REVIEW", observations: [
+      { source: "GMAIL_ALERT", url: LINKEDIN }, { source: "GREENHOUSE", url: "https://boards.greenhouse.io/x/jobs/1" }] });
+    await seed(ws, "owner-saved-linkedin", { outcome: "REVIEW", observations: [
+      { source: "GMAIL_ALERT", url: LINKEDIN }, { source: "LINKEDIN_SAVED", url: LINKEDIN }] });
+    await seed(ws, "owner-saved-mcf", { outcome: "REVIEW", observations: [
+      { source: "GMAIL_ALERT", url: "https://www.mycareersfuture.gov.sg/job/a/b" }, { source: "MCF_SAVED", url: "https://www.mycareersfuture.gov.sg/job/a/b" }] });
+    await seed(ws, "owner-manual", { outcome: "REVIEW", observations: [
+      { source: "GMAIL_ALERT", url: LINKEDIN }, { source: "MANUAL_IMPORT", url: "https://example.test/manual" }] });
+    await seed(ws, "company-alert", { outcome: "REVIEW", observations: [{ source: "GMAIL_ALERT", url: "https://careers.example.com/jobs/4900000102" }] });
+    await seed(ws, "lookalike-host", { outcome: "REVIEW", observations: [{ source: "GMAIL_ALERT", url: "https://notlinkedin.com/jobs/view/1" }] });
+    await seed(ws, "archived-lead", { outcome: "REVIEW", observations: [{ source: "GMAIL_ALERT", url: LINKEDIN }], archived: true });
+    await seed(ws, "test-fixture-lead", { outcome: "REVIEW", fixture: true, observations: [{ source: "GMAIL_ALERT", url: LINKEDIN }] });
+
+    const report = await reportAggregatorLeadsInRanking(db(), ws);
+    expect(report.count).toBe(4);
+    expect(report.sample.length).toBeLessThanOrEqual(LEAD_RANKING_SAMPLE_SIZE);
+    expect([...report.sample].sort()).toEqual([...violations].sort());
   });
 
   it("is zero once the employer's posting is resolved or the lead is no longer ranked", async () => {
-    for (const key of ["rankedLinkedInLead", "rankedMarkedLead", "rankedIndeedSubdomain"]) {
-      await db().query(`UPDATE canonical_jobs SET recommendation_outcome = NULL, recommendation_eligibility = NULL WHERE id = $1`, [ids[key]]);
+    const ws = await newWorkspace();
+    const lead = await seed(ws, "ranked-lead", { outcome: "REVIEW", observations: [{ source: "GMAIL_ALERT", url: LINKEDIN }] });
+    expect((await reportAggregatorLeadsInRanking(db(), ws)).count).toBe(1);
+    await db().query(`UPDATE canonical_jobs SET recommendation_outcome = NULL WHERE id = $1`, [lead]);
+    expect(await reportAggregatorLeadsInRanking(db(), ws)).toEqual({ count: 0, sample: [] });
+  });
+
+  it("caps the sample at the documented size", async () => {
+    const ws = await newWorkspace();
+    for (let index = 0; index < LEAD_RANKING_SAMPLE_SIZE + 2; index += 1) {
+      await seed(ws, `many-${index}`, { outcome: "REVIEW", observations: [{ source: "GMAIL_ALERT", url: LINKEDIN }] });
     }
-    const report = await reportAggregatorLeadsInRanking(db(), context!.workspaceId);
-    expect(report).toEqual({ count: 0, sample: [] });
+    const report = await reportAggregatorLeadsInRanking(db(), ws);
+    expect(report.count).toBe(LEAD_RANKING_SAMPLE_SIZE + 2);
+    expect(report.sample).toHaveLength(LEAD_RANKING_SAMPLE_SIZE);
   });
 });
