@@ -325,6 +325,10 @@ export async function applyRepair(
                recommendation_coverage_score = NULL,
                recommendation_evidence_completeness = NULL,
                recommendation_decided_at = NULL,
+               recommendation_score_policy = NULL,
+               recommendation_degree_asked_for = NULL,
+               recommendation_role_signals = '[]'::jsonb,
+               recommendation_evidence_confidence = NULL,
                updated_at = NOW()
            WHERE workspace_id = $1 AND id = $2`,
           [context.workspaceId, candidate.canonical_job_id, nextState]

@@ -49,6 +49,7 @@ import {
   pipelineTaskTargetKey,
 } from "./pipelineWorkerLanes.js";
 import { scopeSeedQuery } from "./seedQueryScope.js";
+import { deciderVersionReassessmentReason, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import {
   pipelineTaskStageVersion,
   reconcileStalePendingPipelineTasks,
@@ -1609,7 +1610,8 @@ export async function seedRecoverablePipelineTasks(
               c.latest_deterministic_decision_id AS deterministic_decision_id,
               active_profile.id AS profile_version_id,
               TRUE AS repair_existing_state,
-              (${readinessRefreshPredicate} AND c.recommendation_outcome IS NOT NULL) AS readiness_reassessment_required
+              (${readinessRefreshPredicate} AND c.recommendation_outcome IS NOT NULL) AS readiness_reassessment_required,
+              (${deciderVersionRefreshSql("c", { includeTestFixtures })} AND c.recommendation_outcome IS NOT NULL) AS decider_reassessment_required
        FROM canonical_jobs c
        LEFT JOIN LATERAL (
          SELECT pv.id
@@ -1633,11 +1635,13 @@ export async function seedRecoverablePipelineTasks(
              'MATCHED', 'QUEUED_FOR_AI', 'NEEDS_MANUAL_REVIEW'
            )
            OR ${readinessRefreshPredicate}
+           OR ${deciderVersionRefreshSql("c", { includeTestFixtures })}
          )
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
          AND (
            c.recommendation_outcome IS NULL
            OR ${readinessRefreshPredicate}
+           OR ${deciderVersionRefreshSql("c", { includeTestFixtures })}
          )
          AND (
            COALESCE(c.processing_state, c.processing_status) IN (
@@ -1677,9 +1681,13 @@ export async function seedRecoverablePipelineTasks(
           deterministic_decision_id: row.deterministic_decision_id ?? null,
           ...(row.profile_version_id ? { profile_version_id: row.profile_version_id } : {}),
           ...(row.repair_existing_state === true ? { repair_existing_state: true } : {}),
-          ...(row.readiness_reassessment_required === true
-            ? { reprocess_existing_state: true, reassessment_reason: "APPLICATION_READINESS_REFRESH" }
-            : {}),
+          // A decider version change wins over a readiness refresh: its reason carries the version, so the task key is new
+          // once per version (existing tasks of that version are not inserted again).
+          ...(row.decider_reassessment_required === true
+            ? { reprocess_existing_state: true, reassessment_reason: deciderVersionReassessmentReason() }
+            : row.readiness_reassessment_required === true
+              ? { reprocess_existing_state: true, reassessment_reason: "APPLICATION_READINESS_REFRESH" }
+              : {}),
         },
       }),
       enabledTypes,

@@ -294,7 +294,7 @@ describe("application ranking materializer", () => {
 
   it("persists an incomplete rank but never marks it Top 10 when a required deterministic signal is missing", async () => {
     const { pool, calls } = createPool([
-      currentApplyNowRow({ deterministic_match_score: null }),
+      currentApplyNowRow({ recommendation_requirement_score: null }), // the raw score (80) is present: only the stored adjusted score counts
     ]);
 
     const result = await materializeApplicationRankings(pool, "workspace-1");
@@ -303,6 +303,14 @@ describe("application ranking materializer", () => {
     expect(result.incompleteRequiredInputs).toBe(1);
     expect(insert?.params?.[22]).toBe(false);
     expect(insert?.params?.[9]).toBeNull();
+  });
+
+  it("treats a stored adjusted score outside the 0-1 fraction as missing, never as a percent", async () => {
+    const { pool, calls } = createPool([currentApplyNowRow({ recommendation_requirement_score: 80 })]);
+    const result = await materializeApplicationRankings(pool, "workspace-1");
+    const insert = calls.find((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"));
+    expect(result.incompleteRequiredInputs).toBe(1);
+    expect(insert?.params?.[22]).toBe(false);
   });
 
   it("persists a ranking snapshot with Top 10 disabled when an optional signal is unknown", async () => {
