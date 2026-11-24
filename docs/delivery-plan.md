@@ -44,7 +44,11 @@ Not started this round:
    | `src/ingestion/`, `scripts/run_adapters.ts`, `scripts/parse_emails.ts` | W4 |
    | `src/services/agent.ts`, `src/services/llmFallback.ts`, `src/services/modelCallResilience.ts` | W5 |
    | `src/security/`, `src/reporting/` | W6 |
-   | `package.json`, `package-lock.json`, `.github/workflows/` | Orchestrator only |
+   | `scripts/reconcile_pipeline.ts`, `scripts/check_integrity.ts`, `src/tasks/completedWithoutResult.ts`, and the zero-check modules once merged (the integrity zero-check and repair modules in `src/tasks/`) | W10 (the zero-check stream; it took these over from W1 and W7) |
+| `src/tasks/availabilityRecheck.ts`, `src/tasks/pipelineTaskCurrentness.ts`, `src/services/jobArchive.ts` | W1 stream (carried by W10 while W1 has no budget) |
+| `src/architecture/boundary-baseline.json`, `docs/architecture.md` | W5 |
+| `.agents/DATA-FLOW-CONTRACT.md` | Append-only for every stream: add your own row, never edit another stream's row; on a conflict keep both sides |
+| `package.json`, `package-lock.json`, `.github/workflows/` | Orchestrator only |
 
 2. **Reserved migration numbers.** The latest migration on `main` is 120 (118 prompt identity columns, 119 availability re-check state, 120 awaiting-content read model). 115 to 117 are unused and stay unused (see `migrations/README.md`). The next free number is 121, reserved for W3's adjusted-score read model. A stream that needs a number asks the orchestrator; CI rejects any pending number at or below the highest applied one.
 3. **One database copy per stream.** Each stream rehearses on its own Neon branch, named `replay-<stream>`. Two streams never write to the same copy. No stream reads or writes production.
