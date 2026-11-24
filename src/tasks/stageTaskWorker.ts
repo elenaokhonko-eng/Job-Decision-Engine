@@ -2841,6 +2841,7 @@ async function executeStageTask(
   budgetRunId: string,
   onSuccessorTaskCreated: () => void,
   onTaskRerouted: () => void,
+  onStampOnly: () => void = () => undefined,
 ): Promise<string | void> {
   if (taskType === "RECHECK_AVAILABILITY") {
     // The read result (verdict, counters, next read) is recorded by the task itself; it has no successor stage.
@@ -3168,7 +3169,9 @@ async function executeStageTask(
       throw new Error(`Hard gate failed for job_version_id=${jobVersionId}.`);
     }
     if (versionRefresh && (summary.stamped ?? 0) > 0) {
-      // Stamp-only re-gate: the job keeps its state and its downstream work. Nothing to enqueue and nothing to verify.
+      // Stamp-only re-gate: the job keeps its state and its downstream work. Nothing to enqueue and nothing to verify; the
+      // after-complete successor logic is skipped too (it would enqueue PUBLISH_EMBEDDING / DECIDE_RECOMMENDATION from the state).
+      onStampOnly();
       return;
     }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
@@ -3521,6 +3524,8 @@ async function executeStageTask(
 interface PipelineTaskRunMetrics {
   successorTasksCreated: number;
   rerouted: boolean;
+  /** A version-refresh gate stamp: the task completes without any successor enqueue. */
+  stampOnly?: boolean;
 }
 
 async function processClaimedTask(
@@ -3623,11 +3628,12 @@ async function processClaimedTask(
       options.budgetRunId,
       () => { metrics.successorTasksCreated += 1; },
       () => { metrics.rerouted = true; },
+      () => { metrics.stampOnly = true; },
     );
     await completePipelineTaskAndRun(task, clientOrPool, {
       context: ctx,
       afterComplete: async (transactionClient) => {
-        if (!metrics.rerouted) {
+        if (!metrics.rerouted && !metrics.stampOnly) {
           metrics.successorTasksCreated += await maybeEnqueueAfterTask(
             taskType,
             task,

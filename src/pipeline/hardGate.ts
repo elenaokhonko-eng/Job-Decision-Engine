@@ -908,11 +908,13 @@ export function evaluateHardGatesForJob(input: {
  * gate-owned canonical columns from the new result) and workplace_type (the work-mode enrichment writes it before the gate runs,
  * from the posting text; it is not downstream state and is not part of the gate outcome).
  */
-type GateRefreshKind = "STAMP" | "CLEAR_FLAG" | "RESET";
+type GateRefreshKind = "STAMP" | "CLEAR_FLAG" | "KEEP_FLAG" | "RESET";
 interface GateRefreshClassification {
   kind: GateRefreshKind;
   storedFacts: Record<string, unknown> | null;
   storedQuotes: string[];
+  /** Codes of the stored audit row, in stored order: the canonical rejection_reason is gate-owned only while it equals their join. */
+  storedCodes: string[];
 }
 
 async function classifyGateRefresh(
@@ -934,16 +936,21 @@ async function classifyGateRefresh(
     [workspaceId, jobId, jobVersionId],
   );
   const stored = rows[0];
-  const reset: GateRefreshClassification = { kind: "RESET", storedFacts: null, storedQuotes: [] };
+  const reset: GateRefreshClassification = { kind: "RESET", storedFacts: null, storedQuotes: [], storedCodes: [] };
   if (!stored || stored.gate_decision !== stored.decision) return reset;
   const storedFacts = (stored.workability_facts ?? null) as Record<string, unknown> | null;
   const storedQuotes = Array.isArray(stored.gate_evidence_quotes) ? stored.gate_evidence_quotes.map(String) : [];
+  const storedCodes = Array.isArray(stored.rejection_codes) ? stored.rejection_codes.map(String) : [];
   const codes = (value: unknown): string => (Array.isArray(value) ? [...new Set(value.map(String))].sort().join("|") : "");
   if (stored.decision === result.status && codes(stored.rejection_codes) === codes(result.rejection_codes)) {
-    return { kind: "STAMP", storedFacts, storedQuotes };
+    return { kind: "STAMP", storedFacts, storedQuotes, storedCodes };
   }
   if (stored.decision === "NEEDS_VERIFICATION" && result.status === "PASS" && storedFacts && storedFacts.facts_conflict) {
-    return { kind: "CLEAR_FLAG", storedFacts, storedQuotes };
+    // The gate reads the posting text, not the availability re-check or feed that set most flags, so a passing re-gate says nothing
+    // about their conflict: only a flag whose evidence came from the posting text is cleared; any other flag stays until a new
+    // re-check or a human resolves it (the audit row is re-stamped with the stored decision).
+    const source = (storedFacts.facts_conflict as { source?: unknown }).source;
+    return { kind: source === "POSTING_TEXT" ? "CLEAR_FLAG" : "KEEP_FLAG", storedFacts, storedQuotes, storedCodes };
   }
   return reset;
 }
@@ -1258,7 +1265,7 @@ export async function runHardGates(
         // Version refresh with an unchanged outcome: stamp the new gate_version in the audit row only.
         const refresh: GateRefreshClassification = options?.versionRefresh === true
           ? await classifyGateRefresh(client as any, ctx.workspaceId, job.id, job.job_version_id, gateResult)
-          : { kind: "RESET", storedFacts: null, storedQuotes: [] };
+          : { kind: "RESET", storedFacts: null, storedQuotes: [], storedCodes: [] };
         const stampOnly = refresh.kind !== "RESET";
 
         // Update canonical job with gate outcome + structured workability facts + evidence
@@ -1267,16 +1274,24 @@ export async function runHardGates(
         const keepFlagConflict = refresh.kind === "STAMP" && refresh.storedFacts?.facts_conflict
           ? { facts_conflict: refresh.storedFacts.facts_conflict }
           : {};
-        const stampFacts = { ...gateResult.workability_facts, ...keepFlagConflict };
-        const stampQuotes = refresh.kind === "STAMP" && refresh.storedFacts?.facts_conflict
-          ? [...new Set([...refresh.storedQuotes, ...gateResult.evidence_quotes])]
-          : gateResult.evidence_quotes;
-        const canonicalUpdate = stampOnly
+        const keepFlag = refresh.kind === "KEEP_FLAG";
+        const stampFacts = keepFlag ? (refresh.storedFacts ?? {}) : { ...gateResult.workability_facts, ...keepFlagConflict };
+        const stampQuotes = keepFlag
+          ? refresh.storedQuotes
+          : refresh.kind === "STAMP" && refresh.storedFacts?.facts_conflict
+            ? [...new Set([...refresh.storedQuotes, ...gateResult.evidence_quotes])]
+            : gateResult.evidence_quotes;
+        const canonicalUpdate = keepFlag
+          ? { rowCount: 1 }
+          : stampOnly
           ? await client.query(
             `UPDATE canonical_jobs
                 SET gate_evidence_quotes = $3::jsonb,
                     workability_facts = $4::jsonb,
-                    rejection_reason = $5,
+                    -- rejection_reason also carries operational history (an exhausted embedding repair, an engine error): the stamp
+                    -- replaces it only while it still is what the gate itself wrote (empty, or the stored audit codes).
+                    rejection_reason = CASE WHEN rejection_reason IS NULL OR rejection_reason = '' OR rejection_reason = $7 THEN $5 ELSE rejection_reason END,
+                    workplace_type = CASE WHEN $8::varchar = 'PASS' AND ($4::jsonb->>'workplace_type') = 'ASSUMED_HYBRID' THEN 'ASSUMED_HYBRID' ELSE workplace_type END,
                     gate_decision = CASE WHEN $6::boolean THEN 'PASS' ELSE gate_decision END,
                     processing_state = CASE WHEN $6::boolean AND COALESCE(processing_state, processing_status) = 'NEEDS_VERIFICATION' THEN 'PREQUALIFIED' ELSE processing_state END,
                     processing_status = CASE WHEN $6::boolean AND COALESCE(processing_state, processing_status) = 'NEEDS_VERIFICATION' THEN 'PREQUALIFIED' ELSE processing_status END,
@@ -1286,6 +1301,8 @@ export async function runHardGates(
               ctx.workspaceId, job.id, JSON.stringify(stampQuotes), JSON.stringify(stampFacts),
               gateResult.rejection_codes.length > 0 ? gateResult.rejection_codes.join(", ") : null,
               refresh.kind === "CLEAR_FLAG",
+              refresh.storedCodes.join(", "),
+              gateResult.status,
             ],
           )
           : await client.query(
@@ -1348,8 +1365,8 @@ export async function runHardGates(
           pipeline_run_id: pipelineRunId,
           gate_version: GATE_VERSION,
           workability_policy_hash: policyResolution.policyHash,
-          status: gateResult.status,
-          rejection_codes: gateResult.rejection_codes,
+          status: keepFlag ? "NEEDS_VERIFICATION" : gateResult.status,
+          rejection_codes: keepFlag ? refresh.storedCodes : gateResult.rejection_codes,
           evidence_quotes: stampOnly ? stampQuotes : gateResult.evidence_quotes,
           workability_facts: stampOnly ? stampFacts : gateResult.workability_facts,
           evaluated_at: new Date().toISOString(),

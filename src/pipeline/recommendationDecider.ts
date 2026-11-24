@@ -368,6 +368,7 @@ export async function runRecommendationDecider(
       canonical_latest_job_version_id: string | null;
       processing_state: string | null;
       gate_decision: string | null;
+      rejection_reason: string | null;
       deterministic_match_score: any;
       deterministic_match_coverage: any;
       workplace_type: string | null;
@@ -425,6 +426,7 @@ export async function runRecommendationDecider(
         c.latest_job_version_id AS canonical_latest_job_version_id,
         COALESCE(c.processing_state, c.processing_status) AS processing_state,
         c.gate_decision,
+        c.rejection_reason,
         c.deterministic_match_score,
         c.deterministic_match_coverage,
         c.workplace_type,
@@ -1163,6 +1165,12 @@ export async function runRecommendationDecider(
             evidence_confidence_min_requirements: MIN_CONFIRMED_REQUIREMENTS,
             role_downrank_assessment_hash: roleShapeFingerprint(shape),
             ...(confirmedFactsHash ? { confirmed_job_facts_hash: confirmedFactsHash } : {}),
+            // A gate outcome other than a plain PASS is part of the decision context: a re-gate that flips PASS and NEEDS_VERIFICATION
+            // (or changes the codes) on an identical match run must write a new decision row and a new DECIDE task key, or the old
+            // decision would be returned by the conflict clause. PASS adds nothing, so existing fingerprints do not move.
+            ...(normalizedGateDecision && normalizedGateDecision !== "PASS"
+              ? { gate_outcome_hash: sha256Json({ decision: normalizedGateDecision, reason: job.rejection_reason ?? null }) }
+              : {}),
           },
         });
 

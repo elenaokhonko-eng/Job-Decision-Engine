@@ -297,7 +297,7 @@ describe.skipIf(skipReal)("hard gate: version-refresh stamp and flagNeedsVerific
     it("a flag cleared by a passing re-gate is stamped, not reset: an EVALUATED job keeps its state and downstream", async () => {
       const { jobId } = await seedJob("EVALUATED");
       await db().query(`UPDATE canonical_jobs SET primary_lane = 'CORE_AI_DATA', recommendation_outcome = 'REVIEW', recommendation_requirement_score = 0.6 WHERE id = $1`, [jobId]);
-      await flagNeedsVerification(db(), { workspaceId: ctx().workspaceId, jobId, reasonCode: "GATE_UNKNOWN_WORK_MODE", evidence: { quote: "The page says hybrid." } });
+      await flagNeedsVerification(db(), { workspaceId: ctx().workspaceId, jobId, reasonCode: "GATE_UNKNOWN_WORK_MODE", evidence: { quote: "The page says hybrid.", source: "POSTING_TEXT" } });
       expect((await db().query(`SELECT gate_decision FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0].gate_decision).toBe("NEEDS_VERIFICATION");
       const summary = await gate(jobId, { reprocess: true, versionRefresh: true });
       expect(summary.stamped).toBe(1);
@@ -396,6 +396,82 @@ describe.skipIf(skipReal)("hard gate: version-refresh stamp and flagNeedsVerific
       const successors = await db().query(`SELECT task_type FROM pipeline_tasks WHERE payload->>'job_version_id' = $1 AND id <> $2`, [versionId, task.taskId]);
       expect(successors.rows).toEqual([]);
       expect(await auditRows(jobId)).toHaveLength(2);
+    });
+  });
+
+  describe("review fixes: operational history, successors, feed-derived flags", () => {
+    async function refreshViaHandler(jobId: string, versionId: string): Promise<{ otherTasks: string[]; run: Record<string, unknown> }> {
+      const task = await enqueuePipelineTask({
+        taskType: "APPLY_HARD_GATES",
+        taskKey: `APPLY_HARD_GATES:${versionId}:refresh-${randomUUID()}`,
+        payload: { canonical_job_id: jobId, job_version_id: versionId, version_refresh: true },
+      }, db(), { context: ctx() });
+      const run = await runPipelineStageTaskWorker(db(), { context: ctx(), seed: false, reconcileStalePending: false, taskTypes: ["APPLY_HARD_GATES"], maxTasks: 1, heartbeatSeconds: 0 });
+      const others = await db().query(`SELECT task_type FROM pipeline_tasks WHERE payload->>'job_version_id' = $1 AND id <> $2`, [versionId, task.taskId]);
+      return { otherTasks: others.rows.map((row) => row.task_type), run: run as unknown as Record<string, unknown> };
+    }
+
+    it.each([
+      ["NEEDS_MANUAL_REVIEW", "REQUIREMENT_EMBEDDING_REPAIR_EXHAUSTED: 3 requirements without an embedding"],
+      ["NEEDS_MANUAL_REVIEW", "ENGINE_ERROR: the matcher failed"],
+    ])("a stamp keeps the operational rejection_reason of a %s job: %s", async (state, reason) => {
+      const { jobId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId] });
+      await db().query(`UPDATE canonical_jobs SET processing_state = $2, processing_status = $2, rejection_reason = $3 WHERE id = $1`, [jobId, state, reason]);
+      const summary = await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId], reprocess: true, versionRefresh: true });
+      expect(summary.stamped).toBe(1);
+      const job = (await db().query(`SELECT rejection_reason, processing_state FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
+      expect(job).toEqual({ rejection_reason: reason, processing_state: state });
+    });
+
+    it("a stamp still refreshes a rejection_reason that is the gate's own (the stored audit codes)", async () => {
+      const { jobId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await db().query(`UPDATE canonical_jobs SET workplace_type = 'ONSITE', location = 'London' WHERE id = $1`, [jobId]);
+      await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId] });
+      const before = (await db().query(`SELECT rejection_reason FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0].rejection_reason;
+      expect(before).toBeTruthy();
+      expect((await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId], reprocess: true, versionRefresh: true })).stamped).toBe(1);
+      expect((await db().query(`SELECT rejection_reason FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0].rejection_reason).toBe(before);
+    });
+
+    it("the handler enqueues nothing for a stamped PREQUALIFIED job", async () => {
+      const { jobId, versionId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId] });
+      expect((await db().query(`SELECT processing_state FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0].processing_state).toBe("PREQUALIFIED");
+      const { otherTasks, run } = await refreshViaHandler(jobId, versionId);
+      expect(run).toMatchObject({ completed: 1, failed: 0 });
+      expect(otherTasks).toEqual([]);
+    });
+
+    it("the handler enqueues nothing for a stamped HARD_REJECTED job", async () => {
+      const { jobId, versionId } = await seedJob("RAW_STAGED", { gateDecision: null });
+      await db().query(`UPDATE canonical_jobs SET workplace_type = 'ONSITE', location = 'London' WHERE id = $1`, [jobId]);
+      await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId] });
+      expect((await db().query(`SELECT processing_state FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0].processing_state).toBe("HARD_REJECTED");
+      const { otherTasks, run } = await refreshViaHandler(jobId, versionId);
+      expect(run).toMatchObject({ completed: 1, failed: 0 });
+      expect(otherTasks).toEqual([]);
+    });
+
+    it.each(["QUEUED_FOR_AI", "EVALUATED"])("the handler enqueues nothing for a flagged NEEDS_VERIFICATION job in %s, and the feed-derived flag is kept", async (state) => {
+      const { jobId, versionId } = await seedJob(state);
+      await flagNeedsVerification(db(), { workspaceId: ctx().workspaceId, jobId, reasonCode: "GATE_UNKNOWN_WORK_MODE", evidence: { quote: "The page says hybrid.", source: "RECHECK_AVAILABILITY" } });
+      const { otherTasks, run } = await refreshViaHandler(jobId, versionId);
+      expect(run).toMatchObject({ completed: 1, failed: 0 });
+      expect(otherTasks).toEqual([]);
+      const job = (await db().query(`SELECT gate_decision, processing_state FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
+      expect(job).toEqual({ gate_decision: "NEEDS_VERIFICATION", processing_state: state });
+      const rows = await auditRows(jobId);
+      expect(rows[rows.length - 1]).toMatchObject({ decision: "NEEDS_VERIFICATION", gate_version: GATE_VERSION });
+    });
+
+    it("a flag whose evidence came from the posting text IS cleared by a passing refresh; the job returns to PREQUALIFIED and is left for the PREQUALIFIED seed", async () => {
+      const { jobId, versionId } = await seedJob("NEEDS_VERIFICATION", { gateDecision: "NEEDS_VERIFICATION" });
+      await flagNeedsVerification(db(), { workspaceId: ctx().workspaceId, jobId, reasonCode: "GATE_UNKNOWN_WORK_MODE", evidence: { quote: "The posting says hybrid.", source: "POSTING_TEXT" } });
+      const { otherTasks } = await refreshViaHandler(jobId, versionId);
+      expect(otherTasks).toEqual([]);
+      const job = (await db().query(`SELECT gate_decision, processing_state FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
+      expect(job).toEqual({ gate_decision: "PASS", processing_state: "PREQUALIFIED" });
     });
   });
 });
