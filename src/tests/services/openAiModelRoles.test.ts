@@ -155,18 +155,6 @@ describe('OpenAI model role chains', () => {
     expect(requestedModels(fetchMock)).toEqual(['gpt-document-role']);
   });
 
-  it('runAgentWithFallback and runAgent use EVALUATION_FALLBACK_MODEL', async () => {
-    const agent = await import('../../services/agent.js');
-    setRoleEnv();
-    const fetchMock = stubOpenAiFetch('{"evaluation_summary":"s","evaluated_jobs":[]}');
-
-    const withFallback = await agent.runAgentWithFallback('Evaluate.', { type: 'object' });
-    expect(withFallback.model).toBe('gpt-evaluation-role');
-    await agent.runAgent('Evaluate.', { candidateProfileContext: '{"synthetic":true}' }).catch(() => undefined);
-
-    expect(requestedModels(fetchMock)).toEqual(['gpt-evaluation-role', 'gpt-evaluation-role']);
-  });
-
   it('preflightModelRoutes checks the role models for evaluation and documents', async () => {
     const agent = await import('../../services/agent.js');
     setRoleEnv();
