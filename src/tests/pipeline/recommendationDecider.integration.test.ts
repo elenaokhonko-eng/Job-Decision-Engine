@@ -373,6 +373,10 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     expect(stored.rows[0].recommendation_degree_asked_for).toBe(quote);
     expect(stored.rows[0].recommendation_role_signals).toEqual([expect.objectContaining({ code: "DEGREE_GAP_FLAGGED", penalty: 0.06, quote })]);
     expect(stored.rows[0].recommendation_evidence_confidence).toBe("NORMAL");
+
+    // decider_version is written in the INSERT of the decision (rows are immutable), outside decision_hash.
+    const stamped = await q(`SELECT decider_version FROM deterministic_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [JOB_ID]);
+    expect(stamped.rows[0].decider_version).toBe("recommendation_decider_v1");
     const check = readiness.checks.find((entry: { key: string }) => entry.key === "MANDATORY_QUALIFICATIONS");
     expect(check.status).toBe("MET");
     expect(check.reason_code).not.toBe("DEGREE_GAP_FLAGGED");

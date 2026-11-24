@@ -6,6 +6,7 @@ import dotenv from "dotenv";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { buildPipelineTaskContextFingerprint } from "../../pipeline/artifactContext.js";
+import { DECIDER_VERSION, deciderVersionReassessmentReason } from "../../pipeline/deciderVersion.js";
 import { GATE_VERSION } from "../../contracts/version.js";
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
 import { recordPipelineWorkerProgressSnapshot } from "../../tasks/pipelineWorkerProgress.js";
@@ -1233,4 +1234,81 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       [currentDecisionTaskId, "COMPLETED"],
     ]));
   }, 20000);
+
+  describe("decider version (migration 121)", () => {
+    async function decidedJob(deciderVersion: string | null): Promise<{ canonicalJobId: string; versionId: string }> {
+      const database = getClient();
+      const workspaceId = getContext().workspaceId;
+      const versions = await insertJobVersions();
+      await database.query(
+        `UPDATE canonical_jobs
+         SET processing_state = 'NEEDS_VERIFICATION', processing_status = 'NEEDS_VERIFICATION', gate_decision = 'PASS',
+             recommendation_eligibility = 'ELIGIBLE', recommendation_outcome = 'REVIEW'
+         WHERE workspace_id = $1 AND id = $2`,
+        [workspaceId, versions.canonicalJobId],
+      );
+      const snapshot = await database.query<{ id: string }>(
+        `INSERT INTO workspace_policy_snapshots (workspace_id, snapshot_hash, resolved_snapshot) VALUES ($1, $2, '{}'::jsonb) RETURNING id`,
+        [workspaceId, `snap-${versions.canonicalJobId}`],
+      );
+      const decision = await database.query<{ id: string }>(
+        `INSERT INTO deterministic_decisions (workspace_id, canonical_job_id, job_version_id, policy_snapshot_id, decision_hash, decision_json,
+                                              recommendation_eligibility, recommendation_outcome, decider_version)
+         VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, 'ELIGIBLE', 'REVIEW', $6) RETURNING id`,
+        [workspaceId, versions.canonicalJobId, versions.latestVersionId, snapshot.rows[0].id, `decision-${versions.canonicalJobId}`, deciderVersion],
+      );
+      await database.query(`UPDATE canonical_jobs SET latest_deterministic_decision_id = $2 WHERE id = $1`, [versions.canonicalJobId, decision.rows[0].id]);
+      return { canonicalJobId: versions.canonicalJobId, versionId: versions.latestVersionId };
+    }
+
+    async function deciderVersionTasks(canonicalJobIds: string[]): Promise<number> {
+      const rows = await getClient().query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM pipeline_tasks
+          WHERE workspace_id = $1 AND task_type = 'DECIDE_RECOMMENDATION'
+            AND payload->>'canonical_job_id' = ANY($2::text[])
+            AND payload->>'reassessment_reason' = $3`,
+        [getContext().workspaceId, canonicalJobIds, deciderVersionReassessmentReason()],
+      );
+      return rows.rows[0]?.n ?? 0;
+    }
+
+    it("same decider version seeds no decider-version task; an older or missing version reopens the job once; a cap bounds a run", async () => {
+      const current = await decidedJob(DECIDER_VERSION);
+      const older = await decidedJob("recommendation_decider_v0");
+      const unstamped = await decidedJob(null);
+      // The seeder takes the oldest jobs first; the current-version job (still picked up for a stale readiness view in this
+      // fixture, with its own reason) goes last so the cap decides between the two mismatched jobs.
+      await getClient().query(`UPDATE canonical_jobs SET updated_at = NOW() + INTERVAL '1 day' WHERE id = $1`, [current.canonicalJobId]);
+      const seedScope = [current.versionId, older.versionId, unstamped.versionId];
+      const ids = [current.canonicalJobId, older.canonicalJobId, unstamped.canonicalJobId];
+
+      // Cap: one job per run.
+      const first = await seedRecoverablePipelineTasks(getClient(), {
+        context: getContext(), taskTypes: ["DECIDE_RECOMMENDATION"], jobVersionIds: seedScope, maxSeedPerType: 1,
+      });
+      expect(await deciderVersionTasks(ids)).toBe(1);
+      expect(first.byType.DECIDE_RECOMMENDATION?.inserted).toBeLessThanOrEqual(1);
+
+      // Uncapped: both mismatched jobs have a task, the current-version job has none, and a repeat adds nothing.
+      await seedRecoverablePipelineTasks(getClient(), {
+        context: getContext(), taskTypes: ["DECIDE_RECOMMENDATION"], jobVersionIds: seedScope, maxSeedPerType: 10,
+      });
+      expect(await deciderVersionTasks([current.canonicalJobId])).toBe(0);
+      expect(await deciderVersionTasks([older.canonicalJobId, unstamped.canonicalJobId])).toBe(2);
+      await seedRecoverablePipelineTasks(getClient(), {
+        context: getContext(), taskTypes: ["DECIDE_RECOMMENDATION"], jobVersionIds: seedScope, maxSeedPerType: 10,
+      });
+      expect(await deciderVersionTasks(ids)).toBe(2);
+    }, 30000);
+
+    it("the stored version is outside decision_hash and the context fingerprint changes only when the version constant does", () => {
+      const base = { workspaceId: "w", taskType: "DECIDE_RECOMMENDATION" as const, payload: { canonical_job_id: "j" } };
+      const sameVersion = buildPipelineTaskContextFingerprint({ ...base, taskVersion: DECIDER_VERSION });
+      expect(buildPipelineTaskContextFingerprint({ ...base, taskVersion: DECIDER_VERSION })).toBe(sameVersion);
+      expect(buildPipelineTaskContextFingerprint({ ...base, taskVersion: "recommendation_decider_v2" })).not.toBe(sameVersion);
+      // decision_hash hashes the decision, readiness and evidence (recommendationDecider.ts); the version is written by a
+      // separate UPDATE of the decider_version column, so it cannot enter that hash.
+      expect(DECIDER_VERSION).toBe("recommendation_decider_v1");
+    });
+  });
 });
