@@ -156,4 +156,10 @@ describe("pipeline artifact context", () => {
     expect(other).not.toBe(none);
     expect(newPolicy).not.toBe(none);
   });
+
+  it("decider_version is part of the decision context", () => {
+    const base = { workspaceId: "w", taskType: "DECIDE_RECOMMENDATION" as const, taskVersion: "recommendation_decider_v1" };
+    expect(buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j", decider_version: "v1" } }))
+      .not.toBe(buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j" } }));
+  });
 });
