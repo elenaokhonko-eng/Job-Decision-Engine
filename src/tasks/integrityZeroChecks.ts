@@ -11,6 +11,7 @@ import { LANE_ROUTER_RULE_VERSION } from "../pipeline/laneRouter.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
 import { routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
 import { ROUTABLE_VERIFICATION_SQL, supersededProfileMatchSql } from "./stageTaskWorker.js";
+import { embeddingSpacePreflight } from "../embeddings/staleSpaces.js";
 import { findTasksCompletedWithoutResult } from "./completedWithoutResult.js";
 
 type Queryable = Pick<pg.PoolClient, "query">;
@@ -222,6 +223,20 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
   return result("stage_result_older_than_rule_version", ids, detail);
 }
 
+/** More than one active non-fallback embedding space (or none while inputs exist): the primary space is ambiguous. */
+export async function activeEmbeddingSpaceNotExactlyOne(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  const preflight = await embeddingSpacePreflight(db, workspaceId);
+  const ids = preflight.violation ? preflight.activeNonFallback.map((row) => row.id) : [];
+  return {
+    ...result("active_embedding_space_not_exactly_one", ids, {
+      active_non_fallback: preflight.activeNonFallback.length,
+      stale: preflight.staleSpaceIds.length,
+      router_equals_matcher: preflight.routerEqualsMatcher ? 1 : 0, // report only, not a failure
+    }),
+    total: preflight.violation ? Math.max(1, preflight.activeNonFallback.length) : 0,
+  };
+}
+
 /**
  * `phase` "pre" is for a run BEFORE a drain: it leaves out the stale-stage check, which is non-zero by design
  * right after a rule-version change until the reopen seeds have drained. The default, "post", is strict
@@ -239,6 +254,7 @@ export async function runZeroChecks(
     await completedTasksWithoutResult(db, workspaceId),
     await routableVerificationJobsStranded(db, workspaceId),
     await protectedJobsAutoArchived(db, workspaceId),
+    await activeEmbeddingSpaceNotExactlyOne(db, workspaceId),
     ...stale,
   ];
 }
