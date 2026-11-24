@@ -14,10 +14,15 @@
 -- Existing rows keep NULL / [] until the decider re-decides them (its context fingerprint changed in #239, so the next
 -- run re-decides every job once).
 --
--- Additive: four nullable-or-defaulted columns and one new view. Nothing is rewritten or deleted.
+-- Also: deterministic_decisions.decider_version (nullable; NULL = decided before this column or by an older decider). It is
+-- written by the decider and kept OUT of decision_hash. The task seeder re-seeds a job once per decider version when the
+-- latest decision's decider_version differs from src/pipeline/deciderVersion.ts DECIDER_VERSION (capped per run).
+--
+-- Additive: five nullable-or-defaulted columns and one new view. Nothing is rewritten or deleted.
 --
 -- Rollback (exact; src/tests/ingestion/rankingReadModel.integration.test.ts runs it):
 --   DROP VIEW IF EXISTS v_job_ranking_scoped;
+--   ALTER TABLE deterministic_decisions DROP COLUMN IF EXISTS decider_version;
 --   ALTER TABLE canonical_jobs
 --     DROP COLUMN IF EXISTS recommendation_evidence_confidence,
 --     DROP COLUMN IF EXISTS recommendation_role_signals,
@@ -35,6 +40,9 @@ ALTER TABLE canonical_jobs
 ALTER TABLE canonical_jobs
   ADD CONSTRAINT canonical_jobs_recommendation_evidence_confidence_check
   CHECK (recommendation_evidence_confidence IS NULL OR recommendation_evidence_confidence IN ('NORMAL', 'LOW'));
+
+ALTER TABLE deterministic_decisions
+  ADD COLUMN IF NOT EXISTS decider_version TEXT;
 
 CREATE OR REPLACE VIEW v_job_ranking_scoped AS
 SELECT

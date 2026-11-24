@@ -221,6 +221,15 @@ function toFiniteNumber(value: unknown): number | null {
   return null;
 }
 
+/** The stored adjusted score is always a 0-1 fraction (the decider writes it so); anything else is treated as missing. */
+function adjustedScoreToPercent(value: unknown): number | null {
+  const score = toFiniteNumber(value);
+  if (score === null) return null;
+  // Out of range is bad data: it counts as a missing required input (never Top 10), not as a percent to guess.
+  if (score < 0 || score > 1) return null;
+  return score * 100;
+}
+
 function scoreFromFraction(value: unknown): number | null {
   const score = toFiniteNumber(value);
   if (score === null) return null;
@@ -459,7 +468,7 @@ function buildComponents(
 
   return {
     // The stored ADJUSTED score (raw match score lowered by the role-shape downranks), on the 0-100 scale of the raw one.
-    requirementFit: scoreFromFraction(row.recommendation_requirement_score),
+    requirementFit: adjustedScoreToPercent(row.recommendation_requirement_score),
     requirementCoverage: toFiniteNumber(row.deterministic_match_coverage),
     evidenceCompleteness: scoreFromFraction(row.recommendation_evidence_completeness),
     laneConfidence: laneConfidenceScore(row.lane_confidence),

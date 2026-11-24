@@ -29,6 +29,7 @@ import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import { APPROXIMATE_DATE_UNIT_MS, isRepostFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
 import { MIN_CONFIRMED_REQUIREMENTS } from "../requirements/requirementKinds.js";
+import { DECIDER_VERSION } from "./deciderVersion.js";
 import { applyRoleShapePenalty, assessRoleShape, roleShapeFingerprint, ROLE_SHAPE_POLICY_VERSION } from "./roleShape.js";
 import { assessCareerTrack, capOutcome, CAREER_TRACK_POLICY_VERSION, parseTrackExperience, type TrackRequirement } from "./careerTrack.js";
 import {
@@ -295,18 +296,26 @@ export async function loadMandatoryQualificationCounts(
 /** The posting words of a MUST degree the current match found the profile short of, or null. */
 export async function loadDegreeGapQuote(
   client: Pick<pg.PoolClient, "query">,
-  args: { workspaceId: string; matchRunId: string; requirementSetId: string },
+  args: { workspaceId: string; matchRunId: string; requirementSetId: string; jobVersionId: string },
 ): Promise<string | null> {
+  // Same scoping as loadMandatoryQualificationCounts: this workspace, this job version and requirement set, and only the
+  // LATEST evidence row of the match run for each requirement.
   const { rows } = await client.query<{ quote: string | null }>(
     `SELECT COALESCE(jr.quote_text, jr.requirement_text) AS quote
-       FROM requirement_evidence_matches rem
-       JOIN job_requirements jr ON jr.id = rem.requirement_id
-      WHERE rem.workspace_id = $1 AND rem.match_run_id = $2 AND jr.requirement_set_id = $3
+       FROM job_requirements jr
+       JOIN LATERAL (
+         SELECT rem.match_type, rem.evidence->>'match_qualification_code' AS qualification_code
+           FROM requirement_evidence_matches rem
+          WHERE rem.workspace_id = jr.workspace_id AND rem.match_run_id = $2 AND rem.requirement_id = jr.id
+          ORDER BY rem.created_at DESC, rem.id DESC
+          LIMIT 1
+       ) current_match ON TRUE
+      WHERE jr.workspace_id = $1 AND jr.job_version_id = $4 AND jr.requirement_set_id = $3
         AND jr.requirement_type = 'DEGREE' AND jr.importance = 'MUST'
-        AND rem.match_type = 'NO_MATCH'
-        AND rem.evidence->>'match_qualification_code' = 'MATCH_QUALIFICATION_DEGREE_GAP'
+        AND current_match.match_type = 'NO_MATCH'
+        AND current_match.qualification_code = 'MATCH_QUALIFICATION_DEGREE_GAP'
       ORDER BY jr.requirement_key ASC LIMIT 1`,
-    [args.workspaceId, args.matchRunId, args.requirementSetId],
+    [args.workspaceId, args.matchRunId, args.requirementSetId, args.jobVersionId],
   );
   return rows[0]?.quote ?? null;
 }
@@ -620,7 +629,7 @@ export async function runRecommendationDecider(
           description: job.description_text,
           employmentType: job.employment_type,
           degreeGapQuote: currentMatch && job.latest_match_run_id && job.active_requirement_set_id
-            ? await loadDegreeGapQuote(client, { workspaceId: ctx.workspaceId, matchRunId: job.latest_match_run_id, requirementSetId: job.active_requirement_set_id })
+            ? await loadDegreeGapQuote(client, { workspaceId: ctx.workspaceId, matchRunId: job.latest_match_run_id, requirementSetId: job.active_requirement_set_id, jobVersionId: job.job_version_id })
             : null,
         });
         const requirementScore = applyRoleShapePenalty(rawRequirementScore, shape);
@@ -1127,7 +1136,7 @@ export async function runRecommendationDecider(
         const decisionContextFingerprint = buildPipelineTaskContextFingerprint({
           workspaceId: ctx.workspaceId,
           taskType: "DECIDE_RECOMMENDATION",
-          taskVersion: "recommendation_decider_v1",
+          taskVersion: DECIDER_VERSION,
           payload: {
             canonical_job_id: job.canonical_job_id,
             job_version_id: job.job_version_id,
@@ -1146,6 +1155,9 @@ export async function runRecommendationDecider(
             workability_policy_hash: workabilityPolicyResolution.policyHash,
             career_track_policy_version: CAREER_TRACK_POLICY_VERSION,
             career_track_assessment_hash: sha256Json(careerTrack),
+            // decider_version in the context separates a decision made after migration 121 from an unstamped row with
+            // the same inputs (decisions are immutable, so an old row cannot be stamped in place).
+            decider_version: DECIDER_VERSION,
             role_downrank_policy_version: ROLE_SHAPE_POLICY_VERSION,
             evidence_confidence_policy_version: EVIDENCE_CONFIDENCE_POLICY_VERSION,
             evidence_confidence_min_requirements: MIN_CONFIRMED_REQUIREMENTS,
@@ -1173,9 +1185,10 @@ export async function runRecommendationDecider(
               preference_context_id,
               readiness_json,
               evidence_revision_hash,
-              readiness_fingerprint
+              readiness_fingerprint,
+              decider_version
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT (
               workspace_id,
               canonical_job_id,
@@ -1214,6 +1227,7 @@ export async function runRecommendationDecider(
             JSON.stringify(readiness),
             evidenceRevisionHash,
             readiness.readiness_fingerprint,
+            DECIDER_VERSION,
           ]
         );
 

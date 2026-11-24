@@ -15,6 +15,7 @@ import { runRequirementsExtraction as defaultRunRequirementsExtraction } from ".
 import { runHardGates as defaultRunHardGates } from "../pipeline/hardGate.js";
 import { runEmbeddingBatchWithFallback as defaultRunEmbeddingBatchWithFallback } from "../embeddings/batchCoordinator.js";
 import { getEmbeddingSpaceRegistryConfiguration } from "../embeddings/spaceRegistry.js";
+import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
 import { LANE_ROUTER_RULE_VERSION, runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/laneRoutingCurrency.js";
@@ -48,6 +49,7 @@ import {
   pipelineTaskTargetKey,
 } from "./pipelineWorkerLanes.js";
 import { scopeSeedQuery } from "./seedQueryScope.js";
+import { deciderVersionReassessmentReason, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import {
   pipelineTaskStageVersion,
   reconcileStalePendingPipelineTasks,
@@ -948,7 +950,14 @@ export async function seedRecoverablePipelineTasks(
       "EXTRACT_DETERMINISTIC_REQUIREMENTS",
       `SELECT c.id AS canonical_job_id,
               jv.id AS job_version_id,
-              COALESCE(c.processing_state, c.processing_status) <> 'RAW_STAGED' AS repair_existing_state
+              COALESCE(c.processing_state, c.processing_status) <> 'RAW_STAGED' AS repair_existing_state,
+              -- The completed extraction was made by an older extractor version: re-extract (reprocess).
+              EXISTS (
+                SELECT 1
+                FROM job_version_pipeline_state stale_ps
+                WHERE stale_ps.workspace_id = c.workspace_id AND stale_ps.job_version_id = jv.id
+                  AND stale_ps.current_stage = 'REQUIREMENTS_EXTRACTED' AND stale_ps.stage_status = 'COMPLETED'
+              ) AS extractor_version_stale
        FROM canonical_jobs c
        JOIN job_versions jv
          ON jv.workspace_id = c.workspace_id
@@ -975,6 +984,12 @@ export async function seedRecoverablePipelineTasks(
             AND rer.status = 'COMPLETED'
             AND jv.active_requirement_set_id IS NOT NULL
             AND rer.requirement_set_id = jv.active_requirement_set_id
+           JOIN requirement_sets active_set
+             ON active_set.workspace_id = rer.workspace_id AND active_set.id = rer.requirement_set_id
+           JOIN requirement_set_identities active_identity
+             ON active_identity.workspace_id = active_set.workspace_id AND active_identity.id = active_set.requirement_identity_id
+            -- A completed extraction counts only if the current extractor version made it.
+            AND active_identity.deterministic_extractor_version = $3
            WHERE ps.workspace_id = c.workspace_id
              AND ps.job_version_id = jv.id
              AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
@@ -993,13 +1008,15 @@ export async function seedRecoverablePipelineTasks(
          )
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
-      [ctx.workspaceId, maxPerType],
+      [ctx.workspaceId, maxPerType, DETERMINISTIC_EXTRACTOR_VERSION],
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
         payload: {
           canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
           job_version_id: requiredSeedValue(row, "job_version_id"),
           ...(row.repair_existing_state === true ? { repair_existing_state: true } : {}),
+          // Task key carries the extractor version, so a new version is a new task; it must recompute.
+          ...(row.extractor_version_stale === true ? { reprocess: true } : {}),
         },
       }),
       enabledTypes,
@@ -1524,7 +1541,8 @@ export async function seedRecoverablePipelineTasks(
               c.latest_deterministic_decision_id AS deterministic_decision_id,
               active_profile.id AS profile_version_id,
               TRUE AS repair_existing_state,
-              (${readinessRefreshPredicate} AND c.recommendation_outcome IS NOT NULL) AS readiness_reassessment_required
+              (${readinessRefreshPredicate} AND c.recommendation_outcome IS NOT NULL) AS readiness_reassessment_required,
+              (${deciderVersionRefreshSql("c", { includeTestFixtures })} AND c.recommendation_outcome IS NOT NULL) AS decider_reassessment_required
        FROM canonical_jobs c
        LEFT JOIN LATERAL (
          SELECT pv.id
@@ -1548,11 +1566,13 @@ export async function seedRecoverablePipelineTasks(
              'MATCHED', 'QUEUED_FOR_AI', 'NEEDS_MANUAL_REVIEW'
            )
            OR ${readinessRefreshPredicate}
+           OR ${deciderVersionRefreshSql("c", { includeTestFixtures })}
          )
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
          AND (
            c.recommendation_outcome IS NULL
            OR ${readinessRefreshPredicate}
+           OR ${deciderVersionRefreshSql("c", { includeTestFixtures })}
          )
          AND (
            COALESCE(c.processing_state, c.processing_status) IN (
@@ -1592,9 +1612,13 @@ export async function seedRecoverablePipelineTasks(
           deterministic_decision_id: row.deterministic_decision_id ?? null,
           ...(row.profile_version_id ? { profile_version_id: row.profile_version_id } : {}),
           ...(row.repair_existing_state === true ? { repair_existing_state: true } : {}),
-          ...(row.readiness_reassessment_required === true
-            ? { reprocess_existing_state: true, reassessment_reason: "APPLICATION_READINESS_REFRESH" }
-            : {}),
+          // A decider version change wins over a readiness refresh: its reason carries the version, so the task key is new
+          // once per version (existing tasks of that version are not inserted again).
+          ...(row.decider_reassessment_required === true
+            ? { reprocess_existing_state: true, reassessment_reason: deciderVersionReassessmentReason() }
+            : row.readiness_reassessment_required === true
+              ? { reprocess_existing_state: true, reassessment_reason: "APPLICATION_READINESS_REFRESH" }
+              : {}),
         },
       }),
       enabledTypes,

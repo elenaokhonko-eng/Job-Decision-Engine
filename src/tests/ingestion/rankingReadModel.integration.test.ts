@@ -22,7 +22,7 @@ const read = (file: string) => fs.readFileSync(path.resolve(process.cwd(), file)
 describe("no list orders by the raw match score (static)", () => {
   it("the Top 10 materializer ranks on the stored adjusted score", () => {
     const source = read("src/services/applicationRankingMaterializer.ts");
-    expect(source).toContain("requirementFit: scoreFromFraction(row.recommendation_requirement_score)");
+    expect(source).toContain("requirementFit: adjustedScoreToPercent(row.recommendation_requirement_score)");
     expect(source).not.toMatch(/requirementFit:\s*toFiniteNumber\(row\.deterministic_match_score\)/);
   });
 
@@ -44,18 +44,36 @@ describe("no list orders by the raw match score (static)", () => {
   });
 });
 
+describe("every UPDATE that clears the stored score also clears its evidence (static)", () => {
+  const STORED = ["recommendation_score_policy", "recommendation_degree_asked_for", "recommendation_role_signals", "recommendation_evidence_confidence"];
+  it.each(["src/pipeline/hardGate.ts", "src/pipeline/deterministicMatcher.ts"])("%s clears the four evidence columns wherever it clears the adjusted score", (file) => {
+    const source = read(file);
+    const clears = source.match(/recommendation_requirement_score = CASE WHEN [^\n]*THEN NULL/g) ?? [];
+    expect(clears.length).toBeGreaterThan(0);
+    for (const column of STORED) {
+      const columnClears = source.match(new RegExp(column + String.raw` = CASE WHEN [^
+]*THEN (?:NULL|'\[\]'::jsonb)`, 'g')) ?? [];
+      expect(columnClears.length, file + " must clear " + column + " in every UPDATE that clears the score").toBe(clears.length);
+    }
+  });
+});
+
 describe("rankingIntegrity pure helpers", () => {
   it("one policy is fine; a split reports the minority; an even split reports all", () => {
     expect(summarizeScorePolicies([{ policy: "a|r1", count: 5 }]).mixedScorePolicyJobs).toBe(0);
     expect(summarizeScorePolicies([{ policy: "a|r1", count: 5 }, { policy: "b|r1", count: 2 }]).mixedScorePolicyJobs).toBe(2);
     expect(summarizeScorePolicies([{ policy: "a|r1", count: 3 }, { policy: "b|r1", count: 3 }]).mixedScorePolicyJobs).toBe(6);
     expect(summarizeScorePolicies([{ policy: null, count: 4 }]).listedWithoutScorePolicy).toBe(4);
+    // Three policies [5, 3, 3]: the majority is the single maximum (5), so 6 jobs are outside it, not all 11.
+    expect(summarizeScorePolicies([{ policy: "a", count: 5 }, { policy: "b", count: 3 }, { policy: "c", count: 3 }]).mixedScorePolicyJobs).toBe(6);
+    expect(summarizeScorePolicies([{ policy: "a", count: 4 }, { policy: "b", count: 4 }, { policy: "c", count: 1 }]).mixedScorePolicyJobs).toBe(9);
   });
 
   it("fails the reconciler on any violation and passes a clean report", () => {
-    const clean = { listedWithoutAdjustedScore: 0, listedWithoutScorePolicy: 0, scorePolicies: {}, mixedScorePolicyJobs: 0 };
+    const clean = { listedWithoutAdjustedScore: 0, evidenceWithoutScore: 0, listedWithoutScorePolicy: 0, scorePolicies: {}, mixedScorePolicyJobs: 0 };
     expect(rankingIntegrityExitCode(clean)).toBe(0);
     expect(rankingIntegrityExitCode({ ...clean, listedWithoutAdjustedScore: 1 })).toBe(1);
+    expect(rankingIntegrityExitCode({ ...clean, evidenceWithoutScore: 1 })).toBe(1);
     expect(rankingIntegrityExitCode({ ...clean, mixedScorePolicyJobs: 1 })).toBe(1);
     expect(rankingIntegrityExitCode({ ...clean, listedWithoutScorePolicy: 1 })).toBe(1);
   });
@@ -167,6 +185,14 @@ describe.skipIf(skipReal)("ranking read model, ordering consistency, must-be-zer
     expect(rankingIntegrityExitCode(after)).toBe(1);
   });
 
+  it("reconciler check: a job with no adjusted score that still holds role evidence is counted", async () => {
+    const before = await reportRankingIntegrity(db(), context!.workspaceId);
+    await seedJob({ title: "Cleared Score, Stale Evidence", outcome: "TRACK", adjusted: null, raw: null, policy: "m1|role_shape_v1", signals: [{ code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "TITLE", quote: "x" }] });
+    const after = await reportRankingIntegrity(db(), context!.workspaceId);
+    expect(after.evidenceWithoutScore).toBe(before.evidenceWithoutScore + 1);
+    expect(rankingIntegrityExitCode(after)).toBe(1);
+  });
+
   it("reconciler check: listed jobs on two score policies are reported", async () => {
     await seedJob({ title: "Other Policy", outcome: "REVIEW", adjusted: 0.5, raw: 55, policy: "legacy|role_shape_v1" });
     const report = await reportRankingIntegrity(db(), context!.workspaceId);
@@ -185,8 +211,12 @@ describe.skipIf(skipReal)("ranking read model, ordering consistency, must-be-zer
       .split(";")
       .map((statement) => statement.trim())
       .filter(Boolean);
-    expect(statements.length).toBe(2);
+    expect(statements.length).toBe(3);
     for (const statement of statements) await db().query(statement);
+    const deciderColumn = await db().query(
+      `SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'deterministic_decisions' AND column_name = 'decider_version'`,
+    );
+    expect(deciderColumn.rows).toEqual([]);
     const view = await db().query(`SELECT to_regclass(current_schema() || '.v_job_ranking_scoped') AS name`);
     expect(view.rows[0].name).toBeNull();
     const columns = await db().query(

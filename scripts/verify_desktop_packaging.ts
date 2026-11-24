@@ -86,6 +86,37 @@ export function verifyDesktopPackaging(rootDir = process.cwd()): DesktopPackagin
   requireCheck(fileContains(mainPath, "http://127.0.0.1"), "main process configures local companion loopback transport");
   requireCheck(fileContains(mainPath, "databaseUrl"), "main process manages database credentials via safeStorage");
   requireCheck(fileContains(pkgPath, "migrations/**/*"), "package.json packages migrations for standalone initialization");
+  // The YAML configuration is read from disk at runtime, so an installer that
+  // omits it produces an app with no lanes and no workability policy. Ship it
+  // via extraResources so it stays outside the asar and remains user-editable.
+  const configResources = Array.isArray(pkg.build?.extraResources) ? pkg.build.extraResources : [];
+  const shipsConfig = configResources.some((entry: any) =>
+    typeof entry === "string" ? entry.startsWith("config") : entry?.from === "config"
+  );
+  requireCheck(shipsConfig, "package.json ships config/ with the installer");
+  const configRoot = path.join(rootDir, "config");
+  const REQUIRED_RUNTIME_CONFIG = [
+    "lanes/registry.yml",
+    "policies/workability.yml",
+    "source-plans/six_lane_sources.yml",
+    "source-plans/searchapi_linkedin.yml",
+    "source-plugins/linkedin_saved.yml",
+    "companies.yml",
+  ];
+  for (const relativeConfigPath of REQUIRED_RUNTIME_CONFIG) {
+    requireCheck(
+      fs.existsSync(path.join(configRoot, relativeConfigPath)),
+      `runtime config exists: config/${relativeConfigPath}`
+    );
+  }
+  requireCheck(
+    fileContains(path.join(rootDir, "src", "pipeline", "laneConfigLoader.ts"), "configPath("),
+    "lane config resolves through the shared config root resolver"
+  );
+  requireCheck(
+    fileContains(path.join(rootDir, "src", "pipeline", "workabilityPolicy.ts"), "configPath("),
+    "workability policy resolves through the shared config root resolver"
+  );
   requireCheck(hasScript(pkg, "desktop:build:backend"), "desktop:build:backend script exists");
   requireCheck(fileContains(mainPath, "JDEC_DESKTOP_START_API"), "main process has local API runtime guard");
   requireCheck(fileContains(mainPath, "JDEC_DESKTOP_RELEASE_CHANNEL"), "main process reads release channel");

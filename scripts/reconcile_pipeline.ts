@@ -484,6 +484,7 @@ async function run(): Promise<void> {
     if (rankingIntegrityExitCode(report.ranking_integrity) !== 0) {
       console.error(
         `ERROR: ranking integrity: ${report.ranking_integrity.listedWithoutAdjustedScore} listed job(s) with a decision but no adjusted score, ` +
+        `${report.ranking_integrity.evidenceWithoutScore} job(s) with no adjusted score but stored score evidence, ` +
         `${report.ranking_integrity.listedWithoutScorePolicy} without a score policy, ` +
         `${report.ranking_integrity.mixedScorePolicyJobs} outside the majority score policy ${JSON.stringify(report.ranking_integrity.scorePolicies)}.`,
       );

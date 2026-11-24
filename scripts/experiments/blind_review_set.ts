@@ -62,6 +62,15 @@ try {
      ORDER BY cj.recommendation_requirement_score DESC, cj.id`,
     [ws.workspaceId, LINKEDIN_SAVED_SOURCE_NAME, EXCLUDED_IDS],
   );
+  // Jobs that passed the gate and have a match but no stored adjusted score yet (not re-decided since migration 121) are not
+  // in the pool above: say how many, so the omission is never silent.
+  const { rows: notYetDecided } = await client.query(
+    `SELECT COUNT(*)::int AS n FROM canonical_jobs cj
+      WHERE cj.workspace_id = $1 AND cj.archived_at IS NULL AND cj.gate_decision = 'PASS' AND cj.is_test_fixture IS NOT TRUE
+        AND cj.latest_match_run_id IS NOT NULL AND cj.recommendation_requirement_score IS NULL`,
+    [ws.workspaceId],
+  );
+  console.log(`dropped (matched, gate-passed, no adjusted score yet - re-decide first): ${notYetDecided[0]?.n ?? 0}`);
   // A posting is drawn only if the read model says it is currently open (v_job_availability_current,
   // migration 114). This script does not decide that itself; it only counts what was left out.
   const rows = allRows.filter((r) => r.availability_current === true);

@@ -63,7 +63,7 @@ describe.skipIf(skipReal)("tasks completed without a result (PostgreSQL)", () =>
     await client.query(`SET search_path TO ${schemaName}, public`);
     await runMigrations(client);
     context = await resolveWorkspaceContext(client);
-  });
+  }, 60_000);
 
   afterAll(async () => {
     if (client) {

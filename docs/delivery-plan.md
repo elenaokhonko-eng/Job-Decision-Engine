@@ -46,12 +46,14 @@ Not started this round:
    | `src/security/`, `src/reporting/` | W6 |
    | `package.json`, `package-lock.json`, `.github/workflows/` | Orchestrator only |
 
-2. **Reserved migration numbers.** The latest migration is 114. Each stream uses only its own numbers, so two streams never claim the same one: W1 has 115 and 116, W4 has 117, W6 has 118, W2 has 119, W3 has 120. A stream that needs more asks the orchestrator.
+2. **Reserved migration numbers.** The latest migration on `main` is 120 (118 prompt identity columns, 119 availability re-check state, 120 awaiting-content read model). 115 to 117 are unused and stay unused (see `migrations/README.md`). The next free number is 121, reserved for W3's adjusted-score read model. A stream that needs a number asks the orchestrator; CI rejects any pending number at or below the highest applied one.
 3. **One database copy per stream.** Each stream rehearses on its own Neon branch, named `replay-<stream>`. Two streams never write to the same copy. No stream reads or writes production.
 4. **Small pull requests to `main`.** No stack deeper than two. Rebase on `main` every day. Each report names the CI status of every pull request it mentions.
 5. **A builder never signs off its own work.** Sign-off comes from the reviewer roles in `.agents/team.yml`: `data-contract-checker`, `test-evals-specialist`, `database-versioning-engineer`, `release-security-reviewer`.
 6. **The boundary check applies to everyone.** New code follows [architecture.md](architecture.md), section 6. An exception is listed with its reason at the top of the pull request description.
-7. **Standing limits.** Processing stays paused. No production write without the owner's go-ahead and the exact command. No secrets, connection strings or profile data in output, fixtures, logs or pull requests. Job titles and employers from the owner's saved list stay out of the repository.
+7. **A stage's version changes when its output changes.** Any change to what a stage produces (gate, extractor, matcher, lane router, decider, role-shape rules) changes that stage's version, so the version-reopen mechanism re-runs the affected jobs. `data-contract-checker` does not sign off a pull request that changes behaviour without a version change. Two faults of this kind reached `main` (the extractor input in #244, the degree rule in #247).
+8. **Merge lists carry evidence.** Every line the orchestrator sends the owner for merging states that CI is green and which reviewer roles signed off. A pull request without both is not on the list.
+9. **Standing limits.** Processing stays paused. No production write without the owner's go-ahead and the exact command. No secrets, connection strings or profile data in output, fixtures, logs or pull requests. Job titles and employers from the owner's saved list stay out of the repository.
 
 ## The orchestrator
 
@@ -71,7 +73,7 @@ Deliver, as small pull requests:
 
 1. A `RECHECK_AVAILABILITY` task type that runs through the normal queue when a job's 7-day window expires.
 2. One posting read per re-check that re-evaluates three facts: open or closed, work mode, hiring territory.
-3. Closure on evidence only: the page says not found or no longer accepting, or the feed was read successfully and the job is absent on two readings in a row. The absence count is stored (migration 115). A failed read is "cannot tell".
+3. Closure on evidence only: the page says not found or no longer accepting, or the feed was read successfully and the job is absent on two readings in a row. The absence count is stored (migration 119). A failed read is "cannot tell".
 4. "Cannot tell" is retried up to 3 times over 3 days, then the job is archived as not confirmable. Paywall and login pages count as "cannot tell". Page checks are rate-limited per site.
 5. The Track list reads `availability_current`, like Review.
 6. Unknown facts: routable unknowns always continue to matching; a question reaches the owner only for a job in the top 20; a job unresolved for 28 days and never in the top 20 is archived as not confirmable.
