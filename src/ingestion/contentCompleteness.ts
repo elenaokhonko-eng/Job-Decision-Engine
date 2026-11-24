@@ -44,8 +44,11 @@ export interface AwaitingContentReport {
 }
 
 /** Live, awaiting-content jobs that still carry a gate decision, lane or recommendation. Read only; ids only. */
+/** Anything with a pg `query`: a Pool, a Client or a PoolClient. */
+export type Queryable = Pick<pg.Pool, "query">;
+
 export async function reportAwaitingContentOutputs(
-  client: pg.PoolClient | pg.Client,
+  client: Queryable,
   workspaceId: string,
 ): Promise<AwaitingContentReport> {
   const result = await client.query<{
