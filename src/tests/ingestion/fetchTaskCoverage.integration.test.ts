@@ -160,13 +160,16 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
   });
 
   it("ensureFetchTasksForAwaitingContent queues tasks additively, dry run first, and is idempotent", async () => {
+    // Independent of the rows other tests left: the expected count is whatever is missing a task right now, plus this job.
+    const existing = (await reportContentWithoutFetchTask(db(), context!.workspaceId)).withoutFetchTask.length;
     const job = await seedAlertJob("ensure");
+    const expected = existing + 1;
     const dry = await ensureFetchTasksForAwaitingContent(db(), context!, { apply: false, producer: "test" });
-    expect(dry.candidates).toBe(2);
+    expect(dry.candidates).toBe(expected);
     expect(dry.queued).toBe(0);
     expect((await reportContentWithoutFetchTask(db(), context!.workspaceId)).withoutFetchTask).toContain(job.canonicalJobId);
     const applied = await ensureFetchTasksForAwaitingContent(db(), context!, { apply: true, producer: "test" });
-    expect(applied.queued).toBe(2);
+    expect(applied.queued).toBe(expected);
     expect((await reportContentWithoutFetchTask(db(), context!.workspaceId)).withoutFetchTask).not.toContain(job.canonicalJobId);
     const again = await ensureFetchTasksForAwaitingContent(db(), context!, { apply: true, producer: "test" });
     expect(again.queued).toBe(0);

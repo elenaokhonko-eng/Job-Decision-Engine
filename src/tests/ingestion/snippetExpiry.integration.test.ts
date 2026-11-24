@@ -36,14 +36,16 @@ interface JobOptions {
   readonly quality?: "COMPLETE" | "INCOMPLETE";
   readonly alertContentStatus?: string;
   readonly extraSource?: string;
-  readonly fetchTask?: "PENDING" | "COMPLETED" | "RETRY_WAIT" | "BLOCKED_DEPENDENCY";
+  readonly fetchTask?: "PENDING" | "COMPLETED" | "RETRY_WAIT" | "BLOCKED_DEPENDENCY" | "DEAD_LETTER";
   /** Attempts already made by the fetch task (its budget is 8). */
   readonly fetchAttempts?: number;
+  /** The fetch task's last error text. */
+  readonly fetchError?: string;
+  readonly fetchStatus?: string;
   readonly state?: string;
 }
 
-async function seedJob(label: string, options: JobOptions): Promise<string> {
-  const workspaceId = context!.workspaceId;
+async function seedJob(label: string, options: JobOptions, workspaceId: string = context!.workspaceId): Promise<string> {
   const state = options.state ?? "RAW_STAGED";
   const canonical = await db().query<{ id: string }>(
     `INSERT INTO canonical_jobs (workspace_id, company_name, normalized_title, canonical_url, processing_state, processing_status, description_quality_status, gate_decision)
@@ -85,9 +87,9 @@ async function seedJob(label: string, options: JobOptions): Promise<string> {
   }
   if (options.fetchTask) {
     await db().query(
-      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, attempt_count, max_attempts)
-       VALUES ($1, 'FETCH_JOB_CONTENT', $2, $3::jsonb, $4, $5, 8)`,
-      [workspaceId, `FETCH_JOB_CONTENT:${firstObservation}:posting_fetch_v1`, JSON.stringify({ observation_id: firstObservation }), options.fetchTask, options.fetchAttempts ?? 0],
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, attempt_count, max_attempts, last_error)
+       VALUES ($1, 'FETCH_JOB_CONTENT', $2, $3::jsonb, $4, $5, 8, $6)`,
+      [workspaceId, `FETCH_JOB_CONTENT:${firstObservation}:posting_fetch_v1`, JSON.stringify({ observation_id: firstObservation }), options.fetchTask, options.fetchAttempts ?? 0, options.fetchError ?? null],
     );
   }
   return canonicalJobId;
@@ -203,6 +205,70 @@ describe.skipIf(skipReal)("snippet-only expiry (PostgreSQL)", () => {
     await db().query("COMMIT");
     expect(restored).toMatchObject({ restored: true, reasonCode: "RESTORED" });
     expect((await archiveState(ids.lastSeen8!)).archived).toBe(false);
+  });
+
+  async function newWorkspace(): Promise<string> {
+    const inserted = await db().query<{ id: string }>(
+      `INSERT INTO workspaces (workspace_key, display_name) VALUES ($1, 'Expiry') RETURNING id::text`, [`expiry-${randomUUID()}`]);
+    return inserted.rows[0]!.id;
+  }
+  const applyIn = (workspaceId: string, extra: { beforeLock?: () => Promise<void> } = {}) => expireSnippetOnlyJobs(db(), {
+    workspaceId, apply: true, now: NOW, actor: "test:snippet_expiry", restorePoint: "test-restore-point", ...extra,
+  });
+
+  it("an application created between the first read and the archive stops the archive (locked re-check)", async () => {
+    const ws = await newWorkspace();
+    const raced = await seedJob("raced-application", { seen: [30 * DAY] }, ws);
+    const quiet = await seedJob("quiet", { seen: [30 * DAY] }, ws);
+    const report = await applyIn(ws, {
+      beforeLock: async () => {
+        await db().query(
+          `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status)
+           SELECT $1, $2, $3, latest_job_version_id, 'APPLIED' FROM canonical_jobs WHERE id = $3`,
+          [ws, context!.userId, raced],
+        );
+      },
+    });
+    expect(report.droppedAtApply).toBe(1);
+    expect(report.archivedJobIds).toEqual([quiet]);
+    expect((await archiveState(raced)).archived).toBe(false);
+    expect((await archiveState(quiet)).archived).toBe(true);
+  });
+
+  it("a running lease and a manual review protect a job from expiry, like an application or a hold", async () => {
+    const ws = await newWorkspace();
+    const leased = await seedJob("leased", { seen: [30 * DAY] }, ws);
+    const review = await seedJob("manual-review", { seen: [30 * DAY] }, ws);
+    const free = await seedJob("free", { seen: [30 * DAY] }, ws);
+    await db().query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, lease_id, lease_expires_at)
+       VALUES ($1, 'NORMALIZE_OBSERVATION', $2, $3::jsonb, 'RUNNING', $4, NOW() + INTERVAL '1 hour')`,
+      [ws, `lease-${randomUUID()}`, JSON.stringify({ canonical_job_id: leased }), randomUUID()],
+    );
+    await db().query(
+      `INSERT INTO evaluation_queue (workspace_id, canonical_job_id, job_version_id, lane, status)
+       SELECT $1, $2, latest_job_version_id, 'CORE_AI_DATA', 'NEEDS_MANUAL_REVIEW' FROM canonical_jobs WHERE id = $2`,
+      [ws, review],
+    );
+    const dry = await expireSnippetOnlyJobs(db(), { workspaceId: ws, apply: false, now: NOW, actor: "t" });
+    expect(dry.protectedSkipped).toBe(2);
+    const report = await applyIn(ws);
+    expect(report.archivedJobIds).toEqual([free]);
+    expect((await archiveState(leased)).archived).toBe(false);
+    expect((await archiveState(review)).archived).toBe(false);
+  });
+
+  it("a fetch that failed for an infrastructure reason defers the archive; a content or source failure does not", async () => {
+    const ws = await newWorkspace();
+    const outage = await seedJob("provider-outage", { seen: [30 * DAY], fetchTask: "DEAD_LETTER", fetchAttempts: 8, fetchError: "Posting provider returned HTTP 503." }, ws);
+    const rateLimited = await seedJob("rate-limited", { seen: [30 * DAY], fetchTask: "DEAD_LETTER", fetchAttempts: 8, fetchError: "RATE_LIMITED: slow down" }, ws);
+    const timeout = await seedJob("timeout", { seen: [30 * DAY], fetchTask: "RETRY_WAIT", fetchAttempts: 8, fetchError: "request timed out" }, ws);
+    const unsupported = await seedJob("unsupported-source", { seen: [30 * DAY], fetchTask: "DEAD_LETTER", fetchAttempts: 8, fetchError: "UNSUPPORTED_SOURCE" }, ws);
+    const parked = await seedJob("parked", { seen: [30 * DAY], fetchTask: "BLOCKED_DEPENDENCY", fetchError: "SOURCE_RETIRED_BY_USER: content comes from the saved-jobs export" }, ws);
+    const report = await applyIn(ws);
+    expect(report.deferredInfraFailure).toBe(3);
+    expect([...report.archivedJobIds].sort()).toEqual([unsupported, parked].sort());
+    for (const id of [outage, rateLimited, timeout]) expect((await archiveState(id)).archived).toBe(false);
   });
 
   it("the limits must be whole days and the first-seen limit cannot be shorter", async () => {
