@@ -9,6 +9,7 @@ import { runZeroChecks, zeroChecksExitCode, type ZeroCheckResult } from "../src/
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { reportAwaitingContentOutputs } from "../src/ingestion/contentCompleteness.js";
 import { reportContentWithoutFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
+import { runZeroCheckRepairCommand } from "../src/tasks/zeroCheckRepair.js";
 import { rankingIntegrityExitCode, reportRankingIntegrity, type RankingIntegrityReport } from "../src/pipeline/rankingIntegrity.js";
 
 dotenv.config();
@@ -65,8 +66,18 @@ function parseArgs(argv: string[]): {
   json: boolean;
   /** "pre" (before a drain) leaves out the stale-stage check; the default "post" is strict. */
   phase: "pre" | "post";
+  /** --repair: plan (default, read only) or, with --apply, enqueue the forced stage tasks for the zero-check violations. */
+  repair: boolean;
+  apply: boolean;
+  target?: string;
+  confirmWorkspace?: string;
+  maxTasks?: number;
+  snapshotFile?: string;
 } {
-  const out: { workspaceKey?: string; userKey?: string; json: boolean; phase: "pre" | "post" } = { json: false, phase: "post" };
+  const out: {
+    workspaceKey?: string; userKey?: string; json: boolean; phase: "pre" | "post";
+    repair: boolean; apply: boolean; target?: string; confirmWorkspace?: string; maxTasks?: number; snapshotFile?: string;
+  } = { json: false, phase: "post", repair: false, apply: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--workspace-key" && argv[i + 1]) {
@@ -75,6 +86,20 @@ function parseArgs(argv: string[]): {
       out.userKey = String(argv[++i]).trim();
     } else if (arg === "--json") {
       out.json = true;
+    } else if (arg === "--repair") {
+      out.repair = true;
+    } else if (arg === "--apply") {
+      out.apply = true;
+    } else if (arg === "--target" && argv[i + 1]) {
+      out.target = String(argv[++i]).trim();
+    } else if (arg.startsWith("--target=")) {
+      out.target = arg.slice("--target=".length).trim();
+    } else if (arg.startsWith("--snapshot-file=")) {
+      out.snapshotFile = arg.slice("--snapshot-file=".length).trim();
+    } else if (arg.startsWith("--max-tasks=")) {
+      out.maxTasks = Number(arg.slice("--max-tasks=".length));
+    } else if (arg.startsWith("--confirm-workspace=")) {
+      out.confirmWorkspace = arg.slice("--confirm-workspace=".length).trim();
     } else if (arg === "--phase=pre" || arg === "--phase=post") {
       out.phase = arg === "--phase=pre" ? "pre" : "post";
     } else if (arg.startsWith("--phase=")) {
@@ -94,10 +119,33 @@ async function countRows(
 }
 
 async function run(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.repair) {
+    // The repair never uses DATABASE_URL: it runs against the replay copy only (src/tasks/zeroCheckRepair.ts).
+    const report = await runZeroCheckRepairCommand(process.env, {
+      target: args.target,
+      apply: args.apply,
+      confirmWorkspace: args.confirmWorkspace,
+      maxTasks: args.maxTasks,
+      snapshotFile: args.snapshotFile,
+      workspaceKey: args.workspaceKey,
+      userKey: args.userKey,
+    });
+    console.log(JSON.stringify(report, null, 2));
+    if (report.truncated) {
+      console.error(
+        report.mode === "apply"
+          ? `WARNING: the cap of ${report.maxTasks} stopped the run with ${report.applied?.remaining ?? 0} plan item(s) not attempted; run again to continue.`
+          : `WARNING: the plan has ${report.planned} item(s), more than the cap of ${report.maxTasks}; an apply run needs several runs.`,
+      );
+    }
+    return;
+  }
+  if (args.apply) throw new Error("--apply is only valid with --repair.");
+
   const databaseUrl = (process.env.DATABASE_URL || "").trim();
   if (!databaseUrl) throw new Error("DATABASE_URL is required.");
 
-  const args = parseArgs(process.argv.slice(2));
   const pool = new pg.Pool(pgPoolConfig(databaseUrl));
   const client = await pool.connect();
 

@@ -20,16 +20,22 @@ export interface ZeroCheckResult {
   readonly total: number;
   readonly sample: readonly string[];
   readonly detail?: Record<string, number>;
+  /** Every violating id; only present when a check is called with { withIds: true } (the repair path). */
+  readonly ids?: readonly string[];
+}
+
+export interface ZeroCheckOptions {
+  readonly withIds?: boolean;
 }
 
 const SAMPLE = 10;
 
-function result(name: string, ids: readonly string[], detail?: Record<string, number>): ZeroCheckResult {
-  return { name, total: ids.length, sample: ids.slice(0, SAMPLE), ...(detail ? { detail } : {}) };
+function result(name: string, ids: readonly string[], detail?: Record<string, number>, options?: ZeroCheckOptions): ZeroCheckResult {
+  return { name, total: ids.length, sample: ids.slice(0, SAMPLE), ...(detail ? { detail } : {}), ...(options?.withIds ? { ids } : {}) };
 }
 
 /** A job whose latest gate result is HARD_REJECT still carries a recommendation. */
-export async function rejectedJobsWithRecommendation(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+export async function rejectedJobsWithRecommendation(db: Queryable, workspaceId: string, options?: ZeroCheckOptions): Promise<ZeroCheckResult> {
   const { rows } = await db.query<{ id: string }>(
     `WITH latest AS (
        SELECT DISTINCT ON (canonical_job_id) canonical_job_id, decision
@@ -42,7 +48,21 @@ export async function rejectedJobsWithRecommendation(db: Queryable, workspaceId:
       ORDER BY c.id`,
     [workspaceId],
   );
-  return result("rejected_job_with_recommendation", rows.map((row) => row.id));
+  return result("rejected_job_with_recommendation", rows.map((row) => row.id), undefined, options);
+}
+
+/** An UNMATCHED job (no active lane match) still carries a recommendation (PRIORITY, REVIEW or TRACK). */
+export async function unmatchedJobsWithRecommendation(db: Queryable, workspaceId: string, options?: ZeroCheckOptions): Promise<ZeroCheckResult> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT c.id::text AS id
+       FROM canonical_jobs c
+      WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+        AND COALESCE(c.processing_state, c.processing_status) = 'UNMATCHED'
+        AND c.recommendation_outcome IN ('PRIORITY', 'REVIEW', 'TRACK')
+      ORDER BY c.id`,
+    [workspaceId],
+  );
+  return result("unmatched_job_with_recommendation", rows.map((row) => row.id), undefined, options);
 }
 
 /** A job in the Apply Now or Top 10 list whose current version is not confirmed open (v_job_availability_current). */
@@ -81,13 +101,14 @@ export async function listedJobsNotCurrentlyOpen(
 }
 
 /** A task COMPLETED with no result row, including RECHECK_AVAILABILITY. */
-export async function completedTasksWithoutResult(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
-  const report = await findTasksCompletedWithoutResult(db, workspaceId, { sampleLimit: SAMPLE });
-  return { name: "task_completed_without_result", total: report.total, sample: report.sample.map((row) => row.taskId), detail: report.byTaskType };
+export async function completedTasksWithoutResult(db: Queryable, workspaceId: string, options?: ZeroCheckOptions): Promise<ZeroCheckResult> {
+  const report = await findTasksCompletedWithoutResult(db, workspaceId, { sampleLimit: SAMPLE, all: options?.withIds === true });
+  const ids = report.sample.map((row) => row.taskId);
+  return { name: "task_completed_without_result", total: report.total, sample: ids.slice(0, SAMPLE), detail: report.byTaskType, ...(options?.withIds ? { ids } : {}) };
 }
 
 /** A routable NEEDS_VERIFICATION job with no active task and no match run: nothing will carry it on. */
-export async function routableVerificationJobsStranded(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+export async function routableVerificationJobsStranded(db: Queryable, workspaceId: string, options?: ZeroCheckOptions): Promise<ZeroCheckResult> {
   // Active task targets are collected once; each job is then matched by equality (two hashed semi-joins),
   // not by an OR over JSON keys inside a per-job scan.
   const { rows } = await db.query<{ id: string }>(
@@ -105,7 +126,69 @@ export async function routableVerificationJobsStranded(db: Queryable, workspaceI
       ORDER BY c.id`,
     [workspaceId],
   );
-  return result("routable_verification_job_stranded", rows.map((row) => row.id));
+  return result("routable_verification_job_stranded", rows.map((row) => row.id), undefined, options);
+}
+
+/**
+ * A live job whose canonical copy columns lag its stage results: a decision row exists for its current job version, and
+ * either latest_deterministic_decision_id is NULL (never on an UNMATCHED job, which the router and matcher close themselves), or it sits in PREQUALIFIED, LANE_ROUTED or MATCHED with no
+ * recommendation outcome; nothing is queued for it. A
+ * re-gate that resets the copy columns while the version-keyed successor tasks are already COMPLETED leaves it so:
+ * every stage task reads done, the job reads unfinished.
+ */
+export async function canonicalCopyColumnsDrift(db: Queryable, workspaceId: string, options?: ZeroCheckOptions): Promise<ZeroCheckResult> {
+  const { rows } = await db.query<{ id: string }>(
+    `WITH active AS (
+       SELECT task.payload->>'canonical_job_id' AS canonical_job_id, task.payload->>'job_version_id' AS job_version_id
+         FROM pipeline_tasks task
+        WHERE task.workspace_id = $1::uuid AND task.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY'))
+     SELECT c.id::text AS id
+       FROM canonical_jobs c
+      WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+        AND EXISTS (SELECT 1 FROM deterministic_decisions d WHERE d.workspace_id = c.workspace_id AND d.job_version_id = c.latest_job_version_id)
+        AND (
+          (COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'LANE_ROUTED', 'MATCHED') AND c.recommendation_outcome IS NULL)
+          -- A missing decision id is drift except where it is by design: the router writes SKIP on an UNMATCHED job itself and
+          -- the matcher writes UNMATCHED, so those jobs never carry latest_deterministic_decision_id (a decide recompute could
+          -- also turn their SKIP into TRACK); a removed job is not live.
+          OR (c.latest_deterministic_decision_id IS NULL
+              AND COALESCE(c.processing_state, c.processing_status) NOT IN ('UNMATCHED', 'MANUALLY_REMOVED'))
+        )
+        AND NOT EXISTS (SELECT 1 FROM active a WHERE a.canonical_job_id = c.id::text)
+        AND NOT EXISTS (SELECT 1 FROM active a WHERE a.job_version_id = c.latest_job_version_id::text)
+      ORDER BY c.id`,
+    [workspaceId],
+  );
+  return result("canonical_copy_columns_drift", rows.map((row) => row.id), undefined, options);
+}
+
+/** A match task stays blocked on a missing requirement embedding longer than this before it is an error. */
+export const MATCH_BLOCKED_ON_EMBEDDING_MAX_AGE_HOURS = 24;
+
+/**
+ * A MATCH_PROFILE_EVIDENCE task BLOCKED_DEPENDENCY on REQUIREMENT_EMBEDDING_MISSING for more than
+ * MATCH_BLOCKED_ON_EMBEDDING_MAX_AGE_HOURS: the embedding repair round it queued did not unblock it. Ids are the
+ * canonical job ids of live jobs.
+ */
+export async function matchBlockedOnRequirementEmbedding(
+  db: Queryable,
+  workspaceId: string,
+  options?: ZeroCheckOptions & { maxAgeHours?: number },
+): Promise<ZeroCheckResult> {
+  const maxAgeHours = options?.maxAgeHours ?? MATCH_BLOCKED_ON_EMBEDDING_MAX_AGE_HOURS;
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT DISTINCT c.id::text AS id
+       FROM pipeline_tasks task
+       JOIN job_versions v ON v.workspace_id = task.workspace_id AND v.id::text = task.payload->>'job_version_id'
+       JOIN canonical_jobs c ON c.workspace_id = v.workspace_id AND c.id = v.canonical_job_id AND c.latest_job_version_id = v.id
+      WHERE task.workspace_id = $1::uuid AND task.task_type = 'MATCH_PROFILE_EVIDENCE' AND task.status = 'BLOCKED_DEPENDENCY'
+        AND task.blocked_on LIKE 'REQUIREMENT\\_EMBEDDING\\_MISSING:%'
+        AND task.updated_at < NOW() - make_interval(hours => $2::int)
+        AND c.archived_at IS NULL AND NOT c.is_test_fixture
+      ORDER BY 1`,
+    [workspaceId, maxAgeHours],
+  );
+  return result("match_blocked_on_requirement_embedding", rows.map((row) => row.id), undefined, options);
 }
 
 /**
@@ -235,9 +318,12 @@ export async function runZeroChecks(
   const stale = options.phase === "pre" ? [] : [await staleStageResults(db, workspaceId)];
   return [
     await rejectedJobsWithRecommendation(db, workspaceId),
+    await unmatchedJobsWithRecommendation(db, workspaceId),
     await listedJobsNotCurrentlyOpen(db, workspaceId),
     await completedTasksWithoutResult(db, workspaceId),
     await routableVerificationJobsStranded(db, workspaceId),
+    await canonicalCopyColumnsDrift(db, workspaceId),
+    await matchBlockedOnRequirementEmbedding(db, workspaceId),
     await protectedJobsAutoArchived(db, workspaceId),
     ...stale,
   ];

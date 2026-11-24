@@ -71,3 +71,21 @@ export function forcedTaskRerouteIntent(task: ClaimedPipelineTask): ForcedTaskRe
     mode: "FORCE_RECOMPUTE",
   };
 }
+
+/**
+ * A task that asks for a recompute even when the job already looks done: an explicit rerun flag in the
+ * payload, or a TaskIntentV2 in FORCE_RECOMPUTE mode. Terminal-state shortcuts must not swallow it.
+ */
+export function isForcedRecomputeTask(task: Pick<ClaimedPipelineTask, "payload">): boolean {
+  const parsed = z.record(z.string(), z.unknown()).safeParse(task.payload);
+  if (!parsed.success) return false;
+  const record = parsed.data;
+  if (
+    record.reprocess === true ||
+    record.force_policy_recalculation === true ||
+    record.reprocess_existing_state === true
+  ) return true;
+  // repair_existing_state is not a force: the seeds put it on every decide task for an existing job.
+  const intent = TaskIntentV2Schema.safeParse(record.task_intent);
+  return intent.success && intent.data.mode === "FORCE_RECOMPUTE";
+}
