@@ -1109,7 +1109,9 @@ export async function runDeterministicMatcher(
                 ? "MATCH_QUALIFICATION_PREFERRED_CERT_GAP"
                 : "MATCH_QUALIFICATION_MANDATORY_CERT_MISSING";
 
-            if (!isOptional && req.importance === "MUST") {
+            // A degree gap is ranked lower and flagged (role-shape downrank DEGREE_GAP_FLAGGED), never a block: the owner
+            // has marked a role that asks for a PhD as a yes. A missing mandatory credential still blocks.
+            if (!isOptional && req.importance === "MUST" && req.requirement_type !== "DEGREE") {
               mandatoryQualificationFailures.push(qualCode);
             }
 

@@ -16,6 +16,8 @@ export interface RoleShapeInput {
   title: string | null | undefined;
   description: string | null | undefined;
   employmentType?: string | null | undefined;
+  /** The posting words of a MUST degree the matcher found the profile short of (null when there is none). */
+  degreeGapQuote?: string | null | undefined;
 }
 
 export interface RoleShapeSignal {
@@ -34,7 +36,7 @@ export interface RoleShapeAssessment {
   total_penalty: number;
 }
 
-export type RoleShapeDetector = (input: { title: string; description: string; employmentType: string }) => RoleShapeSignal | null;
+export type RoleShapeDetector = (input: { title: string; description: string; employmentType: string; degreeGapQuote: string | null }) => RoleShapeSignal | null;
 
 export function excerpt(text: string, index: number, length: number): string {
   const start = Math.max(0, index - 40);
@@ -144,13 +146,24 @@ export const detectInfrastructureByDescription: RoleShapeDetector = ({ descripti
   return { code: "INFRASTRUCTURE_BY_DESCRIPTION", penalty: 0.08, source: "DESCRIPTION", quote: excerpt(description, hits[0]!.index ?? 0, hits[0]![0].length) };
 };
 
-const DETECTORS: RoleShapeDetector[] = [detectCustomerFacingDelivery, detectPeopleManagementCore, detectContractEmployment, detectInfrastructureByDescription];
+
+// ---------------------------------------------------------------------------------------------------------------
+// Degree gap: a MUST degree (for example a PhD) the profile does not meet. Ranked lower and flagged, never a block.
+// ---------------------------------------------------------------------------------------------------------------
+
+export const detectDegreeGapFlagged: RoleShapeDetector = ({ degreeGapQuote }) => {
+  if (!degreeGapQuote) return null;
+  return { code: "DEGREE_GAP_FLAGGED", penalty: 0.06, source: "DESCRIPTION", quote: degreeGapQuote.replace(/\s+/g, " ").trim().slice(0, EVIDENCE_QUOTE_MAX) };
+};
+
+const DETECTORS: RoleShapeDetector[] = [detectCustomerFacingDelivery, detectPeopleManagementCore, detectContractEmployment, detectInfrastructureByDescription, detectDegreeGapFlagged];
 
 export function assessRoleShape(input: RoleShapeInput, detectors: RoleShapeDetector[] = DETECTORS): RoleShapeAssessment {
   const normalized = {
     title: String(input.title ?? ""),
     description: String(input.description ?? ""),
     employmentType: String(input.employmentType ?? ""),
+    degreeGapQuote: input.degreeGapQuote ? String(input.degreeGapQuote) : null,
   };
   const signals = detectors.map((detect) => detect(normalized)).filter((signal): signal is RoleShapeSignal => signal !== null);
   const total = Math.min(ROLE_SHAPE_MAX_TOTAL_PENALTY, signals.reduce((sum, signal) => sum + signal.penalty, 0));
