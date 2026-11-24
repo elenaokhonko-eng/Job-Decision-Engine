@@ -1,6 +1,6 @@
 import { callLLM, generateContent, MODEL_REGISTRY } from "./agent.js";
 import { OpenAI } from "openai";
-import { evaluationOpenAiModel } from "./openAiModelRoles.js";
+import { evaluationOpenAiModel, openAiBaseUrl } from "./openAiModelRoles.js";
 
 /** Helper to call OpenAI as the final fallback */
 async function callOpenAI(raw: string, schema?: any): Promise<string> {
@@ -9,7 +9,7 @@ async function callOpenAI(raw: string, schema?: any): Promise<string> {
   // Serves the legacy alert evaluator (removed; its callers are gone), whose Gemini step uses the
   // evaluation model: the evaluation chain applies (EVALUATION_FALLBACK_MODEL -> OPENAI_MODEL).
   const model = evaluationOpenAiModel();
-  const client = new OpenAI({ apiKey });
+  const client = new OpenAI({ apiKey, baseURL: openAiBaseUrl() });
   
   const payload: any = {
     model,
