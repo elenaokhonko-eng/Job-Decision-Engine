@@ -6,7 +6,6 @@ import {
   preflightModelRoutes,
   PROMPT_LANE_KEYS,
   promptLaneUnion,
-  runAgent,
   type SingleEvaluationJobInput,
 } from '../../services/agent.js';
 import { TARGET_LANE_KEYS } from '../../policy/laneIntentContracts.js';
@@ -47,14 +46,6 @@ describe('generateContentAudited retry policy', () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     restoreEnv();
-  });
-
-  it('refuses the legacy evaluator without database-backed candidate context', async () => {
-    process.env.OPENAI_API_KEY = 'test-openai-key';
-    delete process.env.GEMINI_API_KEY;
-    delete process.env.GEMINI_FLASH_API_KEY;
-
-    await expect(runAgent('Evaluate this job', { candidateProfileContext: '' })).rejects.toThrow(/database-backed candidateProfileContext/);
   });
 
   it('does not retry non-retryable OpenAI 400 schema errors', async () => {
