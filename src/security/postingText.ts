@@ -118,22 +118,11 @@ export function cleanPostingText(raw: unknown): CleanedPosting {
 
   // Markup can hide a forged fence or role marker, so look before stripping too.
   const preStripFlags = detectPostingInjectionFlags(text);
-  let htmlStripped = LOOKS_LIKE_HTML.test(text);
+  const htmlStripped = LOOKS_LIKE_HTML.test(text);
   if (htmlStripped) {
     text = stripHtml(text);
   }
   text = decodeHtmlEntities(text);
-  // Escaped markup (&lt;li&gt;) becomes real markup once decoded, so strip again. Bounded: a feed
-  // that escapes twice needs a third pass; deeper nesting is left as text.
-  for (let pass = 0; pass < 3; pass += 1) {
-    if (LOOKS_LIKE_HTML.test(text)) {
-      htmlStripped = true;
-      text = stripHtml(text);
-    }
-    const decoded = decodeHtmlEntities(text);
-    if (decoded === text) break;
-    text = decoded;
-  }
   // Entities can decode to invisible or control characters, so clean again.
   invisible += countMatches(text, INVISIBLE_CHARS);
   control += countMatches(text, CONTROL_CHARS);
