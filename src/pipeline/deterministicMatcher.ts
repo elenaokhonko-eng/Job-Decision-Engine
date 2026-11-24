@@ -1396,6 +1396,10 @@ export async function runDeterministicMatcher(
                recommendation_coverage_score = CASE WHEN $8::boolean THEN NULL ELSE recommendation_coverage_score END,
                recommendation_evidence_completeness = CASE WHEN $8::boolean THEN NULL ELSE recommendation_evidence_completeness END,
                recommendation_decided_at = CASE WHEN $8::boolean THEN NULL ELSE recommendation_decided_at END,
+               recommendation_score_policy = CASE WHEN $8::boolean THEN NULL ELSE recommendation_score_policy END,
+               recommendation_degree_asked_for = CASE WHEN $8::boolean THEN NULL ELSE recommendation_degree_asked_for END,
+               recommendation_role_signals = CASE WHEN $8::boolean THEN '[]'::jsonb ELSE recommendation_role_signals END,
+               recommendation_evidence_confidence = CASE WHEN $8::boolean THEN NULL ELSE recommendation_evidence_confidence END,
                latest_deterministic_decision_id = CASE WHEN $8::boolean THEN NULL ELSE latest_deterministic_decision_id END,
                updated_at = NOW()
            WHERE workspace_id = $1
