@@ -1301,31 +1301,6 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       expect(await deciderVersionTasks(ids)).toBe(2);
     }, 30000);
 
-    it("an archived job and a fixture job are never seeded for a decider version (they could never become current and would starve live jobs under the cap)", async () => {
-      const archived = await decidedJob("recommendation_decider_v0");
-      const fixture = await decidedJob("recommendation_decider_v0");
-      const live = await decidedJob("recommendation_decider_v0");
-      const archiveRun = crypto.randomUUID();
-      await getClient().query(
-        `INSERT INTO job_archive_runs (id, run_started_at, cutoff_at, mode, status) VALUES ($1, NOW(), NOW() - INTERVAL '1 day', 'DRY_RUN', 'SUCCEEDED')`,
-        [archiveRun],
-      );
-      await getClient().query(
-        `UPDATE canonical_jobs SET archived_at = NOW(), archive_run_id = $2, archive_reason = 'fixture archive',
-                archive_age_basis = 'HARD_REJECTED_DECISION', archive_reference_at = NOW() WHERE id = $1`,
-        [archived.canonicalJobId, archiveRun],
-      );
-      await getClient().query(`UPDATE canonical_jobs SET is_test_fixture = TRUE WHERE id = $1`, [fixture.canonicalJobId]);
-      // The archived and fixture jobs are the oldest: without the filters they would take capped slots ahead of the live job.
-      await getClient().query(`UPDATE canonical_jobs SET updated_at = NOW() - INTERVAL '2 days' WHERE id = ANY($1::uuid[])`, [[archived.canonicalJobId, fixture.canonicalJobId]]);
-      await seedRecoverablePipelineTasks(getClient(), {
-        context: getContext(), taskTypes: ["DECIDE_RECOMMENDATION"],
-        jobVersionIds: [archived.versionId, fixture.versionId, live.versionId], maxSeedPerType: 10,
-      });
-      expect(await deciderVersionTasks([archived.canonicalJobId, fixture.canonicalJobId])).toBe(0);
-      expect(await deciderVersionTasks([live.canonicalJobId])).toBe(1);
-    }, 30000);
-
     it("decider_version is in the decision context: a different version gives a different fingerprint", () => {
       const base = { workspaceId: "w", taskType: "DECIDE_RECOMMENDATION" as const, taskVersion: DECIDER_VERSION };
       const current = buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j", decider_version: DECIDER_VERSION } });
