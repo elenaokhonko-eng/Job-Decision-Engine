@@ -3055,3 +3055,10 @@ describe("stageTaskWorker", () => {
     }
   });
 });
+
+describe("scoped seed query (KNOWN GAP, follow-up owner W9, 2026-11-30)", () => {
+  // scopeSeedQuery wraps the seed without an outer ORDER BY, so under a cap the scoped path's choice is
+  // best-effort. Unscoped production runs keep the seed's real ORDER BY. Planned design: each seed returns an
+  // explicit ordering column and the wrapper orders by that column, with no SQL parsing.
+  it.todo("scoped seeds do not guarantee the cap ordering");
+});

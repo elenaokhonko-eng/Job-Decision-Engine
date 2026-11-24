@@ -620,6 +620,13 @@ async function enqueueStageTask(
     taskPayload.superseded_match_run_id.trim() !== ""
       ? taskPayload.superseded_match_run_id.trim()
       : null;
+  // One embedding task per requirement set: a new active set (a re-extraction) is a new task.
+  const embeddingRequirementSetId =
+    taskType === "PUBLISH_EMBEDDING" &&
+    typeof taskPayload.embedding_requirement_set_id === "string" &&
+    taskPayload.embedding_requirement_set_id.trim() !== ""
+      ? taskPayload.embedding_requirement_set_id.trim()
+      : null;
   // Each requirement-embedding repair round is its own task: a repeat repair of the same job version is not a no-op.
   const embeddingRepairSequence =
     taskType === "PUBLISH_EMBEDDING" && Number.isInteger(payload.embedding_repair_seq) && Number(payload.embedding_repair_seq) > 0
@@ -636,6 +643,8 @@ async function enqueueStageTask(
     ? `repair-embedding-${embeddingRepairSequence}`
     : routingReplayVersion
     ? `repair-${routingReplayVersion}`
+    : embeddingRequirementSetId
+      ? `embed-${embeddingRequirementSetId}`
     : gateRuleVersion
       ? `gate-${gateRuleVersion}`
     : laneRoutingRerouteVersion
@@ -1213,6 +1222,66 @@ export async function seedRecoverablePipelineTasks(
       deadlineAt,
     seedScope,
     maxPerType,
+    );
+
+    // A job whose ACTIVE requirement set has a requirement with no embedding input, or an input with no
+    // published embedding in the configured primary space, gets its embeddings published (one task per set,
+    // idempotent). Without this, a re-extraction (new requirement set) leaves the new texts without vectors.
+    const embeddingConfiguration = getEmbeddingSpaceRegistryConfiguration();
+    await selectAndEnqueue(
+      client as any,
+      ctx,
+      summary,
+      "PUBLISH_EMBEDDING",
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id, jv.active_requirement_set_id AS requirement_set_id
+       FROM canonical_jobs c
+       JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
+       WHERE c.workspace_id = $1
+         AND c.archived_at IS NULL
+         AND ($6::boolean OR c.is_test_fixture IS NOT TRUE)
+         AND jv.active_requirement_set_id IS NOT NULL
+         AND COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'HARD_REJECTED', 'MANUALLY_REMOVED')
+         -- One attempt per requirement set: a task for this set in ANY state (completed or failed included)
+         -- ends the candidacy, so attempted jobs cannot sit ahead of fresh ones under the cap.
+         AND NOT EXISTS (
+           SELECT 1 FROM pipeline_tasks attempted
+            WHERE attempted.workspace_id = c.workspace_id AND attempted.task_type = 'PUBLISH_EMBEDDING'
+              AND attempted.task_key LIKE 'PUBLISH_EMBEDDING:' || jv.id::text || ':%:embed-' || jv.active_requirement_set_id::text)
+         AND EXISTS (
+           SELECT 1 FROM job_requirements r
+            WHERE r.workspace_id = c.workspace_id AND r.requirement_set_id = jv.active_requirement_set_id
+              -- The embedding builder embeds only VALIDATED requirements; others can never be published.
+              AND r.status = 'VALIDATED'
+              AND NOT EXISTS (
+                SELECT 1 FROM embedding_inputs ei
+                 WHERE ei.workspace_id = r.workspace_id AND ei.source_type = 'JOB_REQUIREMENT' AND ei.source_id = r.id AND ei.is_current
+                   AND EXISTS (
+                     SELECT 1 FROM v_published_semantic_embeddings se
+                       JOIN embedding_spaces sp ON sp.workspace_id = se.workspace_id AND sp.id = se.embedding_space_id
+                      WHERE se.workspace_id = ei.workspace_id AND se.embedding_input_id = ei.id
+                        AND sp.active = TRUE AND sp.is_fallback_space = FALSE AND LOWER(sp.provider) = LOWER($3)
+                        AND sp.model = $4 AND sp.dimensions = $5)))
+         AND NOT EXISTS (
+           SELECT 1 FROM pipeline_tasks inflight
+            WHERE inflight.workspace_id = c.workspace_id AND inflight.task_type = 'PUBLISH_EMBEDDING'
+              AND inflight.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+              AND inflight.payload->>'job_version_id' = jv.id::text)
+       ORDER BY jv.observed_at ASC
+       LIMIT $2`,
+      [ctx.workspaceId, maxPerType, embeddingConfiguration.primary.provider, embeddingConfiguration.primary.model, embeddingConfiguration.primary.dimensions, includeTestFixtures],
+      (row) => ({
+        id: requiredSeedValue(row, "job_version_id"),
+        payload: {
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
+          embedding_requirement_set_id: requiredSeedValue(row, "requirement_set_id"),
+        },
+      }),
+      enabledTypes,
+      includeTestFixtures,
+      deadlineAt,
+      seedScope,
+      maxPerType,
     );
 
     await selectAndEnqueue(
