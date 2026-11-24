@@ -11,7 +11,7 @@ import { runEmbeddingBatchWithFallback } from "../../embeddings/batchCoordinator
 import { upsertLaneRevision } from "../../lanes/registry.js";
 import { loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
 import { GATE_VERSION } from "../../contracts/version.js";
-import { seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
+import { runPipelineStageTaskWorker, seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { batchEmbeddingFromPerInput } from "../fixtures/embeddingBatchMock.js";
 import { insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
@@ -452,6 +452,71 @@ describe.skipIf(skipReal)("APPLY_HARD_GATES seed follows the gate version", () =
     const { rows } = await db().query<{ rejection_reason: string | null; processing_state: string }>(
       `SELECT rejection_reason, processing_state FROM canonical_jobs WHERE id = $1`, [job.canonicalJobId]);
     expect(rows[0]).toEqual({ rejection_reason: "KEEP_ME", processing_state: "NEEDS_MANUAL_REVIEW" });
-    // TODO(after #275 merges): run the stamp handler on this task and assert rejection_reason is still KEEP_ME.
+  });
+
+  // ---- end to end: seed -> real handler (#275 stamp path) ----
+  const RESULT_COLUMNS = [
+    "processing_state", "processing_status", "primary_lane", "lane_confidence", "deterministic_match_score", "deterministic_match_coverage",
+    "recommendation_eligibility", "recommendation_outcome", "recommendation_requirement_score", "recommendation_coverage_score",
+    "recommendation_evidence_completeness", "recommendation_score_policy", "recommendation_degree_asked_for",
+    "recommendation_role_signals", "recommendation_evidence_confidence", "rejection_reason", "archived_at",
+  ];
+  const withResults = async (job: { canonicalJobId: string }, state: string, extra = "") => db().query(
+    `UPDATE canonical_jobs
+        SET processing_state = $2, processing_status = $2, primary_lane = 'CORE_AI_DATA', lane_confidence = 0.9,
+            deterministic_match_score = 70, deterministic_match_coverage = 55, recommendation_eligibility = 'ELIGIBLE',
+            recommendation_outcome = 'REVIEW', recommendation_requirement_score = 0.658, recommendation_coverage_score = 0.55,
+            recommendation_evidence_completeness = 0.9, recommendation_score_policy = 'm|role_shape_v2',
+            recommendation_degree_asked_for = 'A doctoral degree is required.',
+            recommendation_role_signals = '[{"code":"X","penalty":0.06,"source":"TITLE","quote":"x"}]'::jsonb,
+            recommendation_evidence_confidence = 'LOW' ${extra}
+      WHERE id = $1`, [job.canonicalJobId, state]);
+  const snapshot = async (canonicalJobId: string) => (await db().query(`SELECT ${RESULT_COLUMNS.join(", ")} FROM canonical_jobs WHERE id = $1`, [canonicalJobId])).rows[0];
+
+  it("end to end: a seeded refresh keeps lane, match, decision, score and ranking intact (saved and held jobs too, a NEEDS_MANUAL_REVIEW job keeps its rejection_reason), queues no downstream work and stamps the gate version", async () => {
+    const evaluated = await stampedJob("e2e-evaluated", "gate-old-version");
+    const saved = await stampedJob("e2e-saved", "gate-old-version");
+    const held = await stampedJob("e2e-held", "gate-old-version");
+    const manual = await stampedJob("e2e-manual", "gate-old-version");
+    await withResults(evaluated, "EVALUATED");
+    await withResults(saved, "MATCHED");
+    await withResults(held, "MATCHED");
+    await withResults(manual, "NEEDS_MANUAL_REVIEW", ", rejection_reason = 'ENGINE_ERROR: the matcher failed'");
+    await db().query(
+      `INSERT INTO raw_job_observations (workspace_id, source_name, source_external_id, source_url, retrieved_at, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id)
+       VALUES ($1, 'LINKEDIN_SAVED', $2, $3, NOW(), 'Seed Test Co', 'fixture role', 'x', '{}'::jsonb, $4, 'PROCESSED', $5)`,
+      [ctx().workspaceId, `s-${crypto.randomUUID()}`, `https://example.test/s/${crypto.randomUUID()}`, crypto.randomUUID().replaceAll("-", "").padEnd(64, "0"), saved.jobVersionId]);
+    await db().query(
+      `INSERT INTO job_archive_holds (workspace_id, canonical_job_id, hold_reason, hold_type, created_by, expires_at)
+       VALUES ($1, $2, 'owner keeps it', 'USER_PRESERVE', 'test', NOW() + INTERVAL '30 days')`, [ctx().workspaceId, held.canonicalJobId]);
+    const jobsUnderTest = [evaluated, saved, held, manual];
+    const ids = jobsUnderTest.map((job) => job.jobVersionId);
+    const before = await Promise.all(jobsUnderTest.map((job) => snapshot(job.canonicalJobId)));
+    // Only this test's gate tasks are claimed.
+    await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE workspace_id = $1 AND task_type = 'APPLY_HARD_GATES' AND status IN ('PENDING', 'RETRY_WAIT')`, [ctx().workspaceId]);
+    const tasksFor = async () => (await db().query<{ task_type: string; status: string }>(
+      `SELECT task_type, status FROM pipeline_tasks WHERE workspace_id = $1 AND payload->>'job_version_id' = ANY($2::text[])`, [ctx().workspaceId, ids])).rows;
+    expect(await tasksFor()).toHaveLength(0);
+
+    await seedFor(ids);
+    const seededTasks = await tasksFor();
+    expect(seededTasks.map((task) => task.task_type)).toEqual(["APPLY_HARD_GATES", "APPLY_HARD_GATES", "APPLY_HARD_GATES", "APPLY_HARD_GATES"]);
+    const run = await runPipelineStageTaskWorker(db(), { context: ctx(), seed: false, reconcileStalePending: false, taskTypes: ["APPLY_HARD_GATES"], maxTasks: 4, heartbeatSeconds: 0 });
+    expect(run.failed).toBe(0);
+
+    // Gate tasks completed, and nothing else (no embedding, lane, match, decision or AI task) was queued.
+    const after = await tasksFor();
+    expect(after).toHaveLength(4);
+    expect(after.every((task) => task.task_type === "APPLY_HARD_GATES" && task.status === "COMPLETED")).toBe(true);
+    for (const [index, job] of jobsUnderTest.entries()) {
+      expect(await snapshot(job.canonicalJobId), `job ${index} keeps every result column`).toEqual(before[index]);
+      const gate = (await db().query<{ gate_version: string }>(
+        `SELECT gate_version FROM gate_decisions WHERE job_version_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [job.jobVersionId])).rows[0];
+      expect(gate?.gate_version, `job ${index} is stamped`).toBe(GATE_VERSION);
+    }
+    // Stamped, so a second seed finds nothing to do.
+    await seedFor(ids);
+    expect(await tasksFor()).toHaveLength(4);
   });
 });
