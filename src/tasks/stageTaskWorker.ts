@@ -40,6 +40,7 @@ import { isCurrentCanonicalJobVersion } from "./canonicalJobVersion.js";
 import { createTaskIntentV2, TaskIntentV2Schema } from "./taskIntent.js";
 import { runAvailabilityRecheck, seedAvailabilityRechecks, type AvailabilityRecheckDependencies } from "./availabilityRecheck.js";
 import { archivedJobForPipelineTask } from "./jobArchiveGuard.js";
+import { decidableJobVersionSql } from "./completedWithoutResult.js";
 import { forcedTaskRerouteIntent, forcedTaskReroutePayload, isForcedRecomputeTask } from "./forcedTaskReroute.js";
 import { planPipelineStageRound } from "./pipelineStageScheduler.js";
 import {
@@ -427,6 +428,24 @@ export class DecisionSupersededError extends PipelineTaskDependencyBlockedError 
     );
     this.name = "DecisionSupersededError";
   }
+}
+
+async function jobVersionHasDecision(clientOrPool: pg.Pool | pg.PoolClient, ctx: WorkspaceContext, jobVersionId: string): Promise<boolean> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ exists: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM deterministic_decisions d WHERE d.workspace_id = $1 AND d.job_version_id = $2) AS exists`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return Boolean(rows[0]?.exists);
+}
+
+async function jobVersionIsDecidable(clientOrPool: pg.Pool | pg.PoolClient, ctx: WorkspaceContext, jobVersionId: string): Promise<boolean> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ decidable: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM job_versions v JOIN canonical_jobs c ON c.workspace_id = v.workspace_id AND c.id = v.canonical_job_id
+        WHERE v.workspace_id = $1 AND v.id = $2 AND ${decidableJobVersionSql("c", "v")}) AS decidable`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return Boolean(rows[0]?.decidable);
 }
 
 /** PRIORITY, REVIEW and TRACK are recommendations; SKIP is the absence of one. */
@@ -3443,16 +3462,19 @@ async function executeStageTask(
       // must not create a permanent blocked/manual-review record.
       return;
     }
+    const isTerminalState = ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "");
     if (
       decisionState.recommendationOutcome &&
-      ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "") &&
+      isTerminalState &&
       !isActionableRecommendationOutcome(decisionState.recommendationOutcome) &&
-      !isForcedRecomputeTask(task)
+      !isForcedRecomputeTask(task) &&
+      // The outcome lives on the canonical job, which can carry it from an earlier job version: the task is
+      // complete only when THIS version has its decision (or cannot be decided).
+      ((await jobVersionHasDecision(clientOrPool, ctx, jobVersionId)) || !(await jobVersionIsDecidable(clientOrPool, ctx, jobVersionId)))
     ) {
-      // A terminal job whose recorded outcome is a non-recommendation (SKIP) is complete. A recommendation
-      // (PRIORITY, REVIEW, TRACK) still stored on a terminal job is stale: accepting it here completed the
-      // task without a decision and kept the recommendation visible, so the decider runs instead. A forced
-      // recompute (zero-check repair) always runs the decider.
+      // A terminal job whose recorded outcome is a non-recommendation (SKIP) and whose version is decided (or
+      // undecidable) is complete. A stale recommendation (PRIORITY, REVIEW, TRACK), or a version with no decision,
+      // runs the decider instead. A forced recompute (zero-check repair) always runs it.
       return;
     }
     const matchDependentStates = new Set([
@@ -3501,12 +3523,21 @@ async function executeStageTask(
     if (!state.recommendationOutcome) {
       throw new Error(`Recommendation decider left job_version_id=${jobVersionId} without recommendation_outcome.`);
     }
-    if (state.processingState === "HARD_REJECTED" && isActionableRecommendationOutcome(state.recommendationOutcome)) {
+    const terminalAfter = ["HARD_REJECTED", "UNMATCHED"].includes(state.processingState || "");
+    if (terminalAfter && isActionableRecommendationOutcome(state.recommendationOutcome)) {
       // The decider selected nothing (for example the posting has no complete source content), so the stale
-      // recommendation survived. Fail visibly instead of completing a hard-rejected job that still recommends.
+      // recommendation survived. Fail visibly instead of completing a terminal job that still recommends.
       throw new Error(
-        `Recommendation decider left a ${state.recommendationOutcome} recommendation on hard-rejected job_version_id=${jobVersionId}.`
+        `Recommendation decider left a ${state.recommendationOutcome} recommendation on ${state.processingState} job_version_id=${jobVersionId}.`
       );
+    }
+    if (
+      (terminalAfter || isForcedRecomputeTask(task)) &&
+      (await jobVersionIsDecidable(clientOrPool, ctx, jobVersionId)) &&
+      !(await jobVersionHasDecision(clientOrPool, ctx, jobVersionId))
+    ) {
+      // A decidable version must end with a decision row; a decider run that wrote none is not a completed task.
+      throw new Error(`Recommendation decider wrote no decision for decidable job_version_id=${jobVersionId}.`);
     }
     return;
   }
@@ -4083,3 +4114,6 @@ export async function runPipelineStageTaskWorker(
     }
   }
 }
+
+/** The production stage dependencies, for tests that replace a single stage. */
+export const defaultPipelineStageWorkerDependencies: PipelineStageWorkerDependencies = defaultDependencies;

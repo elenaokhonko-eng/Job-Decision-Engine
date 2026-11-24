@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 
+import { insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import {
@@ -191,9 +192,19 @@ describe.skipIf(skipReal)("tasks completed without a result (PostgreSQL)", () =>
     const missingMatch = await completedTask("MATCH_PROFILE_EVIDENCE", shouldHaveMatch.jobVersionId);
     const rejectedNoDecision = await job();
     await setState(rejectedNoDecision.canonicalJobId, "HARD_REJECTED");
+    // Decidable: a complete description with source content, so the version must have a decision.
+    await db().query(`UPDATE canonical_jobs SET description_quality_status = 'COMPLETE' WHERE id = $1`, [rejectedNoDecision.canonicalJobId]);
+    await insertCompletePostingEvidence(db(), {
+      workspaceId: ctx().workspaceId, jobVersionId: rejectedNoDecision.jobVersionId, companyName: "Result Fixture Co",
+      title: "fixture role", sourceUrl: "https://example.test/r/decidable", description: "Synthetic decidable posting text.",
+    });
+    const undecidable = await job();
+    await setState(undecidable.canonicalJobId, "HARD_REJECTED");
+    const undecidableTask = await completedTask("DECIDE_RECOMMENDATION", undecidable.jobVersionId);
     const missingDecision = await completedTask("DECIDE_RECOMMENDATION", rejectedNoDecision.jobVersionId);
     const reported = (await findTasksCompletedWithoutResult(db(), ctx().workspaceId, { sampleLimit: 200 })).sample.map((row) => row.taskId);
     for (const taskId of designed) expect(reported).not.toContain(taskId);
+    expect(reported).not.toContain(undecidableTask);
     expect(reported).toContain(missingMatch);
     expect(reported).toContain(missingDecision);
   });
