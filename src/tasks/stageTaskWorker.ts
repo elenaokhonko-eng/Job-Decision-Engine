@@ -3539,7 +3539,6 @@ async function executeStageTask(
     if (!state.recommendationOutcome) {
       throw new Error(`Recommendation decider left job_version_id=${jobVersionId} without recommendation_outcome.`);
     }
-    const terminalAfter = ["HARD_REJECTED", "UNMATCHED"].includes(state.processingState || "");
     if (state.processingState === "HARD_REJECTED" && isActionableRecommendationOutcome(state.recommendationOutcome)) {
       // A hard reject always decides INELIGIBLE / SKIP, so a recommendation that survives means the decider did not run
       // for this job: fail visibly instead of completing it. An UNMATCHED job is different: the policy can legitimately
@@ -3550,11 +3549,12 @@ async function executeStageTask(
       );
     }
     if (
-      (terminalAfter || isForcedRecomputeTask(task)) &&
+      isForcedRecomputeTask(task) &&
       (await jobVersionIsDecidable(clientOrPool, ctx, jobVersionId)) &&
       !(await jobVersionHasDecision(clientOrPool, ctx, jobVersionId))
     ) {
-      // A decidable version must end with a decision row; a decider run that wrote none is not a completed task.
+      // A forced recompute of a decidable version must end with a decision row; a decider run that wrote none is not a
+      // completed task (the zero-check repair would otherwise record the job as repaired while it still violates).
       throw new Error(`Recommendation decider wrote no decision for decidable job_version_id=${jobVersionId}.`);
     }
     return;

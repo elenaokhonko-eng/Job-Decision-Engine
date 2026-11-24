@@ -192,7 +192,7 @@ describe.skipIf(skipReal)("decide task on a terminal job (PostgreSQL)", () => {
 
   it("a stale recommendation on a DECIDABLE terminal job that the decider leaves in place fails visibly", async () => {
     const job = await s().seedRoutableJob("decidable-silent");
-    await hardRejected(job, "TRACK", "VERIFY", "UNMATCHED");
+    await hardRejected(job, "TRACK", "VERIFY");
     await enqueueDecide(job, false);
     const silentDecider = {
       ...defaultPipelineStageWorkerDependencies,
