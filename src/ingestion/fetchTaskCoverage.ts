@@ -127,16 +127,24 @@ export async function reportContentWithoutFetchTask(
 
 export interface EnsureFetchTasksReport {
   mode: "DRY_RUN" | "APPLY";
-  /** Live waiting jobs with no fetch task whose latest alert observation can be fetched. */
+  /** Live waiting jobs with no fetch task whose latest alert observation can be fetched, after the cap. */
   candidates: number;
   queued: number;
+  /** Waiting jobs without a fetch task that were left alone because the owner saved them (their text comes from the export). */
+  skippedOwnerSaved: number;
 }
 
+/** Per-run cap used by the worker seed (seedRecoverablePipelineTasks maxSeedPerType default). */
+export const AWAITING_FETCH_SEED_DEFAULT_CAP = 200;
+
 /**
- * Reviewed, additive path for a live job that has neither complete content nor a fetch task: queue one
+ * Additive, idempotent path for a live job that has neither complete content nor a fetch task: queue one
  * FETCH_JOB_CONTENT task for its latest Gmail alert observation (idempotent on the shared key). It changes no job
- * status and no decision, and removing the task undoes it. Aggregator leads are not candidates. The caller owns the
- * transaction; a dry run only reads.
+ * status and no decision, and removing the task undoes it. Left alone: aggregator leads (they have no fetch task by
+ * design), jobs the owner saved through a saved-jobs export (their text comes from the export, and a content-attach
+ * task is the import's job), archived jobs (not live), and jobs with no Gmail alert observation (Hacker News,
+ * Himalayas and exported jobs have nothing this fetch can retrieve). At most `limit` tasks per call, so a seed stays
+ * bounded. The caller owns the transaction; a dry run only reads.
  */
 export async function ensureFetchTasksForAwaitingContent(
   client: pg.PoolClient,
@@ -144,9 +152,18 @@ export async function ensureFetchTasksForAwaitingContent(
   input: { apply: boolean; producer: string; limit?: number },
 ): Promise<EnsureFetchTasksReport> {
   const coverage = await reportContentWithoutFetchTask(client, ctx.workspaceId);
-  const jobIds = coverage.withoutFetchTask.slice(0, input.limit ?? 500);
-  const observations = jobIds.length === 0 ? [] : (await client.query<{ observation_id: string }>(
-    `SELECT DISTINCT ON (version.canonical_job_id) observation.id::text AS observation_id
+  const limit = input.limit ?? AWAITING_FETCH_SEED_DEFAULT_CAP;
+  const jobIds = coverage.withoutFetchTask;
+  const found = jobIds.length === 0 ? { rows: [] as { observation_id: string; owner_saved: boolean }[] } : await client.query<{ observation_id: string; owner_saved: boolean }>(
+    `SELECT DISTINCT ON (version.canonical_job_id) observation.id::text AS observation_id,
+            EXISTS (
+              SELECT 1 FROM job_versions saved_version
+                JOIN raw_job_observations saved_observation
+                  ON saved_observation.workspace_id = saved_version.workspace_id AND saved_observation.job_version_id = saved_version.id
+               WHERE saved_version.workspace_id = observation.workspace_id
+                 AND saved_version.canonical_job_id = version.canonical_job_id
+                 AND saved_observation.source_name IN ('LINKEDIN_SAVED', 'MCF_SAVED')
+            ) AS owner_saved
        FROM raw_job_observations observation
        JOIN job_versions version
          ON version.workspace_id = observation.workspace_id AND version.id = observation.job_version_id
@@ -155,7 +172,9 @@ export async function ensureFetchTasksForAwaitingContent(
         AND version.canonical_job_id = ANY($2::uuid[])
       ORDER BY version.canonical_job_id, observation.retrieved_at DESC, observation.id DESC`,
     [ctx.workspaceId, jobIds],
-  )).rows;
+  );
+  const skippedOwnerSaved = found.rows.filter((row) => row.owner_saved).length;
+  const observations = found.rows.filter((row) => !row.owner_saved).slice(0, limit);
   let queued = 0;
   if (input.apply) {
     for (const row of observations) {
@@ -163,5 +182,5 @@ export async function ensureFetchTasksForAwaitingContent(
       if (task.inserted) queued += 1;
     }
   }
-  return { mode: input.apply ? "APPLY" : "DRY_RUN", candidates: observations.length, queued };
+  return { mode: input.apply ? "APPLY" : "DRY_RUN", candidates: observations.length, queued, skippedOwnerSaved };
 }
