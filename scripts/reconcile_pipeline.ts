@@ -10,6 +10,7 @@ import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { reportAwaitingContentOutputs } from "../src/ingestion/contentCompleteness.js";
 import { reportContentWithoutFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
 import { runZeroCheckRepairCommand } from "../src/tasks/zeroCheckRepair.js";
+import { rankingIntegrityExitCode, reportRankingIntegrity, type RankingIntegrityReport } from "../src/pipeline/rankingIntegrity.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -24,6 +25,7 @@ interface ReconciliationReport {
   job_states: CountRow[];
   task_states: CountRow[];
   evaluation_queue_states: CountRow[];
+  ranking_integrity: RankingIntegrityReport;
   funnel: {
     canonical_jobs: number;
     gate_passed: number;
@@ -487,6 +489,7 @@ async function run(): Promise<void> {
 
     const awaitingOutputs = await reportAwaitingContentOutputs(client, ctx.workspaceId);
     const fetchCoverage = await reportContentWithoutFetchTask(client, ctx.workspaceId);
+    const rankingIntegrity = await reportRankingIntegrity(client, ctx.workspaceId);
 
     const report: ReconciliationReport = {
       mode: "read_only",
@@ -504,6 +507,7 @@ async function run(): Promise<void> {
         awaiting_without_fetch_task: fetchCoverage.withoutFetchTask.length,
         awaiting_with_only_dead_lettered_fetch: fetchCoverage.fetchDeadLetteredOnly,
       },
+      ranking_integrity: rankingIntegrity,
       samples: samples.rows[0] ?? {
         pass_missing_current_requirements: [],
         pass_missing_current_matches: [],
@@ -516,6 +520,15 @@ async function run(): Promise<void> {
     } else {
       console.log("PIPELINE RECONCILIATION (READ ONLY)");
       console.log(JSON.stringify(report, null, 2));
+    }
+    if (rankingIntegrityExitCode(report.ranking_integrity) !== 0) {
+      console.error(
+        `ERROR: ranking integrity: ${report.ranking_integrity.listedWithoutAdjustedScore} listed job(s) with a decision but no adjusted score, ` +
+        `${report.ranking_integrity.evidenceWithoutScore} job(s) with no adjusted score but stored score evidence, ` +
+        `${report.ranking_integrity.listedWithoutScorePolicy} without a score policy, ` +
+        `${report.ranking_integrity.mixedScorePolicyJobs} outside the majority score policy ${JSON.stringify(report.ranking_integrity.scorePolicies)}.`,
+      );
+      process.exitCode = 1;
     }
     for (const check of report.zero_checks.filter((entry) => entry.total > 0)) {
       console.error(`ERROR: zero-check ${check.name} found ${check.total} (sample ${check.sample.join(", ")}).`);
