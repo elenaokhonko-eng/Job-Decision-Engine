@@ -120,6 +120,7 @@ def test_review_queries_read_only_scoped_read_models(name):
         "v_application_readiness_current",
         "v_apply_now_jobs_stage3_scoped",
         "v_job_availability_current",
+        "v_job_ranking_scoped",
     }, tables
     assert "WHERE jobs.workspace_id = %s" in query
 

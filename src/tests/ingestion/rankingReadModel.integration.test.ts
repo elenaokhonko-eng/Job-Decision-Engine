@@ -35,13 +35,15 @@ describe("no list orders by the raw match score (static)", () => {
     expect(source).not.toMatch(/deterministic_match_score/);
   });
 
-  // KNOWN VIOLATION, owned by the Streamlit owner: streamlit_app.py still orders its lists by the raw score. This
-  // test is expected to fail until they switch to v_job_ranking_scoped.ranking_score (or
-  // recommendation_requirement_score); when they do, `it.fails` makes this test fail, which is the cue to change it to `it`.
-  it.fails("Streamlit lists order by the stored adjusted score, never by the raw score", () => {
-    const orderByClauses = [...read("streamlit_app.py").matchAll(/ORDER BY([^"]*?)(?:\n\s*"""|LIMIT|\n\s*\)|$)/gim)].map((match) => match[1] ?? "");
-    const rawFirst = orderByClauses.filter((clause) => /deterministic_match_score/.test(clause));
-    expect(rawFirst).toEqual([]);
+  it("Streamlit lists order by the stored adjusted score, never by the raw score", () => {
+    const source = read("streamlit_app.py");
+    const orderByClauses = [...source.matchAll(/ORDER BY([^"]*?)(?:\n\s*"""|LIMIT|\n\s*\)|$)/gim)].map((match) => match[1] ?? "");
+    expect(orderByClauses.filter((clause) => /deterministic_match_score|raw_match_score/.test(clause))).toEqual([]);
+    for (const name of ["APPLY_NOW_JOBS_QUERY", "VERIFY_THEN_APPLY_JOBS_QUERY", "REVIEW_JOBS_QUERY", "TRACK_JOBS_QUERY"]) {
+      const query = new RegExp(`${name}\\s*=\\s*"""([\\s\\S]*?)"""`).exec(source)?.[1] ?? "";
+      expect(query, `${name} reads v_job_ranking_scoped`).toContain("v_job_ranking_scoped");
+      expect(query, `${name} orders by ranking_score`).toMatch(/ORDER BY[^"]*ranking_score DESC/i);
+    }
   });
 });
 
