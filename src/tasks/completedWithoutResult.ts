@@ -9,7 +9,19 @@
  */
 import type pg from "pg";
 
+import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
+
 type Queryable = Pick<pg.PoolClient, "query">;
+
+/**
+ * SQL predicate (canonical alias, version alias) that is TRUE when the decider can select the job version: a complete
+ * description and source content evidence. A version that fails it genuinely cannot be decided; a version that passes it
+ * must get a decision row. One definition for the worker and for this check.
+ */
+export function decidableJobVersionSql(canonicalAlias: string, versionAlias: string): string {
+  return `(${canonicalAlias}.description_quality_status = 'COMPLETE'
+    AND ${sourceContentEvidencePredicate(`${canonicalAlias}.workspace_id`, `${versionAlias}.id`)})`;
+}
 
 /** Task type -> SQL predicate (alias task, version job_version_id) that is TRUE when the result exists. */
 export const COMPLETED_RESULT_PREDICATES: Readonly<Record<string, string>> = {
@@ -49,9 +61,10 @@ export interface CompletedWithoutResultReport {
 export async function findTasksCompletedWithoutResult(
   client: Queryable,
   workspaceId: string,
-  options: { sampleLimit?: number } = {},
+  /** sampleLimit is clamped to 200 for reporting; `all: true` returns every row (the repair path). */
+  options: { sampleLimit?: number; all?: boolean } = {},
 ): Promise<CompletedWithoutResultReport> {
-  const sampleLimit = Math.max(0, Math.min(options.sampleLimit ?? 20, 200));
+  const sampleLimit = options.all ? Number.MAX_SAFE_INTEGER : Math.max(0, Math.min(options.sampleLimit ?? 20, 200));
   const missing = Object.entries(COMPLETED_RESULT_PREDICATES)
     .map(([type, exists]) => `(task.task_type = '${type}' AND NOT ${exists})`)
     .join("\n          OR ");
@@ -79,6 +92,9 @@ export async function findTasksCompletedWithoutResult(
         -- A decision task for a job still before lane routing is a stale task the worker closes without a decision, by design.
         AND NOT (task.task_type = 'DECIDE_RECOMMENDATION' AND COALESCE(canonical.processing_state, canonical.processing_status)
                  IN ('RAW_STAGED', 'PREQUALIFIED'))
+        -- A terminal job whose version the decider cannot select (incomplete description or no source content) cannot get a decision.
+        AND NOT (task.task_type = 'DECIDE_RECOMMENDATION' AND COALESCE(canonical.processing_state, canonical.processing_status)
+                 IN ('HARD_REJECTED', 'UNMATCHED') AND NOT ${decidableJobVersionSql("canonical", "version")})
         -- RECHECK_AVAILABILITY skips (and completes without an event) a job that has no observation to read.
         AND NOT (task.task_type = 'RECHECK_AVAILABILITY' AND NOT EXISTS (
           SELECT 1 FROM raw_job_observations skip_observation
