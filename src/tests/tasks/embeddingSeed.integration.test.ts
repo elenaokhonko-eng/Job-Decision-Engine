@@ -378,7 +378,6 @@ describe.skipIf(skipReal)("PUBLISH_EMBEDDING seed follows the active requirement
     const rejected = await seedRoutableJob("status-rejected", ["Zebra rejected only"], remote, "REJECTED");
     const ids = [extracted.jobVersionId, rejected.jobVersionId];
     await seedScoped(ids);
-    console.log('DBG', JSON.stringify((await db().query(`select task_key, status from pipeline_tasks where payload->>'job_version_id' = ANY($1::text[])`, [ids])).rows), JSON.stringify((await db().query(`select status from job_requirements where job_version_id = ANY($1::uuid[])`, [ids])).rows));
     expect(await setKeyed(ids)).toBe(0);
   });
 
