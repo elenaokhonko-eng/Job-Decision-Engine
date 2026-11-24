@@ -217,7 +217,6 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
 
     const capped = await ensureFetchTasksForAwaitingContent(db(), ctx, { apply: true, producer: "test", limit: 2 });
     expect(capped.queued).toBe(2);
-    expect(capped.skippedOwnerSaved).toBe(1);
     const rest = await ensureFetchTasksForAwaitingContent(db(), ctx, { apply: true, producer: "test", limit: 10 });
     expect(rest.queued).toBe(1);
     const tasks = await db().query<{ observation_id: string }>(
@@ -226,6 +225,26 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
     for (const untouched of [saved, lead, feed, archivedJob]) {
       expect(tasks.rows.map((row) => row.observation_id)).not.toContain(untouched.observationId);
     }
+  });
+
+  it("check 9 covers alert-backed jobs only: feed-only and owner-saved jobs without a task are information, not violations", async () => {
+    const ctx = await newContext();
+    const alertJob = await seedAlertJob("alert-no-task", ctx);
+    const feedJob = await seedAlertJob("feed-no-task", ctx);
+    await db().query(`UPDATE raw_job_observations SET source_name = 'HACKER_NEWS' WHERE id = $1`, [feedJob.observationId]);
+    const savedJob = await seedAlertJob("saved-no-task", ctx);
+    const version = await db().query<{ job_version_id: string }>(`SELECT job_version_id FROM raw_job_observations WHERE id = $1`, [savedJob.observationId]);
+    const savedObservation = randomUUID();
+    await db().query(
+      `INSERT INTO raw_job_observations (id, workspace_id, source_name, source_external_id, source_url, retrieved_at, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id)
+       VALUES ($1, $2, 'MCF_SAVED', $3, 'https://example.test/saved', NOW(), 'Coverage Fixture Co', 'saved', 'Short.', '{}'::jsonb, $4, 'PROCESSED', $5)`,
+      [savedObservation, ctx.workspaceId, `saved-${savedObservation}`, `raw-${savedObservation}`, version.rows[0]!.job_version_id],
+    );
+    const report = await reportContentWithoutFetchTask(db(), ctx.workspaceId);
+    expect(report.withoutFetchTask).toEqual([alertJob.canonicalJobId]);
+    expect(report.notFetchableWithoutTask).toBe(2);
+    expect(report.awaitingContentJobs).toBe(3);
   });
 
   it("reconciliation lists exactly the live jobs with neither complete content nor a fetch task", async () => {

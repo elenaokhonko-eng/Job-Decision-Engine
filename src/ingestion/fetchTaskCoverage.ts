@@ -72,8 +72,17 @@ export async function assertObservationsHaveFetchTask(
 export interface FetchTaskCoverageReport {
   /** Live jobs without complete content. */
   awaitingContentJobs: number;
-  /** Of those, jobs with no FETCH_JOB_CONTENT task for any of their observations (each is a violation). */
+  /**
+   * Of those, alert-backed jobs (a Gmail alert observation, no owner-saved observation, not an aggregator lead) with no
+   * FETCH_JOB_CONTENT task for any of their observations (each is a violation: a fetch could serve them).
+   */
   withoutFetchTask: string[];
+  /**
+   * Awaiting jobs with no fetch task that a fetch cannot serve (Hacker News, Himalayas, saved-export and other feed jobs).
+   * Information only: they wait for a re-export, a paste or a new source, and are read through
+   * v_job_awaiting_content_scoped.
+   */
+  notFetchableWithoutTask: number;
   /** Of those, jobs whose every fetch task is DEAD_LETTER: stuck until the expiry rule archives them (information). */
   fetchDeadLetteredOnly: number;
 }
@@ -83,8 +92,23 @@ export async function reportContentWithoutFetchTask(
   client: Queryable,
   workspaceId: string,
 ): Promise<FetchTaskCoverageReport> {
-  const result = await client.query<{ canonical_job_id: string; task_count: number; live_task_count: number }>(
+  const result = await client.query<{ canonical_job_id: string; task_count: number; live_task_count: number; fetchable: boolean }>(
     `SELECT awaiting.canonical_job_id::text AS canonical_job_id,
+            (EXISTS (
+               SELECT 1 FROM raw_job_observations alert
+                 JOIN job_versions alert_version
+                   ON alert_version.workspace_id = alert.workspace_id AND alert_version.id = alert.job_version_id
+                WHERE alert.workspace_id = awaiting.workspace_id
+                  AND alert_version.canonical_job_id = awaiting.canonical_job_id
+                  AND alert.source_name = 'GMAIL_ALERT'
+             ) AND NOT EXISTS (
+               SELECT 1 FROM raw_job_observations saved
+                 JOIN job_versions saved_version
+                   ON saved_version.workspace_id = saved.workspace_id AND saved_version.id = saved.job_version_id
+                WHERE saved.workspace_id = awaiting.workspace_id
+                  AND saved_version.canonical_job_id = awaiting.canonical_job_id
+                  AND saved.source_name IN ('LINKEDIN_SAVED', 'MCF_SAVED')
+             )) AS fetchable,
             COALESCE(tasks.task_count, 0)::int AS task_count,
             COALESCE(tasks.live_task_count, 0)::int AS live_task_count
        FROM v_job_awaiting_content_scoped awaiting
@@ -120,7 +144,8 @@ export async function reportContentWithoutFetchTask(
   );
   return {
     awaitingContentJobs: result.rows.length,
-    withoutFetchTask: result.rows.filter((row) => row.task_count === 0).map((row) => row.canonical_job_id),
+    withoutFetchTask: result.rows.filter((row) => row.task_count === 0 && row.fetchable).map((row) => row.canonical_job_id),
+    notFetchableWithoutTask: result.rows.filter((row) => row.task_count === 0 && !row.fetchable).length,
     fetchDeadLetteredOnly: result.rows.filter((row) => row.task_count > 0 && row.live_task_count === 0).length,
   };
 }
@@ -130,8 +155,6 @@ export interface EnsureFetchTasksReport {
   /** Live waiting jobs with no fetch task whose latest alert observation can be fetched, after the cap. */
   candidates: number;
   queued: number;
-  /** Waiting jobs without a fetch task that were left alone because the owner saved them (their text comes from the export). */
-  skippedOwnerSaved: number;
 }
 
 /** Per-run cap used by the worker seed (seedRecoverablePipelineTasks maxSeedPerType default). */
@@ -173,7 +196,6 @@ export async function ensureFetchTasksForAwaitingContent(
       ORDER BY version.canonical_job_id, observation.retrieved_at DESC, observation.id DESC`,
     [ctx.workspaceId, jobIds],
   );
-  const skippedOwnerSaved = found.rows.filter((row) => row.owner_saved).length;
   const observations = found.rows.filter((row) => !row.owner_saved).slice(0, limit);
   let queued = 0;
   if (input.apply) {
@@ -182,5 +204,5 @@ export async function ensureFetchTasksForAwaitingContent(
       if (task.inserted) queued += 1;
     }
   }
-  return { mode: input.apply ? "APPLY" : "DRY_RUN", candidates: observations.length, queued, skippedOwnerSaved };
+  return { mode: input.apply ? "APPLY" : "DRY_RUN", candidates: observations.length, queued };
 }

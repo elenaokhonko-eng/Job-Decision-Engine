@@ -86,3 +86,61 @@ export async function reportAwaitingContentOutputs(
   }
   return { awaitingContentJobs: result.rows.length, violations, byOutput };
 }
+
+/**
+ * The read models the owner's lists read (Review, Priority and Apply Now, Track, Top 10, the shortlist and the status buckets).
+ * A name is only a literal in a query: the list is fixed here, never taken from input. A view that does not exist in
+ * the connected schema is reported in `viewsMissing`, not silently treated as clean.
+ */
+export const LIST_READ_MODELS = [
+  "v_canonical_shortlist_scoped",
+  "v_canonical_shortlist_actions_scoped",
+  "v_job_status_buckets_scoped",
+  "v_apply_now_jobs_scoped",
+  "v_apply_now_jobs_stage3_scoped",
+  "v_track_jobs_scoped",
+  "v_top_ten_ready_jobs_scoped",
+  "v_top_ten_ready_jobs_stage3_scoped",
+  "v_application_workspace_scoped",
+] as const;
+
+export interface AwaitingContentVisibilityReport {
+  /** Awaiting-content jobs shown by at least one list read model (each is a violation). */
+  visible: { canonicalJobId: string; views: string[] }[];
+  viewsChecked: string[];
+  /** List read models absent from the schema or without workspace_id and canonical_job_id; not checked. */
+  viewsMissing: string[];
+}
+
+/**
+ * The invariant that matters for "awaiting content": no list shows such a job. Stored gate, lane and recommendation on an
+ * awaiting job are kept as evidence and reported by reportAwaitingContentOutputs as information only. Read only; ids only.
+ */
+export async function reportAwaitingContentVisibility(client: Queryable, workspaceId: string): Promise<AwaitingContentVisibilityReport> {
+  const present = await client.query<{ table_name: string }>(
+    `SELECT table_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = ANY($1::text[]) AND column_name IN ('workspace_id', 'canonical_job_id')
+      GROUP BY table_name HAVING COUNT(DISTINCT column_name) = 2`,
+    [[...LIST_READ_MODELS]],
+  );
+  const available = new Set(present.rows.map((row) => row.table_name));
+  const viewsChecked = LIST_READ_MODELS.filter((name) => available.has(name));
+  const viewsMissing = LIST_READ_MODELS.filter((name) => !available.has(name));
+  const byJob = new Map<string, string[]>();
+  for (const view of viewsChecked) {
+    const result = await client.query<{ canonical_job_id: string }>(
+      `SELECT DISTINCT list.canonical_job_id::text AS canonical_job_id
+         FROM ${view} list
+         JOIN v_job_awaiting_content_scoped awaiting
+           ON awaiting.workspace_id = list.workspace_id AND awaiting.canonical_job_id = list.canonical_job_id
+        WHERE list.workspace_id = $1::uuid`,
+      [workspaceId],
+    );
+    for (const row of result.rows) byJob.set(row.canonical_job_id, [...(byJob.get(row.canonical_job_id) ?? []), view]);
+  }
+  return {
+    visible: [...byJob.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([canonicalJobId, views]) => ({ canonicalJobId, views })),
+    viewsChecked,
+    viewsMissing,
+  };
+}
