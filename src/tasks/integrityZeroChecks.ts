@@ -8,6 +8,10 @@ import type pg from "pg";
 import { AVAILABILITY_RECHECK_ARCHIVE_RULE } from "../services/jobArchive.js";
 import { OWNER_SAVED_SOURCE_NAMES } from "../services/jobArchiveHardRejectedPolicy.js";
 import { routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
+import { GATE_VERSION } from "../contracts/version.js";
+import { currentMatcherPolicyVersion } from "../pipeline/profileMatchCurrency.js";
+import { LANE_ROUTER_RULE_VERSION } from "../pipeline/laneRouter.js";
+import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
 import { findTasksCompletedWithoutResult } from "./completedWithoutResult.js";
 
 type Queryable = Pick<pg.PoolClient, "query">;
@@ -142,6 +146,63 @@ export async function protectedJobsAutoArchived(db: Queryable, workspaceId: stri
   return result("protected_job_auto_archived", rows.map((row) => row.id), { POSTING_NOT_CONFIRMABLE: rows.length });
 }
 
+/**
+ * A stage result older than the current rule version, per stage, for live jobs: the extractor (requirement
+ * set made by an older extractor version), the gate (latest gate decision under an older GATE_VERSION),
+ * the matcher (latest match run under an older policy version) and the lane router (latest lane decision
+ * not stamped with the current router rule version). The decider joins when it stores its version.
+ * Staleness is visible after a run: after the version-reopen seeds have drained it must be zero.
+ */
+export async function staleStageResults(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  const stages: Record<string, { sql: string; params: unknown[] }> = {
+    extractor: {
+      sql: `SELECT c.id::text AS id
+              FROM canonical_jobs c
+              JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
+              JOIN requirement_sets rs ON rs.workspace_id = jv.workspace_id AND rs.id = jv.active_requirement_set_id
+              JOIN requirement_set_identities ri ON ri.workspace_id = rs.workspace_id AND ri.id = rs.requirement_identity_id
+             WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+               AND ri.deterministic_extractor_version IS DISTINCT FROM $2`,
+      params: [DETERMINISTIC_EXTRACTOR_VERSION],
+    },
+    gate: {
+      sql: `SELECT c.id::text AS id
+              FROM canonical_jobs c
+              JOIN LATERAL (SELECT g.gate_version FROM gate_decisions g
+                             WHERE g.workspace_id = c.workspace_id AND g.job_version_id = c.latest_job_version_id
+                             ORDER BY g.created_at DESC, g.id DESC LIMIT 1) latest_gate ON TRUE
+             WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+               AND COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'MANUALLY_REMOVED')
+               AND latest_gate.gate_version IS DISTINCT FROM $2`,
+      params: [GATE_VERSION],
+    },
+    matcher: {
+      sql: `SELECT c.id::text AS id
+              FROM canonical_jobs c
+              JOIN match_runs mr ON mr.workspace_id = c.workspace_id AND mr.id = c.latest_match_run_id
+             WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+               AND mr.policy_version IS DISTINCT FROM $2`,
+      params: [currentMatcherPolicyVersion()],
+    },
+    lane_router: {
+      sql: `SELECT c.id::text AS id
+              FROM canonical_jobs c
+              JOIN lane_decisions ld ON ld.workspace_id = c.workspace_id AND ld.id = c.latest_lane_decision_id
+             WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+               AND LEFT(ld.model_version, LENGTH($2)) IS DISTINCT FROM $2`,
+      params: [LANE_ROUTER_RULE_VERSION],
+    },
+  };
+  const ids: string[] = [];
+  const detail: Record<string, number> = {};
+  for (const [stage, query] of Object.entries(stages)) {
+    const { rows } = await db.query<{ id: string }>(query.sql, [workspaceId, ...query.params]);
+    detail[stage] = rows.length;
+    ids.push(...rows.map((row) => `${stage}:${row.id}`));
+  }
+  return result("stage_result_older_than_rule_version", ids, detail);
+}
+
 export async function runZeroChecks(db: Queryable, workspaceId: string): Promise<ZeroCheckResult[]> {
   return [
     await rejectedJobsWithRecommendation(db, workspaceId),
@@ -149,6 +210,7 @@ export async function runZeroChecks(db: Queryable, workspaceId: string): Promise
     await completedTasksWithoutResult(db, workspaceId),
     await routableVerificationJobsStranded(db, workspaceId),
     await protectedJobsAutoArchived(db, workspaceId),
+    await staleStageResults(db, workspaceId),
   ];
 }
 

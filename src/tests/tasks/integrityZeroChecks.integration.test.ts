@@ -4,6 +4,10 @@ import pg from "pg";
 
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
+import { GATE_VERSION } from "../../contracts/version.js";
+import { LANE_ROUTER_RULE_VERSION } from "../../pipeline/laneRouter.js";
+import { currentMatcherPolicyVersion } from "../../pipeline/profileMatchCurrency.js";
+import { DETERMINISTIC_EXTRACTOR_VERSION } from "../../requirements/deterministicExtractors.js";
 import { AVAILABILITY_RECHECK_ARCHIVE_RULE } from "../../services/jobArchive.js";
 import {
   completedTasksWithoutResult,
@@ -12,6 +16,7 @@ import {
   rejectedJobsWithRecommendation,
   routableVerificationJobsStranded,
   runZeroChecks,
+  staleStageResults,
   zeroChecksExitCode,
 } from "../../tasks/integrityZeroChecks.js";
 
@@ -114,9 +119,9 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     const results = await runZeroChecks(db(), ws);
     expect(results.map((check) => check.name)).toEqual([
       "rejected_job_with_recommendation", "listed_job_not_currently_open", "task_completed_without_result",
-      "routable_verification_job_stranded", "protected_job_auto_archived",
+      "routable_verification_job_stranded", "protected_job_auto_archived", "stage_result_older_than_rule_version",
     ]);
-    expect(results.map((check) => check.total)).toEqual([0, 0, 0, 0, 0]);
+    expect(results.map((check) => check.total)).toEqual([0, 0, 0, 0, 0, 0]);
     expect(zeroChecksExitCode(results)).toBe(0);
     expect(zeroChecksExitCode([{ total: 0 }, { total: 2 }])).toBe(1);
   });
@@ -234,5 +239,45 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     await archive(ws, otherRule.canonicalJobId, null, 1);
     const check = await protectedJobsAutoArchived(db(), ws);
     expect([...check.sample].sort()).toEqual([savedThenArchived.canonicalJobId, heldThenArchived.canonicalJobId].sort());
+  });
+  it("stage result older than the current rule version: gate, matcher and lane router are reported per stage; current results are not", async () => {
+    const ws = await newWorkspace();
+    const staleGate = await job(ws);
+    const currentGate = await job(ws);
+    const gate = (j: { canonicalJobId: string; jobVersionId: string }, version: string) => db().query(
+      `INSERT INTO gate_decisions (canonical_job_id, job_version_id, decision, gate_version, workspace_id) VALUES ($1, $2, 'PASS', $3, $4)`,
+      [j.canonicalJobId, j.jobVersionId, version, ws]);
+    await gate(staleGate, "gate-old");
+    await gate(currentGate, GATE_VERSION);
+
+    const profile = await db().query<{ id: string }>(
+      `INSERT INTO candidate_profiles (workspace_id, profile_key, display_name) VALUES ($1, $2, 'Fixture') RETURNING id`, [ws, `fixture-${randomUUID()}`]);
+    const version = await db().query<{ id: string }>(
+      `INSERT INTO profile_versions (workspace_id, candidate_profile_id, version_number, schema_version, source_hash, status, effective_at)
+       VALUES ($1, $2, 1, '2.2.0', $3, 'DRAFT', NOW()) RETURNING id`, [ws, profile.rows[0]!.id, `fixture-${randomUUID()}`]);
+    const staleMatch = await job(ws);
+    const currentMatch = await job(ws);
+    for (const [j, policy] of [[staleMatch, "matcher-old"], [currentMatch, currentMatcherPolicyVersion()]] as const) {
+      const run = await db().query<{ id: string }>(
+        `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, status, requirement_count, matched_count, policy_version, job_content_hash, context_fingerprint)
+         VALUES ($1, $2, $3, $4, 'COMPLETED', 1, 1, $5, 'h', 'fp') RETURNING id`, [ws, j.canonicalJobId, j.jobVersionId, version.rows[0]!.id, policy]);
+      await db().query(`UPDATE canonical_jobs SET latest_match_run_id = $1 WHERE id = $2`, [run.rows[0]!.id, j.canonicalJobId]);
+    }
+
+    const staleLane = await job(ws);
+    const currentLane = await job(ws);
+    for (const [j, model] of [[staleLane, "lane_router_old|lanes_x|"], [currentLane, `${LANE_ROUTER_RULE_VERSION}|lanes_x|`]] as const) {
+      const decision = await db().query<{ id: string }>(
+        `INSERT INTO lane_decisions (workspace_id, canonical_job_id, job_version_id, decision_hash, model_version, lane_snapshot, decision_json)
+         VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, '{}'::jsonb) RETURNING id`, [ws, j.canonicalJobId, j.jobVersionId, randomUUID(), model]);
+      await db().query(`UPDATE canonical_jobs SET latest_lane_decision_id = $1 WHERE id = $2`, [decision.rows[0]!.id, j.canonicalJobId]);
+    }
+
+    const check = await staleStageResults(db(), ws);
+    expect([...check.sample].sort()).toEqual([
+      `gate:${staleGate.canonicalJobId}`, `lane_router:${staleLane.canonicalJobId}`, `matcher:${staleMatch.canonicalJobId}`,
+    ].sort());
+    expect(check.detail).toEqual({ extractor: 0, gate: 1, matcher: 1, lane_router: 1 });
+    expect(DETERMINISTIC_EXTRACTOR_VERSION).toBeTruthy();
   });
 });
