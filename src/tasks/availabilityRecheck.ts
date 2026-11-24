@@ -73,6 +73,7 @@ export const RECHECK_AVAILABILITY_STAGE_VERSION = "availability_recheck_v1" as c
 const OPEN_WINDOW_MS = 7 * 24 * 3_600_000;
 const CLOSED_WINDOW_MS = 24 * 3_600_000;
 const DEFAULT_PAGE_INTERVAL_MS = 2_000;
+const PROTECTED_RECHECK_MS = 7 * 24 * 3_600_000;
 
 type Queryable = Pick<pg.PoolClient, "query">;
 
@@ -788,7 +789,7 @@ export async function runAvailabilityRecheck(
 
   const details: Record<string, unknown> = { source_name: observation.source_name };
   if (outcome.kind === "CANNOT_TELL") details.cannot_tell_reason = outcome.reason;
-  let action: RecheckAction | "KEPT_PROTECTED" = decision.action;
+  let action = decision.action as RecheckAction | "KEPT_PROTECTED";
   let reasonCode = decision.reasonCode;
   let nextCheckAt = decision.nextCheckAt;
 
@@ -877,33 +878,36 @@ export async function runAvailabilityRecheck(
     details.readiness_recomputed = stored.readinessRecomputed;
       if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
   } else if (decision.action === "ARCHIVE_NOT_CONFIRMABLE") {
-    const protection = await readAutomaticArchiveProtection(client, {
-      workspaceId: context.workspaceId,
-      canonicalJobId: payload.canonical_job_id,
-      now,
-    });
-    if (protection.protected) {
-      // Saved, applied or held: never archived automatically. The job stays; the reason is on record.
-      action = "KEPT_PROTECTED";
-      reasonCode = `${decision.reasonCode}|PROTECTED:${protection.reasons.join("+")}`;
-      nextCheckAt = null;
-      details.protection = protection.reasons;
-    } else {
-      writes.push(async () => {
-        const archived = await archiveJobsAsPostingNotConfirmable(client, {
-          workspaceId: context.workspaceId,
-          canonicalJobIds: [payload.canonical_job_id],
-          actor: "system:availability-recheck",
-          details: {
-            rule: AVAILABILITY_RECHECK_ARCHIVE_RULE,
-            reason_code: decision.reasonCode,
-            cannot_tell_attempts: decision.counters.cannotTellAttempts,
-            cycle_started_at: cycleStartedAt.toISOString(),
-          },
-        });
-        details.archived = archived.length === 1;
+    // Protection is read INSIDE the write transaction with the job row locked, so a save, application or hold
+    // made between the decision and the archive cannot be missed. A protected job is never archived; it is read
+    // again in 7 days (it stays hidden from the lists meanwhile because its availability is unconfirmed).
+    writes.push(async () => {
+      const protection = await readAutomaticArchiveProtection(client, {
+        workspaceId: context.workspaceId,
+        canonicalJobId: payload.canonical_job_id,
+        now,
+        lock: true,
       });
-    }
+      if (protection.protected) {
+        action = "KEPT_PROTECTED";
+        reasonCode = `${decision.reasonCode}|PROTECTED:${protection.reasons.join("+")}`;
+        nextCheckAt = new Date(now.getTime() + PROTECTED_RECHECK_MS);
+        details.protection = protection.reasons;
+        return;
+      }
+      const archived = await archiveJobsAsPostingNotConfirmable(client, {
+        workspaceId: context.workspaceId,
+        canonicalJobIds: [payload.canonical_job_id],
+        actor: "system:availability-recheck",
+        details: {
+          rule: AVAILABILITY_RECHECK_ARCHIVE_RULE,
+          reason_code: decision.reasonCode,
+          cannot_tell_attempts: decision.counters.cannotTellAttempts,
+          cycle_started_at: cycleStartedAt.toISOString(),
+        },
+      });
+      details.archived = archived.length === 1;
+    });
   }
 
   let nextTaskQueued = false;
@@ -924,7 +928,7 @@ export async function runAvailabilityRecheck(
       now,
     });
 
-    if (nextCheckAt !== null && (action === "WAIT_NEXT_READ" || action === "RETRY_LATER")) {
+    if (nextCheckAt !== null && (action === "WAIT_NEXT_READ" || action === "RETRY_LATER" || action === "KEPT_PROTECTED")) {
       nextTaskQueued = await enqueueAvailabilityRecheck(client, context, {
         canonicalJobId: payload.canonical_job_id,
         jobVersionId: payload.job_version_id,

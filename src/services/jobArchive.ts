@@ -768,7 +768,7 @@ export interface AutomaticArchiveProtection {
  */
 export async function readAutomaticArchiveProtection(
   client: pg.PoolClient,
-  input: { workspaceId: string; canonicalJobId: string; now: Date },
+  input: { workspaceId: string; canonicalJobId: string; now: Date; /** Lock the job row (FOR UPDATE OF canonical) so a concurrent save, application or hold waits; call inside the archive transaction. */ lock?: boolean },
 ): Promise<AutomaticArchiveProtection> {
   uuidSchema.parse(input.workspaceId);
   uuidSchema.parse(input.canonicalJobId);
@@ -786,7 +786,7 @@ export async function readAutomaticArchiveProtection(
                 AND UPPER(saved_observation.source_name) = ANY($4::text[])
             ) AS has_saved_source_observation
        FROM canonical_jobs canonical
-      WHERE canonical.workspace_id = $2::uuid AND canonical.id = $3::uuid`,
+      WHERE canonical.workspace_id = $2::uuid AND canonical.id = $3::uuid${input.lock ? " FOR UPDATE OF canonical" : ""}`,
     [input.now, input.workspaceId, input.canonicalJobId, [...OWNER_SAVED_SOURCE_NAMES]],
   );
   const row = rows[0];

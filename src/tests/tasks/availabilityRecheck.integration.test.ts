@@ -257,7 +257,7 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     await client.query(`SET search_path TO ${schemaName}, public`);
     await runMigrations(client);
     context = await resolveWorkspaceContext(client);
-  });
+  }, 60_000);
 
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -381,7 +381,10 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
       expect(last?.decision).toBe("KEPT_PROTECTED");
       expect(last?.reason_code).toMatch(/PROTECTED:/);
       const state = await db().query(`SELECT next_check_at, last_decision FROM job_availability_recheck_state WHERE canonical_job_id = $1`, [job.canonicalJobId]);
-      expect(state.rows[0]).toMatchObject({ next_check_at: null, last_decision: "KEPT_PROTECTED" });
+      expect(state.rows[0]).toMatchObject({ last_decision: "KEPT_PROTECTED" });
+      // A protected job is read again in 7 days; it is not abandoned.
+      expect(new Date(state.rows[0]!.next_check_at).getTime()).toBeGreaterThan(at(6).getTime());
+      expect((await pendingTasks(job, "RECHECK_AVAILABILITY")).some((task) => new Date(task.available_at).getTime() > at(6).getTime())).toBe(true);
     }
   });
 
