@@ -999,7 +999,10 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       `UPDATE canonical_jobs
        SET processing_state = 'HARD_REJECTED',
            processing_status = 'HARD_REJECTED',
-           gate_decision = 'HARD_REJECT'
+           gate_decision = 'HARD_REJECT',
+           -- A decidable job (complete description and source evidence): an undecidable terminal job is awaiting content and
+           -- its decide task completes without running the decider.
+           description_quality_status = 'COMPLETE'
        WHERE workspace_id = $1 AND id = $2`,
       [getContext().workspaceId, recommendationJob.canonicalJobId],
     );
