@@ -282,7 +282,7 @@ describe.skipIf(skipReal)("PUBLISH_EMBEDDING seed follows the active requirement
   });
 
   const seed = () => seedRecoverablePipelineTasks(db(), {
-    context: ctx(), taskTypes: ["PUBLISH_EMBEDDING"], includeTestFixtures: true,
+    context: ctx(), timeBudgetMs: 60_000, taskTypes: ["PUBLISH_EMBEDDING"], includeTestFixtures: true,
     jobVersionIds: Object.values(jobs).map((job) => job.jobVersionId),
   });
   const embedTasks = async () => (await db().query<{ task_key: string; payload: { job_version_id: string; embedding_requirement_set_id?: string } }>(
@@ -356,7 +356,7 @@ describe.skipIf(skipReal)("PUBLISH_EMBEDDING seed follows the active requirement
     const extra = [await seedRoutableJob("cap-1", ["Zebra cap one"]), await seedRoutableJob("cap-2", ["Zebra cap two"]), await seedRoutableJob("cap-3", ["Zebra cap three"])];
     const scoped = extra.map((job) => job.jobVersionId);
     const capped = () => seedRecoverablePipelineTasks(db(), {
-      context: ctx(), taskTypes: ["PUBLISH_EMBEDDING"], includeTestFixtures: true, jobVersionIds: scoped, maxSeedPerType: 2,
+      context: ctx(), timeBudgetMs: 60_000, taskTypes: ["PUBLISH_EMBEDDING"], includeTestFixtures: true, jobVersionIds: scoped, maxSeedPerType: 2,
     });
     const counts = async () => (await embedTasks()).filter((row) => scoped.includes(row.payload.job_version_id)).length;
     // The older job-version seed has its own cap and set-less task keys, so only the set-keyed tasks are counted.
@@ -369,7 +369,7 @@ describe.skipIf(skipReal)("PUBLISH_EMBEDDING seed follows the active requirement
   });
 
   const seedScoped = (versionIds: string[], extra: { maxSeedPerType?: number; includeTestFixtures?: boolean } = {}) =>
-    seedRecoverablePipelineTasks(db(), { context: ctx(), taskTypes: ["PUBLISH_EMBEDDING"], jobVersionIds: versionIds, includeTestFixtures: extra.includeTestFixtures ?? true, maxSeedPerType: extra.maxSeedPerType });
+    seedRecoverablePipelineTasks(db(), { context: ctx(), timeBudgetMs: 60_000, taskTypes: ["PUBLISH_EMBEDDING"], jobVersionIds: versionIds, includeTestFixtures: extra.includeTestFixtures ?? true, maxSeedPerType: extra.maxSeedPerType });
   const setKeyed = async (versionIds: string[]) => (await embedTasks()).filter((row) => versionIds.includes(row.payload.job_version_id)).length;
 
   it("requirements the builder never embeds (EXTRACTED, REJECTED) do not make a job a candidate", async () => {
@@ -417,7 +417,7 @@ describe.skipIf(skipReal)("PUBLISH_EMBEDDING seed follows the active requirement
        VALUES ($1, 'MATCH_PROFILE_EVIDENCE', $2, $3::jsonb, 'BLOCKED_DEPENDENCY', 'REQUIREMENT_EMBEDDING_MISSING', 'PUBLISH_EMBEDDING')`,
       [ctx().workspaceId, `MATCH_PROFILE_EVIDENCE:${job.jobVersionId}:blocked-fixture`, JSON.stringify({ canonical_job_id: job.canonicalJobId, job_version_id: job.jobVersionId })]);
     const scoped = [job.jobVersionId];
-    await seedRecoverablePipelineTasks(db(), { context: ctx(), taskTypes: ["PUBLISH_EMBEDDING"], includeTestFixtures: true, jobVersionIds: scoped });
+    await seedRecoverablePipelineTasks(db(), { context: ctx(), timeBudgetMs: 60_000, taskTypes: ["PUBLISH_EMBEDDING"], includeTestFixtures: true, jobVersionIds: scoped });
     expect(await missingInputs(job.jobVersionId)).toBe(1);
     expect((await runEmbeddingTasks()).failed).toBe(0);
     expect(await missingInputs(job.jobVersionId)).toBe(0);
