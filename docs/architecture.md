@@ -213,7 +213,7 @@ Matching needs a shared vocabulary: a requirement is about a concept, and a prof
 | No database in the gateway | B5 | The audited call path in `src/services/agent.ts` takes a database client |
 | Model IDs in one place | `src/platform/config/` only; checked against the providers with `npm run models:check` | The evaluation default is in `src/services/modelDefaults.ts`. Other defaults are still spread across `src/services/agent.ts`, `src/services/openAiModelRoles.ts`, scripts and environment variables |
 | Versioned prompts | Each stored output records prompt id, prompt version and model | Prompts are built inline. Only the quoted-requirement prompt records a hash |
-| Advice only | An evaluation is stored in `ai_evaluations` and never changes a gate, a score or an outcome | Holds. The legacy `eval:run` scripts are removed and `runAgent` no longer writes to the database. `runAgent` itself is still in `src/services/agent.ts` and goes with Phase 1 |
+| Advice only | An evaluation is stored in `ai_evaluations` and never changes a gate, a score or an outcome | Holds. The legacy evaluator (`runAgent`, its database tool, `eval:golden` and `eval:run`) is deleted |
 | Cleaned input | Posting text is cleaned and delimited before any model sees it | The posting is placed in the same message as the instructions, with no cleaning step |
 | Bounded spend | Lane budgets and deferrals are recorded per run | In place: `ai_evaluation_budget_runs`, `evaluation_budget_deferrals` |
 
@@ -402,8 +402,8 @@ Counted on 23 November 2026, when the check was merged. The live list is the bas
 | F1 | 1 | `src/services/agent.ts` and `src/services/llmFallback.ts` import each other |
 | F2 | 11 | Pairs of areas that import each other; `src/pipeline` is in six of them |
 | F3 | 98 | 92 scripts and 6 API files open their own database connection |
-| F4 | 25 | 16 importers of `src/services/agent.ts`, 9 of `src/db/db.ts` |
-| F5 | 33 | Files in `src/services/` |
+| F4 | 20 | 14 importers of `src/services/agent.ts`, 6 of `src/db/db.ts` |
+| F5 | 32 | Files in `src/services/` |
 | F6 | 46 | Writers of job status columns: `processing_state` from 14 files, `recommendation_outcome` from 6 |
 | F7 | 163 | Table and area pairs; 30 tables are written from more than one area |
 | F8 | 5 | Tables that `streamlit_app.py` reads directly |
@@ -418,7 +418,7 @@ Each phase is a series of small pull requests merged to `main`. Behaviour does n
 
 | Phase | Goal | Done when |
 |---|---|---|
-| 0 | Stop new damage. **Done.** | This check runs in CI; `runAgent` no longer writes to the legacy `jobs` table |
+| 0 | Stop new damage. **Done.** | This check runs in CI; the legacy evaluator that wrote to the legacy `jobs` table is deleted |
 | 1 | Model gateway out of `src/services/agent.ts` | The file is deleted; F1 and its F4 entries are gone |
 | 2 | Prompt registry and `evaluation` module | Every stored evaluation records a prompt version |
 | 3 | One writer per decision | F6 shows one writer per status column |
