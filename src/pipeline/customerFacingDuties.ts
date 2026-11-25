@@ -44,6 +44,8 @@ interface Pattern {
   readonly accept?: (clause: string, start: number, end: number) => boolean;
   /** Skip the subject check (a descriptor such as "commission-based" has no subject). */
   readonly anySubject?: boolean;
+  /** Read even in a clause the boilerplate filter skips ("We offer a base salary plus commission"): pay is stated there. */
+  readonly payClause?: boolean;
 }
 
 const after = (clause: string, end: number): string => clause.slice(end);
@@ -111,8 +113,10 @@ function subjectIsThisRole(before: string): boolean {
 
 function scan(text: string, patterns: readonly Pattern[]): string | null {
   for (const clause of clauses(String(text ?? "").toLowerCase())) {
-    if (BOILERPLATE.test(clause) || HEDGE.test(clause)) continue;
+    if (HEDGE.test(clause)) continue;
+    const boilerplate = BOILERPLATE.test(clause);
     for (const pattern of patterns) {
+      if (boilerplate && !pattern.payClause) continue;
       pattern.regex.lastIndex = 0;
       for (const match of clause.matchAll(pattern.regex)) {
         const start = match.index ?? 0;
@@ -136,7 +140,14 @@ function scan(text: string, patterns: readonly Pattern[]): string | null {
  */
 const EXPLICIT_SALES_PATTERNS: readonly Pattern[] = [
   { regex: /\b(?:carry|carrying|own|owning|meet|meeting|exceed|exceeding|hit|hitting|achieve|achieving)[ \t]+(?:an?[ \t]+|the[ \t]+|your[ \t]+)?(?:(?:individual|annual|quarterly|monthly|sales|revenue|new[- ]business|bookings)[ \t]+){0,3}(?:quotas?|sales[ \t]+targets?|revenue[ \t]+targets?|bookings[ \t]+targets?)\b/g },
-  { regex: /\b(?:quota[- ]carrying|commission[- ](?:based|only|driven))\b/g, anySubject: true },
+  { regex: /\bquota[- ]carrying\b/g, anySubject: true },
+  // Commission as part of the pay (owner decision 2026-11-25): "commission-based", "commission-only", "base plus commission",
+  // "earn commission on sales", "uncapped commission", "commission structure". Not the word alone: "commission-free", "European
+  // Commission", "Securities and Exchange Commission", "commissioning", "commissioned work" and a negation ("no commission").
+  { regex: /\bcommission[- ](?:based|only|driven)\b/g, anySubject: true, payClause: true },
+  { regex: /(?:\bplus|\+|\band|\bwith)[ \t]+(?:(?:an?|uncapped|performance|sales|variable|attractive|generous)[ \t]+){0,2}commissions?\b/g, anySubject: true, payClause: true },
+  { regex: /\b(?:earn(?:s|ing)?|receiv(?:e|es|ing)|paid|eligible[ \t]+for)[ \t]+(?:(?:an?|uncapped|performance|sales|variable)[ \t]+){0,2}commissions?\b/g, anySubject: true, payClause: true },
+  { regex: /\b(?:uncapped|variable|performance|sales)[ \t]+commissions?\b|\bcommissions?[ \t]+(?:structure|plan|scheme|rates?|payments?|earnings|on[ \t]+(?:sales|revenue|deals))\b/g, anySubject: true, payClause: true },
   { regex: /\b(?:cold[- ]call(?:s|ing)?|cold[ \t]+outreach|outbound[ \t]+prospecting|outbound[ \t]+sales)\b/g },
 ];
 

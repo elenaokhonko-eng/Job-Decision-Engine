@@ -108,3 +108,54 @@ Own the customer journey for our contract-review solution.`;
     expect(findExplicitSalesDuty("our securities commission clients value accuracy.")).toBeNull();
   });
 });
+
+describe("commission counts only as pay (owner decision 2026-11-25)", () => {
+  it.each([
+    ["100% commission-based", "<p>The compensation is 100% commission-based.</p>"],
+    ["commission-only", "<p>This is a commission-only position.</p>"],
+    ["base plus commission", "<p>We offer a base salary plus commission.</p>"],
+    ["earn commission on sales", "<p>You will earn commission on sales you close.</p>"],
+  ])("rejects, quoting the pay sentence: %s", (_label, body) => {
+    const result = gate("Legal Solutions Lead", `${BASE}${body}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+    expect(result.evidence_quotes[0]).toMatch(/^Explicit sales-target duty: ".*commission/);
+  });
+
+  it.each([
+    ["commission-free", "<p>This is a commission-free role with a fixed salary.</p>"],
+    ["no commission", "<p>There is no commission in this role.</p>"],
+    ["does not include commission", "<p>The package does not include commission.</p>"],
+    ["European Commission", "<p>You will analyse European Commission regulations on AI.</p>"],
+    ["Securities and Exchange Commission", "<p>You will interpret Securities and Exchange Commission filings.</p>"],
+    ["commissioning of systems", "<p>You will support the commissioning of new data systems.</p>"],
+    ["commissioned work", "<p>You will review commissioned work from external research partners.</p>"],
+    ["bonus without commission", "<p>Compensation is a base salary plus an annual performance bonus.</p>"],
+  ])("does not reject: %s", (_label, body) => {
+    const result = gate("Legal Solutions Lead", `${BASE}${body}`);
+    expect(result.status).not.toBe("HARD_REJECT");
+    expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+  });
+});
+
+describe("sales-engineer and pre-sales TITLES keep rejecting; solutions titles pass", () => {
+  it.each(["Sales Engineer", "Senior Sales Engineer - Singapore", "Pre-Sales Engineer", "Presales Consultant", "Sales Engineering Lead"])(
+    "title %s rejects",
+    (title) => {
+      const result = gate(title, BASE);
+      expect(result.status).toBe("HARD_REJECT");
+      expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+    },
+  );
+
+  it.each(["Solutions Engineer", "Solution Architect", "Senior Solutions Architect"])("title %s passes", (title) => {
+    const result = gate(title, BASE);
+    expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+    expect(result.status).toBe("PASS");
+  });
+
+  it("a sales-engineering mention in the body of a non-sales title does not reject", () => {
+    const result = gate("Legal Solutions Lead", `${BASE}<p>Experience in sales engineering is a plus.</p>`);
+    expect(result.status).not.toBe("HARD_REJECT");
+  });
+});

@@ -110,7 +110,10 @@ export function nonTechnicalFunctionTitle(title: string): string | null {
 // 1c. Owner policy (gate-2026-11.5): a pre-sales title ("Presales Solutions Architect",
 // "Solutions Engineer (Pre-Sales)") is GATE_HIGH_INTERACTION for any title, whatever the
 // description says and whatever the external-client policy allows.
-const PRESALES_TITLE = /\bpre[\s‐‑-]?sales?\b/i;
+// gate-2026-11.7: sales-engineer titles ("Sales Engineer", "Senior Sales Engineer", "Sales Engineering Lead") are the same role
+// and keep rejecting as titles; before, only the bare "sales engineering" keyword in the description (removed in 11.7) did.
+// "Solutions Engineer" and "Solution Architect" are not matched.
+const PRESALES_TITLE = /\b(?:pre[\s‐‑-]?sales?|sales[\s‐‑-]+engineer(?:s|ing)?)\b/i;
 
 /** The matched pre-sales title phrase, or null. */
 export function presalesTitle(title: string): string | null {
