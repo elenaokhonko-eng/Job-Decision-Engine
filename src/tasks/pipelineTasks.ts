@@ -226,7 +226,13 @@ export async function enqueuePipelineTask(
     if (existing.rows.length === 0) {
       throw new Error(`Failed to enqueue task (no insert and no existing row): ${input.taskKey}`);
     }
-    if (existing.rows[0].status === "BLOCKED_DEPENDENCY") {
+    // A task superseded by a gate outcome is a recorded no-op, not a discharged obligation: when the job becomes routable again
+    // (a later gate version) the same task identity must run, so a re-enqueue reopens it just like a blocked task.
+    const supersededByGate = existing.rows[0].status === "COMPLETED" && (await (client as QueryClient).query<{ id: string }>(
+      `SELECT id FROM pipeline_tasks WHERE workspace_id = $1 AND id = $2 AND repair_action = 'SUPERSEDED_BY_GATE_OUTCOME'`,
+      [ctx.workspaceId, existing.rows[0].id]
+    )).rows.length > 0;
+    if (existing.rows[0].status === "BLOCKED_DEPENDENCY" || supersededByGate) {
       const reactivated = await (client as QueryClient).query<{ id: string }>(
         `
           UPDATE pipeline_tasks
@@ -244,7 +250,8 @@ export async function enqueuePipelineTask(
               updated_at = NOW()
           WHERE workspace_id = $1
             AND id = $2
-            AND status = 'BLOCKED_DEPENDENCY'
+            AND (status = 'BLOCKED_DEPENDENCY'
+                 OR (status = 'COMPLETED' AND repair_action = 'SUPERSEDED_BY_GATE_OUTCOME'))
           RETURNING id
         `,
         [ctx.workspaceId, existing.rows[0].id]

@@ -221,6 +221,8 @@ Matching needs a shared vocabulary: a requirement is about a concept, and a prof
 
 A stage is a task in `pipeline_tasks`. The worker is `scripts/process_pipeline_tasks.ts`, which runs `src/tasks/stageTaskWorker.ts`. Task types are defined there as `PIPELINE_STAGE_TASK_TYPES`.
 
+A `ROUTE_LANE` or `PUBLISH_EMBEDDING` task claimed for a job version whose canonical job is `HARD_REJECTED`, or `NEEDS_VERIFICATION` with a non-routable gate result (`isRoutableWorkabilityVerification`), completes with `repair_action = SUPERSEDED_BY_GATE_OUTCOME`. It is a recorded no-op, never a failure or dead letter, and it changes no job state or gate evidence. `PUBLISH_EMBEDDING` queues no `ROUTE_LANE` successor for such a job. A later enqueue of the same task identity reopens a superseded task. Every `enforcePipelineWorkerExitPolicy` failure message starts with `[rule=NAME]`, naming the rule that fired.
+
 | # | Task type | What it does | Code today | Target module |
 |---|---|---|---|---|
 | 1 | `FETCH_JOB_CONTENT` | Fetches the full posting for a discovered link | `src/ingestion/jobContentFetcher.ts` | `sourcing` |

@@ -3033,7 +3033,7 @@ async function maybeEnqueueAfterTask(
     await reactivateBlockedDependencyTasks("PUBLISH_EMBEDDING", jobVersionId, clientOrPool, ctx);
     // A gate-version refresh can move the job to HARD_REJECTED/NEEDS_VERIFICATION while an embedding repair is queued;
     // lane routing has nothing to do for such a job, so no ROUTE_LANE task is created for it.
-    if (!GATE_SUPERSEDED_ROUTE_STATES.has(state.processingState ?? "")) {
+    if (!gateOutcomeEndsRouting(state)) {
       await enqueueSuccessor("ROUTE_LANE", jobVersionId, stagePayload);
     }
     return insertedSuccessors;
@@ -3846,7 +3846,16 @@ interface PipelineTaskRunMetrics {
 }
 
 /** Job states a deterministic gate decision leaves a job in; lane routing cannot act on them. */
-const GATE_SUPERSEDED_ROUTE_STATES: ReadonlySet<string> = new Set(["HARD_REJECTED", "NEEDS_VERIFICATION"]);
+function gateOutcomeEndsRouting(state: {
+  processingState: string | null;
+  gateDecision: string | null;
+  gateRejectionCodes: string[];
+}): boolean {
+  if (state.processingState === "HARD_REJECTED") return true;
+  // A routable workability verification (unknown work mode, office days, ...) continues through embedding, routing and matching.
+  return state.processingState === "NEEDS_VERIFICATION" &&
+    !isRoutableWorkabilityVerification(state.gateDecision, state.gateRejectionCodes);
+}
 
 async function processClaimedTask(
   task: ClaimedPipelineTask,
@@ -3880,13 +3889,14 @@ async function processClaimedTask(
     }
     return;
   }
-  // A lane-routing or embedding task whose job version a deterministic gate has since moved to HARD_REJECTED or NEEDS_VERIFICATION
-  // has nothing to act on (the embedding input builder does not build job inputs for those states, so the task could only fail).
+  // A lane-routing or embedding task whose job version a deterministic gate has since moved to HARD_REJECTED or to a non-routable
+  // NEEDS_VERIFICATION has nothing to act on (routing cannot advance it; embedding it only spends provider calls). Routable
+  // workability verification is not covered: it continues through embedding, routing and matching.
   // That is the gate's decision, not a stage failure: record the task as superseded without retry or dead letter, and leave the
   // job state and its gate evidence untouched.
   if (taskType === "ROUTE_LANE" || taskType === "PUBLISH_EMBEDDING") {
     const gateState = await lookupJobState(clientOrPool, ctx, requireStringPayload(task, "job_version_id"));
-    if (GATE_SUPERSEDED_ROUTE_STATES.has(gateState.processingState ?? "")) {
+    if (gateOutcomeEndsRouting(gateState)) {
       await completePipelineTaskAndRun(task, clientOrPool, {
         context: ctx,
         repairAction: "SUPERSEDED_BY_GATE_OUTCOME",

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import crypto from "node:crypto";
 import pg from "pg";
 import dotenv from "dotenv";
@@ -22,6 +22,7 @@ import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pg
 import { buildEmbeddingInputs } from "../../embeddings/inputBuilder.js";
 import { runEmbeddingBatch } from "../../embeddings/batchCoordinator.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
+import { routableVerificationJobsStranded } from "../../tasks/integrityZeroChecks.js";
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
 import { runPipelineStageTaskWorker, type PipelineStageWorkerDependencies } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
@@ -31,6 +32,9 @@ dotenv.config({ path: ".env.local" });
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
+if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
+  throw new Error("CI must run the gate-superseded task integration tests against its PostgreSQL service.");
+}
 
 let pool: pg.Pool | undefined;
 let client: pg.PoolClient | undefined;
@@ -67,10 +71,10 @@ async function insertJob(state: string): Promise<{ canonicalJobId: string; jobVe
 }
 
 /** The gate-version refresh moves the job to a new deterministic outcome after the task was queued. */
-async function applyGateOutcome(canonicalJobId: string, state: "HARD_REJECTED" | "NEEDS_VERIFICATION", decision: string): Promise<void> {
+async function applyGateOutcome(canonicalJobId: string, state: "HARD_REJECTED" | "NEEDS_VERIFICATION", decision: string, codes: string | null = null): Promise<void> {
   await db().query(
-    `UPDATE canonical_jobs SET processing_state = $2, processing_status = $2, gate_decision = $3 WHERE id = $1`,
-    [canonicalJobId, state, decision],
+    `UPDATE canonical_jobs SET processing_state = $2, processing_status = $2, gate_decision = $3, rejection_reason = $4 WHERE id = $1`,
+    [canonicalJobId, state, decision, codes],
   );
 }
 
@@ -100,7 +104,7 @@ async function jobRow(canonicalJobId: string) {
     `SELECT processing_state, gate_decision FROM canonical_jobs WHERE id = $1`, [canonicalJobId])).rows[0]!;
 }
 
-function runWorker(taskType: "ROUTE_LANE" | "PUBLISH_EMBEDDING", dependencies: Partial<PipelineStageWorkerDependencies>) {
+function runWorker(taskType: "ROUTE_LANE" | "PUBLISH_EMBEDDING" | "MATCH_PROFILE_EVIDENCE", dependencies: Partial<PipelineStageWorkerDependencies>) {
   return runPipelineStageTaskWorker(db(), {
     context: context!, seed: false, reconcileStalePending: false, taskTypes: [taskType], maxTasks: 1, heartbeatSeconds: 0, minTimeToStartTaskMs: 0,
   }, dependencies as PipelineStageWorkerDependencies);
@@ -109,6 +113,7 @@ function runWorker(taskType: "ROUTE_LANE" | "PUBLISH_EMBEDDING", dependencies: P
 async function publishJobVersionEmbedding(jobVersionId: string): Promise<void> {
   await buildEmbeddingInputs(db(), 100, {
     context: context!, includeRequirements: false, includeProfileFacts: false, includeLanePrototypes: false, includeJobVersions: true,
+    jobVersionIds: [jobVersionId],
   });
   const inputs = await db().query<{ id: string }>(
     `SELECT id::text AS id FROM embedding_inputs ei
@@ -147,6 +152,12 @@ async function enqueueEmbeddingJob(): Promise<{ canonicalJobId: string; jobVersi
   return job;
 }
 
+async function taskRowByVersion(jobVersionId: string, taskType: string) {
+  return (await db().query<{ status: string; repair_action: string | null }>(
+    `SELECT status, repair_action FROM pipeline_tasks WHERE task_type = $2 AND payload->>'job_version_id' = $1 ORDER BY created_at DESC LIMIT 1`,
+    [jobVersionId, taskType])).rows[0]!;
+}
+
 async function routeTaskCount(jobVersionId: string): Promise<number> {
   return Number((await db().query<{ n: string }>(
     `SELECT COUNT(*)::text AS n FROM pipeline_tasks WHERE task_type = 'ROUTE_LANE' AND payload->>'job_version_id' = $1`, [jobVersionId])).rows[0]!.n);
@@ -182,6 +193,11 @@ describe.skipIf(skipReal)("lane routing against a gate outcome that changed afte
     );
     primarySpaceId = space.rows[0]!.id;
   }, 120_000);
+
+  beforeEach(async () => {
+    // Each test owns the queue: a task left by an earlier test must not be claimed by this test's single-task worker run.
+    await db().query(`DELETE FROM pipeline_tasks`);
+  });
 
   afterAll(async () => {
     if (client) {
@@ -234,11 +250,14 @@ describe.skipIf(skipReal)("lane routing against a gate outcome that changed afte
     expect(task.last_error).toContain("Lane routing did not advance");
   });
 
-  it("a queued PUBLISH_EMBEDDING task completes as superseded when the gate hard-rejected the job, without provider work", async () => {
+  it.each([
+    { state: "HARD_REJECTED" as const, decision: "HARD_REJECT" },
+    { state: "NEEDS_VERIFICATION" as const, decision: "NEEDS_VERIFICATION" },
+  ])("a queued PUBLISH_EMBEDDING task completes as superseded when the gate moved the job to $state (non-routable), without provider work", async ({ state, decision }) => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const job = await enqueueEmbeddingJob();
-    await applyGateOutcome(job.canonicalJobId, "HARD_REJECTED", "HARD_REJECT");
+    await applyGateOutcome(job.canonicalJobId, state, decision);
     const dependencies = publishingDependencies(job.jobVersionId);
 
     const summary = await runWorker("PUBLISH_EMBEDDING", dependencies);
@@ -246,25 +265,141 @@ describe.skipIf(skipReal)("lane routing against a gate outcome that changed afte
     expect(summary).toMatchObject({ claimed: 1, completed: 1, failed: 0, deadLettered: 0 });
     expect(dependencies.runEmbeddingBatchWithFallback).not.toHaveBeenCalled();
     expect(await routeTaskCount(job.jobVersionId)).toBe(0);
-    expect((await jobRow(job.canonicalJobId)).processing_state).toBe("HARD_REJECTED");
+    expect((await jobRow(job.canonicalJobId)).processing_state).toBe(state);
   }, 120_000);
 
-  it("producer: an embedding repair that finishes after the gate hard-rejected the job queues no ROUTE_LANE task; a routable job still gets one", async () => {
+  it.each([
+    { state: "HARD_REJECTED" as const, decision: "HARD_REJECT" },
+    { state: "NEEDS_VERIFICATION" as const, decision: "NEEDS_VERIFICATION" },
+  ])("producer: an embedding repair that finishes after the gate moved the job to $state (non-routable) queues no ROUTE_LANE task; a routable job still gets one", async ({ state, decision }) => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const rejected = await enqueueEmbeddingJob();
     // The gate-version refresh lands while the embedding task is running.
     const rejectedRun = await runWorker("PUBLISH_EMBEDDING", publishingDependencies(
       rejected.jobVersionId,
-      () => applyGateOutcome(rejected.canonicalJobId, "HARD_REJECTED", "HARD_REJECT"),
+      () => applyGateOutcome(rejected.canonicalJobId, state, decision),
     ));
     expect(rejectedRun).toMatchObject({ claimed: 1, completed: 1, failed: 0, deadLettered: 0 });
     expect(await routeTaskCount(rejected.jobVersionId)).toBe(0);
-    expect((await jobRow(rejected.canonicalJobId)).processing_state).toBe("HARD_REJECTED");
+    expect((await jobRow(rejected.canonicalJobId)).processing_state).toBe(state);
 
     const routable = await enqueueEmbeddingJob();
     const routableRun = await runWorker("PUBLISH_EMBEDDING", publishingDependencies(routable.jobVersionId));
     expect(routableRun).toMatchObject({ claimed: 1, completed: 1, failed: 0 });
     expect(await routeTaskCount(routable.jobVersionId)).toBe(1);
   }, 120_000);
+
+  it("routable NEEDS_VERIFICATION is not superseded: PUBLISH_EMBEDDING runs, ROUTE_LANE follows and runs, and the job is not stranded", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const job = await enqueueEmbeddingJob();
+    await applyGateOutcome(job.canonicalJobId, "NEEDS_VERIFICATION", "NEEDS_VERIFICATION", "GATE_UNKNOWN_WORK_MODE");
+    const dependencies = publishingDependencies(job.jobVersionId);
+
+    const embedded = await runWorker("PUBLISH_EMBEDDING", dependencies);
+    expect(embedded).toMatchObject({ claimed: 1, completed: 1, failed: 0, deadLettered: 0 });
+    expect(dependencies.runEmbeddingBatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(await routeTaskCount(job.jobVersionId)).toBe(1);
+    // A pending ROUTE_LANE task carries the job: it is not reported as stranded.
+    expect((await routableVerificationJobsStranded(db(), context!.workspaceId)).sample).not.toContain(job.canonicalJobId);
+
+    const runLaneRouting = vi.fn(async () => {
+      await db().query(`UPDATE canonical_jobs SET processing_state = 'LANE_ROUTED', processing_status = 'LANE_ROUTED' WHERE id = $1`, [job.canonicalJobId]);
+      return { routed: 1, deferred: 0, skipped: 0, errors: 0 };
+    });
+    const routed = await runWorker("ROUTE_LANE", { runLaneRouting } as never);
+    expect(routed).toMatchObject({ claimed: 1, completed: 1, failed: 0, deadLettered: 0 });
+    expect(runLaneRouting).toHaveBeenCalledTimes(1);
+    expect(await taskRowByVersion(job.jobVersionId, "ROUTE_LANE")).toMatchObject({ status: "COMPLETED", repair_action: null });
+    expect((await jobRow(job.canonicalJobId)).processing_state).toBe("LANE_ROUTED");
+  }, 120_000);
+
+  it("flip back: after a gate-superseded ROUTE_LANE repair, a re-enqueue of the same task reopens it and it routes the job", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const job = await insertJob("PREQUALIFIED");
+    const taskId = await enqueueRouteRepair(job);
+    await applyGateOutcome(job.canonicalJobId, "HARD_REJECTED", "HARD_REJECT");
+    const first = await runWorker("ROUTE_LANE", { runLaneRouting: vi.fn() } as never);
+    expect(first).toMatchObject({ claimed: 1, completed: 1, failed: 0 });
+    expect(await taskRow(taskId)).toMatchObject({ status: "COMPLETED", repair_action: "SUPERSEDED_BY_GATE_OUTCOME" });
+
+    // A later gate version makes the job routable again; the same repair identity is enqueued again.
+    await db().query(`UPDATE canonical_jobs SET processing_state = 'PREQUALIFIED', processing_status = 'PREQUALIFIED', gate_decision = 'PASS' WHERE id = $1`, [job.canonicalJobId]);
+    expect(await enqueueRouteRepair(job)).toBe(taskId);
+    expect(await taskRow(taskId)).toMatchObject({ status: "PENDING", repair_action: null });
+
+    const runLaneRouting = vi.fn(async () => {
+      await db().query(`UPDATE canonical_jobs SET processing_state = 'LANE_ROUTED', processing_status = 'LANE_ROUTED' WHERE id = $1`, [job.canonicalJobId]);
+      return { routed: 1, deferred: 0, skipped: 0, errors: 0 };
+    });
+    const second = await runWorker("ROUTE_LANE", { runLaneRouting } as never);
+    expect(second).toMatchObject({ claimed: 1, completed: 1, failed: 0, deadLettered: 0 });
+    expect(runLaneRouting).toHaveBeenCalledTimes(1);
+    expect((await jobRow(job.canonicalJobId)).processing_state).toBe("LANE_ROUTED");
+  });
+
+  it("an ordinary completed repair task is not reopened by a re-enqueue (only gate-superseded ones are)", async () => {
+    const job = await insertJob("LANE_ROUTED");
+    const taskId = await enqueueRouteRepair(job);
+    await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE id = $1`, [taskId]);
+    expect(await enqueueRouteRepair(job)).toBe(taskId);
+    expect((await taskRow(taskId)).status).toBe("COMPLETED");
+  });
+
+  it("a RETRY_WAIT ROUTE_LANE task is claimed through the same check and superseded when the job is gate-rejected", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const job = await insertJob("PREQUALIFIED");
+    const taskId = await enqueueRouteRepair(job);
+    await db().query(
+      `UPDATE pipeline_tasks SET status = 'RETRY_WAIT', attempt_count = 2, available_at = NOW() - INTERVAL '1 second', last_error = 'Lane routing did not advance' WHERE id = $1`,
+      [taskId],
+    );
+    await applyGateOutcome(job.canonicalJobId, "HARD_REJECTED", "HARD_REJECT");
+    const summary = await runWorker("ROUTE_LANE", { runLaneRouting: vi.fn() } as never);
+    expect(summary).toMatchObject({ claimed: 1, completed: 1, failed: 0, deadLettered: 0 });
+    expect(await taskRow(taskId)).toMatchObject({ status: "COMPLETED", repair_action: "SUPERSEDED_BY_GATE_OUTCOME", dead_letter_reason: null });
+    expect((await jobRow(job.canonicalJobId)).processing_state).toBe("HARD_REJECTED");
+  });
+
+  it("a BLOCKED_DEPENDENCY ROUTE_LANE task is reactivated to PENDING by its repair and then superseded when the job is gate-rejected", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const job = await insertJob("PREQUALIFIED");
+    const taskId = await enqueueRouteRepair(job);
+    await db().query(
+      `UPDATE pipeline_tasks SET status = 'BLOCKED_DEPENDENCY', blocked_on = 'PUBLISH_EMBEDDING:x', blocked_reason = 'fixture' WHERE id = $1`,
+      [taskId],
+    );
+    await applyGateOutcome(job.canonicalJobId, "HARD_REJECTED", "HARD_REJECT");
+    expect(await enqueueRouteRepair(job)).toBe(taskId);
+    expect((await taskRow(taskId)).status).toBe("PENDING");
+    const summary = await runWorker("ROUTE_LANE", { runLaneRouting: vi.fn() } as never);
+    expect(summary).toMatchObject({ claimed: 1, completed: 1, failed: 0, deadLettered: 0 });
+    expect(await taskRow(taskId)).toMatchObject({ status: "COMPLETED", repair_action: "SUPERSEDED_BY_GATE_OUTCOME" });
+  });
+
+  it("guard: MATCH_PROFILE_EVIDENCE on a gate-rejected job is unchanged (silent no-op completion, no match run, no decision task)", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const job = await insertJob("LANE_ROUTED");
+    const profileVersionId = (await db().query<{ id: string }>(
+      `SELECT id::text AS id FROM profile_versions WHERE workspace_id = $1 AND status = 'ACTIVE' LIMIT 1`, [context!.workspaceId])).rows[0]!.id;
+    const enqueued = await enqueuePipelineTask({
+      taskType: "MATCH_PROFILE_EVIDENCE",
+      taskKey: `MATCH_PROFILE_EVIDENCE:${job.jobVersionId}:deterministic_matcher_v1:${profileVersionId}`,
+      payload: { canonical_job_id: job.canonicalJobId, job_version_id: job.jobVersionId, profile_version_id: profileVersionId },
+    }, db(), { context: context! });
+    await applyGateOutcome(job.canonicalJobId, "HARD_REJECTED", "HARD_REJECT");
+    const runDeterministicMatcher = vi.fn();
+    const summary = await runWorker("MATCH_PROFILE_EVIDENCE", { runDeterministicMatcher } as never);
+    expect(summary).toMatchObject({ claimed: 1, completed: 1, failed: 0, deadLettered: 0 });
+    expect(runDeterministicMatcher).not.toHaveBeenCalled();
+    expect(await taskRow(enqueued.taskId)).toMatchObject({ status: "COMPLETED", repair_action: null });
+    expect((await db().query(`SELECT 1 FROM match_runs WHERE canonical_job_id = $1`, [job.canonicalJobId])).rows).toEqual([]);
+    expect((await db().query(`SELECT 1 FROM pipeline_tasks WHERE task_type = 'DECIDE_RECOMMENDATION' AND payload->>'job_version_id' = $1`, [job.jobVersionId])).rows).toEqual([]);
+    expect((await jobRow(job.canonicalJobId)).processing_state).toBe("HARD_REJECTED");
+  });
 });
