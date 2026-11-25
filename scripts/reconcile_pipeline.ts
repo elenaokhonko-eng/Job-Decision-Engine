@@ -5,7 +5,7 @@ import {
   DEAD_LETTER_CLASSIFICATION_SQL,
   DEAD_LETTER_LINEAGE_JOINS_SQL,
 } from "../src/tasks/deadLetterPolicy.js";
-import { runZeroChecks, zeroChecksExitCode, type ZeroCheckResult } from "../src/tasks/integrityZeroChecks.js";
+import { reportedDecisionCounts, runZeroChecks, zeroChecksExitCode, type ReportedDecisionCounts, type ZeroCheckResult } from "../src/tasks/integrityZeroChecks.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { reportAwaitingContentOutputs } from "../src/ingestion/contentCompleteness.js";
 import { reportContentWithoutFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
@@ -45,6 +45,8 @@ interface ReconciliationReport {
   /** Tasks marked COMPLETED whose result row is missing. Any count above zero is an error. */
   /** Must-be-zero checks (src/tasks/integrityZeroChecks.ts). Any total above zero is an error. */
   zero_checks: ZeroCheckResult[];
+  /** Counts reported for visibility only; never an error (jobs the decider-version seed cannot reach). */
+  reported_counts: ReportedDecisionCounts;
   /** Awaiting-content jobs (live, no complete posting text). Violations are listed by scripts/check_integrity.ts. */
   content_completeness: {
     awaiting_content_jobs: number;
@@ -468,6 +470,7 @@ async function run(): Promise<void> {
       evaluation_queue_states: evaluationQueueStates,
       funnel: { ...funnel.rows[0] },
       zero_checks: await runZeroChecks(client, ctx.workspaceId, { phase: args.phase }),
+      reported_counts: await reportedDecisionCounts(client, ctx.workspaceId),
       content_completeness: {
         awaiting_content_jobs: awaitingOutputs.awaitingContentJobs,
         awaiting_with_gate_lane_or_recommendation: awaitingOutputs.violations.length,

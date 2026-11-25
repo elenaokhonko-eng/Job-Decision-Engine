@@ -49,7 +49,8 @@ import {
   SERIAL_PIPELINE_TASK_TYPES,
   pipelineTaskTargetKey,
 } from "./pipelineWorkerLanes.js";
-import { scopeSeedQuery } from "./seedQueryScope.js";
+import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
+import { OUTCOME_CONFLICT_REPAIR_ACTION, applyLiveJobScope, deciderSeedableSql, scopeSeedQuery } from "./seedQueryScope.js";
 import { deciderVersionReassessmentReason, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import {
   pipelineTaskStageVersion,
@@ -205,6 +206,12 @@ export interface SeedPipelineTasksSummary {
   timeBudgetExceeded: boolean;
   byType: Record<string, { inserted: number; existing: number }>;
   /**
+   * Seed candidates the enqueue refused because the job is archived (JOB_ARCHIVED). Reported on its own, never
+   * as `existing`: the seed queries filter archived jobs before their cap, so a non-zero count means a seed
+   * selected a job it should not have, and it must stay visible instead of looking like already-queued work.
+   */
+  skippedArchived: number;
+  /**
    * Eligible routed jobs found with a lane decision from superseded lane routing content in
    * this seeding pass; each gets a ROUTE_LANE re-route task (inserted or already existing).
    */
@@ -337,10 +344,13 @@ function isPool(value: pg.Pool | pg.PoolClient): value is pg.Pool {
 function incrementSeed(
   summary: SeedPipelineTasksSummary,
   taskType: PipelineStageTaskType,
-  inserted: boolean
+  inserted: boolean,
+  skippedReason?: "JOB_ARCHIVED",
 ): void {
   summary.byType[taskType] ??= { inserted: 0, existing: 0 };
-  if (inserted) {
+  if (skippedReason === "JOB_ARCHIVED") {
+    summary.skippedArchived += 1;
+  } else if (inserted) {
     summary.inserted += 1;
     summary.byType[taskType].inserted += 1;
   } else {
@@ -519,6 +529,44 @@ async function enqueueStageTask(
     mode?: "ENSURE_CURRENT" | "FORCE_RECOMPUTE";
   },
 ): Promise<boolean> {
+  return (await enqueueStageTaskResult(taskType, id, payload, clientOrPool, context, intentOptions)).inserted;
+}
+
+/**
+ * A reassessment of a terminal job would change its stored outcome. Deterministic, so never retried and never an engine error:
+ * the task is closed with a repair action, the job is untouched, and the terminal_outcome_conflict zero check keeps it visible.
+ */
+class TerminalOutcomeConflictError extends Error {
+  constructor(readonly jobVersionId: string, readonly details: readonly unknown[]) {
+    super(`${OUTCOME_CONFLICT_REPAIR_ACTION}: job_version_id=${jobVersionId}; the decider would change the stored outcome, so nothing was written.`);
+  }
+}
+
+async function jobVersionHasDecision(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<boolean> {
+  const { rows } = await clientOrPool.query(
+    `SELECT 1 FROM deterministic_decisions WHERE workspace_id = $1 AND job_version_id = $2 LIMIT 1`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return rows.length > 0;
+}
+
+async function enqueueStageTaskResult(
+  taskType: PipelineStageTaskType,
+  id: string,
+  payload: Record<string, unknown>,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  context: WorkspaceContext,
+  intentOptions?: {
+    producer?: string;
+    requestId?: string;
+    triggerRevisionId?: string | null;
+    mode?: "ENSURE_CURRENT" | "FORCE_RECOMPUTE";
+  },
+) {
   const maxAttempts = MODEL_BACKED_STAGE_TASK_TYPES.has(taskType) ? 3 : 8;
   let taskPayload = payload;
   let profileVersionId: string | undefined;
@@ -675,7 +723,7 @@ async function enqueueStageTask(
     clientOrPool,
     { context }
   );
-  return result.inserted;
+  return result;
 }
 
 function stageVersion(taskType: PipelineStageTaskType): string {
@@ -728,7 +776,11 @@ async function selectAndEnqueue(
     summary.timeBudgetExceeded = true;
     return;
   }
-  const scopedQuery = scopeSeedQuery(sql, params, seedScope, maxSeedPerType);
+  // The live-job scope sits inside the query, before its LIMIT. Only the observation seed has no canonical job.
+  const liveQuery = taskType === "NORMALIZE_OBSERVATION"
+    ? { sql, params }
+    : applyLiveJobScope(sql, params, { includeTestFixtures });
+  const scopedQuery = scopeSeedQuery(liveQuery.sql, liveQuery.params, seedScope, maxSeedPerType);
   const { rows } = await client.query<Record<string, unknown>>(scopedQuery.sql, scopedQuery.params);
   const candidates = rows.map(build);
   const canonicalJobIds = [...new Set(candidates
@@ -758,8 +810,8 @@ async function selectAndEnqueue(
     if (!task) continue;
     const canonicalJobId = task.payload.canonical_job_id;
     if (!includeTestFixtures && typeof canonicalJobId === "string" && fixtureIds.has(canonicalJobId)) continue;
-    const inserted = await enqueueStageTask(taskType, task.id, task.payload, client as any, ctx);
-    incrementSeed(summary, taskType, inserted);
+    const enqueued = await enqueueStageTaskResult(taskType, task.id, task.payload, client as any, ctx);
+    incrementSeed(summary, taskType, enqueued.inserted, enqueued.skippedReason);
   }
 }
 
@@ -787,6 +839,7 @@ export async function seedRecoverablePipelineTasks(
     existing: 0,
     deferredByBudget: 0,
     timeBudgetExceeded: false,
+    skippedArchived: 0,
     byType: {},
   };
   const maxPerType = options.maxSeedPerType ?? 200;
@@ -1726,6 +1779,17 @@ export async function seedRecoverablePipelineTasks(
          LIMIT 1
        ) jv ON TRUE
        WHERE c.workspace_id = $1
+         -- Only what the decider will process (it skips an incomplete posting and one without source content): a skipped job
+         -- would keep the oldest updated_at and fill the cap on every pass.
+         AND c.description_quality_status = 'COMPLETE'
+         -- The states the handler can stamp, shared with the decider zero check (RAW_STAGED and PREQUALIFIED are no-ops there).
+         AND ${deciderSeedableSql("c")}
+         AND EXISTS (
+           SELECT 1 FROM job_versions decidable_version
+            WHERE decidable_version.workspace_id = c.workspace_id
+              AND decidable_version.id = COALESCE(c.latest_job_version_id, jv.id)
+              AND ${sourceContentEvidencePredicate("decidable_version.workspace_id", "decidable_version.id")}
+         )
          AND (
            COALESCE(c.processing_state, c.processing_status) IN (
              'HARD_REJECTED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED',
@@ -3773,9 +3837,18 @@ async function executeStageTask(
       // must not create a permanent blocked/manual-review record.
       return;
     }
+    let terminalWithOutcome = false;
     if (decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) {
-      // Terminal jobs with recorded recommendation outcomes are complete.
-      return;
+      // A terminal job with a recorded outcome needs no decision run, but only when a decision row already exists for this
+      // version (the "completed without result" check expects one) and the task is not a reassessment: a decider-version or
+      // readiness reassessment must stamp a decision under the current decider_version. The decider never changes the job's
+      // processing state, so a HARD_REJECTED job stays HARD_REJECTED.
+      // Only a decider-version reassessment bypasses the no-op: other enqueuers (a rematch successor, a readiness refresh)
+      // set reprocess_existing_state too and must not re-run the decider on a terminal job that already has a decision.
+      const payload = (task.payload || {}) as Record<string, unknown>;
+      const reassessment = typeof payload.reassessment_reason === "string" && payload.reassessment_reason.startsWith("DECIDER_VERSION:");
+      if (!reassessment && await jobVersionHasDecision(clientOrPool, ctx, jobVersionId)) return;
+      terminalWithOutcome = true;
     }
     const matchDependentStates = new Set([
       "LANE_ROUTED",
@@ -3815,7 +3888,12 @@ async function executeStageTask(
       context: ctx,
       jobVersionIds: [jobVersionId],
       limit: 1,
+      // A terminal job keeps its stored outcome, eligibility and scores: the decision is stamped only if it agrees with them.
+      ...(terminalWithOutcome ? { preserveStoredOutcome: true } : {}),
     });
+    if ((summary.outcomeConflicts ?? 0) > 0) {
+      throw new TerminalOutcomeConflictError(jobVersionId, summary.outcomeConflictDetails ?? []);
+    }
     if (summary.errors > 0) {
       throw new Error(`Recommendation decider reported ${summary.errors} error(s).`);
     }
@@ -3963,17 +4041,36 @@ async function processClaimedTask(
         return;
       }
     }
-    const retrievedObservationId = await executeStageTask(
-      taskType,
-      task,
-      clientOrPool,
-      ctx,
-      dependencies,
-      options.budgetRunId,
-      () => { metrics.successorTasksCreated += 1; },
-      () => { metrics.rerouted = true; },
-      () => { metrics.stampOnly = true; },
-    );
+    let retrievedObservationId: Awaited<ReturnType<typeof executeStageTask>>;
+    try {
+      retrievedObservationId = await executeStageTask(
+        taskType,
+        task,
+        clientOrPool,
+        ctx,
+        dependencies,
+        options.budgetRunId,
+        () => { metrics.successorTasksCreated += 1; },
+        () => { metrics.rerouted = true; },
+        () => { metrics.stampOnly = true; },
+      );
+    } catch (error) {
+      if (!(error instanceof TerminalOutcomeConflictError)) throw error;
+      // Close, do not retry or fail: the recompute is deterministic and the job must keep its state (no PROCESSING_ERROR).
+      await completePipelineTaskAndRun(task, clientOrPool, {
+        context: ctx,
+        repairAction: OUTCOME_CONFLICT_REPAIR_ACTION,
+        afterComplete: async (transactionClient) => {
+          await (transactionClient as QueryClient).query(
+            `UPDATE pipeline_tasks SET payload = payload || jsonb_build_object('outcome_conflict', $3::jsonb)
+              WHERE workspace_id = $1 AND id = $2`,
+            // The decider version the conflict was closed under scopes the seed exclusion and the zero check to this version.
+            [ctx.workspaceId, task.taskId, JSON.stringify({ decider_version: DECIDER_VERSION, details: error.details })],
+          );
+        },
+      });
+      return;
+    }
     await completePipelineTaskAndRun(task, clientOrPool, {
       context: ctx,
       afterComplete: async (transactionClient) => {

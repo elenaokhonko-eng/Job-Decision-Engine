@@ -773,6 +773,7 @@ export async function processPipelineTasks(): Promise<void> {
       stale_pending_by_task_type: summary.stalePendingReconciliation.byTaskType,
       seed_deferred_by_budget: summary.seeded?.deferredByBudget ?? 0,
       seed_time_budget_exceeded: summary.seeded?.timeBudgetExceeded ?? false,
+      seed_skipped_archived: summary.seeded?.skippedArchived ?? 0,
       remaining_pending: queueHealth.pending,
       duration_ms: summary.durationMs,
       seconds_per_claimed_task: summary.claimed > 0

@@ -245,6 +245,13 @@ Order of work:
 - If lane routing finds no lane, the job becomes `UNMATCHED` and stops. If routing could not run for a technical reason, the job becomes `ROUTING_DEFERRED` and goes to stage 9.
 - Stage 10 follows stage 9 only when eligibility is `ELIGIBLE` and the outcome is `PRIORITY` or `REVIEW`.
 
+Task seeds (`seedRecoverablePipelineTasks`, `src/tasks/stageTaskWorker.ts`):
+
+- Every capped seed selects live jobs only. `applyLiveJobScope` (`src/tasks/seedQueryScope.ts`) puts `archived_at IS NULL` and, unless fixtures are included, `is_test_fixture IS NOT TRUE` inside the query, before its `LIMIT`. Only the observation seed (`NORMALIZE_OBSERVATION`) has no canonical job and is exempt. A new seed gets the scope without writing it, and a query with no `WHERE c.workspace_id = $1` anchor throws.
+- A job the enqueue still refuses as archived is counted as `skippedArchived`, never as `existing`.
+- A `DECIDE_RECOMMENDATION` task for a `HARD_REJECTED` or `UNMATCHED` job with a recorded outcome completes without a decider run only when a decision row already exists for that version and the task is not a decider-version reassessment (`DECIDER_VERSION:` reason). A reassessment runs the decider in `preserveStoredOutcome` mode: the decision is stamped only if it agrees with the stored outcome and eligibility, the job's recommendation columns never change, and a disagreement closes the task with `repair_action = OUTCOME_CONFLICT_ON_TERMINAL_JOB` without writing (no retry, no `PROCESSING_ERROR`); the failing post-phase zero check `terminal_outcome_conflict` keeps it visible (cleared by a decider version bump or `reopenOutcomeConflictTasks` after a correction; not run in the pre-drain phase so it never blocks the drain). The DECIDE seed selects only jobs the decider can process (complete description with source content, a state past routing, no closed conflict). A job without complete content waits in the awaiting-content read model and is not decided.
+- The stale-stage zero check (`stage_result_older_than_rule_version`) covers the extractor, matcher, lane router, decider and gate stages. The decider stage equals what the DECIDE seed reaches and the handler can stamp; stale decisions outside it are reported as `reported_counts` by `reconcile_pipeline.ts`, never as errors.
+
 After the stages:
 
 | Step | Code today | Target module |

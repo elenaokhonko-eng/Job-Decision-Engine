@@ -6,6 +6,7 @@ import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { DECIDER_VERSION, deciderVersionReassessmentReason } from "../../pipeline/deciderVersion.js";
 import { seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
+import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
 // The decider-version seed under a per-run cap. The readiness-refresh arm of the same seed query is switched off by dropping
@@ -44,6 +45,12 @@ async function decidedJob(deciderVersion: string | null): Promise<{ jobId: strin
     [versionId, ctx().workspaceId, jobId, `hash-${versionId}`],
   );
   await db().query(`UPDATE canonical_jobs SET latest_job_version_id = $2 WHERE id = $1`, [jobId, versionId]);
+  // The DECIDE seed selects only what the decider can process: a complete posting with source content.
+  await db().query(`UPDATE job_versions SET description_text = $2 WHERE id = $1`, [versionId, COMPLETE_TEST_POSTING_DESCRIPTION]);
+  await insertCompletePostingEvidence(db(), {
+    workspaceId: ctx().workspaceId, jobVersionId: versionId, companyName: "Cap Fixture", title: "Fixture Role",
+    sourceUrl: `https://example.test/cap/${jobId}`, description: COMPLETE_TEST_POSTING_DESCRIPTION,
+  });
   const snapshot = await db().query<{ id: string }>(
     `INSERT INTO workspace_policy_snapshots (workspace_id, snapshot_hash, resolved_snapshot) VALUES ($1, $2, '{}'::jsonb) RETURNING id`,
     [ctx().workspaceId, `snap-${jobId}`],
