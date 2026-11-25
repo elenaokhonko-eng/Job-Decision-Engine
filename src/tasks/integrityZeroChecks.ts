@@ -5,7 +5,6 @@
  */
 import type pg from "pg";
 
-import { AVAILABILITY_RECHECK_ARCHIVE_RULE } from "../services/jobArchive.js";
 import { OWNER_SAVED_SOURCE_NAMES } from "../services/jobArchiveHardRejectedPolicy.js";
 import { LANE_ROUTER_RULE_VERSION } from "../pipeline/laneRouter.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
@@ -109,23 +108,18 @@ export async function routableVerificationJobsStranded(db: Queryable, workspaceI
 }
 
 /**
- * A job the owner saved, applied to or held BEFORE the availability re-check archived it as not
- * confirmable. Only archives made by that rule (latest ARCHIVED event details.rule) count, and the
- * protection must predate the archive and have been in force at that moment (a hold counts only if not
- * released and not expired then). A job saved or held after a legitimate archive is not a violation.
+ * A job the owner saved, applied to or held BEFORE any automatic archive rule archived it (age rule, hard-reject
+ * rule, snippet expiry, availability re-check, link repair). Any archive whose reason is not a manual one counts,
+ * and the protection must predate the archive and have been in force at that moment (a hold counts only if not
+ * released and not expired then). A job saved or held after a legitimate archive is not a violation. The detail
+ * counts violations per archive reason (POSTING_NOT_CONFIRMABLE is always present).
  */
 export async function protectedJobsAutoArchived(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
-  const { rows } = await db.query<{ id: string }>(
-    `SELECT c.id::text AS id
+  const { rows } = await db.query<{ id: string; archive_reason: string | null }>(
+    `SELECT c.id::text AS id, c.archive_reason
        FROM canonical_jobs c
-       JOIN LATERAL (
-         SELECT event.details->>'rule' AS rule
-           FROM job_archive_events event
-          WHERE event.workspace_id = c.workspace_id AND event.canonical_job_id = c.id AND event.action = 'ARCHIVED'
-          ORDER BY event.event_at DESC, event.id DESC
-          LIMIT 1
-       ) archived_by ON archived_by.rule = $3
-      WHERE c.workspace_id = $1::uuid AND c.archived_at IS NOT NULL AND c.archive_reason = 'POSTING_NOT_CONFIRMABLE'
+      WHERE c.workspace_id = $1::uuid AND c.archived_at IS NOT NULL
+        AND UPPER(COALESCE(c.archive_reason, '')) NOT LIKE 'MANUAL%'
         AND (
           EXISTS (SELECT 1 FROM job_versions v JOIN raw_job_observations o
                     ON o.workspace_id = v.workspace_id AND o.job_version_id = v.id
@@ -140,9 +134,11 @@ export async function protectedJobsAutoArchived(db: Queryable, workspaceId: stri
                         AND h.expires_at > c.archived_at AND (h.released_at IS NULL OR h.released_at > c.archived_at))
         )
       ORDER BY c.id`,
-    [workspaceId, [...OWNER_SAVED_SOURCE_NAMES], AVAILABILITY_RECHECK_ARCHIVE_RULE],
+    [workspaceId, [...OWNER_SAVED_SOURCE_NAMES]],
   );
-  return result("protected_job_auto_archived", rows.map((row) => row.id), { POSTING_NOT_CONFIRMABLE: rows.length });
+  const detail: Record<string, number> = { POSTING_NOT_CONFIRMABLE: 0 };
+  for (const row of rows) detail[row.archive_reason ?? "UNKNOWN"] = (detail[row.archive_reason ?? "UNKNOWN"] ?? 0) + 1;
+  return result("protected_job_auto_archived", rows.map((row) => row.id), detail);
 }
 
 /**
