@@ -82,14 +82,22 @@ describe('End-to-End Funnel & Gate Verification Suite', () => {
     expect(qaResult.reasonCode).toBe('NON_TARGET_ROLE_FAMILY');
   });
 
-  it('should reject sales engineer / presales roles that lack hands-on building', () => {
-    const salesResult = evaluateHardGates(
+  it('does not reject a bare presales phrase (gate-2026-11.7); explicit sales-target evidence still rejects', () => {
+    const bare = evaluateHardGates(
       'Solutions Engineer (Sales)',
       'Customer relationship management and presales activities.',
       'Remote',
       'Remote'
     );
-    expect(salesResult.passed).toBe(false);
+    expect(bare.reasonCode).not.toBe('GATE_HIGH_INTERACTION');
+    const explicit = evaluateHardGates(
+      'Solutions Engineer (Sales)',
+      'You will carry a quarterly sales quota and do outbound prospecting.',
+      'Remote',
+      'Remote'
+    );
+    expect(explicit.passed).toBe(false);
+    expect(explicit.reasonCode).toBe('GATE_HIGH_INTERACTION');
   });
 
 });
