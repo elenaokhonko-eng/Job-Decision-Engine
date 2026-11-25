@@ -273,15 +273,22 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     const savedByHardReject = await job(ws);
     await observation(ws, savedByHardReject.jobVersionId, "MCF_SAVED", "NOW() - INTERVAL '5 days'");
     await archive(ws, savedByHardReject.canonicalJobId, null, 1, "HARD_REJECTED_PERMANENT");
+    // Violation: a lowercase / mixed-case saved source name (the SQL compares UPPER(source_name)).
+    const savedLowercase = await job(ws);
+    await observation(ws, savedLowercase.jobVersionId, "linkedin_saved", "NOW() - INTERVAL '200 days'");
+    await archive(ws, savedLowercase.canonicalJobId, null, 1, "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS");
+    const savedMixed = await job(ws);
+    await observation(ws, savedMixed.jobVersionId, "Mcf_Saved", "NOW() - INTERVAL '200 days'");
+    await archive(ws, savedMixed.canonicalJobId, null, 1, "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS");
     // Near miss: an unsaved job archived by the age rule.
     const unsavedByAgeRule = await job(ws);
     await archive(ws, unsavedByAgeRule.canonicalJobId, null, 1, "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS");
     const check = await protectedJobsAutoArchived(db(), ws);
     expect([...check.sample].sort()).toEqual([
       savedThenArchived.canonicalJobId, heldThenArchived.canonicalJobId, appliedThenArchived.canonicalJobId,
-      otherRule.canonicalJobId, savedByAgeRule.canonicalJobId, heldByAgeRule.canonicalJobId, savedByHardReject.canonicalJobId,
+      otherRule.canonicalJobId, savedByAgeRule.canonicalJobId, savedLowercase.canonicalJobId, savedMixed.canonicalJobId, heldByAgeRule.canonicalJobId, savedByHardReject.canonicalJobId,
     ].sort());
-    expect(check.detail).toEqual({ POSTING_NOT_CONFIRMABLE: 4, JOB_OLDER_THAN_THREE_CALENDAR_MONTHS: 2, HARD_REJECTED_PERMANENT: 1 });
+    expect(check.detail).toEqual({ POSTING_NOT_CONFIRMABLE: 4, JOB_OLDER_THAN_THREE_CALENDAR_MONTHS: 4, HARD_REJECTED_PERMANENT: 1 });
   });
   async function matchRun(ws: string, j: { canonicalJobId: string; jobVersionId: string }, profileVersionId: string, policy: string): Promise<void> {
     const run = await db().query<{ id: string }>(

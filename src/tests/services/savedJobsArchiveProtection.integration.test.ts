@@ -96,6 +96,19 @@ describe.skipIf(skipReal)("saved jobs are never archived automatically (PostgreS
     expect(await archivedAt(savedMcf.id)).toBeNull();
   });
 
+  it("the saved-source match is case-insensitive: a mixed-case source name is still protected by the age rule", async () => {
+    const ws = await newWorkspace();
+    const lower = await oldJob(ws, ["GREENHOUSE", "linkedin_saved"]);
+    const mixed = await oldJob(ws, ["GREENHOUSE", "Mcf_Saved"]);
+    const control = await oldJob(ws, ["GREENHOUSE"]);
+    const applied = await runJobArchive(pool, { mode: "APPLY", workspaceId: ws, runStartedAt, maxArchives: 10 });
+    expect(applied.protected_count).toBe(2);
+    expect(applied.archived_count).toBe(1);
+    expect(await archivedAt(control.id)).not.toBeNull();
+    expect(await archivedAt(lower.id)).toBeNull();
+    expect(await archivedAt(mixed.id)).toBeNull();
+  });
+
   it("the shared protection read reports SAVED_BY_OWNER for a saved job only", async () => {
     const ws = await newWorkspace();
     const saved = await oldJob(ws, ["LINKEDIN_SAVED"]);
