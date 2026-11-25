@@ -53,7 +53,7 @@ describe.skipIf(skipReal)("hard gate: bare customer-engagement phrase, HARD_REJE
     await pool?.end();
   });
 
-  async function seedRejectedJob(): Promise<string> {
+  async function seedRejectedJob(description: string = DESCRIPTION): Promise<string> {
     const jobId = randomUUID();
     const versionId = randomUUID();
     const url = `https://example.test/gate-hi/${jobId}`;
@@ -66,18 +66,18 @@ describe.skipIf(skipReal)("hard gate: bare customer-engagement phrase, HARD_REJE
     await db().query(
       `INSERT INTO job_versions (id, workspace_id, canonical_job_id, content_hash, description_text, observed_at)
        VALUES ($1, $2, $3, $4, $5, NOW())`,
-      [versionId, ctx().workspaceId, jobId, `hash-${versionId}`, DESCRIPTION],
+      [versionId, ctx().workspaceId, jobId, `hash-${versionId}`, description],
     );
     await db().query(`UPDATE canonical_jobs SET latest_job_version_id = $2 WHERE id = $1`, [jobId, versionId]);
     await insertCompletePostingEvidence(db(), {
       workspaceId: ctx().workspaceId, jobVersionId: versionId, companyName: "Gate HI Fixture", title: "Legal Solutions Lead",
-      sourceUrl: url, description: DESCRIPTION,
+      sourceUrl: url, description,
     });
     // Run the gate once to get a complete audit envelope, then rewrite it as the earlier gate version's rejection.
     await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId] });
     await db().query(
       `UPDATE gate_decisions
-          SET decision = 'HARD_REJECT', gate_version = 'gate-2026-11.6', rejection_codes = '["GATE_HIGH_INTERACTION"]'::jsonb,
+          SET decision = 'HARD_REJECT', gate_version = 'gate-2026-11.7', rejection_codes = '["GATE_HIGH_INTERACTION"]'::jsonb,
               evidence_quotes = '["Pre-sales / customer-engagement role duty: own the customer journey"]'::jsonb
         WHERE canonical_job_id = $1`,
       [jobId],
@@ -115,8 +115,24 @@ describe.skipIf(skipReal)("hard gate: bare customer-engagement phrase, HARD_REJE
       [jobId],
     )).rows;
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toMatchObject({ decision: "HARD_REJECT", gate_version: "gate-2026-11.6" });
+    expect(rows[0]).toMatchObject({ decision: "HARD_REJECT", gate_version: "gate-2026-11.7" });
     expect(rows[1]).toMatchObject({ decision: "PASS", gate_version: GATE_VERSION });
     expect(rows[1]!.rejection_codes).toEqual([]);
+  });
+
+  it("gate-2026-11.8: a job rejected at gate-2026-11.7 for generic commission boilerplate is re-gated to PASS; a commission-only job stays rejected", async () => {
+    const boilerplate = `${COMPLETE_TEST_POSTING_DESCRIPTION}\n\nIn addition to base pay, we offer a performance-driven annual bonus or commission.`;
+    const explicit = `${COMPLETE_TEST_POSTING_DESCRIPTION}\n\nThis is a commission-only sales position.`;
+    const passJob = await seedRejectedJob(boilerplate);
+    const rejectJob = await seedRejectedJob(explicit);
+    const summary = await runHardGates(db(), { context: ctx(), canonicalJobIds: [passJob, rejectJob], reprocess: true, versionRefresh: true });
+    expect(summary.errors).toBe(0);
+    const rows = (await db().query(
+      `SELECT id, gate_decision, processing_state FROM canonical_jobs WHERE id = ANY($1::uuid[])`,
+      [[passJob, rejectJob]],
+    )).rows;
+    const byId = new Map(rows.map((row) => [row.id as string, row]));
+    expect(byId.get(passJob)).toMatchObject({ gate_decision: "PASS", processing_state: "PREQUALIFIED" });
+    expect(byId.get(rejectJob)).toMatchObject({ gate_decision: "HARD_REJECT", processing_state: "HARD_REJECTED" });
   });
 });

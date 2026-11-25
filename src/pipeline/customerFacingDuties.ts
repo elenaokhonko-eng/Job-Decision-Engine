@@ -137,69 +137,95 @@ function scan(text: string, patterns: readonly Pattern[]): string | null {
 }
 
 /**
- * Explicit sales-target evidence (gate-2026-11.7): the only description evidence that still hard-rejects as
- * GATE_HIGH_INTERACTION. A stated quota, sales or revenue target, commission-based pay, or cold calling / outbound
- * prospecting as a duty of this role. A bare customer-engagement duty phrase is not enough (owner decision 2026-11-25,
- * decision #213: it lowers the rank through the role-shape CUSTOMER_FACING_DELIVERY signal and never rejects).
+ * Explicit sales evidence (gate-2026-11.8): the only description evidence that hard-rejects as GATE_HIGH_INTERACTION.
+ * A bare customer-engagement duty phrase is not enough (owner decision 2026-11-25, decision #213: it lowers the rank
+ * through the role-shape CUSTOMER_FACING_DELIVERY signal and never rejects).
+ *
+ * THE TERMS TREATED AS SALES-LINKED VARIABLE PAY (one list; docs/data-contracts.md repeats it):
+ *   OTE / on-target earnings, commission, quota, sales target (revenue or bookings target), variable sales pay.
+ * They reject only when they are THIS role's main variable pay or an explicit sales duty:
+ *   - commission-only / commission-based (hyphen form, "is commission based") / commission-driven pay, uncapped commission;
+ *   - OTE or on-target earnings (explicit terms; they reject on their own, unless the clause is about other roles);
+ *   - "base plus commission" as the stated pay structure; "earn commission on sales"; "commission on every deal";
+ *     "earnings include commission"; "commission eligible" / "eligible for commission"; "you earn commission";
+ *   - a quota or sales-target duty; cold calling or outbound prospecting as this role's own duty (a duty verb, or the
+ *     clause starts with it; "experience in cold calling" or a team that does it is not).
+ * They do NOT reject: a generic option list ("bonus or commission", "bonus, commission, or incentive program"),
+ * "commission opportunities" without a structure, commission paid to others (affiliate, referral, partner, "track
+ * affiliate commissions"), commission that a clause gives to other roles or company-wide text, a negation, "-free",
+ * "commissioning", "commissioned work", and bodies such as the European Commission.
  */
-/** Pay words in the same clause ("base + 40k commission", "OTE 80k", "earnings include commission", "plus uncapped commission"). */
-const PAY_CONTEXT = /\b(?:pay|salary|salaries|ote|on-target|earnings?|earn(?:s|ing)?|compensation|bonus(?:es)?|base|uncapped|paid|incentives?|remuneration|package|income|variable|payouts?|plus|quota)\b|\d[ \t]*k\b|[$£€]|\bper[ \t]+(?:year|annum)\b/;
-/** A body or a thing that follows "commission" ("Commission staff", "commission rates", "commission guidance"): not pay. */
-const COMMISSION_NOT_PAY_AFTER = /^(?:['’]s?\b|-free\b|[ \t]+(?:staff|officials?|regulators?|members?|rules?|reports?|decisions?|directives?|proposals?|guidance|guidelines|rates?|regulations?|filings?|rulings?|recommendations?|president|officers?|investigations?|inquir(?:y|ies)|documents?|consultations?)\b)/;
-/** A body name before "commission" ("European Commission", "Law Commission", "the Commission", "Securities and Exchange Commission"). */
-const COMMISSION_NOT_PAY_BEFORE = /(?:european|eu|law|competition|regulatory|securities|exchange|trade|electoral|royal|federal|planning|police|the|that|this|our|its)[ \t]+$/;
-/** The pay itself: "commission on every deal", "includes commission". */
-const COMMISSION_PAY_AFTER = /^[ \t]+(?:on|for)[ \t]+(?:(?:every|each|all|any|the)[ \t]+)?(?:sales?|revenue|deals?|closed|bookings|contracts?)\b/;
-const COMMISSION_INCLUDES_BEFORE = /\binclud(?:e|es|ing)[ \t]+(?:[\w$£€,.-]+[ \t]+){0,2}$/;
-
 /** Commission governed by other roles or a company-wide policy ("most sales positions are eligible for commission under the applicable plan"). */
-const OTHER_ROLES = /\b(?:most|some|certain|select|other|many|several)[ \t]+(?:sales[ \t]+)?(?:positions?|roles?|jobs?|employees|team[ \t]+members)\b|\bsales[ \t]+(?:positions?|roles?|team(?:[ \t]+members)?|representatives?|staff|employees)\b|\beligible[ \t]+(?:roles?|positions?)\b|\bapplicable[ \t]+(?:commission[ \t]+|sales[ \t]+)?(?:plan|policy|programs?)\b|\bfor[ \t]+(?:some|certain|select)\b/;
+const OTHER_ROLES = /\b(?:most|some|certain|select|other|many|several)[ \t]+(?:sales[ \t]+)?(?:positions?|roles?|jobs?|employees|team[ \t]+members)\b|\bsales[ \t]+(?:positions?|roles?|team(?:[ \t]+members)?|representatives?|staff|employees)\b|\beligible[ \t]+(?:roles?|positions?)\b|\bapplicable[ \t]+(?:commission[ \t]+|sales[ \t]+)?(?:plan|policy|programs?)\b|\bfor[ \t]+(?:some|certain|select)\b|\bfor[ \t]+(?:[\w-]+[ \t]+){0,2}(?:roles?|positions?)\b|\b(?:account[ \t]+executives?|aes|sales[ \t]+reps?|sdrs?|bdrs?|(?:business|sales)[ \t]+development[ \t]+representatives?)\b|\bquota[- ]based\b|\bour[ \t]+sales\b/;
 /** The clause speaks to this role or the applicant. */
-const THIS_ROLE = /\b(?:this|the|your)[ \t]+(?:role|position|job)\b|\byou(?:r|['’]ll)?\b|\bthe[ \t]+successful\b/;
+const THIS_ROLE = /\b(?:this|the|your)[ \t]+(?:role|position|job|opportunity)\b|\bthis[ \t]+is[ \t]+an?\b|\byou(?:r|['’]ll)?\b|\bthe[ \t]+successful\b/;
+/** A generic option list: "a performance-driven annual bonus or commission", "bonus, commission, or incentive program". */
+const GENERIC_PAY_LIST = /\b(?:bonus(?:es)?|incentives?)[ \t]*(?:,|or|and|\/)[ \t]*(?:(?:an?|the|annual|performance[- ]based|performance[- ]driven)[ \t]+)*commissions?\b|\bcommissions?(?:[- ]eligible)?[ \t]*(?:,|or|and|\/)[ \t]*(?:(?:an?|the|annual|other)[ \t]+)*(?:bonus(?:es)?|incentive)/;
+/** Commission paid to others or tracked as a function: "track affiliate commissions", "referral commission". */
+const COMMISSION_FOR_OTHERS = /\b(?:affiliate|referral|partner|channel|vendor|marketplace|publisher|agent|broker)s?[ \t]+commissions?\b|\b(?:track|calculate|process|reconcile|administer|audit)(?:s|ing)?[ \t]+(?:[\w-]+[ \t]+){0,2}commissions?\b/;
+const COMMISSION_NEGATED = /\b(?:no|not|without|never|neither|nor)\b[^.]{0,25}\bcommissions?\b|\bcommissions?[- ](?:free|less)\b/;
+/** The word "commission" as pay vocabulary (not a body such as "European Commission" or "Commission staff"). */
+const COMMISSION_WORD = /\bcommissions?\b(?![- ]free)(?!['’]s?\b)(?![ \t]+(?:staff|officials?|regulators?|members?|rules?|reports?|decisions?|directives?|proposals?|guidance|guidelines|regulations?|filings?|rulings?|recommendations?|president|officers?|investigations?|inquir(?:y|ies)|documents?|consultations?)\b)/;
+const COMMISSION_BODY_BEFORE = /\b(?:european|eu|law|competition|regulatory|securities|exchange|trade|electoral|royal|federal|planning|police|the)[ \t]+commissions?\b/;
+const SALES_VARIABLE_TERMS = /\bvariable\b|\bquota\b|\bsales[ \t]+targets?\b|\brevenue[ \t]+targets?\b/;
 
-/** "commission" as a verb: "you will commission artwork", "to commission equipment" (but "entitled to commission" is pay). */
-const COMMISSION_VERB_BEFORE = /\b(?:will|to|must|should|can|shall|would|may|please|also|help|who)[ \t]+$/;
-const COMMISSION_ENTITLED_BEFORE = /\b(?:entitled|eligible|due|right)[ \t]+to[ \t]+$/;
-/** This role's pay: "eligible for (sales) commission", "commission eligible", "commission-eligible". */
-const COMMISSION_ELIGIBLE_BEFORE = /\beligible[ \t]+(?:for|to[ \t]+(?:receive|earn))[ \t]+(?:(?:sales|performance|variable)[ \t]+)?$/;
-const COMMISSION_ELIGIBLE_AFTER = /^[- ]eligible\b/;
-
-interface ClauseFacts { readonly otherRolesOnly: boolean; readonly payContext: boolean }
+interface ClauseFacts {
+  /** The clause gives commission to other roles or company-wide text and does not speak to this role. */
+  readonly otherRolesOnly: boolean;
+  readonly commissionExcluded: boolean;
+  /** The clause names commission as pay vocabulary. */
+  readonly commissionPay: boolean;
+  readonly variableTerm: boolean;
+  /** The clause addresses this role and names commission outside a generic list, others' commission or a negation. */
+  readonly youEarnOk: boolean;
+}
 let memoClause = "";
-let memoFacts: ClauseFacts = { otherRolesOnly: false, payContext: false };
+let memoFacts: ClauseFacts = { otherRolesOnly: false, commissionExcluded: false, commissionPay: false, variableTerm: false, youEarnOk: false };
 
 /** Clause-level facts, computed once per clause (a clause with thousands of "commission" words stays linear). */
 function clauseFacts(clause: string): ClauseFacts {
   if (clause !== memoClause) {
     memoClause = clause;
-    memoFacts = { otherRolesOnly: OTHER_ROLES.test(clause) && !THIS_ROLE.test(clause), payContext: PAY_CONTEXT.test(clause) };
+    const otherRolesOnly = OTHER_ROLES.test(clause) && !THIS_ROLE.test(clause);
+    memoFacts = {
+      otherRolesOnly,
+      commissionExcluded: otherRolesOnly || GENERIC_PAY_LIST.test(clause) || COMMISSION_FOR_OTHERS.test(clause) || COMMISSION_NEGATED.test(clause),
+      commissionPay: COMMISSION_WORD.test(clause) && !COMMISSION_BODY_BEFORE.test(clause),
+      variableTerm: SALES_VARIABLE_TERMS.test(clause),
+      youEarnOk: THIS_ROLE.test(clause) && COMMISSION_WORD.test(clause) && !GENERIC_PAY_LIST.test(clause) && !COMMISSION_FOR_OTHERS.test(clause) && !COMMISSION_NEGATED.test(clause),
+    };
   }
   return memoFacts;
 }
 
-function isCommissionAsPay(clause: string, start: number, end: number): boolean {
+/** A commission pattern applies only when the clause is not about other roles, a generic list, others' commission or a negation. */
+const commissionClauseOk = (clause: string): boolean => {
   const facts = clauseFacts(clause);
-  if (facts.otherRolesOnly) return false;
-  const before = clause.slice(Math.max(0, start - 60), start);
-  const afterText = clause.slice(end, end + 40);
-  if (COMMISSION_ELIGIBLE_BEFORE.test(before) || COMMISSION_ELIGIBLE_AFTER.test(afterText)) return true;
-  if (COMMISSION_VERB_BEFORE.test(before) && !COMMISSION_ENTITLED_BEFORE.test(before)) return false;
-  if (COMMISSION_NOT_PAY_BEFORE.test(before) || COMMISSION_NOT_PAY_AFTER.test(afterText)) return false;
-  if (COMMISSION_PAY_AFTER.test(afterText) || COMMISSION_INCLUDES_BEFORE.test(before)) return true;
-  return facts.payContext;
-}
+  return facts.commissionPay && !facts.commissionExcluded;
+};
 
 const EXPLICIT_SALES_PATTERNS: readonly Pattern[] = [
   { regex: /\b(?:carry|carrying|own|owning|meet|meeting|exceed|exceeding|hit|hitting|achieve|achieving)[ \t]+(?:an?[ \t]+|the[ \t]+|your[ \t]+)?(?:(?:individual|annual|quarterly|monthly|sales|revenue|new[- ]business|bookings)[ \t]+){0,3}(?:quotas?|sales[ \t]+targets?|revenue[ \t]+targets?|bookings[ \t]+targets?)\b/g },
   { regex: /\bquota[- ]carrying\b/g, anySubject: true },
-  // Commission as part of the pay (owner decision 2026-11-25): "commission-based", "commission-only", "base plus commission",
-  // "earn commission on sales", "uncapped commission", "commission structure". Not the word alone: "commission-free", "European
-  // Commission", "Securities and Exchange Commission", "commissioning", "commissioned work" and a negation ("no commission").
-  { regex: /\bcommission[- ](?:based|only|driven)\b/g, anySubject: true, payClause: true, accept: (clause) => !clauseFacts(clause).otherRolesOnly },
-  // Any other "commission" counts only when the clause is about pay (PAY_CONTEXT) and the word is not a body, a noun
-  // that follows it, a rate or "-free" (isCommissionAsPay).
-  { regex: /\bcommissions?\b/g, anySubject: true, payClause: true, accept: isCommissionAsPay },
-  { regex: /\b(?:cold[- ]call(?:s|ing)?|cold[ \t]+outreach|outbound[ \t]+prospecting|outbound[ \t]+sales)\b/g },
+  // Commission as this role's main variable pay (see the term list above).
+  // "commission-based" / "commission-only" / "commission-driven" as the pay structure. "commission based on performance" (a
+  // bonus-like component, ambiguous) is not this pattern.
+  { regex: /\bcommission-(?:based|only|driven)\b|\bcommission[ \t]+only\b|\b(?:100%|fully|entirely|purely|is|are|be|paid)[ \t]+commission[ \t]+(?:based|driven)\b(?![ \t]+on\b)|\buncapped[ \t]+(?:sales[ \t]+)?commissions?\b/g, anySubject: true, payClause: true, accept: commissionClauseOk },
+  // OTE / on-target earnings together with commission, variable pay, a quota or a sales target.
+  { regex: /\b(?:ote|on[- ]target[ \t]+earnings)\b/g, anySubject: true, payClause: true, accept: (clause) => !clauseFacts(clause).otherRolesOnly },
+  // "base plus commission" as the stated pay structure ("commission opportunities" and programs are not a structure).
+  { regex: /\b(?:base(?:[ \t]+(?:salary|pay))?|salary)\b[^.]{0,60}?(?:\bplus\b|\+|\band\b)[ \t]+(?:an?[ \t]+)?(?:(?:uncapped|sales|performance|variable)[ \t]+)?commissions?\b(?![ \t]+(?:opportunit|incentive|program|plan))/g, anySubject: true, payClause: true, accept: commissionClauseOk },
+  // "earn commission on sales", "commission on every deal", "earnings include commission".
+  { regex: /\bearn(?:s|ing)?[ \t]+(?:an?[ \t]+)?commissions?[ \t]+(?:on|for)\b|\bcommissions?[ \t]+on[ \t]+(?:(?:every|each|all|any|your|the)[ \t]+)?(?:(?:closed|new|won|qualified)[ \t]+)?(?:deals?|sales?|contracts?|revenue|bookings)\b/g, anySubject: true, payClause: true, accept: commissionClauseOk },
+  { regex: /\b(?:earnings?|compensation|pay|package|remuneration)\b[^.]{0,40}?\binclud(?:e|es|ing)[ \t]+(?:[\w-]+[ \t]+){0,2}?commissions?\b/g, anySubject: true, payClause: true, accept: commissionClauseOk },
+  // Eligibility as this role's pay ("commission eligible", "eligible for sales commission").
+  { regex: /\bcommission[- ]eligible\b|\beligible[ \t]+(?:for|to[ \t]+(?:receive|earn))[ \t]+(?:(?:sales|performance|variable)[ \t]+)?commissions?\b/g, anySubject: true, payClause: true, accept: commissionClauseOk },
+  // "you will earn / receive commission": the clause must speak to this role (the mixed case "Sales roles earn commission, and you will receive commission too").
+  { regex: /\b(?:earn|receive|get)(?:s|ing)?[ \t]+(?:an?[ \t]+)?(?:(?:uncapped|sales)[ \t]+)?commissions?\b(?![ \t]+(?:opportunit|incentive|program|plan))/g, anySubject: true, payClause: true, accept: (clause) => clauseFacts(clause).youEarnOk },
+  // Cold calling / cold emailing / outbound prospecting as this role's own duty: a duty verb, or a clause that starts with the
+  // term as a duty ("Cold calling and outbound prospecting to build pipeline", "Cold emailing prospects ..."). "Cold calls are made
+  // by our SDRs" and "Cold calling experience is a plus" are not duties of this role.
+  { regex: /\b(?:make|making|do|doing|perform|performing|conduct|conducting|handle|handling|own|owning|drive|driving|run|running|lead|leading|include|includes|including|responsible[ \t]+for)[ \t]+(?:(?:daily|regular|high[- ]volume|structured|outbound)[ \t]+)?(?:cold[- ]call(?:s|ing)?|cold[ \t]+(?:outreach|emails?|emailing)|outbound[ \t]+prospecting|outbound[ \t]+sales)\b|^(?:cold[- ]call(?:s|ing)?|cold[ \t]+(?:outreach|emails?|emailing)|outbound[ \t]+prospecting|outbound[ \t]+sales)(?=[ \t]*(?:$|[,:(&\/-]|and\b|to\b|for\b|campaigns?\b|outreach\b|is[ \t]+part\b|(?:prospects?|leads?|accounts?|customers?|clients?|buyers?)\b))/g },
 ];
 
 /** The first clause that states a quota, sales target, commission-based pay or cold outbound duty, quoted; null when none. */
