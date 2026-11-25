@@ -11,7 +11,8 @@ import { findTasksCompletedWithoutResult } from "../../tasks/completedWithoutRes
 import { reportedDecisionCounts, runZeroChecks, staleStageResults, terminalOutcomeConflicts, zeroChecksExitCode } from "../../tasks/integrityZeroChecks.js";
 import { reopenOutcomeConflictTasks } from "../../tasks/pipelineTasks.js";
 import { OUTCOME_CONFLICT_REPAIR_ACTION, applyLiveJobScope } from "../../tasks/seedQueryScope.js";
-import { runPipelineStageTaskWorker, seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
+import { runRecommendationDecider } from "../../pipeline/recommendationDecider.js";
+import { runPipelineStageTaskWorker, seedRecoverablePipelineTasks, type PipelineStageWorkerDependencies } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
 
@@ -166,6 +167,29 @@ async function withCurrentMatch(job: JobIds): Promise<void> {
 
 const taskRows = async (versionId: string) => (await db().query<{ status: string; repair_action: string | null; attempt_count: number; payload: Record<string, unknown> }>(
   `SELECT status, repair_action, COALESCE(attempt_count, 0) AS attempt_count, payload FROM pipeline_tasks WHERE payload->>'job_version_id' = $1`, [versionId])).rows;
+
+
+/** Drains DECIDE tasks with a counting explanation enqueuer, so a downstream AI queue call would be seen. */
+async function drainCountingEnqueuer(versionIds: string[]): Promise<{ enqueuerCalls: number }> {
+  let enqueuerCalls = 0;
+  const dependencies = {
+    runRecommendationDecider,
+    runExplanationQueueEnqueuer: async () => { enqueuerCalls += 1; },
+  } as unknown as PipelineStageWorkerDependencies;
+  await runPipelineStageTaskWorker(db(), {
+    context: ctx(), seed: false, jobVersionIds: versionIds, taskTypes: ["DECIDE_RECOMMENDATION"],
+    reconcileStalePending: false, maxTasks: 30, heartbeatSeconds: 0,
+  }, dependencies);
+  return { enqueuerCalls };
+}
+
+const downstreamCounts = async () => {
+  const tasks = await db().query<{ task_type: string; n: number }>(
+    `SELECT task_type, COUNT(*)::int AS n FROM pipeline_tasks WHERE workspace_id = $1 GROUP BY task_type ORDER BY task_type`, [ctx().workspaceId]);
+  const ai = await db().query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM ai_evaluations`);
+  const queue = await db().query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM evaluation_queue`);
+  return { tasks: Object.fromEntries(tasks.rows.map((row) => [row.task_type, row.n])), ai: ai.rows[0]!.n, queue: queue.rows[0]!.n };
+};
 
 const deciderTask = (job: JobIds, extra: Record<string, unknown> = {}) => db().query(
   `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status)
@@ -468,6 +492,45 @@ describe.skipIf(skipReal)("seed live filter, decider reassessment and stale-stag
     expect(zeroChecksExitCode(post)).toBe(1);
     // check_integrity.ts calls runZeroChecks with the default phase, which is post.
     expect(zeroChecksExitCode(await runZeroChecks(db(), ctx().workspaceId))).toBe(1);
+  }, 120_000);
+
+  it("a reassessment of a terminal job whose outcome agrees (stamp) or conflicts (closure) queues nothing downstream and makes no AI or explanation-queue call", async () => {
+    const agreeing = await decidableJob({ state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "SKIP", decider: "recommendation_decider_v1" });
+    const conflicting = await decidableJob({ state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "REVIEW", decider: "recommendation_decider_v1" });
+    const unmatchedConflict = await decidableJob({ state: "UNMATCHED", gate: "PASS", outcome: "REVIEW", routingDisposition: "POLICY_NO_MATCH", decider: "recommendation_decider_v1" });
+    for (const job of [agreeing, conflicting, unmatchedConflict]) await deciderTask(job, reassess);
+    const before = await downstreamCounts();
+    expect(before.tasks).toEqual({ DECIDE_RECOMMENDATION: 3 });
+
+    const { enqueuerCalls } = await drainCountingEnqueuer([agreeing, conflicting, unmatchedConflict].map((job) => job.versionId));
+
+    // One stamped, two closed as conflicts; the only tasks are the three DECIDE tasks, and nothing reached the AI queue.
+    expect(await decisionCount(agreeing.versionId)).toBe(2);
+    expect((await taskRows(conflicting.versionId))[0]!.repair_action).toBe(OUTCOME_CONFLICT_REPAIR_ACTION);
+    expect((await taskRows(unmatchedConflict.versionId))[0]!.repair_action).toBe(OUTCOME_CONFLICT_REPAIR_ACTION);
+    const after = await downstreamCounts();
+    expect(after).toEqual({ tasks: { DECIDE_RECOMMENDATION: 3 }, ai: 0, queue: 0 });
+    expect(enqueuerCalls).toBe(0);
+  }, 180_000);
+
+  it("a restored job is picked up: an archived stale job gets no task, and after archived_at is cleared the next seed creates its EXTRACT and DECIDE tasks", async () => {
+    const job = await decidableJob({ state: "ROUTING_DEFERRED", gate: "PASS", outcome: "REVIEW", decider: "recommendation_decider_v0" });
+    await archiveJobs([job.jobId]);
+    const types = ["EXTRACT_DETERMINISTIC_REQUIREMENTS", "DECIDE_RECOMMENDATION"] as const;
+    const archivedPass = await seedRecoverablePipelineTasks(db(), { context: ctx(), taskTypes: [...types], timeBudgetMs: 60_000 });
+    expect(await tasksFor("EXTRACT_DETERMINISTIC_REQUIREMENTS", [job.jobId])).toBe(0);
+    expect(await tasksFor("DECIDE_RECOMMENDATION", [job.jobId])).toBe(0);
+    expect(archivedPass.skippedArchived).toBe(0);
+
+    // The equivalent of restoreArchivedJob's effect on the job row. The real primitive also queues its own reassessment task,
+    // which would hide what the seed does, so the test clears the archive columns directly.
+    await db().query(
+      `UPDATE canonical_jobs SET archived_at = NULL, archive_run_id = NULL, archive_reason = NULL, archive_age_basis = NULL, archive_reference_at = NULL WHERE id = $1`,
+      [job.jobId],
+    );
+    await seedRecoverablePipelineTasks(db(), { context: ctx(), taskTypes: [...types], timeBudgetMs: 60_000 });
+    expect(await tasksFor("EXTRACT_DETERMINISTIC_REQUIREMENTS", [job.jobId])).toBe(1);
+    expect(await tasksFor("DECIDE_RECOMMENDATION", [job.jobId])).toBe(1);
   }, 120_000);
 
   it("an UNMATCHED job with no routing disposition and gate PASS keeps its stored outcome: closed as a conflict if the decider would change it, otherwise stamped", async () => {
