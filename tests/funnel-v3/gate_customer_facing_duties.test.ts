@@ -1,7 +1,7 @@
 /**
- * gate-2026-11.4: pre-sales, post-sales and customer-engagement roles are a hard reject
- * (GATE_HIGH_INTERACTION) for any title, including "Solutions Architect" and
- * "Product Specialist".
+ * gate-2026-11.4 rejected pre-sales, post-sales and customer-engagement roles (GATE_HIGH_INTERACTION).
+ * gate-2026-11.7 (owner decision 2026-11-25, decision #213): the duty phrases are read the same way but only
+ * downrank; the explicit-evidence rejection is covered in gate_high_interaction_explicit_evidence.test.ts.
  *
  * Synthetic postings only: employer names are invented and the descriptions paraphrase
  * the shape of real postings. Building for customers, customer data and stakeholder
@@ -107,18 +107,18 @@ describe("findCustomerFacingRoleDuty", () => {
 });
 
 describe("GATE_HIGH_INTERACTION for pre-sales and post-sales roles", () => {
-  it("rejects a Customer Solutions Architect with customer-journey and proof-of-value duties", () => {
+  // gate-2026-11.7 (owner decision 2026-11-25): duty phrases alone no longer reject; they downrank (roleShape.ts).
+  it("does not reject a Customer Solutions Architect with customer-journey and proof-of-value duties", () => {
     const result = fullGate("Customer Solutions Architect", "Quillbyte AI", CUSTOMER_SOLUTIONS_ARCHITECT);
-    expect(result.status).toBe("HARD_REJECT");
-    expect(result.rejection_codes).toEqual(["GATE_HIGH_INTERACTION"]);
-    expect(result.evidence_quotes[0]).toMatch(/^Pre-sales \/ customer-engagement role duty: ".*entire customer journey/);
+    expect(result.status).toBe("PASS");
+    expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+    expect(findCustomerFacingRoleDuty(CUSTOMER_SOLUTIONS_ARCHITECT.replace(/<[^>]+>/g, " . ").toLowerCase())).toContain("entire customer journey");
   });
 
-  it.each(["UNKNOWN", "ASSUMED_HYBRID", "HYBRID"])("rejects a post-sales Legal Engineer – Product Specialist (stored %s)", (mode) => {
+  it.each(["UNKNOWN", "ASSUMED_HYBRID", "HYBRID"])("does not reject a post-sales Legal Engineer – Product Specialist (stored %s)", (mode) => {
     const result = fullGate("Legal Engineer – Product Specialist", "Lexora Systems", LEGAL_ENGINEER_PRODUCT_SPECIALIST, mode);
-    expect(result.status).toBe("HARD_REJECT");
-    expect(result.rejection_codes).toEqual(["GATE_HIGH_INTERACTION"]);
-    expect(result.evidence_quotes[0]).toMatch(/face of lexora in korea|post-sales organization/);
+    expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+    expect(result.status).not.toBe("HARD_REJECT");
   });
 
   it.each([

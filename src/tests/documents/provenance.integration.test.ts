@@ -448,7 +448,7 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
          created_by_user_id, preference_user_id, preference_context_id,
          readiness_json, evidence_revision_hash, readiness_fingerprint, decider_version
        ) VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, 'ELIGIBLE', 'REVIEW',
-         $7, $8, NULL, NULL, $9::jsonb, $10, $11, 'recommendation_decider_v1')
+         $7, $8, NULL, NULL, $9::jsonb, $10, $11, 'recommendation_decider_v2')
        RETURNING id`,
       [
         workspace.workspaceId,

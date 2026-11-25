@@ -305,9 +305,9 @@ export const UNCHANGED_FIXTURES = {
     location: "Singapore",
     workplace_type: "HYBRID",
     raw_description: `${ENGINEERING_DUTIES} This is a presales advisory role focused on deal velocity.`,
-    expectedStatus: "HARD_REJECT",
-    expectedCodes: ["GATE_HIGH_INTERACTION"],
-    notes: "presales stays a hard reject",
+    expectedStatus: "PASS",
+    expectedCodes: [],
+    notes: "gate-2026-11.7: a bare presales phrase in the description does not reject (it downranks); a presales title still does (G25B)",
   },
   G25B: {
     id: "G25B",

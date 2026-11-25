@@ -7,7 +7,9 @@
  */
 import { createHash } from "node:crypto";
 
-export const ROLE_SHAPE_POLICY_VERSION = "role_shape_v1";
+import { findCustomerFacingRoleDuty } from "./customerFacingDuties.js";
+
+export const ROLE_SHAPE_POLICY_VERSION = "role_shape_v2";
 /** The combined downrank never exceeds this share of the score, so a job can lose rank but is never erased by it. */
 export const ROLE_SHAPE_MAX_TOTAL_PENALTY = 0.15;
 const EVIDENCE_QUOTE_MAX = 160;
@@ -70,6 +72,13 @@ export const detectCustomerFacingDelivery: RoleShapeDetector = ({ title, descrip
   if (hits.length >= 2) {
     const first = hits[0]!.match!;
     return { code: "CUSTOMER_FACING_DELIVERY", penalty: 0.06, source: "DESCRIPTION", quote: excerpt(description, first.index ?? 0, first[0].length) };
+  }
+  // role_shape_v2 (gate-2026-11.7, owner decision 2026-11-25, decision #213): one pre-sales or customer-engagement duty
+  // phrase of this role is a downrank here, no longer a gate rejection (src/pipeline/customerFacingDuties.ts).
+  const duty = findCustomerFacingRoleDuty(description);
+  if (duty) {
+    const at = description.toLowerCase().indexOf(duty);
+    return { code: "CUSTOMER_FACING_DELIVERY", penalty: 0.06, source: "DESCRIPTION", quote: at >= 0 ? excerpt(description, at, duty.length) : duty.slice(0, EVIDENCE_QUOTE_MAX) };
   }
   return null;
 };
