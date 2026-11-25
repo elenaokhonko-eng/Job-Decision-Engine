@@ -122,6 +122,19 @@ function deciderProbe(behaviour: (jobVersionId: string, client: pg.Pool | pg.Poo
            AND version.id = $1::uuid`,
         [jobVersionId],
       );
+      // A decider that completes writes a decision for the version: the worker's completion guard requires one.
+      await client.query(
+        `WITH snapshot AS (
+           INSERT INTO workspace_policy_snapshots (workspace_id, snapshot_hash, resolved_snapshot)
+           SELECT version.workspace_id, 'snapshot-' || gen_random_uuid()::text, '{}'::jsonb FROM job_versions version WHERE version.id = $1::uuid
+           RETURNING id, workspace_id)
+         INSERT INTO deterministic_decisions (workspace_id, canonical_job_id, job_version_id, policy_snapshot_id, decision_hash, decision_json,
+                                              recommendation_eligibility, recommendation_outcome, decider_version)
+         SELECT version.workspace_id, version.canonical_job_id, version.id, snapshot.id, 'decision-' || gen_random_uuid()::text,
+                '{}'::jsonb, 'INELIGIBLE', 'SKIP', 'recommendation_decider_v2'
+           FROM job_versions version, snapshot WHERE version.id = $1::uuid`,
+        [jobVersionId],
+      );
       return { updated: 1, decisionsInserted: 0, errors: 0, policySnapshotId: "fixture", policySnapshotHash: "fixture" };
     } finally {
       inFlight -= 1;

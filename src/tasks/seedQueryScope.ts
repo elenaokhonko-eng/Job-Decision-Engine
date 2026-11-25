@@ -1,3 +1,4 @@
+import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
 import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
 
 export interface SeedQueryScope {
@@ -103,4 +104,37 @@ export function deciderSeedableSql(alias = "c"): string {
           AND conflict_task.status = 'COMPLETED' AND conflict_task.repair_action = '${OUTCOME_CONFLICT_REPAIR_ACTION}'
           AND conflict_task.payload->'outcome_conflict'->>'decider_version' = '${DECIDER_VERSION}'
           AND conflict_task.payload->>'job_version_id' = ${alias}.latest_job_version_id::text))`;
+}
+
+/**
+ * Live jobs the DECIDE seed can reach AND the DECIDE handler can stamp: an outcome, a complete posting with source content, a
+ * state past lane routing (deciderSeedableSql), and either a state the seed always selects (HARD_REJECTED, NEEDS_VERIFICATION,
+ * ROUTING_DEFERRED) or a current completed match run. Equal to the seed's own WHERE (stageTaskWorker.ts). One predicate for the
+ * decider stale-stage zero check, the reopen of a no-op DECIDE task (`enqueuePipelineTask`) and the handler's completion guard,
+ * so they cannot drift. Jobs outside it (UNMATCHED without a match run, LANE_ROUTED without a match) are reported by
+ * `reportedDecisionCounts`, never failed. Alias `c` = canonical_jobs.
+ */
+export function deciderReachableSql(alias = "c"): string {
+  return `${deciderSeedableSql(alias)}
+             AND ${alias}.recommendation_outcome IS NOT NULL
+             AND ${alias}.latest_job_version_id IS NOT NULL
+             AND ${alias}.description_quality_status = 'COMPLETE'
+             AND ${sourceContentEvidencePredicate(`${alias}.workspace_id`, `${alias}.latest_job_version_id`)}
+             AND (
+               COALESCE(${alias}.processing_state, ${alias}.processing_status) IN ('HARD_REJECTED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED')
+               OR EXISTS (
+                 SELECT 1
+                   FROM job_versions target_jv
+                   JOIN profile_versions current_profile
+                     ON current_profile.workspace_id = target_jv.workspace_id AND current_profile.status = 'ACTIVE'
+                   JOIN match_runs current_match
+                     ON current_match.workspace_id = ${alias}.workspace_id AND current_match.canonical_job_id = ${alias}.id
+                    AND current_match.id = ${alias}.latest_match_run_id AND current_match.job_version_id = target_jv.id
+                    AND current_match.profile_version_id = current_profile.id
+                    AND current_match.requirement_set_id = target_jv.active_requirement_set_id
+                    AND current_match.job_content_hash = target_jv.content_hash
+                    AND current_match.context_fingerprint IS NOT NULL AND current_match.status = 'COMPLETED'
+                  WHERE target_jv.workspace_id = ${alias}.workspace_id AND target_jv.id = ${alias}.latest_job_version_id
+               )
+             )`;
 }

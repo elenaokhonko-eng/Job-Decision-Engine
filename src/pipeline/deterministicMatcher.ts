@@ -21,6 +21,7 @@ import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import {
   currentMatcherFingerprintVersion,
   currentMatcherPolicyVersion,
+  unmatchedParkedByOtherMatcherSql,
 } from "./profileMatchCurrency.js";
 import {
   activeScoringPolicy,
@@ -744,6 +745,16 @@ export async function runDeterministicMatcher(
                    'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
                  )
                )
+               -- An explicit target that the matcher itself parked UNMATCHED under an older policy version is re-matched
+               -- (never selected without an explicit target, and never one parked by the current policy).
+               OR (
+                 $${explicitTargetsParam}::boolean
+                 AND EXISTS (
+                   SELECT 1 FROM match_runs parked_mr
+                    WHERE parked_mr.workspace_id = c.workspace_id AND parked_mr.id = c.latest_match_run_id
+                      AND ${unmatchedParkedByOtherMatcherSql("c", "parked_mr", { activeProfileResolved: true })}
+                 )
+               )
              )
            )
          )
@@ -1380,6 +1391,9 @@ export async function runDeterministicMatcher(
                END,
                rejection_reason = CASE
                  WHEN $9::boolean THEN $10
+                 -- A re-match that no longer parks an UNMATCHED job (only the explicit re-match of a matcher-parked job reaches
+                 -- an UNMATCHED row here) removes the stale parking reason.
+                 WHEN NOT $8::boolean AND COALESCE(processing_state, processing_status) = 'UNMATCHED' THEN NULL
                  ELSE rejection_reason
                END,
                recommendation_eligibility = CASE
