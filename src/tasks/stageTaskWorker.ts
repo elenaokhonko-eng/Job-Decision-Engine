@@ -49,7 +49,7 @@ import {
   SERIAL_PIPELINE_TASK_TYPES,
   pipelineTaskTargetKey,
 } from "./pipelineWorkerLanes.js";
-import { scopeSeedQuery } from "./seedQueryScope.js";
+import { applyLiveJobScope, scopeSeedQuery } from "./seedQueryScope.js";
 import { deciderVersionReassessmentReason, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import {
   pipelineTaskStageVersion,
@@ -205,6 +205,12 @@ export interface SeedPipelineTasksSummary {
   timeBudgetExceeded: boolean;
   byType: Record<string, { inserted: number; existing: number }>;
   /**
+   * Seed candidates the enqueue refused because the job is archived (JOB_ARCHIVED). Reported on its own, never
+   * as `existing`: the seed queries filter archived jobs before their cap, so a non-zero count means a seed
+   * selected a job it should not have, and it must stay visible instead of looking like already-queued work.
+   */
+  skippedArchived: number;
+  /**
    * Eligible routed jobs found with a lane decision from superseded lane routing content in
    * this seeding pass; each gets a ROUTE_LANE re-route task (inserted or already existing).
    */
@@ -337,10 +343,13 @@ function isPool(value: pg.Pool | pg.PoolClient): value is pg.Pool {
 function incrementSeed(
   summary: SeedPipelineTasksSummary,
   taskType: PipelineStageTaskType,
-  inserted: boolean
+  inserted: boolean,
+  skippedReason?: "JOB_ARCHIVED",
 ): void {
   summary.byType[taskType] ??= { inserted: 0, existing: 0 };
-  if (inserted) {
+  if (skippedReason === "JOB_ARCHIVED") {
+    summary.skippedArchived += 1;
+  } else if (inserted) {
     summary.inserted += 1;
     summary.byType[taskType].inserted += 1;
   } else {
@@ -519,6 +528,34 @@ async function enqueueStageTask(
     mode?: "ENSURE_CURRENT" | "FORCE_RECOMPUTE";
   },
 ): Promise<boolean> {
+  return (await enqueueStageTaskResult(taskType, id, payload, clientOrPool, context, intentOptions)).inserted;
+}
+
+async function jobVersionHasDecision(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<boolean> {
+  const { rows } = await clientOrPool.query(
+    `SELECT 1 FROM deterministic_decisions WHERE workspace_id = $1 AND job_version_id = $2 LIMIT 1`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return rows.length > 0;
+}
+
+async function enqueueStageTaskResult(
+  taskType: PipelineStageTaskType,
+  id: string,
+  payload: Record<string, unknown>,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  context: WorkspaceContext,
+  intentOptions?: {
+    producer?: string;
+    requestId?: string;
+    triggerRevisionId?: string | null;
+    mode?: "ENSURE_CURRENT" | "FORCE_RECOMPUTE";
+  },
+) {
   const maxAttempts = MODEL_BACKED_STAGE_TASK_TYPES.has(taskType) ? 3 : 8;
   let taskPayload = payload;
   let profileVersionId: string | undefined;
@@ -675,7 +712,7 @@ async function enqueueStageTask(
     clientOrPool,
     { context }
   );
-  return result.inserted;
+  return result;
 }
 
 function stageVersion(taskType: PipelineStageTaskType): string {
@@ -728,7 +765,11 @@ async function selectAndEnqueue(
     summary.timeBudgetExceeded = true;
     return;
   }
-  const scopedQuery = scopeSeedQuery(sql, params, seedScope, maxSeedPerType);
+  // The live-job scope sits inside the query, before its LIMIT. Only the observation seed has no canonical job.
+  const liveQuery = taskType === "NORMALIZE_OBSERVATION"
+    ? { sql, params }
+    : applyLiveJobScope(sql, params, { includeTestFixtures });
+  const scopedQuery = scopeSeedQuery(liveQuery.sql, liveQuery.params, seedScope, maxSeedPerType);
   const { rows } = await client.query<Record<string, unknown>>(scopedQuery.sql, scopedQuery.params);
   const candidates = rows.map(build);
   const canonicalJobIds = [...new Set(candidates
@@ -758,8 +799,8 @@ async function selectAndEnqueue(
     if (!task) continue;
     const canonicalJobId = task.payload.canonical_job_id;
     if (!includeTestFixtures && typeof canonicalJobId === "string" && fixtureIds.has(canonicalJobId)) continue;
-    const inserted = await enqueueStageTask(taskType, task.id, task.payload, client as any, ctx);
-    incrementSeed(summary, taskType, inserted);
+    const enqueued = await enqueueStageTaskResult(taskType, task.id, task.payload, client as any, ctx);
+    incrementSeed(summary, taskType, enqueued.inserted, enqueued.skippedReason);
   }
 }
 
@@ -787,6 +828,7 @@ export async function seedRecoverablePipelineTasks(
     existing: 0,
     deferredByBudget: 0,
     timeBudgetExceeded: false,
+    skippedArchived: 0,
     byType: {},
   };
   const maxPerType = options.maxSeedPerType ?? 200;
@@ -3774,8 +3816,14 @@ async function executeStageTask(
       return;
     }
     if (decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) {
-      // Terminal jobs with recorded recommendation outcomes are complete.
-      return;
+      // A terminal job with a recorded outcome needs no decision run, but only when a decision row already exists for this
+      // version (the "completed without result" check expects one) and the task is not a reassessment: a decider-version or
+      // readiness reassessment must stamp a decision under the current decider_version. The decider never changes the job's
+      // processing state, so a HARD_REJECTED job stays HARD_REJECTED.
+      const payload = (task.payload || {}) as Record<string, unknown>;
+      const reassessment = payload.reprocess_existing_state === true ||
+        (typeof payload.reassessment_reason === "string" && payload.reassessment_reason.startsWith("DECIDER_VERSION:"));
+      if (!reassessment && await jobVersionHasDecision(clientOrPool, ctx, jobVersionId)) return;
     }
     const matchDependentStates = new Set([
       "LANE_ROUTED",

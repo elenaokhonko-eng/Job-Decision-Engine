@@ -6,6 +6,9 @@
 import type pg from "pg";
 
 import { OWNER_SAVED_SOURCE_NAMES } from "../services/jobArchiveHardRejectedPolicy.js";
+import { GATE_VERSION } from "../contracts/version.js";
+import { deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
+import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
 import { LANE_ROUTER_RULE_VERSION } from "../pipeline/laneRouter.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
 import { routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
@@ -207,6 +210,45 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
                AND LEFT(ld.model_version, LENGTH($2)) IS DISTINCT FROM $2`,
       params: [LANE_ROUTER_RULE_VERSION],
     },
+  };
+  // Seed-equal, like the stages above. decider: the DECIDE seed's decider-version arm (a live job whose latest decision
+  // has another or no decider_version), limited to what the decider itself processes (complete description with source
+  // content). gate: the gate version seed (latest gate decision older than the running version, no gate task in flight).
+  stages.decider = {
+    sql: `SELECT c.id::text AS id
+            FROM canonical_jobs c
+           WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+             AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+             AND c.recommendation_outcome IS NOT NULL
+             AND c.latest_job_version_id IS NOT NULL
+             AND c.description_quality_status = 'COMPLETE'
+             AND ${sourceContentEvidencePredicate("c.workspace_id", "c.latest_job_version_id")}
+             AND ${deciderVersionRefreshSql("c")}`,
+    params: [],
+  };
+  stages.gate = {
+    sql: `SELECT c.id::text AS id
+            FROM canonical_jobs c
+            JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
+            JOIN LATERAL (
+              SELECT gate.gate_version FROM gate_decisions gate
+               WHERE gate.workspace_id = c.workspace_id AND gate.job_version_id = jv.id
+               ORDER BY gate.created_at DESC, gate.id DESC LIMIT 1
+            ) latest_gate ON TRUE
+           WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+             AND COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'MANUALLY_REMOVED')
+             AND c.description_quality_status = 'COMPLETE'
+             AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
+             AND CASE WHEN latest_gate.gate_version ~ '^(gate-)?[0-9]{1,17}([-.][0-9]{1,17})*$'
+                 THEN regexp_split_to_array(regexp_replace(latest_gate.gate_version, '^gate-', ''), '[-.]')::bigint[]
+                      < regexp_split_to_array(regexp_replace($2::text, '^gate-', ''), '[-.]')::bigint[]
+                 ELSE TRUE END
+             AND NOT EXISTS (
+               SELECT 1 FROM pipeline_tasks inflight
+                WHERE inflight.workspace_id = c.workspace_id AND inflight.task_type = 'APPLY_HARD_GATES'
+                  AND inflight.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+                  AND inflight.payload->>'job_version_id' = jv.id::text)`,
+    params: [GATE_VERSION],
   };
   const ids: string[] = [];
   const detail: Record<string, number> = {};

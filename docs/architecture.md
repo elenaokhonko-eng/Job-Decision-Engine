@@ -245,6 +245,13 @@ Order of work:
 - If lane routing finds no lane, the job becomes `UNMATCHED` and stops. If routing could not run for a technical reason, the job becomes `ROUTING_DEFERRED` and goes to stage 9.
 - Stage 10 follows stage 9 only when eligibility is `ELIGIBLE` and the outcome is `PRIORITY` or `REVIEW`.
 
+Task seeds (`seedRecoverablePipelineTasks`, `src/tasks/stageTaskWorker.ts`):
+
+- Every capped seed selects live jobs only. `applyLiveJobScope` (`src/tasks/seedQueryScope.ts`) puts `archived_at IS NULL` and, unless fixtures are included, `is_test_fixture IS NOT TRUE` inside the query, before its `LIMIT`. Only the observation seed (`NORMALIZE_OBSERVATION`) has no canonical job and is exempt. A new seed gets the scope without writing it, and a query with no `WHERE c.workspace_id = $1` anchor throws.
+- A job the enqueue still refuses as archived is counted as `skippedArchived`, never as `existing`.
+- A `DECIDE_RECOMMENDATION` task for a `HARD_REJECTED` or `UNMATCHED` job with a recorded outcome completes without a decider run only when a decision row already exists for that version and the task is not a reassessment. A decider-version reassessment runs the decider and stamps a decision with the current `decider_version`; the job state and the outcome rules do not change.
+- The stale-stage zero check (`stage_result_older_than_rule_version`) covers the extractor, matcher, lane router, decider and gate stages, each equal to its seed.
+
 After the stages:
 
 | Step | Code today | Target module |
