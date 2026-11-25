@@ -176,9 +176,11 @@ interface ClauseFacts {
   /** The clause names commission as pay vocabulary. */
   readonly commissionPay: boolean;
   readonly variableTerm: boolean;
+  /** The clause addresses this role and names commission outside a generic list, others' commission or a negation. */
+  readonly youEarnOk: boolean;
 }
 let memoClause = "";
-let memoFacts: ClauseFacts = { otherRolesOnly: false, commissionExcluded: false, commissionPay: false, variableTerm: false };
+let memoFacts: ClauseFacts = { otherRolesOnly: false, commissionExcluded: false, commissionPay: false, variableTerm: false, youEarnOk: false };
 
 /** Clause-level facts, computed once per clause (a clause with thousands of "commission" words stays linear). */
 function clauseFacts(clause: string): ClauseFacts {
@@ -190,6 +192,7 @@ function clauseFacts(clause: string): ClauseFacts {
       commissionExcluded: otherRolesOnly || GENERIC_PAY_LIST.test(clause) || COMMISSION_FOR_OTHERS.test(clause) || COMMISSION_NEGATED.test(clause),
       commissionPay: COMMISSION_WORD.test(clause) && !COMMISSION_BODY_BEFORE.test(clause),
       variableTerm: SALES_VARIABLE_TERMS.test(clause),
+      youEarnOk: THIS_ROLE.test(clause) && COMMISSION_WORD.test(clause) && !GENERIC_PAY_LIST.test(clause) && !COMMISSION_FOR_OTHERS.test(clause) && !COMMISSION_NEGATED.test(clause),
     };
   }
   return memoFacts;
@@ -218,7 +221,7 @@ const EXPLICIT_SALES_PATTERNS: readonly Pattern[] = [
   // Eligibility as this role's pay ("commission eligible", "eligible for sales commission").
   { regex: /\bcommission[- ]eligible\b|\beligible[ \t]+(?:for|to[ \t]+(?:receive|earn))[ \t]+(?:(?:sales|performance|variable)[ \t]+)?commissions?\b/g, anySubject: true, payClause: true, accept: commissionClauseOk },
   // "you will earn / receive commission": the clause must speak to this role (the mixed case "Sales roles earn commission, and you will receive commission too").
-  { regex: /\b(?:earn|receive|get)(?:s|ing)?[ \t]+(?:an?[ \t]+)?(?:(?:uncapped|sales)[ \t]+)?commissions?\b(?![ \t]+(?:opportunit|incentive|program|plan))/g, anySubject: true, payClause: true, accept: (clause) => THIS_ROLE.test(clause) && clauseFacts(clause).commissionPay && !GENERIC_PAY_LIST.test(clause) && !COMMISSION_FOR_OTHERS.test(clause) && !COMMISSION_NEGATED.test(clause) },
+  { regex: /\b(?:earn|receive|get)(?:s|ing)?[ \t]+(?:an?[ \t]+)?(?:(?:uncapped|sales)[ \t]+)?commissions?\b(?![ \t]+(?:opportunit|incentive|program|plan))/g, anySubject: true, payClause: true, accept: (clause) => clauseFacts(clause).youEarnOk },
   // Cold calling / outbound prospecting as this role's own duty: a duty verb, or the clause starts with the term.
   { regex: /\b(?:make|making|do|doing|perform|performing|conduct|conducting|handle|handling|own|owning|drive|driving|responsible[ \t]+for)[ \t]+(?:(?:daily|regular|high[- ]volume)[ \t]+)?(?:cold[- ]call(?:s|ing)?|cold[ \t]+outreach|outbound[ \t]+prospecting|outbound[ \t]+sales)\b|^(?:cold[- ]call(?:s|ing)?|cold[ \t]+outreach|outbound[ \t]+prospecting|outbound[ \t]+sales)\b/g },
 ];

@@ -323,6 +323,11 @@ describe("commission scope (gate-2026-11.8)", () => {
     ["1MB commission", "commission ".repeat(100000)],
     ["1MB base plus", "base plus ".repeat(100000)],
     ["1MB OTE", "ote ".repeat(250000)],
+    ["1MB earn commission", "earn commission ".repeat(62500)],
+    ["1MB eligible for commission", "eligible for commission ".repeat(42000)],
+    ["1MB commission on", "commission on every ".repeat(50000)],
+    ["1MB base and", "base salary and ".repeat(62500)],
+    ["1MB cold calling", "do cold calling ".repeat(62500)],
   ])("stays fast on hostile text: %s", (_label, text) => {
     const started = performance.now();
     findExplicitSalesDuty(text);
