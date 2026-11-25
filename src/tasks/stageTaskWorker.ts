@@ -49,7 +49,7 @@ import {
   SERIAL_PIPELINE_TASK_TYPES,
   pipelineTaskTargetKey,
 } from "./pipelineWorkerLanes.js";
-import { applyLiveJobScope, scopeSeedQuery } from "./seedQueryScope.js";
+import { OUTCOME_CONFLICT_REPAIR_ACTION, applyLiveJobScope, deciderSeedableSql, scopeSeedQuery } from "./seedQueryScope.js";
 import { deciderVersionReassessmentReason, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import {
   pipelineTaskStageVersion,
@@ -529,6 +529,16 @@ async function enqueueStageTask(
   },
 ): Promise<boolean> {
   return (await enqueueStageTaskResult(taskType, id, payload, clientOrPool, context, intentOptions)).inserted;
+}
+
+/**
+ * A reassessment of a terminal job would change its stored outcome. Deterministic, so never retried and never an engine error:
+ * the task is closed with a repair action, the job is untouched, and the terminal_outcome_conflict zero check keeps it visible.
+ */
+class TerminalOutcomeConflictError extends Error {
+  constructor(readonly jobVersionId: string, readonly details: readonly unknown[]) {
+    super(`${OUTCOME_CONFLICT_REPAIR_ACTION}: job_version_id=${jobVersionId}; the decider would change the stored outcome, so nothing was written.`);
+  }
 }
 
 async function jobVersionHasDecision(
@@ -1771,6 +1781,8 @@ export async function seedRecoverablePipelineTasks(
          -- Only what the decider will process (it skips an incomplete posting and one without source content): a skipped job
          -- would keep the oldest updated_at and fill the cap on every pass.
          AND c.description_quality_status = 'COMPLETE'
+         -- The states the handler can stamp, shared with the decider zero check (RAW_STAGED and PREQUALIFIED are no-ops there).
+         AND ${deciderSeedableSql("c")}
          AND EXISTS (
            SELECT 1 FROM job_versions decidable_version
             WHERE decidable_version.workspace_id = c.workspace_id
@@ -3879,10 +3891,7 @@ async function executeStageTask(
       ...(terminalWithOutcome ? { preserveStoredOutcome: true } : {}),
     });
     if ((summary.outcomeConflicts ?? 0) > 0) {
-      throw new Error(
-        `OUTCOME_CONFLICT_ON_TERMINAL_JOB: job_version_id=${jobVersionId} is ${decisionState.processingState} with a stored outcome; ` +
-          "the decider would change it, so no decision was written and the job is unchanged.",
-      );
+      throw new TerminalOutcomeConflictError(jobVersionId, summary.outcomeConflictDetails ?? []);
     }
     if (summary.errors > 0) {
       throw new Error(`Recommendation decider reported ${summary.errors} error(s).`);
@@ -4031,17 +4040,35 @@ async function processClaimedTask(
         return;
       }
     }
-    const retrievedObservationId = await executeStageTask(
-      taskType,
-      task,
-      clientOrPool,
-      ctx,
-      dependencies,
-      options.budgetRunId,
-      () => { metrics.successorTasksCreated += 1; },
-      () => { metrics.rerouted = true; },
-      () => { metrics.stampOnly = true; },
-    );
+    let retrievedObservationId: Awaited<ReturnType<typeof executeStageTask>>;
+    try {
+      retrievedObservationId = await executeStageTask(
+        taskType,
+        task,
+        clientOrPool,
+        ctx,
+        dependencies,
+        options.budgetRunId,
+        () => { metrics.successorTasksCreated += 1; },
+        () => { metrics.rerouted = true; },
+        () => { metrics.stampOnly = true; },
+      );
+    } catch (error) {
+      if (!(error instanceof TerminalOutcomeConflictError)) throw error;
+      // Close, do not retry or fail: the recompute is deterministic and the job must keep its state (no PROCESSING_ERROR).
+      await completePipelineTaskAndRun(task, clientOrPool, {
+        context: ctx,
+        repairAction: OUTCOME_CONFLICT_REPAIR_ACTION,
+        afterComplete: async (transactionClient) => {
+          await (transactionClient as QueryClient).query(
+            `UPDATE pipeline_tasks SET payload = payload || jsonb_build_object('outcome_conflict', $3::jsonb)
+              WHERE workspace_id = $1 AND id = $2`,
+            [ctx.workspaceId, task.taskId, JSON.stringify(error.details)],
+          );
+        },
+      });
+      return;
+    }
     await completePipelineTaskAndRun(task, clientOrPool, {
       context: ctx,
       afterComplete: async (transactionClient) => {

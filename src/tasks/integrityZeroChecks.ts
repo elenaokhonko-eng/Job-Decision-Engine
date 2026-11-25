@@ -7,11 +7,12 @@ import type pg from "pg";
 
 import { OWNER_SAVED_SOURCE_NAMES } from "../services/jobArchiveHardRejectedPolicy.js";
 import { GATE_VERSION } from "../contracts/version.js";
-import { deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
+import { DECIDER_VERSION, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
 import { LANE_ROUTER_RULE_VERSION } from "../pipeline/laneRouter.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
 import { routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
+import { OUTCOME_CONFLICT_REPAIR_ACTION, deciderSeedableSql } from "./seedQueryScope.js";
 import { ROUTABLE_VERIFICATION_SQL, supersededProfileMatchSql } from "./stageTaskWorker.js";
 import { findTasksCompletedWithoutResult } from "./completedWithoutResult.js";
 
@@ -145,13 +146,40 @@ export async function protectedJobsAutoArchived(db: Queryable, workspaceId: stri
 }
 
 /**
+ * A terminal (HARD_REJECTED / UNMATCHED) job whose decider-version reassessment would have changed its stored outcome: the task
+ * was closed with repair_action OUTCOME_CONFLICT_ON_TERMINAL_JOB, the job was left untouched, and its latest decision is still
+ * stale. It stays red until an operator resolves it (fixes the stored outcome or the rule). Excluded from the decider stage
+ * (deciderSeedableSql), so a conflicted job is counted once, here, and not also as a stale decision.
+ */
+export async function terminalOutcomeConflicts(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT DISTINCT c.id::text AS id
+       FROM pipeline_tasks t
+       JOIN canonical_jobs c ON c.workspace_id = t.workspace_id AND c.latest_job_version_id::text = t.payload->>'job_version_id'
+      WHERE t.workspace_id = $1::uuid AND t.task_type = 'DECIDE_RECOMMENDATION' AND t.status = 'COMPLETED'
+        AND t.repair_action = '${OUTCOME_CONFLICT_REPAIR_ACTION}'
+        AND c.archived_at IS NULL AND NOT c.is_test_fixture
+        AND COALESCE(c.processing_state, c.processing_status) IN ('HARD_REJECTED', 'UNMATCHED')
+        AND c.recommendation_outcome IS NOT NULL
+        -- Still unresolved: no decision stamped under the current decider version exists for this version (also true when
+        -- the job never had a decision, which the stale-decision arm cannot see).
+        AND NOT EXISTS (
+          SELECT 1 FROM deterministic_decisions d
+           WHERE d.workspace_id = c.workspace_id AND d.job_version_id = c.latest_job_version_id AND d.decider_version = $2)
+      ORDER BY 1`,
+    [workspaceId, DECIDER_VERSION],
+  );
+  return result("terminal_outcome_conflict", rows.map((row) => row.id));
+}
+
+/**
  * Live jobs (alias c) the DECIDE seed can reach AND the DECIDE handler can stamp: an outcome, a complete posting with source
  * content, a state past lane routing, and either a state the seed always selects (HARD_REJECTED, NEEDS_VERIFICATION,
  * ROUTING_DEFERRED) or a current completed match run. Equal to the seed's own WHERE (stageTaskWorker.ts), so the check can
  * be zero after a drain. Jobs outside it (UNMATCHED without a match run, LANE_ROUTED without a match) are reported by
  * `reportedDecisionCounts`, never failed.
  */
-const DECIDER_REACHABLE_SQL = `COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'PREQUALIFIED', 'MANUALLY_REMOVED')
+const DECIDER_REACHABLE_SQL = `${deciderSeedableSql("c")}
              AND c.recommendation_outcome IS NOT NULL
              AND c.latest_job_version_id IS NOT NULL
              AND c.description_quality_status = 'COMPLETE'
@@ -331,6 +359,7 @@ export async function runZeroChecks(
     await completedTasksWithoutResult(db, workspaceId),
     await routableVerificationJobsStranded(db, workspaceId),
     await protectedJobsAutoArchived(db, workspaceId),
+    await terminalOutcomeConflicts(db, workspaceId),
     ...stale,
   ];
 }

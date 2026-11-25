@@ -82,3 +82,21 @@ export function applyLiveJobScope(
     params: [...params],
   };
 }
+
+/** `pipeline_tasks.repair_action` of a DECIDE task closed because the decider would have changed a terminal job's stored outcome. */
+export const OUTCOME_CONFLICT_REPAIR_ACTION = "OUTCOME_CONFLICT_ON_TERMINAL_JOB";
+
+/**
+ * States past lane routing that the DECIDE handler can stamp, and not a job whose current version already has a closed
+ * outcome conflict (nothing will ever run for it until an operator acts). One predicate shared by the DECIDE seed and the
+ * decider stale-stage check, so the two cannot drift again. Alias `c` = canonical_jobs.
+ */
+export function deciderSeedableSql(alias = "c"): string {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) throw new Error("A canonical_jobs alias must be a plain identifier.");
+  return `(COALESCE(${alias}.processing_state, ${alias}.processing_status) NOT IN ('RAW_STAGED', 'PREQUALIFIED', 'MANUALLY_REMOVED')
+     AND NOT EXISTS (
+       SELECT 1 FROM pipeline_tasks conflict_task
+        WHERE conflict_task.workspace_id = ${alias}.workspace_id AND conflict_task.task_type = 'DECIDE_RECOMMENDATION'
+          AND conflict_task.status = 'COMPLETED' AND conflict_task.repair_action = '${OUTCOME_CONFLICT_REPAIR_ACTION}'
+          AND conflict_task.payload->>'job_version_id' = ${alias}.latest_job_version_id::text))`;
+}

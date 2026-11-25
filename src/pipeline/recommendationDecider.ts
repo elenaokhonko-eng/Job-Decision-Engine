@@ -73,12 +73,23 @@ export function applyThinPostingCap<T extends string>(outcome: T, confidence: { 
   return confidence.level === "LOW" && outcome === "PRIORITY" ? "REVIEW" : outcome;
 }
 
+export interface OutcomeConflictDetail {
+  canonical_job_id: string;
+  job_version_id: string;
+  stored_outcome: string | null;
+  recomputed_outcome: string;
+  stored_eligibility: string | null;
+  recomputed_eligibility: string;
+}
+
 export interface RecommendationDeciderSummary {
   updated: number;
   decisionsInserted: number;
   errors: number;
   /** Jobs in `preserveStoredOutcome` mode whose recomputed outcome or eligibility differs from the stored one (nothing written for them). */
   outcomeConflicts?: number;
+  /** One entry per conflict: the stored and the recomputed outcome and eligibility (ids and codes only). */
+  outcomeConflictDetails?: OutcomeConflictDetail[];
   policySnapshotId: string;
   policySnapshotHash: string;
 }
@@ -340,6 +351,7 @@ export async function runRecommendationDecider(
 ): Promise<RecommendationDeciderSummary> {
   const preserveStoredOutcome = options?.preserveStoredOutcome === true;
   let outcomeConflicts = 0;
+  const outcomeConflictDetails: OutcomeConflictDetail[] = [];
   console.log("Starting Deterministic Recommendation Decider...");
   const pool = clientOrPool || defaultPool;
 
@@ -1103,6 +1115,14 @@ export async function runRecommendationDecider(
         if (preserveStoredOutcome
           && (job.recommendation_outcome !== adjustedOutcome || job.recommendation_eligibility !== adjustedEligibility)) {
           outcomeConflicts += 1;
+          outcomeConflictDetails.push({
+            canonical_job_id: job.canonical_job_id,
+            job_version_id: job.job_version_id,
+            stored_outcome: job.recommendation_outcome,
+            recomputed_outcome: adjustedOutcome,
+            stored_eligibility: job.recommendation_eligibility,
+            recomputed_eligibility: adjustedEligibility,
+          });
           throw new Error("OUTCOME_CONFLICT_ON_TERMINAL_JOB: the recomputed outcome differs from the stored one; nothing was written.");
         }
         const decisionJson = RecommendationDecisionSchema.parse({
@@ -1342,6 +1362,7 @@ export async function runRecommendationDecider(
       decisionsInserted,
       errors,
       outcomeConflicts,
+      outcomeConflictDetails,
       policySnapshotId: snapshot.snapshotId,
       policySnapshotHash: snapshot.snapshotHash,
     };

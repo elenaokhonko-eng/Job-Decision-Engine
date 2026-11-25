@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import pg from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -7,8 +8,8 @@ import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pg
 import { GATE_VERSION } from "../../contracts/version.js";
 import { DECIDER_VERSION, deciderVersionReassessmentReason } from "../../pipeline/deciderVersion.js";
 import { findTasksCompletedWithoutResult } from "../../tasks/completedWithoutResult.js";
-import { reportedDecisionCounts, staleStageResults } from "../../tasks/integrityZeroChecks.js";
-import { applyLiveJobScope } from "../../tasks/seedQueryScope.js";
+import { reportedDecisionCounts, runZeroChecks, staleStageResults, terminalOutcomeConflicts, zeroChecksExitCode } from "../../tasks/integrityZeroChecks.js";
+import { OUTCOME_CONFLICT_REPAIR_ACTION, applyLiveJobScope } from "../../tasks/seedQueryScope.js";
 import { runPipelineStageTaskWorker, seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
@@ -131,6 +132,40 @@ describe("applyLiveJobScope", () => {
   });
 });
 
+
+/** A completed match run that is current for the job (active profile, requirement set, content hash). */
+async function withCurrentMatch(job: JobIds): Promise<void> {
+  const database = db();
+  const workspaceId = ctx().workspaceId;
+  let profile = await database.query<{ id: string }>(`SELECT id FROM profile_versions WHERE workspace_id = $1 AND status = 'ACTIVE' LIMIT 1`, [workspaceId]);
+  if (profile.rows.length === 0) {
+    const candidate = await database.query<{ id: string }>(
+      `INSERT INTO candidate_profiles (workspace_id, profile_key, display_name) VALUES ($1, 'seed_live_profile', 'Seed Live Profile') RETURNING id`, [workspaceId]);
+    profile = await database.query<{ id: string }>(
+      `INSERT INTO profile_versions (workspace_id, candidate_profile_id, version_number, schema_version, source_hash, status, effective_at)
+       VALUES ($1, $2, 1, '2.2.0', 'seed-live-profile-v1', 'ACTIVE', NOW()) RETURNING id`, [workspaceId, candidate.rows[0]!.id]);
+  }
+  const contentHash = `h-${job.versionId}`;
+  const identity = await database.query<{ id: string }>(
+    `INSERT INTO requirement_set_identities (workspace_id, canonical_job_id, identity_hash, job_content_hash, deterministic_extractor_version,
+                                             quoted_extractor_version, quoted_prompt_hash, normalizer_hash, quoted_enabled)
+     VALUES ($1, $2, $3, $4, 'fixture-v1', 'fixture-v1', 'fixture-prompt', 'fixture-normalizer', FALSE) RETURNING id`,
+    [workspaceId, job.jobId, `identity-${job.versionId}`, contentHash]);
+  const set = await database.query<{ id: string }>(
+    `INSERT INTO requirement_sets (workspace_id, requirement_identity_id, canonical_job_id, job_version_id, revision_number, source_type)
+     VALUES ($1, $2, $3, $4, 1, 'EXTRACTED') RETURNING id`, [workspaceId, identity.rows[0]!.id, job.jobId, job.versionId]);
+  await database.query(`UPDATE job_versions SET active_requirement_set_id = $2 WHERE id = $1`, [job.versionId, set.rows[0]!.id]);
+  const run = await database.query<{ id: string }>(
+    `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, requirement_set_id, status, requirement_count,
+                             matched_count, coverage_score, overall_match_score, policy_version, job_content_hash, context_fingerprint, completed_at)
+     VALUES ($1, $2, $3, $4, $5, 'COMPLETED', 1, 1, 100.00, 80.00, 'fixture-v1', $6, $7, NOW()) RETURNING id`,
+    [workspaceId, job.jobId, job.versionId, profile.rows[0]!.id, set.rows[0]!.id, contentHash, `ctx-${job.versionId}`]);
+  await database.query(`UPDATE canonical_jobs SET latest_match_run_id = $2 WHERE id = $1`, [job.jobId, run.rows[0]!.id]);
+}
+
+const taskRows = async (versionId: string) => (await db().query<{ status: string; repair_action: string | null; attempt_count: number; payload: Record<string, unknown> }>(
+  `SELECT status, repair_action, COALESCE(attempt_count, 0) AS attempt_count, payload FROM pipeline_tasks WHERE payload->>'job_version_id' = $1`, [versionId])).rows;
+
 const deciderTask = (job: JobIds, extra: Record<string, unknown> = {}) => db().query(
   `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status)
    VALUES ($1, 'DECIDE_RECOMMENDATION', $2, $3::jsonb, 'PENDING')`,
@@ -143,7 +178,8 @@ const drain = (versionIds: string[], seed = true) => runPipelineStageTaskWorker(
 });
 const outcomeColumns = async (jobId: string) => (await db().query(
   `SELECT recommendation_outcome, recommendation_eligibility, recommendation_requirement_score, recommendation_coverage_score,
-          recommendation_evidence_completeness, recommendation_decided_at, COALESCE(processing_state, processing_status) AS state
+          recommendation_evidence_completeness, recommendation_decided_at, processing_state, processing_status, rejection_reason,
+          gate_decision
      FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
 const decisionCount = async (versionId: string) =>
   (await db().query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM deterministic_decisions WHERE job_version_id = $1`, [versionId])).rows[0]!.n;
@@ -320,35 +356,93 @@ describe.skipIf(skipReal)("seed live filter, decider reassessment and stale-stag
     expect(await Promise.all(ids.map((job) => decisionCount(job.versionId)))).toEqual(decisionsAfterFirst);
   }, 180_000);
 
-  it("B2: a terminal job whose stored outcome the decider would change is left untouched: no decision, no column change, a visible failure", async () => {
-    // Stored REVIEW on a HARD_REJECTED job (an illegal state): the decider recomputes SKIP.
-    const reviewOnRejected = await decidableJob({ state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "REVIEW", decider: "recommendation_decider_v1" });
+  it("N1: a terminal job whose stored outcome the decider would change is closed with a repair action, untouched, and flagged by terminal_outcome_conflict", async () => {
+    // Stored REVIEW on a HARD_REJECTED job and on an UNMATCHED job: the decider recomputes SKIP for both.
+    const rejectedReview = await decidableJob({ state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "REVIEW", decider: "recommendation_decider_v1" });
+    const unmatchedReview = await decidableJob({ state: "UNMATCHED", gate: "PASS", outcome: "REVIEW", routingDisposition: "POLICY_NO_MATCH", decider: "recommendation_decider_v1" });
+    const conflicted = [rejectedReview, unmatchedReview];
+    // Agreeing fixtures: stored SKIP, and the decider recomputes SKIP.
     const staleGate = await decidableJob({ state: "HARD_REJECTED", gate: "PASS", outcome: "SKIP", decider: "recommendation_decider_v1" });
     await db().query(`UPDATE canonical_jobs SET gate_decision = NULL WHERE id = $1`, [staleGate.jobId]);
-    const unmatchedNullDisposition = await decidableJob({ state: "UNMATCHED", gate: "PASS", outcome: "SKIP", routingDisposition: null, decider: "recommendation_decider_v1" });
-    const jobs = [reviewOnRejected, staleGate, unmatchedNullDisposition];
-    const before = await Promise.all(jobs.map((job) => outcomeColumns(job.jobId)));
-    const decisionsBefore = await Promise.all(jobs.map((job) => decisionCount(job.versionId)));
-    for (const job of jobs) await deciderTask(job, reassess);
+    const all = [...conflicted, staleGate];
+    const before = await Promise.all(all.map((job) => outcomeColumns(job.jobId)));
+    const decisionsBefore = await Promise.all(all.map((job) => decisionCount(job.versionId)));
+    for (const job of all) await deciderTask(job, reassess);
 
-    await drain(jobs.map((job) => job.versionId), false);
+    // Several drains: a retry or an engine-error path would show up as a changed state or extra attempts.
+    for (let pass = 0; pass < 3; pass += 1) await drain(all.map((job) => job.versionId), false);
 
-    for (const [index, job] of jobs.entries()) {
-      expect(await outcomeColumns(job.jobId)).toEqual(before[index]);
+    for (const [index, job] of conflicted.entries()) {
+      const tasks = await taskRows(job.versionId);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!.status).toBe("COMPLETED");
+      expect(tasks[0]!.repair_action).toBe(OUTCOME_CONFLICT_REPAIR_ACTION);
+      expect(Number(tasks[0]!.attempt_count)).toBeLessThanOrEqual(1);
+      const detail = (tasks[0]!.payload.outcome_conflict as Array<Record<string, string>>)[0]!;
+      expect(detail).toMatchObject({ canonical_job_id: job.jobId, stored_outcome: "REVIEW", recomputed_outcome: "SKIP" });
+      expect(await outcomeColumns(job.jobId)).toEqual(before[index]); // state, status, rejection_reason, outcome, scores, decided_at
+      expect(await decisionCount(job.versionId)).toBe(decisionsBefore[index]);
     }
-    // The conflicting job gets no decision row and its task did not complete.
-    expect(await decisionCount(reviewOnRejected.versionId)).toBe(decisionsBefore[0]);
-    const task = await db().query<{ status: string }>(`SELECT status FROM pipeline_tasks WHERE payload->>'job_version_id' = $1`, [reviewOnRejected.versionId]);
-    expect(task.rows[0]!.status).not.toBe("COMPLETED");
-    // A decision for the other two is written only if it agrees with the stored outcome: the columns above are identical either way.
-    for (const [index, job] of [staleGate, unmatchedNullDisposition].entries()) {
-      const written = (await decisionCount(job.versionId)) - decisionsBefore[index + 1]!;
-      const row = await db().query<{ status: string }>(`SELECT status FROM pipeline_tasks WHERE payload->>'job_version_id' = $1`, [job.versionId]);
-      expect(row.rows[0]!.status === "COMPLETED" ? written : -written).toBeGreaterThanOrEqual(row.rows[0]!.status === "COMPLETED" ? 1 : 0);
-    }
-    // Still flagged by the zero check, so the conflict cannot go unnoticed.
-    expect((await staleIds("decider")).sample).toContain(`decider:${reviewOnRejected.jobId}`);
+    // The agreeing HARD_REJECTED job (NULL canonical gate_decision) is stamped and completes normally.
+    const stamped = await taskRows(staleGate.versionId);
+    expect(stamped[0]!.status).toBe("COMPLETED");
+    expect(stamped[0]!.repair_action).toBeNull();
+    expect(await decisionCount(staleGate.versionId)).toBe(decisionsBefore[2]! + 1);
+    expect(await outcomeColumns(staleGate.jobId)).toEqual(before[2]);
+
+    // The new check flags exactly the conflicted jobs; the task is not "completed without result"; the stale-decision arm does not double count them.
+    const conflictCheck = await terminalOutcomeConflicts(db(), ctx().workspaceId);
+    expect([...conflictCheck.sample].sort()).toEqual(conflicted.map((job) => job.jobId).sort());
+    expect(zeroChecksExitCode(await runZeroChecks(db(), ctx().workspaceId))).toBe(1);
+    const missing = await findTasksCompletedWithoutResult(db(), ctx().workspaceId);
+    expect(missing.byTaskType.DECIDE_RECOMMENDATION ?? 0).toBe(0);
+    expect((await staleIds("decider")).count).toBe(0);
   }, 180_000);
+
+  it("an UNMATCHED job with no routing disposition and gate PASS keeps its stored outcome: closed as a conflict if the decider would change it, otherwise stamped", async () => {
+    const job = await decidableJob({ state: "UNMATCHED", gate: "PASS", outcome: "SKIP", routingDisposition: null, decider: "recommendation_decider_v1" });
+    const before = await outcomeColumns(job.jobId);
+    await deciderTask(job, reassess);
+    await drain([job.versionId], false);
+    const tasks = await taskRows(job.versionId);
+    expect(tasks[0]!.status).toBe("COMPLETED");
+    expect(await outcomeColumns(job.jobId)).toEqual(before);
+    // A job without a disposition and without a match recomputes a non-SKIP outcome: that must be a recorded conflict, never a promoted recommendation.
+    expect(tasks[0]!.repair_action).toBe(OUTCOME_CONFLICT_REPAIR_ACTION);
+    expect((await terminalOutcomeConflicts(db(), ctx().workspaceId)).sample).toContain(job.jobId);
+  }, 120_000);
+
+  it("N2: PREQUALIFIED and RAW_STAGED stale jobs (with a current match) older than the cap do not starve a decidable job", async () => {
+    const stale = { outcome: "REVIEW", decider: "recommendation_decider_v1", gate: "PASS" };
+    const noop: JobIds[] = [];
+    for (const state of ["PREQUALIFIED", "PREQUALIFIED", "PREQUALIFIED", "RAW_STAGED", "RAW_STAGED", "RAW_STAGED"]) {
+      const job = await decidableJob({ ...stale, state, ageDays: 40 });
+      await withCurrentMatch(job);
+      noop.push(job);
+    }
+    const live = await decidableJob({ ...stale, state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "SKIP", ageDays: 1 });
+    await seedRecoverablePipelineTasks(db(), { context: ctx(), taskTypes: ["DECIDE_RECOMMENDATION"], maxSeedPerType: 5, timeBudgetMs: 60_000 });
+    expect(await tasksFor("DECIDE_RECOMMENDATION", noop.map((job) => job.jobId))).toBe(0);
+    expect(await tasksFor("DECIDE_RECOMMENDATION", [live.jobId])).toBe(1);
+    expect((await staleIds("decider")).sample).toEqual([`decider:${live.jobId}`]);
+  }, 180_000);
+
+  it("preserve mode leaves what the readiness view and the readiness refresh arm see for a terminal job current, never stale", async () => {
+    const job = await decidableJob({ state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "SKIP", decider: "recommendation_decider_v1" });
+    await deciderTask(job, reassess);
+    expect((await drain([job.versionId], false)).failed).toBe(0);
+    const view = await db().query<{ reasons: string[] | null }>(
+      `SELECT readiness_reason_codes AS reasons FROM v_application_readiness_current WHERE workspace_id = $1 AND canonical_job_id = $2`, [ctx().workspaceId, job.jobId]);
+    expect(view.rows).toHaveLength(1);
+    // A terminal job reads BLOCKED from its state; the stamped decision only refreshes the evidence, so no stale-readiness reason appears.
+    for (const code of ["READINESS_EVIDENCE_STALE", "READINESS_FINGERPRINT_STALE", "READINESS_CONTEXT_STALE"]) expect(view.rows[0]!.reasons ?? []).not.toContain(code);
+  }, 120_000);
+
+  it("reconcile_pipeline reports reported_counts next to zero_checks (wiring guard)", () => {
+    const source = readFileSync(new URL("../../../scripts/reconcile_pipeline.ts", import.meta.url), "utf8");
+    expect(source).toMatch(/reported_counts:\s*await reportedDecisionCounts\(client, ctx\.workspaceId\)/);
+    expect(source).toMatch(/reported_counts: ReportedDecisionCounts/);
+  });
 
   it("a terminal job with a decision is not re-run by a task that is only reprocess_existing_state (a rematch successor)", async () => {
     const job = await decidableJob({ state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "SKIP", decider: DECIDER_VERSION });
