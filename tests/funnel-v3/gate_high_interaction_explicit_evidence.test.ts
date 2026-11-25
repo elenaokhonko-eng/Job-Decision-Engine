@@ -277,3 +277,91 @@ it("a hostile quota clause is found (first match) and is fast", () => {
   expect(findExplicitSalesDuty("carry a quota ".repeat(10000))).not.toBeNull();
   expect(performance.now() - started).toBeLessThan(250);
 });
+
+// gate-2026-11.8: commission rejects only as this role's main variable pay or an explicit sales duty. Synthetic text only.
+describe("commission scope (gate-2026-11.8)", () => {
+  it.each([
+    ["generic option list", "<p>In addition to base pay, we offer a performance-driven annual bonus or commission.</p>"],
+    ["bonus, commission, or incentive program", "<p>You may be eligible for a bonus, commission, or incentive program.</p>"],
+    ["eligible for a bonus, commission, or incentive program", "<p>Eligible for a bonus, commission, or incentive program.</p>"],
+    ["commission opportunities without a structure", "<p>Base salary paid in USD + commission opportunities.</p>"],
+    ["affiliate commissions paid to others", "<p>You will track affiliate commissions and reconcile partner payouts.</p>"],
+    ["referral commission for others", "<p>You will administer the referral commission programme for the sales team.</p>"],
+    ["other roles", "<p>Most sales positions are eligible for commission under the applicable plan.</p>"],
+    ["cold calling as experience", "<p>Experience in cold calling is helpful but not required.</p>"],
+    ["cold calling done by a team", "<p>You will manage an intake team that handles scheduling, and the sales group does cold calling.</p>"],
+    ["negated cold calling duty", "<p>This role does not involve cold calling.</p>"],
+  ])("does not reject: %s", (_label, body) => {
+    const result = gate("Senior Database Architect", `${BASE}${body}`);
+    expect(result.status).not.toBe("HARD_REJECT");
+    expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+  });
+
+  it.each([
+    ["commission-only sales role", "<p>This is a commission-only sales position.</p>"],
+    ["commission-based", "<p>Pay is 100% commission-based.</p>"],
+    ["uncapped commission", "<p>You will have uncapped commission on new accounts.</p>"],
+    ["OTE with commission", "<p>Base + commission OTE $110,000-$140,000.</p>"],
+    ["OTE 80k base + 40k commission", "<p>OTE 80k base + 40k commission.</p>"],
+    ["on-target earnings with variable pay", "<p>On-target earnings of $120,000 with a variable component tied to bookings.</p>"],
+    ["on-target earnings with a quota", "<p>On-target earnings assume you meet a quarterly sales target.</p>"],
+    ["base plus commission structure", "<p>Compensation is base salary plus commission.</p>"],
+    ["earn commission on sales", "<p>You will earn commission on sales you close.</p>"],
+    ["quota duty", "<p>You will carry a quarterly sales quota.</p>"],
+    ["cold calling duty", "<p>You will make daily cold calls to new prospects.</p>"],
+    ["clause-initial cold calling", "<ul><li>Cold calling and outbound prospecting to build pipeline.</li></ul>"],
+    ["mixed case", "<p>Sales roles earn commission, and you will receive commission too.</p>"],
+  ])("rejects: %s", (_label, body) => {
+    const result = gate("Senior Database Architect", `${BASE}${body}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+  });
+
+  it.each([
+    ["100KB commission", "commission ".repeat(10000)],
+    ["100KB commission,", "commission, ".repeat(10000)],
+    ["1MB commission", "commission ".repeat(100000)],
+    ["1MB base plus", "base plus ".repeat(100000)],
+    ["1MB OTE", "ote ".repeat(250000)],
+  ])("stays fast on hostile text: %s", (_label, text) => {
+    const started = performance.now();
+    findExplicitSalesDuty(text);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+});
+
+// Owner rulings 2026-11-26 (option 2). Synthetic paraphrases only.
+describe("commission scope: dry-run patterns and owner rulings", () => {
+  it.each([
+    ["pre-K: end-of-semester commission based on performance (bonus-like)", "<p>Pay is $16-$22 per hour, plus an end-of-semester commission based on performance, targeting 15% of yearly salary.</p>"],
+    ["commission as a performance bonus for a non-sales role", "<p>Staff receive a performance bonus, sometimes called commission, each term.</p>"],
+    ["affiliate specialist: track affiliate commissions", "<p>Track affiliate commissions, payouts and creator performance.</p>"],
+    ["director: variable commission for quota-based roles", "<p>Compensation includes base salary, an equity incentive plan and variable commission (for quota-based roles).</p>"],
+    ["engineering boilerplate: bonus or commission", "<p>In addition to base pay, we offer a performance-driven annual bonus or commission.</p>"],
+    ["generic eligibility list", "<p>You may be eligible for a bonus, commission, or incentive program.</p>"],
+    ["tuition-fee commission paid to an agency", "<p>The agency takes a commission on tuition fees it collects from families.</p>"],
+    ["enrolment quota", "<p>Each classroom has an enrolment quota of 18 children.</p>"],
+    ["school-store sales", "<p>You will help run the school store sales on Fridays.</p>"],
+    ["other team does cold calling", "<p>Our SDR team does cold calling; you will receive qualified leads.</p>"],
+    ["experience in cold calling", "<p>Experience in cold calling is a plus.</p>"],
+  ])("does not reject: %s", (_label, body) => {
+    const result = gate("Early Childhood Teacher", `${BASE}${body}`);
+    expect(result.status).not.toBe("HARD_REJECT");
+    expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+  });
+
+  it.each([
+    ["lead intake manager: cold outbound as the role's duty", "Lead Intake Manager", "<ul><li>Cold calling and cold emailing: conduct structured outbound campaigns targeting priority markets.</li></ul>"],
+    ["sales development representative", "Sales Development Representative", "<p>Base + commission OTE $60,000-$80,000.</p>"],
+    ["inside sales", "Inside Sales Executive", "<p>Base + commission OTE $110,000-$140,000.</p>"],
+    ["business development", "Business Development Manager", "<p>OTE 80k base + 40k commission.</p>"],
+    ["commission-only structure", "Territory Manager", "<p>This is a commission-only position.</p>"],
+    ["is commission based", "Territory Lead", "<p>Your pay is commission based.</p>"],
+    ["OTE alone", "Growth Lead", "<p>On-target earnings of $100,000.</p>"],
+    ["stated quota", "Partnerships Lead", "<p>You will carry an annual quota.</p>"],
+  ])("rejects: %s", (_label, title, body) => {
+    const result = gate(title, `${BASE}${body}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+  });
+});

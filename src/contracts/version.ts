@@ -27,6 +27,8 @@ export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
 // "sales engineering" / "presales" / "pre-sales" no longer reject; GATE_HIGH_INTERACTION needs explicit evidence (quota, sales
 // target, commission-based pay, cold outbound duty, pre-sales or FDE title, interaction share over the cap). The phrase is a
 // role-shape downrank (role_shape_v2).
-export const GATE_VERSION = "gate-2026-11.7" as const;
+// 2026-11.8: commission, OTE, quota and cold calling reject only as this role's main variable pay or explicit sales duty (customerFacingDuties.ts);
+// generic option lists, commission opportunities, commission paid to others and other roles' commission no longer reject.
+export const GATE_VERSION = "gate-2026-11.8" as const;
 export const PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;
 
