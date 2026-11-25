@@ -159,3 +159,65 @@ describe("sales-engineer and pre-sales TITLES keep rejecting; solutions titles p
     expect(result.status).not.toBe("HARD_REJECT");
   });
 });
+
+describe("commission as pay: owner and reviewer cases", () => {
+  it.each([
+    "<p>OTE 80k base + 40k commission.</p>",
+    "<p>Total earnings include commission.</p>",
+    "<p>The package includes commission.</p>",
+    "<p>Base salary plus uncapped commission.</p>",
+    "<p>You receive commission on every deal you close.</p>",
+  ])("rejects: %s", (body) => {
+    const result = gate("Legal Solutions Lead", `${BASE}${body}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+    expect(result.evidence_quotes[0]).toMatch(/commission/);
+  });
+
+  it.each([
+    "<p>You will work with Commission staff and regulators on AI policy.</p>",
+    "<p>You will engage with commission officials on data standards.</p>",
+    "<p>You will track the Commission's guidance on AI.</p>",
+    "<p>You will summarise Law Commission reports.</p>",
+    "<p>You will monitor Competition Commission decisions.</p>",
+    "<p>You will follow regulatory commission rules for data sharing.</p>",
+    "<p>You will map EU commission directives to controls.</p>",
+    "<p>You will map European commission proposals to controls.</p>",
+    "<p>You will compare commission rates charged by brokers in a pricing study.</p>",
+  ])("does not reject: %s", (body) => {
+    const result = gate("Legal Solutions Lead", `${BASE}${body}`);
+    expect(result.status).not.toBe("HARD_REJECT");
+    expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+  });
+
+  it("stays fast on a large adversarial text (bounded quantifiers)", () => {
+    const text = `${"commission ".repeat(7000)}${"plus ".repeat(7000)}`;
+    const started = Date.now();
+    findExplicitSalesDuty(text);
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+});
+
+describe("commission about other roles or a company-wide policy does not reject", () => {
+  it.each([
+    "<p>Most sales positions are eligible for commission under the applicable plan.</p>",
+    "<p>We offer a competitive commission structure for some roles.</p>",
+    "<p>Sales team members earn commission under the company plan.</p>",
+    "<p>Certain positions are commission-based.</p>",
+  ])("does not reject: %s", (body) => {
+    const result = gate("Senior Database Architect", `${BASE}${body}`);
+    expect(result.status).not.toBe("HARD_REJECT");
+    expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+  });
+
+  it.each([
+    "<p>Your pay is a base salary plus commission.</p>",
+    "<p>This role is commission-based.</p>",
+    "<p>You will earn commission on every deal.</p>",
+    "<p>Compensation: OTE with uncapped commission.</p>",
+  ])("this role's pay line still rejects: %s", (body) => {
+    const result = gate("Senior Database Architect", `${BASE}${body}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+  });
+});

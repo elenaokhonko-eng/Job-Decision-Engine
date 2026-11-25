@@ -138,16 +138,40 @@ function scan(text: string, patterns: readonly Pattern[]): string | null {
  * prospecting as a duty of this role. A bare customer-engagement duty phrase is not enough (owner decision 2026-11-25,
  * decision #213: it lowers the rank through the role-shape CUSTOMER_FACING_DELIVERY signal and never rejects).
  */
+/** Pay words in the same clause ("base + 40k commission", "OTE 80k", "earnings include commission", "plus uncapped commission"). */
+const PAY_CONTEXT = /\b(?:pay|salary|salaries|ote|on-target|earnings?|earn(?:s|ing)?|compensation|bonus(?:es)?|base|uncapped|paid|incentives?|remuneration|package|income|variable|payouts?|plus|quota)\b|\d[ \t]*k\b|[$£€]|\bper[ \t]+(?:year|annum)\b/;
+/** A body or a thing that follows "commission" ("Commission staff", "commission rates", "commission guidance"): not pay. */
+const COMMISSION_NOT_PAY_AFTER = /^(?:['’]s?\b|-free\b|[ \t]+(?:staff|officials?|regulators?|members?|rules?|reports?|decisions?|directives?|proposals?|guidance|guidelines|rates?|regulations?|filings?|rulings?|recommendations?|president|officers?|investigations?|inquir(?:y|ies)|documents?|consultations?)\b)/;
+/** A body name before "commission" ("European Commission", "Law Commission", "the Commission", "Securities and Exchange Commission"). */
+const COMMISSION_NOT_PAY_BEFORE = /(?:european|eu|law|competition|regulatory|securities|exchange|trade|electoral|royal|federal|planning|police|the|that|this|our|its)[ \t]+$/;
+/** The pay itself: "commission on every deal", "includes commission". */
+const COMMISSION_PAY_AFTER = /^[ \t]+(?:on|for)[ \t]+(?:(?:every|each|all|any|the)[ \t]+)?(?:sales?|revenue|deals?|closed|bookings|contracts?)\b/;
+const COMMISSION_INCLUDES_BEFORE = /\binclud(?:e|es|ing)[ \t]+(?:[\w$£€,.-]+[ \t]+){0,2}$/;
+
+/** Commission governed by other roles or a company-wide policy ("most sales positions are eligible for commission under the applicable plan"). */
+const OTHER_ROLES = /\b(?:most|some|certain|select|other|many|several)[ \t]+(?:sales[ \t]+)?(?:positions?|roles?|jobs?|employees|team[ \t]+members)\b|\bsales[ \t]+(?:positions?|roles?|team(?:[ \t]+members)?|representatives?|staff|employees)\b|\beligible[ \t]+(?:roles?|positions?)\b|\bapplicable[ \t]+(?:commission[ \t]+|sales[ \t]+)?(?:plan|policy|programs?)\b|\bfor[ \t]+(?:some|certain|select)\b/;
+/** The clause speaks to this role or the applicant. */
+const THIS_ROLE = /\b(?:this|the|your)[ \t]+(?:role|position|job)\b|\byou(?:r|['’]ll)?\b|\bthe[ \t]+successful\b/;
+
+function isCommissionAsPay(clause: string, start: number, end: number): boolean {
+  if (OTHER_ROLES.test(clause) && !THIS_ROLE.test(clause)) return false;
+  const before = clause.slice(Math.max(0, start - 60), start);
+  const afterText = clause.slice(end, end + 40);
+  if (COMMISSION_NOT_PAY_BEFORE.test(before) || COMMISSION_NOT_PAY_AFTER.test(afterText)) return false;
+  if (COMMISSION_PAY_AFTER.test(afterText) || COMMISSION_INCLUDES_BEFORE.test(before)) return true;
+  return PAY_CONTEXT.test(clause);
+}
+
 const EXPLICIT_SALES_PATTERNS: readonly Pattern[] = [
   { regex: /\b(?:carry|carrying|own|owning|meet|meeting|exceed|exceeding|hit|hitting|achieve|achieving)[ \t]+(?:an?[ \t]+|the[ \t]+|your[ \t]+)?(?:(?:individual|annual|quarterly|monthly|sales|revenue|new[- ]business|bookings)[ \t]+){0,3}(?:quotas?|sales[ \t]+targets?|revenue[ \t]+targets?|bookings[ \t]+targets?)\b/g },
   { regex: /\bquota[- ]carrying\b/g, anySubject: true },
   // Commission as part of the pay (owner decision 2026-11-25): "commission-based", "commission-only", "base plus commission",
   // "earn commission on sales", "uncapped commission", "commission structure". Not the word alone: "commission-free", "European
   // Commission", "Securities and Exchange Commission", "commissioning", "commissioned work" and a negation ("no commission").
-  { regex: /\bcommission[- ](?:based|only|driven)\b/g, anySubject: true, payClause: true },
-  { regex: /(?:\bplus|\+|\band|\bwith)[ \t]+(?:(?:an?|uncapped|performance|sales|variable|attractive|generous)[ \t]+){0,2}commissions?\b/g, anySubject: true, payClause: true },
-  { regex: /\b(?:earn(?:s|ing)?|receiv(?:e|es|ing)|paid|eligible[ \t]+for)[ \t]+(?:(?:an?|uncapped|performance|sales|variable)[ \t]+){0,2}commissions?\b/g, anySubject: true, payClause: true },
-  { regex: /\b(?:uncapped|variable|performance|sales)[ \t]+commissions?\b|\bcommissions?[ \t]+(?:structure|plan|scheme|rates?|payments?|earnings|on[ \t]+(?:sales|revenue|deals))\b/g, anySubject: true, payClause: true },
+  { regex: /\bcommission[- ](?:based|only|driven)\b/g, anySubject: true, payClause: true, accept: (clause) => !OTHER_ROLES.test(clause) || THIS_ROLE.test(clause) },
+  // Any other "commission" counts only when the clause is about pay (PAY_CONTEXT) and the word is not a body, a noun
+  // that follows it, a rate or "-free" (isCommissionAsPay).
+  { regex: /\bcommissions?\b/g, anySubject: true, payClause: true, accept: isCommissionAsPay },
   { regex: /\b(?:cold[- ]call(?:s|ing)?|cold[ \t]+outreach|outbound[ \t]+prospecting|outbound[ \t]+sales)\b/g },
 ];
 
