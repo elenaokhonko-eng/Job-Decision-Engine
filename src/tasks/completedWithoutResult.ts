@@ -11,7 +11,6 @@ import type pg from "pg";
 
 import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
 import { DESIGNED_COMPLETION_REPAIR_ACTION_PREFIXES } from "./designedNoOps.js";
-import { deciderReachableSql } from "./seedQueryScope.js";
 
 type Queryable = Pick<pg.PoolClient, "query">;
 
@@ -103,9 +102,13 @@ export async function findTasksCompletedWithoutResult(
         -- A terminal job whose version the decider cannot select (incomplete description or no source content) cannot get a decision.
         AND NOT (task.task_type = 'DECIDE_RECOMMENDATION' AND COALESCE(canonical.processing_state, canonical.processing_status)
                  IN ('HARD_REJECTED', 'UNMATCHED') AND NOT ${decidableJobVersionSql("canonical", "version")})
-        -- An UNMATCHED job the decider cannot reach (no current completed match run) cannot get a decision either.
+        -- Designed case only: lane routing decided POLICY_NO_MATCH (no lane matched, so there is no match run) and stored a
+        -- deterministic outcome. The decider could stamp such a job, but the decide seed and reopen rule cannot reach it
+        -- (deciderReachableSql needs a current match run for UNMATCHED), and older workers completed its DECIDE task without
+        -- a decision. It stays visible in reported_counts.outcome_without_latest_decision. Any other UNMATCHED job (for
+        -- example disposition ROUTED), or one with no stored outcome, is NOT excluded: a lost result there is an error.
         AND NOT (task.task_type = 'DECIDE_RECOMMENDATION' AND COALESCE(canonical.processing_state, canonical.processing_status) = 'UNMATCHED'
-                 AND NOT (${deciderReachableSql("canonical")}))
+                 AND canonical.routing_disposition = 'POLICY_NO_MATCH' AND canonical.recommendation_outcome IS NOT NULL)
         -- RECHECK_AVAILABILITY skips (and completes without an event) a job that has no observation to read.
         AND NOT (task.task_type = 'RECHECK_AVAILABILITY' AND NOT EXISTS (
           SELECT 1 FROM raw_job_observations skip_observation

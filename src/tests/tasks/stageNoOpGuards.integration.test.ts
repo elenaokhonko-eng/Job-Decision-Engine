@@ -254,15 +254,25 @@ describe.skipIf(skipReal)("stage no-op guards and the decide reopen rule (Postgr
     expect((await tasks(job, "DECIDE_RECOMMENDATION"))[0]).toMatchObject({ status: "COMPLETED", repair_action: "DECISION_NOT_STAMPABLE:JOB_ARCHIVED" });
   });
 
-  it("an UNMATCHED job without a current match run, closed with no recorded reason by an older worker, is not reported", async () => {
-    const job = await terminalJob("legacy-unmatched", "UNMATCHED", "SKIP", "INELIGIBLE");
-    await s().db.query(`UPDATE canonical_jobs SET gate_decision = 'PASS', routing_disposition = 'POLICY_NO_MATCH' WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, job.canonicalJobId]);
-    await s().db.query(
-      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, completed_at)
-       VALUES ($1, 'DECIDE_RECOMMENDATION', $2, $3::jsonb, 'COMPLETED', NOW())`,
-      [s().ctx.workspaceId, `DECIDE_RECOMMENDATION:${job.jobVersionId}:legacy`, JSON.stringify({ job_version_id: job.jobVersionId })],
-    );
-    expect(await reported()).not.toContain(job.jobVersionId);
+  it("a legacy completed DECIDE task of an UNMATCHED job: only a POLICY_NO_MATCH job with a stored outcome is excused", async () => {
+    const unmatchedJob = async (key: string, disposition: string, outcome: string | null) => {
+      const job = await terminalJob(key, "UNMATCHED", "SKIP", "INELIGIBLE");
+      await s().db.query(
+        `UPDATE canonical_jobs SET gate_decision = 'PASS', routing_disposition = $3, recommendation_outcome = $4 WHERE workspace_id = $1 AND id = $2`,
+        [s().ctx.workspaceId, job.canonicalJobId, disposition, outcome]);
+      await s().db.query(
+        `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, completed_at)
+         VALUES ($1, 'DECIDE_RECOMMENDATION', $2, $3::jsonb, 'COMPLETED', NOW())`,
+        [s().ctx.workspaceId, `DECIDE_RECOMMENDATION:${job.jobVersionId}:legacy`, JSON.stringify({ job_version_id: job.jobVersionId })]);
+      return job;
+    };
+    const routed = await unmatchedJob("legacy-routed", "ROUTED", "SKIP");
+    const noOutcome = await unmatchedJob("legacy-no-outcome", "POLICY_NO_MATCH", null);
+    const designed = await unmatchedJob("legacy-policy-no-match", "POLICY_NO_MATCH", "SKIP");
+    const lost = await reported();
+    expect(lost).toContain(routed.jobVersionId);
+    expect(lost).toContain(noOutcome.jobVersionId);
+    expect(lost).not.toContain(designed.jobVersionId);
   });
 
   it("a plain extraction task asks the extractor to reprocess a version-stale active set", async () => {
