@@ -1,3 +1,5 @@
+import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
+
 export interface SeedQueryScope {
   readonly jobVersionIds?: readonly string[];
   readonly observationIds?: readonly string[];
@@ -87,8 +89,9 @@ export function applyLiveJobScope(
 export const OUTCOME_CONFLICT_REPAIR_ACTION = "OUTCOME_CONFLICT_ON_TERMINAL_JOB";
 
 /**
- * States past lane routing that the DECIDE handler can stamp, and not a job whose current version already has a closed
- * outcome conflict (nothing will ever run for it until an operator acts). One predicate shared by the DECIDE seed and the
+ * States past lane routing that the DECIDE handler can stamp, and not a job whose current version already has an outcome
+ * conflict closed under the CURRENT decider version (the same version would conflict again; a decider version bump or an explicit
+ * reopen, `reopenOutcomeConflictTasks`, lets it run again). One predicate shared by the DECIDE seed and the
  * decider stale-stage check, so the two cannot drift again. Alias `c` = canonical_jobs.
  */
 export function deciderSeedableSql(alias = "c"): string {
@@ -98,5 +101,6 @@ export function deciderSeedableSql(alias = "c"): string {
        SELECT 1 FROM pipeline_tasks conflict_task
         WHERE conflict_task.workspace_id = ${alias}.workspace_id AND conflict_task.task_type = 'DECIDE_RECOMMENDATION'
           AND conflict_task.status = 'COMPLETED' AND conflict_task.repair_action = '${OUTCOME_CONFLICT_REPAIR_ACTION}'
+          AND conflict_task.payload->'outcome_conflict'->>'decider_version' = '${DECIDER_VERSION}'
           AND conflict_task.payload->>'job_version_id' = ${alias}.latest_job_version_id::text))`;
 }

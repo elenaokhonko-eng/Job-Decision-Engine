@@ -9,6 +9,7 @@ import { GATE_VERSION } from "../../contracts/version.js";
 import { DECIDER_VERSION, deciderVersionReassessmentReason } from "../../pipeline/deciderVersion.js";
 import { findTasksCompletedWithoutResult } from "../../tasks/completedWithoutResult.js";
 import { reportedDecisionCounts, runZeroChecks, staleStageResults, terminalOutcomeConflicts, zeroChecksExitCode } from "../../tasks/integrityZeroChecks.js";
+import { reopenOutcomeConflictTasks } from "../../tasks/pipelineTasks.js";
 import { OUTCOME_CONFLICT_REPAIR_ACTION, applyLiveJobScope } from "../../tasks/seedQueryScope.js";
 import { runPipelineStageTaskWorker, seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
@@ -378,8 +379,12 @@ describe.skipIf(skipReal)("seed live filter, decider reassessment and stale-stag
       expect(tasks[0]!.status).toBe("COMPLETED");
       expect(tasks[0]!.repair_action).toBe(OUTCOME_CONFLICT_REPAIR_ACTION);
       expect(Number(tasks[0]!.attempt_count)).toBeLessThanOrEqual(1);
-      const detail = (tasks[0]!.payload.outcome_conflict as Array<Record<string, string>>)[0]!;
+      const recorded = tasks[0]!.payload.outcome_conflict as { decider_version: string; details: Array<Record<string, unknown>> };
+      expect(recorded.decider_version).toBe(DECIDER_VERSION);
+      const detail = recorded.details[0]!;
       expect(detail).toMatchObject({ canonical_job_id: job.jobId, stored_outcome: "REVIEW", recomputed_outcome: "SKIP" });
+      expect(Array.isArray(detail.recomputed_notes)).toBe(true);
+      expect(detail).toHaveProperty("outcome_rule_id");
       expect(await outcomeColumns(job.jobId)).toEqual(before[index]); // state, status, rejection_reason, outcome, scores, decided_at
       expect(await decisionCount(job.versionId)).toBe(decisionsBefore[index]);
     }
@@ -398,6 +403,72 @@ describe.skipIf(skipReal)("seed live filter, decider reassessment and stale-stag
     expect(missing.byTaskType.DECIDE_RECOMMENDATION ?? 0).toBe(0);
     expect((await staleIds("decider")).count).toBe(0);
   }, 180_000);
+
+  it("N3: a conflict that persists under the same decider version stays excluded from the seed (no cap slot) and is flagged once", async () => {
+    const job = await decidableJob({ state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "REVIEW", decider: "recommendation_decider_v1" });
+    await deciderTask(job, reassess);
+    await drain([job.versionId], false);
+    expect((await terminalOutcomeConflicts(db(), ctx().workspaceId)).sample).toEqual([job.jobId]);
+    const seeded = await seedRecoverablePipelineTasks(db(), { context: ctx(), taskTypes: ["DECIDE_RECOMMENDATION"], maxSeedPerType: 5, timeBudgetMs: 60_000 });
+    expect(seeded.inserted + seeded.existing).toBe(0);
+    expect(await tasksFor("DECIDE_RECOMMENDATION", [job.jobId])).toBe(1);
+    expect((await terminalOutcomeConflicts(db(), ctx().workspaceId)).total).toBe(1);
+  }, 120_000);
+
+  it("N3: a conflict closed under an older decider version does not block the current one: the seed reassesses, the job is stamped, the check clears", async () => {
+    const agreeing = await decidableJob({ state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "SKIP", decider: "recommendation_decider_v1" });
+    const stillConflicting = await decidableJob({ state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "REVIEW", decider: "recommendation_decider_v1" });
+    for (const job of [agreeing, stillConflicting]) {
+      // A conflict closed under the previous decider version (its reassessment key carries that version).
+      await db().query(
+        `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, repair_action, completed_at)
+         VALUES ($1, 'DECIDE_RECOMMENDATION', $2, $3::jsonb, 'COMPLETED', $4, NOW())`,
+        [ctx().workspaceId, `DECIDE_RECOMMENDATION:${job.versionId}:old`, JSON.stringify({
+          canonical_job_id: job.jobId, job_version_id: job.versionId, reassessment_reason: "DECIDER_VERSION:recommendation_decider_v1",
+          outcome_conflict: { decider_version: "recommendation_decider_v1", details: [] },
+        }), OUTCOME_CONFLICT_REPAIR_ACTION],
+      );
+    }
+    expect((await terminalOutcomeConflicts(db(), ctx().workspaceId)).total).toBe(0);
+    await drain([agreeing.versionId, stillConflicting.versionId]);
+    const stamped = await db().query<{ decider_version: string }>(
+      `SELECT d.decider_version FROM canonical_jobs c JOIN deterministic_decisions d ON d.id = c.latest_deterministic_decision_id WHERE c.id = $1`, [agreeing.jobId]);
+    expect(stamped.rows[0]!.decider_version).toBe(DECIDER_VERSION);
+    // The job whose stored outcome still disagrees is closed again under the current version and flagged; the other cleared.
+    expect((await terminalOutcomeConflicts(db(), ctx().workspaceId)).sample).toEqual([stillConflicting.jobId]);
+  }, 180_000);
+
+  it("N3: an operator who corrects the stored outcome reopens the closed task; the next drain stamps the job and the check clears; an uncorrected one is closed again", async () => {
+    const corrected = await decidableJob({ state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "REVIEW", decider: "recommendation_decider_v1" });
+    const uncorrected = await decidableJob({ state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "REVIEW", decider: "recommendation_decider_v1" });
+    for (const job of [corrected, uncorrected]) await deciderTask(job, reassess);
+    await drain([corrected.versionId, uncorrected.versionId], false);
+    expect((await terminalOutcomeConflicts(db(), ctx().workspaceId)).total).toBe(2);
+
+    await db().query(`UPDATE canonical_jobs SET recommendation_outcome = 'SKIP' WHERE id = $1`, [corrected.jobId]);
+    expect(await reopenOutcomeConflictTasks(db(), ctx(), { jobVersionIds: [corrected.versionId, uncorrected.versionId] })).toBe(2);
+    await drain([corrected.versionId, uncorrected.versionId], false);
+
+    expect((await taskRows(corrected.versionId))[0]!.repair_action).toBeNull();
+    expect((await terminalOutcomeConflicts(db(), ctx().workspaceId)).sample).toEqual([uncorrected.jobId]);
+    expect((await taskRows(uncorrected.versionId))[0]!.repair_action).toBe(OUTCOME_CONFLICT_REPAIR_ACTION);
+    // Nothing else is reopened.
+    expect(await reopenOutcomeConflictTasks(db(), ctx(), { jobVersionIds: [corrected.versionId] })).toBe(0);
+  }, 180_000);
+
+  it("N4: terminal_outcome_conflict is a post-phase check: zero in the pre phase (the drain must still run), failing in the post phase", async () => {
+    const job = await decidableJob({ state: "HARD_REJECTED", gate: "HARD_REJECT", outcome: "REVIEW", decider: "recommendation_decider_v1" });
+    await deciderTask(job, reassess);
+    await drain([job.versionId], false);
+    const pre = await runZeroChecks(db(), ctx().workspaceId, { phase: "pre" });
+    expect(pre.map((check) => check.name)).not.toContain("terminal_outcome_conflict");
+    expect(zeroChecksExitCode(pre)).toBe(0);
+    const post = await runZeroChecks(db(), ctx().workspaceId, { phase: "post" });
+    expect(post.find((check) => check.name === "terminal_outcome_conflict")?.total).toBe(1);
+    expect(zeroChecksExitCode(post)).toBe(1);
+    // check_integrity.ts calls runZeroChecks with the default phase, which is post.
+    expect(zeroChecksExitCode(await runZeroChecks(db(), ctx().workspaceId))).toBe(1);
+  }, 120_000);
 
   it("an UNMATCHED job with no routing disposition and gate PASS keeps its stored outcome: closed as a conflict if the decider would change it, otherwise stamped", async () => {
     const job = await decidableJob({ state: "UNMATCHED", gate: "PASS", outcome: "SKIP", routingDisposition: null, decider: "recommendation_decider_v1" });

@@ -80,6 +80,10 @@ export interface OutcomeConflictDetail {
   recomputed_outcome: string;
   stored_eligibility: string | null;
   recomputed_eligibility: string;
+  eligibility_rule_id: string | null;
+  outcome_rule_id: string | null;
+  /** Rule and note codes of the recomputation (posting quotes left out). */
+  recomputed_notes: string[];
 }
 
 export interface RecommendationDeciderSummary {
@@ -1122,6 +1126,9 @@ export async function runRecommendationDecider(
             recomputed_outcome: adjustedOutcome,
             stored_eligibility: job.recommendation_eligibility,
             recomputed_eligibility: adjustedEligibility,
+            eligibility_rule_id: evaluation.eligibilityRuleId ?? null,
+            outcome_rule_id: evaluation.outcomeRuleId ?? null,
+            recomputed_notes: adjustedNotes.filter((note) => !note.startsWith("degree_asked_for")),
           });
           throw new Error("OUTCOME_CONFLICT_ON_TERMINAL_JOB: the recomputed outcome differs from the stored one; nothing was written.");
         }

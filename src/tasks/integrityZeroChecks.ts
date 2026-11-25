@@ -158,6 +158,7 @@ export async function terminalOutcomeConflicts(db: Queryable, workspaceId: strin
        JOIN canonical_jobs c ON c.workspace_id = t.workspace_id AND c.latest_job_version_id::text = t.payload->>'job_version_id'
       WHERE t.workspace_id = $1::uuid AND t.task_type = 'DECIDE_RECOMMENDATION' AND t.status = 'COMPLETED'
         AND t.repair_action = '${OUTCOME_CONFLICT_REPAIR_ACTION}'
+        AND t.payload->'outcome_conflict'->>'decider_version' = $2
         AND c.archived_at IS NULL AND NOT c.is_test_fixture
         AND COALESCE(c.processing_state, c.processing_status) IN ('HARD_REJECTED', 'UNMATCHED')
         AND c.recommendation_outcome IS NOT NULL
@@ -352,15 +353,16 @@ export async function runZeroChecks(
   workspaceId: string,
   options: { phase?: "pre" | "post" } = {},
 ): Promise<ZeroCheckResult[]> {
-  const stale = options.phase === "pre" ? [] : [await staleStageResults(db, workspaceId)];
+  // Post phase only, like the stale-stage check: a job-local policy disagreement that processing cannot fix must stay visible and
+  // failing, but must not stop the drain that runs after the pre-drain reconcile.
+  const postOnly = options.phase === "pre" ? [] : [await terminalOutcomeConflicts(db, workspaceId), await staleStageResults(db, workspaceId)];
   return [
     await rejectedJobsWithRecommendation(db, workspaceId),
     await listedJobsNotCurrentlyOpen(db, workspaceId),
     await completedTasksWithoutResult(db, workspaceId),
     await routableVerificationJobsStranded(db, workspaceId),
     await protectedJobsAutoArchived(db, workspaceId),
-    await terminalOutcomeConflicts(db, workspaceId),
-    ...stale,
+    ...postOnly,
   ];
 }
 

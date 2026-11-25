@@ -271,6 +271,35 @@ export async function enqueuePipelineTask(
   }
 }
 
+/**
+ * Explicit operator resolution of a terminal outcome conflict that does not need a decider version bump (the stored outcome was
+ * corrected, or the rule was fixed): reopens the DECIDE task that was closed with OUTCOME_CONFLICT_ON_TERMINAL_JOB for the
+ * job's current version, so the next worker drain recomputes it and either stamps a decision (which clears the
+ * `terminal_outcome_conflict` check) or closes it again with fresh evidence. Only COMPLETED tasks with that repair action, for a
+ * live job's current version, are touched; the job itself is not.
+ */
+export async function reopenOutcomeConflictTasks(
+  client: pg.Pool | pg.PoolClient,
+  context: WorkspaceContext,
+  options: { jobVersionIds?: readonly string[] } = {},
+): Promise<number> {
+  const result = await client.query(
+    `UPDATE pipeline_tasks t
+        SET status = 'PENDING', available_at = NOW(), lease_id = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+            claimed_by = NULL, last_error = NULL, blocked_on = NULL, blocked_reason = NULL, repair_action = NULL,
+            completed_at = NULL, payload = t.payload - 'outcome_conflict', updated_at = NOW()
+      WHERE t.workspace_id = $1 AND t.task_type = 'DECIDE_RECOMMENDATION' AND t.status = 'COMPLETED'
+        AND t.repair_action = 'OUTCOME_CONFLICT_ON_TERMINAL_JOB'
+        AND ($2::text[] IS NULL OR t.payload->>'job_version_id' = ANY($2::text[]))
+        AND EXISTS (
+          SELECT 1 FROM canonical_jobs c
+           WHERE c.workspace_id = t.workspace_id AND c.latest_job_version_id::text = t.payload->>'job_version_id'
+             AND c.archived_at IS NULL)`,
+    [context.workspaceId, options.jobVersionIds ? [...options.jobVersionIds] : null],
+  );
+  return result.rowCount ?? 0;
+}
+
 export async function replayDeadLetterPipelineTask(
   input: ReplayDeadLetterPipelineTaskInput,
   clientOrPool: pg.Pool | pg.PoolClient,

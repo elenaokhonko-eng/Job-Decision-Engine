@@ -49,6 +49,7 @@ import {
   SERIAL_PIPELINE_TASK_TYPES,
   pipelineTaskTargetKey,
 } from "./pipelineWorkerLanes.js";
+import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
 import { OUTCOME_CONFLICT_REPAIR_ACTION, applyLiveJobScope, deciderSeedableSql, scopeSeedQuery } from "./seedQueryScope.js";
 import { deciderVersionReassessmentReason, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import {
@@ -4063,7 +4064,8 @@ async function processClaimedTask(
           await (transactionClient as QueryClient).query(
             `UPDATE pipeline_tasks SET payload = payload || jsonb_build_object('outcome_conflict', $3::jsonb)
               WHERE workspace_id = $1 AND id = $2`,
-            [ctx.workspaceId, task.taskId, JSON.stringify(error.details)],
+            // The decider version the conflict was closed under scopes the seed exclusion and the zero check to this version.
+            [ctx.workspaceId, task.taskId, JSON.stringify({ decider_version: DECIDER_VERSION, details: error.details })],
           );
         },
       });
