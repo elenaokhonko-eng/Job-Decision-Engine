@@ -81,6 +81,27 @@ Own the customer journey for our contract-review solution.`;
     expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
   });
 
+  it.each([
+    ["duty phrase first", "<ul><li>Own the customer journey for our contract-review solution.</li><li>You will carry a quarterly sales quota.</li></ul>"],
+    ["quota first", "<ul><li>You will carry a quarterly sales quota.</li><li>Own the customer journey for our contract-review solution.</li></ul>"],
+  ])("a bare duty phrase plus an explicit quota in the same posting still rejects, and the quote names the quota: %s", (_label, body) => {
+    const result = gate("Legal Solutions Lead", `${BASE}${body}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+    expect(result.evidence_quotes[0]).toMatch(/^Explicit sales-target duty: ".*sales quota/);
+    expect(result.evidence_quotes[0]).not.toMatch(/customer journey/);
+  });
+
+  it.each([
+    ["commission-free", "<p>This is a commission-free position with a fixed salary.</p>"],
+    ["hedged pre-sales support", "<p>You may support pre-sales occasionally.</p>"],
+  ])("does not reject, by any rule: %s", (_label, body) => {
+    const result = gate("Legal Solutions Lead", `${BASE}${body}`);
+    expect(result.status).not.toBe("HARD_REJECT");
+    expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+    expect(findExplicitSalesDuty(body.replace(/<[^>]+>/g, " . ").toLowerCase())).toBeNull();
+  });
+
   it("a negated or hedged explicit phrase does not reject", () => {
     expect(findExplicitSalesDuty("this role does not carry a sales quota.")).toBeNull();
     expect(findExplicitSalesDuty("you may occasionally join cold calling sessions.")).toBeNull();
