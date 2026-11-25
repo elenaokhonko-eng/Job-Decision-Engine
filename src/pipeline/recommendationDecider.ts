@@ -77,6 +77,8 @@ export interface RecommendationDeciderSummary {
   updated: number;
   decisionsInserted: number;
   errors: number;
+  /** Jobs in `preserveStoredOutcome` mode whose recomputed outcome or eligibility differs from the stored one (nothing written for them). */
+  outcomeConflicts?: number;
   policySnapshotId: string;
   policySnapshotHash: string;
 }
@@ -327,8 +329,17 @@ export async function runRecommendationDecider(
     jobVersionIds?: string[];
     canonicalJobIds?: string[];
     limit?: number;
+    /**
+     * Reassessment of a terminal (HARD_REJECTED / UNMATCHED) job that already carries an outcome: the decision row is
+     * stamped only when the recomputed outcome and eligibility equal the stored ones (otherwise nothing is written and
+     * the job counts as an outcome conflict), and the job row keeps every recommendation column; only
+     * latest_deterministic_decision_id moves to the stamped decision.
+     */
+    preserveStoredOutcome?: boolean;
   }
 ): Promise<RecommendationDeciderSummary> {
+  const preserveStoredOutcome = options?.preserveStoredOutcome === true;
+  let outcomeConflicts = 0;
   console.log("Starting Deterministic Recommendation Decider...");
   const pool = clientOrPool || defaultPool;
 
@@ -1089,6 +1100,11 @@ export async function runRecommendationDecider(
           adjustedNotes.push("application_readiness_blocked");
         }
 
+        if (preserveStoredOutcome
+          && (job.recommendation_outcome !== adjustedOutcome || job.recommendation_eligibility !== adjustedEligibility)) {
+          outcomeConflicts += 1;
+          throw new Error("OUTCOME_CONFLICT_ON_TERMINAL_JOB: the recomputed outcome differs from the stored one; nothing was written.");
+        }
         const decisionJson = RecommendationDecisionSchema.parse({
           canonical_job_id: job.canonical_job_id,
           job_version_id: job.job_version_id,
@@ -1248,7 +1264,16 @@ export async function runRecommendationDecider(
           decisionsInserted += 1;
         }
 
-        const updateRes = await client.query<{ id: string }>(
+        const updateRes = preserveStoredOutcome
+          ? await client.query<{ id: string }>(
+            `UPDATE canonical_jobs c
+                SET latest_deterministic_decision_id = $3
+              WHERE c.workspace_id = $1 AND c.id = $2 AND c.archived_at IS NULL
+                AND c.latest_deterministic_decision_id IS DISTINCT FROM $3
+              RETURNING c.id`,
+            [ctx.workspaceId, job.canonical_job_id, decisionId],
+          )
+          : await client.query<{ id: string }>(
           `
           UPDATE canonical_jobs c
           SET recommendation_eligibility = $2,
@@ -1316,6 +1341,7 @@ export async function runRecommendationDecider(
       updated,
       decisionsInserted,
       errors,
+      outcomeConflicts,
       policySnapshotId: snapshot.snapshotId,
       policySnapshotHash: snapshot.snapshotHash,
     };

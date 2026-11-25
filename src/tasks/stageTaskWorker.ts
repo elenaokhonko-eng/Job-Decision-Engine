@@ -1768,6 +1768,15 @@ export async function seedRecoverablePipelineTasks(
          LIMIT 1
        ) jv ON TRUE
        WHERE c.workspace_id = $1
+         -- Only what the decider will process (it skips an incomplete posting and one without source content): a skipped job
+         -- would keep the oldest updated_at and fill the cap on every pass.
+         AND c.description_quality_status = 'COMPLETE'
+         AND EXISTS (
+           SELECT 1 FROM job_versions decidable_version
+            WHERE decidable_version.workspace_id = c.workspace_id
+              AND decidable_version.id = COALESCE(c.latest_job_version_id, jv.id)
+              AND ${sourceContentEvidencePredicate("decidable_version.workspace_id", "decidable_version.id")}
+         )
          AND (
            COALESCE(c.processing_state, c.processing_status) IN (
              'HARD_REJECTED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED',
@@ -3815,15 +3824,18 @@ async function executeStageTask(
       // must not create a permanent blocked/manual-review record.
       return;
     }
+    let terminalWithOutcome = false;
     if (decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) {
       // A terminal job with a recorded outcome needs no decision run, but only when a decision row already exists for this
       // version (the "completed without result" check expects one) and the task is not a reassessment: a decider-version or
       // readiness reassessment must stamp a decision under the current decider_version. The decider never changes the job's
       // processing state, so a HARD_REJECTED job stays HARD_REJECTED.
+      // Only a decider-version reassessment bypasses the no-op: other enqueuers (a rematch successor, a readiness refresh)
+      // set reprocess_existing_state too and must not re-run the decider on a terminal job that already has a decision.
       const payload = (task.payload || {}) as Record<string, unknown>;
-      const reassessment = payload.reprocess_existing_state === true ||
-        (typeof payload.reassessment_reason === "string" && payload.reassessment_reason.startsWith("DECIDER_VERSION:"));
+      const reassessment = typeof payload.reassessment_reason === "string" && payload.reassessment_reason.startsWith("DECIDER_VERSION:");
       if (!reassessment && await jobVersionHasDecision(clientOrPool, ctx, jobVersionId)) return;
+      terminalWithOutcome = true;
     }
     const matchDependentStates = new Set([
       "LANE_ROUTED",
@@ -3863,7 +3875,15 @@ async function executeStageTask(
       context: ctx,
       jobVersionIds: [jobVersionId],
       limit: 1,
+      // A terminal job keeps its stored outcome, eligibility and scores: the decision is stamped only if it agrees with them.
+      ...(terminalWithOutcome ? { preserveStoredOutcome: true } : {}),
     });
+    if ((summary.outcomeConflicts ?? 0) > 0) {
+      throw new Error(
+        `OUTCOME_CONFLICT_ON_TERMINAL_JOB: job_version_id=${jobVersionId} is ${decisionState.processingState} with a stored outcome; ` +
+          "the decider would change it, so no decision was written and the job is unchanged.",
+      );
+    }
     if (summary.errors > 0) {
       throw new Error(`Recommendation decider reported ${summary.errors} error(s).`);
     }

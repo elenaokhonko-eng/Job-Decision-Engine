@@ -249,8 +249,8 @@ Task seeds (`seedRecoverablePipelineTasks`, `src/tasks/stageTaskWorker.ts`):
 
 - Every capped seed selects live jobs only. `applyLiveJobScope` (`src/tasks/seedQueryScope.ts`) puts `archived_at IS NULL` and, unless fixtures are included, `is_test_fixture IS NOT TRUE` inside the query, before its `LIMIT`. Only the observation seed (`NORMALIZE_OBSERVATION`) has no canonical job and is exempt. A new seed gets the scope without writing it, and a query with no `WHERE c.workspace_id = $1` anchor throws.
 - A job the enqueue still refuses as archived is counted as `skippedArchived`, never as `existing`.
-- A `DECIDE_RECOMMENDATION` task for a `HARD_REJECTED` or `UNMATCHED` job with a recorded outcome completes without a decider run only when a decision row already exists for that version and the task is not a reassessment. A decider-version reassessment runs the decider and stamps a decision with the current `decider_version`; the job state and the outcome rules do not change.
-- The stale-stage zero check (`stage_result_older_than_rule_version`) covers the extractor, matcher, lane router, decider and gate stages, each equal to its seed.
+- A `DECIDE_RECOMMENDATION` task for a `HARD_REJECTED` or `UNMATCHED` job with a recorded outcome completes without a decider run only when a decision row already exists for that version and the task is not a decider-version reassessment (`DECIDER_VERSION:` reason). A reassessment runs the decider in `preserveStoredOutcome` mode: the decision is stamped only if it agrees with the stored outcome and eligibility, the job's recommendation columns never change, and a disagreement fails the task (`OUTCOME_CONFLICT_ON_TERMINAL_JOB`) without writing. The DECIDE seed selects only jobs the decider can process (complete description with source content).
+- The stale-stage zero check (`stage_result_older_than_rule_version`) covers the extractor, matcher, lane router, decider and gate stages. The decider stage equals what the DECIDE seed reaches and the handler can stamp; stale decisions outside it are reported as `reported_counts` by `reconcile_pipeline.ts`, never as errors.
 
 After the stages:
 

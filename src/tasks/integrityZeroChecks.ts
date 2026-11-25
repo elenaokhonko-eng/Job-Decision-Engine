@@ -145,6 +145,64 @@ export async function protectedJobsAutoArchived(db: Queryable, workspaceId: stri
 }
 
 /**
+ * Live jobs (alias c) the DECIDE seed can reach AND the DECIDE handler can stamp: an outcome, a complete posting with source
+ * content, a state past lane routing, and either a state the seed always selects (HARD_REJECTED, NEEDS_VERIFICATION,
+ * ROUTING_DEFERRED) or a current completed match run. Equal to the seed's own WHERE (stageTaskWorker.ts), so the check can
+ * be zero after a drain. Jobs outside it (UNMATCHED without a match run, LANE_ROUTED without a match) are reported by
+ * `reportedDecisionCounts`, never failed.
+ */
+const DECIDER_REACHABLE_SQL = `COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'PREQUALIFIED', 'MANUALLY_REMOVED')
+             AND c.recommendation_outcome IS NOT NULL
+             AND c.latest_job_version_id IS NOT NULL
+             AND c.description_quality_status = 'COMPLETE'
+             AND ${sourceContentEvidencePredicate("c.workspace_id", "c.latest_job_version_id")}
+             AND (
+               COALESCE(c.processing_state, c.processing_status) IN ('HARD_REJECTED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED')
+               OR EXISTS (
+                 SELECT 1
+                   FROM job_versions target_jv
+                   JOIN profile_versions current_profile
+                     ON current_profile.workspace_id = target_jv.workspace_id AND current_profile.status = 'ACTIVE'
+                   JOIN match_runs current_match
+                     ON current_match.workspace_id = c.workspace_id AND current_match.canonical_job_id = c.id
+                    AND current_match.id = c.latest_match_run_id AND current_match.job_version_id = target_jv.id
+                    AND current_match.profile_version_id = current_profile.id
+                    AND current_match.requirement_set_id = target_jv.active_requirement_set_id
+                    AND current_match.job_content_hash = target_jv.content_hash
+                    AND current_match.context_fingerprint IS NOT NULL AND current_match.status = 'COMPLETED'
+                  WHERE target_jv.workspace_id = c.workspace_id AND target_jv.id = c.latest_job_version_id
+               )
+             )`;
+
+export interface ReportedDecisionCounts {
+  /** Live jobs with an outcome and a stale or unstamped latest decision that no seed reaches, by state. Never an error. */
+  readonly unseeded_stale_decisions: Record<string, number>;
+  /** Live jobs with an outcome but no latest decision at all, by state. The decider-version seed needs a decision to compare. Never an error. */
+  readonly outcome_without_latest_decision: Record<string, number>;
+}
+
+/** Visibility only: states the decider-version seed cannot reach must not stay invisible, and must not fail a reconcile. */
+export async function reportedDecisionCounts(db: Queryable, workspaceId: string): Promise<ReportedDecisionCounts> {
+  const count = async (extra: string): Promise<Record<string, number>> => {
+    const { rows } = await db.query<{ state: string; n: number }>(
+      `SELECT COALESCE(c.processing_state, c.processing_status) AS state, COUNT(*)::int AS n
+         FROM canonical_jobs c
+        WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+          AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+          AND c.recommendation_outcome IS NOT NULL
+          ${extra}
+        GROUP BY 1 ORDER BY 1`,
+      [workspaceId],
+    );
+    return Object.fromEntries(rows.map((row) => [row.state, row.n]));
+  };
+  return {
+    unseeded_stale_decisions: await count(`AND ${deciderVersionRefreshSql("c")} AND NOT (${DECIDER_REACHABLE_SQL})`),
+    outcome_without_latest_decision: await count("AND c.latest_deterministic_decision_id IS NULL"),
+  };
+}
+
+/**
  * A stage result the version-reopen seeds in stageTaskWorker.ts would reopen, per stage: narrower than "any
  * older version", it equals the seed conditions (the matcher check reuses supersededProfileMatchSql, the lane
  * router check lists only the states a rule-version bump reopens, the extractor check leaves out versions
@@ -218,11 +276,7 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
     sql: `SELECT c.id::text AS id
             FROM canonical_jobs c
            WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
-             AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
-             AND c.recommendation_outcome IS NOT NULL
-             AND c.latest_job_version_id IS NOT NULL
-             AND c.description_quality_status = 'COMPLETE'
-             AND ${sourceContentEvidencePredicate("c.workspace_id", "c.latest_job_version_id")}
+             AND ${DECIDER_REACHABLE_SQL}
              AND ${deciderVersionRefreshSql("c")}`,
     params: [],
   };
