@@ -19,7 +19,7 @@ if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
 
 let stack: PipelineStack | undefined;
 const s = (): PipelineStack => { if (!stack) throw new Error("not initialised"); return stack; };
-const jobs: Record<"parked" | "current" | "policyNoMatch" | "incomplete", StackJob> = {} as never;
+const jobs: Record<"parked" | "repark" | "current" | "policyNoMatch" | "policyOldRun" | "incomplete", StackJob> = {} as never;
 const parkedRunIds: Record<string, string> = {};
 
 async function matchRun(job: StackJob, policyVersion: string): Promise<string> {
@@ -82,13 +82,29 @@ const drain = () => runPipelineStageTaskWorker(s().db, {
 describe.skipIf(skipReal)("UNMATCHED job parked by an older matcher policy (PostgreSQL)", () => {
   beforeAll(async () => {
     stack = await openPipelineStack(databaseUrl, "unmatched_rematch");
-    for (const key of ["parked", "current", "policyNoMatch", "incomplete"] as const) jobs[key] = await s().seedRoutableJob(key);
+    for (const key of ["parked", "repark", "current", "policyNoMatch", "policyOldRun", "incomplete"] as const) jobs[key] = await s().seedRoutableJob(key);
+    // A mandatory credential the profile does not have: the current matcher still fails the job after a re-match.
+    await s().db.query(
+      `INSERT INTO job_requirements (workspace_id, canonical_job_id, job_version_id, requirement_set_id, requirement_key, requirement_type, importance,
+                                     requirement_text, structured_value, extractor_type, extractor_version, confidence, status)
+       VALUES ($1, $2, $3, $4, 'credential-1', 'CREDENTIAL', 'MUST', 'CISSP certification', $5::jsonb,
+               'DETERMINISTIC', 'deterministic-fixture-v1', 1, 'VALIDATED')`,
+      [s().ctx.workspaceId, jobs.repark.canonicalJobId, jobs.repark.jobVersionId, jobs.repark.requirementSetId,
+       JSON.stringify({ is_required: true, credential_name: "CISSP" })]);
+    // Profile credential evidence that is not that credential, so the structured comparison is a MISMATCH, not UNKNOWN.
+    await s().db.query(
+      `INSERT INTO profile_facts (workspace_id, profile_version_id, fact_key, fact_type, statement, structured_value, evidence_tier, verification_status)
+       VALUES ($1, $2, 'cert-1', 'SKILL', 'Holds a project management certification', '{}'::jsonb, 'PROFESSIONAL_PRODUCTION', 'VERIFIED')`,
+      [s().ctx.workspaceId, s().profileVersionId]);
     // Route every job with the real lane router, then put each into the state an earlier run left.
     await s().publishEmbeddings();
     await runLaneRouter(s().db, { context: s().ctx, jobVersionIds: Object.values(jobs).map((job) => job.jobVersionId) });
     parkedRunIds.parked = (await park(jobs.parked, "deterministic_v1", "ROUTED"))!;
     parkedRunIds.current = (await park(jobs.current, DETERMINISTIC_MATCHER_POLICY_VERSION, "ROUTED"))!;
+    parkedRunIds.repark = (await park(jobs.repark, "deterministic_v1", "ROUTED"))!;
     await park(jobs.policyNoMatch, null, "POLICY_NO_MATCH");
+    // POLICY_NO_MATCH (the lane router owns it) that still carries an OLDER-policy match run: not this branch's.
+    parkedRunIds.policyOldRun = (await park(jobs.policyOldRun, "deterministic_v1", "POLICY_NO_MATCH"))!;
     parkedRunIds.incomplete = (await park(jobs.incomplete, "deterministic_v1", "ROUTED"))!;
     await s().db.query(`UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE workspace_id = $1 AND id = $2`, [s().ctx.workspaceId, jobs.incomplete.canonicalJobId]);
   }, 180_000);
@@ -96,15 +112,15 @@ describe.skipIf(skipReal)("UNMATCHED job parked by an older matcher policy (Post
 
   it("the seed and the matcher stale-stage check select only the job parked by an older policy that the matcher can select", async () => {
     const stale = await matcherStale();
-    expect(stale).toEqual([`matcher:${jobs.parked.canonicalJobId}`]);
+    expect(stale.sort()).toEqual([`matcher:${jobs.parked.canonicalJobId}`, `matcher:${jobs.repark.canonicalJobId}`].sort());
     const summary = await seedMatch();
-    expect(summary.supersededProfileMatch).toBe(1);
+    expect(summary.supersededProfileMatch).toBe(2);
     const tasks = await s().db.query<{ key: string; superseded: string | null }>(
       `SELECT task_key AS key, payload->>'superseded_match_run_id' AS superseded FROM pipeline_tasks
         WHERE workspace_id = $1 AND task_type = 'MATCH_PROFILE_EVIDENCE' AND payload->>'job_version_id' = ANY($2::text[])`,
       [s().ctx.workspaceId, Object.values(jobs).map((job) => job.jobVersionId)],
     );
-    expect(tasks.rows.map((task) => task.superseded)).toEqual([parkedRunIds.parked]);
+    expect(tasks.rows.map((task) => task.superseded).sort()).toEqual([parkedRunIds.parked, parkedRunIds.repark].sort());
   });
 
   it("re-matches the parked job under the current matcher: not UNMATCHED any more, a new current-policy run, gate and lane untouched", async () => {
@@ -124,17 +140,24 @@ describe.skipIf(skipReal)("UNMATCHED job parked by an older matcher policy (Post
       [s().ctx.workspaceId, jobs.parked.jobVersionId, after.run_id],
     );
     expect(decisions.rows[0]?.n).toBe(1);
-    // Settled: nothing is stale any more.
+    // Re-park: the mandatory credential still fails under the current matcher. A new current-policy run, still UNMATCHED.
+    const reparked = await row(jobs.repark);
+    expect(reparked.state).toBe("UNMATCHED");
+    expect(reparked.run_id).not.toBe(parkedRunIds.repark);
+    expect(reparked.run_policy).toBe(currentMatcherPolicyVersion());
+    // Settled: nothing is stale any more, and the re-parked job is neither selected again nor counted.
     expect(await matcherStale()).toEqual([]);
+    expect((await seedMatch()).supersededProfileMatch).toBe(0);
   }, 120_000);
 
   it("leaves the job parked by the CURRENT policy, the POLICY_NO_MATCH job and the job the matcher cannot select untouched", async () => {
-    for (const key of ["current", "policyNoMatch", "incomplete"] as const) {
+    for (const key of ["current", "policyNoMatch", "policyOldRun", "incomplete"] as const) {
       expect((await row(jobs[key])).state).toBe("UNMATCHED");
     }
     expect((await row(jobs.current)).run_id).toBe(parkedRunIds.current);
     expect((await row(jobs.incomplete)).run_id).toBe(parkedRunIds.incomplete);
     expect((await row(jobs.policyNoMatch)).run_id).toBeNull();
+    expect((await row(jobs.policyOldRun)).run_id).toBe(parkedRunIds.policyOldRun);
   });
 
   it("a re-match task for a job parked by the current policy completes as a recorded no-op without a new match run", async () => {

@@ -17,7 +17,11 @@ export type DecisionNotStampableReason =
   /** The version has no complete description or no source content, so the decider cannot select it. */
   | "AWAITING_CONTENT_NOT_DECIDABLE"
   /** The job needs a current completed match run to be decided and has none (for example UNMATCHED without a match run). */
-  | "NO_CURRENT_MATCH_RUN";
+  | "NO_CURRENT_MATCH_RUN"
+  /** The job was removed by the user (MANUALLY_REMOVED) before or while the task ran. */
+  | "JOB_REMOVED"
+  /** The job was archived between the claim and the decider run. */
+  | "JOB_ARCHIVED";
 
 export function decisionNotStampable(reason: DecisionNotStampableReason): string {
   return `${DECISION_NOT_STAMPABLE_PREFIX}${reason}`;
@@ -30,3 +34,17 @@ export function matchNotApplicable(stateOrReason: string): string {
   return `${MATCH_NOT_APPLICABLE_PREFIX}${stateOrReason}`;
 }
 
+
+/**
+ * The repair_action values under which a COMPLETED stage task legitimately has no result row. The completed-without-result check
+ * trusts only these (prefix match): a misspelled or arbitrary repair_action cannot hide a lost result.
+ */
+export const DESIGNED_COMPLETION_REPAIR_ACTION_PREFIXES: readonly string[] = [
+  DECISION_NOT_STAMPABLE_PREFIX,
+  MATCH_NOT_APPLICABLE_PREFIX,
+  "SUPERSEDED_BY_GATE_OUTCOME",
+  "OUTCOME_CONFLICT_ON_TERMINAL_JOB",
+  "SKIPPED_ARCHIVED_JOB",
+  // Reconciled as satisfied or superseded by pipelineTaskCurrentness.
+  "RECONCILED_",
+];

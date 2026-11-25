@@ -1179,9 +1179,9 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
              VALUES ($1, 'snapshot-' || gen_random_uuid()::text, '{}'::jsonb) RETURNING id)
            INSERT INTO deterministic_decisions (workspace_id, canonical_job_id, job_version_id, policy_snapshot_id, decision_hash, decision_json,
                                                 recommendation_eligibility, recommendation_outcome, decider_version)
-           SELECT $1, $2, $3, snapshot.id, 'decision-' || gen_random_uuid()::text, '{}'::jsonb, 'INELIGIBLE', 'SKIP', 'recommendation_decider_v2'
+           SELECT $1, $2, $3, snapshot.id, 'decision-' || gen_random_uuid()::text, '{}'::jsonb, 'INELIGIBLE', 'SKIP', $4
              FROM snapshot`,
-          [getContext().workspaceId, recommendationJob.canonicalJobId, recommendationJob.latestVersionId],
+          [getContext().workspaceId, recommendationJob.canonicalJobId, recommendationJob.latestVersionId, DECIDER_VERSION],
         );
         return { updated: 1, decisionsInserted: 1, errors: 0, policySnapshotId: "policy", policySnapshotHash: "hash" };
       }),

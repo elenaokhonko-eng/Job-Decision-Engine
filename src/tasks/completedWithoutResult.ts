@@ -10,6 +10,8 @@
 import type pg from "pg";
 
 import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
+import { DESIGNED_COMPLETION_REPAIR_ACTION_PREFIXES } from "./designedNoOps.js";
+import { deciderReachableSql } from "./seedQueryScope.js";
 
 type Queryable = Pick<pg.PoolClient, "query">;
 
@@ -80,7 +82,9 @@ export async function findTasksCompletedWithoutResult(
          ON canonical.workspace_id = version.workspace_id AND canonical.id = version.canonical_job_id
       WHERE task.workspace_id = $1::uuid
         AND task.status = 'COMPLETED'
-        AND task.repair_action IS NULL
+        -- Only a designed repair_action explains a missing result; an unknown one does not hide it.
+        AND (task.repair_action IS NULL OR NOT EXISTS (
+          SELECT 1 FROM unnest($3::text[]) designed(prefix) WHERE starts_with(task.repair_action, designed.prefix)))
         AND task.task_type = ANY($2::text[])
         AND canonical.latest_job_version_id = version.id
         AND canonical.archived_at IS NULL
@@ -99,13 +103,16 @@ export async function findTasksCompletedWithoutResult(
         -- A terminal job whose version the decider cannot select (incomplete description or no source content) cannot get a decision.
         AND NOT (task.task_type = 'DECIDE_RECOMMENDATION' AND COALESCE(canonical.processing_state, canonical.processing_status)
                  IN ('HARD_REJECTED', 'UNMATCHED') AND NOT ${decidableJobVersionSql("canonical", "version")})
+        -- An UNMATCHED job the decider cannot reach (no current completed match run) cannot get a decision either.
+        AND NOT (task.task_type = 'DECIDE_RECOMMENDATION' AND COALESCE(canonical.processing_state, canonical.processing_status) = 'UNMATCHED'
+                 AND NOT (${deciderReachableSql("canonical")}))
         -- RECHECK_AVAILABILITY skips (and completes without an event) a job that has no observation to read.
         AND NOT (task.task_type = 'RECHECK_AVAILABILITY' AND NOT EXISTS (
           SELECT 1 FROM raw_job_observations skip_observation
            WHERE skip_observation.workspace_id = version.workspace_id AND skip_observation.job_version_id = version.id))
         AND (${missing})
       ORDER BY task.completed_at ASC NULLS FIRST, task.id ASC`,
-    [workspaceId, [...COMPLETED_RESULT_TASK_TYPES]],
+    [workspaceId, [...COMPLETED_RESULT_TASK_TYPES], [...DESIGNED_COMPLETION_REPAIR_ACTION_PREFIXES]],
   );
   const byTaskType: Record<string, number> = {};
   for (const row of rows) byTaskType[row.task_type] = (byTaskType[row.task_type] ?? 0) + 1;

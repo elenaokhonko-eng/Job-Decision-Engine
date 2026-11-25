@@ -3503,6 +3503,11 @@ async function executeStageTask(
       // retry/manual-review noise for a job that cannot advance.
       return;
     }
+    // A version-stale active set with a completed run is treated as cached by the extractor unless it is told to reprocess, so a
+    // plain task (a state outside the stale seed's list) would leave the old set in place: force the re-extraction.
+    const staleActiveSet = !reprocess && !(await jobVersionHasCompletedRequirementsExtraction(
+      clientOrPool, ctx, jobVersionId, "DETERMINISTIC", DETERMINISTIC_EXTRACTOR_VERSION,
+    )) && (await jobVersionHasCompletedRequirementsExtraction(clientOrPool, ctx, jobVersionId, "DETERMINISTIC"));
     const summary = await dependencies.runRequirementsExtraction(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
@@ -3510,7 +3515,7 @@ async function executeStageTask(
       quotedMode: "deterministic_only",
       failFastOnQuotedProviderFailure: false,
       ignoreRetryWindow: true,
-      reprocess,
+      reprocess: reprocess || staleActiveSet,
     });
     if (summary.errors > 0) {
       throw new Error(`Deterministic requirement extraction failed for job_version_id=${jobVersionId}.`);
@@ -3878,10 +3883,11 @@ async function executeStageTask(
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (state.processingState === "UNMATCHED") {
       if (unmatchedSupersededMatchRunId && await isUnmatchedParkedByOtherMatcher(clientOrPool, ctx, jobVersionId, unmatchedSupersededMatchRunId)) {
-        // The matcher selected nothing, so the job would keep the match run of the older policy. Fail visibly instead.
-        throw new Error(
-          `Re-match of UNMATCHED job_version_id=${jobVersionId} left it on the superseded match_run_id=${unmatchedSupersededMatchRunId}.`
-        );
+        // The matcher select equals the seed predicate (unmatchedParkedByOtherMatcherSql), so it can skip the job only if it
+        // changed between the seed and the run. The job was UNMATCHED and stays so: a recorded close, never a failure of a
+        // job that carries a valid outcome.
+        onDesignedNoOp(matchNotApplicable("UNMATCHED_NOT_SELECTABLE"));
+        return;
       }
       return;
     }
@@ -3924,6 +3930,11 @@ async function executeStageTask(
       // is still in the pre-lane funnel; it is not a dependency failure and
       // must not create a permanent blocked/manual-review record.
       onDesignedNoOp(decisionNotStampable("PRE_ROUTING_STATE"));
+      return;
+    }
+    if (decisionState.processingState === "MANUALLY_REMOVED") {
+      // The user removed the job while its decision task was pending: nothing to decide, and not a failure.
+      onDesignedNoOp(decisionNotStampable("JOB_REMOVED"));
       return;
     }
     const decidePayload = (task.payload || {}) as Record<string, unknown>;
@@ -3993,6 +4004,20 @@ async function executeStageTask(
     // decider version for a reassessment), or the decider could not select the job by design, recorded as a repair_action. A
     // decider run that wrote nothing for a job it should have decided is a failure, never a silent completion.
     if (!(await jobVersionHasDecision(clientOrPool, ctx, jobVersionId, reassessment ? DECIDER_VERSION : undefined))) {
+      // The job was removed or archived between the claim and the decider run (the decider selects live jobs only).
+      const racedState = await (clientOrPool as QueryClient).query<{ archived: boolean; removed: boolean }>(
+        `SELECT archived_at IS NOT NULL AS archived, COALESCE(processing_state, processing_status) = 'MANUALLY_REMOVED' AS removed
+           FROM canonical_jobs WHERE workspace_id = $1 AND latest_job_version_id = $2::uuid`,
+        [ctx.workspaceId, jobVersionId],
+      );
+      if (racedState.rows[0]?.removed) {
+        onDesignedNoOp(decisionNotStampable("JOB_REMOVED"));
+        return;
+      }
+      if (racedState.rows[0]?.archived) {
+        onDesignedNoOp(decisionNotStampable("JOB_ARCHIVED"));
+        return;
+      }
       if (!(await jobVersionIsDecidable(clientOrPool, ctx, jobVersionId))) {
         onDesignedNoOp(decisionNotStampable("AWAITING_CONTENT_NOT_DECIDABLE"));
         return;

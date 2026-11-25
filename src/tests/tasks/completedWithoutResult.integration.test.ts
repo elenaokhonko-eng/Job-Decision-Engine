@@ -209,6 +209,24 @@ describe.skipIf(skipReal)("tasks completed without a result (PostgreSQL)", () =>
     expect(reported).toContain(missingDecision);
   });
 
+  it("only a designed repair_action explains a missing result: an arbitrary or misspelled one still reports it", async () => {
+    const designed: string[] = [];
+    for (const action of ["DECISION_NOT_STAMPABLE:JOB_REMOVED", "SUPERSEDED_BY_GATE_OUTCOME", "OUTCOME_CONFLICT_ON_TERMINAL_JOB", "SKIPPED_ARCHIVED_JOB"]) {
+      const j = await job();
+      designed.push(await completedTask("DECIDE_RECOMMENDATION", j.jobVersionId, action));
+    }
+    const matchDesigned = await job();
+    designed.push(await completedTask("MATCH_PROFILE_EVIDENCE", matchDesigned.jobVersionId, "MATCH_NOT_APPLICABLE:UNMATCHED"));
+    const typo = await job();
+    const typoTask = await completedTask("DECIDE_RECOMMENDATION", typo.jobVersionId, "DECISION_NOT_STAMPABLE");
+    const arbitrary = await job();
+    const arbitraryTask = await completedTask("DECIDE_RECOMMENDATION", arbitrary.jobVersionId, "SOMETHING_ELSE");
+    const reported = (await findTasksCompletedWithoutResult(db(), ctx().workspaceId, { sampleLimit: 200 })).sample.map((row) => row.taskId);
+    for (const taskId of designed) expect(reported).not.toContain(taskId);
+    expect(reported).toContain(typoTask);
+    expect(reported).toContain(arbitraryTask);
+  });
+
   it("a match task with a match run is not reported; a technically deferred route is not reported", async () => {
     const matched = await job();
     const matchTask = await completedTask("MATCH_PROFILE_EVIDENCE", matched.jobVersionId);
