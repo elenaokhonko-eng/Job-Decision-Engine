@@ -70,19 +70,19 @@ async function observation(ws: string, jobVersionId: string, sourceName: string,
 }
 
 /** Archives a job as POSTING_NOT_CONFIRMABLE; `rule` is the re-check marker or null (another rule), `daysAgo` sets archived_at. */
-async function archive(ws: string, canonicalJobId: string, rule: string | null, daysAgo = 1): Promise<void> {
+async function archive(ws: string, canonicalJobId: string, rule: string | null, daysAgo = 1, reason = "POSTING_NOT_CONFIRMABLE"): Promise<void> {
   const run = await db().query<{ id: string }>(
     `INSERT INTO job_archive_runs (run_started_at, cutoff_at, mode, status) VALUES (NOW(), NOW() - INTERVAL '1 second', 'APPLY', 'RUNNING') RETURNING id::text`,
   );
   await db().query(
-    `UPDATE canonical_jobs SET archived_at = NOW() - make_interval(days => $4::int), archive_reason = 'POSTING_NOT_CONFIRMABLE',
+    `UPDATE canonical_jobs SET archived_at = NOW() - make_interval(days => $4::int), archive_reason = $5,
             archive_age_basis = 'POSTING_LINK_UNVERIFIABLE', archive_reference_at = NOW(), archive_run_id = $3 WHERE workspace_id = $2 AND id = $1`,
-    [canonicalJobId, ws, run.rows[0]!.id, daysAgo],
+    [canonicalJobId, ws, run.rows[0]!.id, daysAgo, reason],
   );
   await db().query(
     `INSERT INTO job_archive_events (workspace_id, canonical_job_id, archive_run_id, action, actor, reason, reference_at, age_basis, details, event_at)
-     VALUES ($1, $2, $3, 'ARCHIVED', 'test', 'POSTING_NOT_CONFIRMABLE', NOW(), 'POSTING_LINK_UNVERIFIABLE', $4::jsonb, NOW() - make_interval(days => $5::int))`,
-    [ws, canonicalJobId, run.rows[0]!.id, JSON.stringify(rule ? { rule } : {}), daysAgo],
+     VALUES ($1, $2, $3, 'ARCHIVED', 'test', $6, NOW(), 'POSTING_LINK_UNVERIFIABLE', $4::jsonb, NOW() - make_interval(days => $5::int))`,
+    [ws, canonicalJobId, run.rows[0]!.id, JSON.stringify(rule ? { rule } : {}), daysAgo, reason],
   );
 }
 
@@ -225,7 +225,7 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     expect(notRoutable.canonicalJobId).not.toBe(stranded.canonicalJobId);
   });
 
-  it("protected job auto-archived: only an archive by the re-check rule, with the protection in force before it, is reported", async () => {
+  it("protected job auto-archived: an archive by any automatic rule, with the protection in force before it, is reported", async () => {
     const ws = await newWorkspace();
     // Violation: saved before the re-check archived it.
     const savedThenArchived = await job(ws);
@@ -260,11 +260,35 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     await hold(ws, releasedHold.canonicalJobId, 5, 20);
     await db().query(`UPDATE job_archive_holds SET released_at = NOW() - INTERVAL '3 days', released_by = 'test', release_reason = 'done' WHERE canonical_job_id = $1`, [releasedHold.canonicalJobId]);
     await archive(ws, releasedHold.canonicalJobId, AVAILABILITY_RECHECK_ARCHIVE_RULE, 1);
-    const otherRule = await job(ws); // e.g. the Himalayas link repair: saved, archived by another rule
+    const otherRule = await job(ws); // e.g. the Himalayas link repair: saved, archived with no rule marker
     await observation(ws, otherRule.jobVersionId, "LINKEDIN_SAVED", "NOW() - INTERVAL '5 days'");
     await archive(ws, otherRule.canonicalJobId, null, 1);
+    // Violation: a saved job archived by the age rule (and a held one, and an MCF_SAVED one by the hard-reject rule).
+    const savedByAgeRule = await job(ws);
+    await observation(ws, savedByAgeRule.jobVersionId, "LINKEDIN_SAVED", "NOW() - INTERVAL '200 days'");
+    await archive(ws, savedByAgeRule.canonicalJobId, null, 1, "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS");
+    const heldByAgeRule = await job(ws);
+    await hold(ws, heldByAgeRule.canonicalJobId, 5, 20);
+    await archive(ws, heldByAgeRule.canonicalJobId, null, 1, "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS");
+    const savedByHardReject = await job(ws);
+    await observation(ws, savedByHardReject.jobVersionId, "MCF_SAVED", "NOW() - INTERVAL '5 days'");
+    await archive(ws, savedByHardReject.canonicalJobId, null, 1, "HARD_REJECTED_PERMANENT");
+    // Violation: a lowercase / mixed-case saved source name (the SQL compares UPPER(source_name)).
+    const savedLowercase = await job(ws);
+    await observation(ws, savedLowercase.jobVersionId, "linkedin_saved", "NOW() - INTERVAL '200 days'");
+    await archive(ws, savedLowercase.canonicalJobId, null, 1, "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS");
+    const savedMixed = await job(ws);
+    await observation(ws, savedMixed.jobVersionId, "Mcf_Saved", "NOW() - INTERVAL '200 days'");
+    await archive(ws, savedMixed.canonicalJobId, null, 1, "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS");
+    // Near miss: an unsaved job archived by the age rule.
+    const unsavedByAgeRule = await job(ws);
+    await archive(ws, unsavedByAgeRule.canonicalJobId, null, 1, "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS");
     const check = await protectedJobsAutoArchived(db(), ws);
-    expect([...check.sample].sort()).toEqual([savedThenArchived.canonicalJobId, heldThenArchived.canonicalJobId, appliedThenArchived.canonicalJobId].sort());
+    expect([...check.sample].sort()).toEqual([
+      savedThenArchived.canonicalJobId, heldThenArchived.canonicalJobId, appliedThenArchived.canonicalJobId,
+      otherRule.canonicalJobId, savedByAgeRule.canonicalJobId, savedLowercase.canonicalJobId, savedMixed.canonicalJobId, heldByAgeRule.canonicalJobId, savedByHardReject.canonicalJobId,
+    ].sort());
+    expect(check.detail).toEqual({ POSTING_NOT_CONFIRMABLE: 4, JOB_OLDER_THAN_THREE_CALENDAR_MONTHS: 4, HARD_REJECTED_PERMANENT: 1 });
   });
   async function matchRun(ws: string, j: { canonicalJobId: string; jobVersionId: string }, profileVersionId: string, policy: string): Promise<void> {
     const run = await db().query<{ id: string }>(

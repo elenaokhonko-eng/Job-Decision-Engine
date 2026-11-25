@@ -20,6 +20,10 @@ The archive basis is `HARD_REJECTED_DECISION` (migration `111_archive_hard_rejec
 
 A hard-rejected archive is restored automatically only when the owner saves the job: a new `LINKEDIN_SAVED` or `MCF_SAVED` observation that normalizes to the job restores it (audited `RESTORED` event, reason `OWNER_SAVED_SOURCE_OBSERVATION`, 14-day reassessment hold, forced `APPLY_HARD_GATES`), and the saved observation keeps it out of the rule from then on. Observations from other sources, including a genuine repost, leave it archived: repost evidence rebuts an age, not a deterministic rejection. A manual restore from the Archive view works for either reason.
 
+### Saved jobs
+
+A job with a `LINKEDIN_SAVED` or `MCF_SAVED` observation (source name matched case-insensitively) is protected from every automatic rule: the age rule, the hard-rejected rule, snippet expiry, the availability re-check and the Himalayas link repair. The skip is counted as `protected` (`protectedSkipped` for snippet expiry). The owner can still archive a job manually. The zero check `protected_job_auto_archived` flags a saved, applied or held job archived by any non-`MANUAL` archive reason, with its `detail` keyed by `archive_reason`; a saved job archived by the age rule before this protection existed is therefore reported as a true positive until it is restored.
+
 ### Age rule (`JOB_OLDER_THAN_THREE_CALENDAR_MONTHS`)
 
 The daily cutoff is calculated by PostgreSQL as `run_started_at - INTERVAL '3 months'`. A job is age-eligible only when its reference date is strictly earlier than that cutoff. Reference dates are selected in this order:
