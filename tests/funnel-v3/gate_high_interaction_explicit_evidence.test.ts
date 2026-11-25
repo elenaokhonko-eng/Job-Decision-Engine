@@ -370,3 +370,71 @@ describe("commission scope: dry-run patterns and owner rulings", () => {
     expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
   });
 });
+
+describe("coverage additions (test review of gate-2026-11.8)", () => {
+  it.each([
+    ["commission on every deal", "<p>You receive commission on every deal you close.</p>", /commission on every deal/],
+    ["earnings include commission", "<p>Your total earnings include commission.</p>", /earnings include commission/],
+    ["commission eligible", "<p>This role is commission eligible.</p>", /commission eligible/],
+    ["eligible for commission", "<p>You are eligible for commission on new accounts.</p>", /eligible for commission/],
+    ["cold emailing as its own duty", "<ul><li>Cold emailing prospects to book discovery meetings.</li></ul>", /cold emailing/],
+    ["cold calling duty", "<p>You will make daily cold calls to new prospects.</p>", /cold calls/],
+    ["commission-only", "<p>This is a commission-only position.</p>", /commission-only/],
+    ["OTE with commission", "<p>Base + commission OTE $110,000-$140,000.</p>", /commission ote/],
+    ["quota duty", "<p>You will carry a quarterly sales quota.</p>", /sales quota/],
+  ])("rejects and quotes the pay or duty sentence: %s", (_label, body, term) => {
+    const result = gate("Senior Database Architect", `${BASE}${body}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+    expect(result.evidence_quotes[0]).toMatch(/^Explicit sales-target duty: "/);
+    expect(result.evidence_quotes[0]).toMatch(term);
+  });
+
+  it.each([
+    ["commission-free", "<p>This is a commission-free role.</p>"],
+    ["commissioning equipment", "<p>You will support the commissioning of lab equipment.</p>"],
+    ["commissioning systems", "<p>You will lead the commissioning of new data systems.</p>"],
+    ["European Commission", "<p>You will map European Commission rules to controls.</p>"],
+    ["Law Commission", "<p>You will summarise Law Commission reports.</p>"],
+    ["Securities Commission", "<p>You will follow Securities Commission circulars.</p>"],
+    ["company-wide text", "<p>The company pays commission for most sales positions across the company.</p>"],
+  ])("does not reject: %s", (_label, body) => {
+    const result = gate("Senior Database Architect", `${BASE}${body}`);
+    expect(result.status).not.toBe("HARD_REJECT");
+    expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+  });
+});
+
+describe("OTE of other roles, cold-calling clause start, generic eligibility list", () => {
+  it.each([
+    "<p>Our account executives have OTE of 150k.</p>",
+    "<p>Account executives are paid OTE.</p>",
+    "<p>OTE applies to quota-based roles.</p>",
+    "<p>Our SDRs and BDRs are on OTE plans.</p>",
+    "<p>Cold calls are made by our SDRs.</p>",
+    "<p>Cold calling experience is a plus.</p>",
+    "<p>Cold calling experience is preferred.</p>",
+    "<p>Benefits: commission eligible, bonus or incentive program.</p>",
+  ])("does not reject: %s", (body) => {
+    const result = gate("Senior Database Architect", `${BASE}${body}`);
+    expect(result.status).not.toBe("HARD_REJECT");
+    expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+  });
+
+  it.each([
+    ["your OTE", "<p>Your OTE is $120,000.</p>", /your ote/],
+    ["OTE for this role", "<p>OTE of $130,000 for this role.</p>", /ote of \$130,000 for this role/],
+    ["bare OTE range", "<p>OTE $110k-$140k.</p>", /ote \$110k-\$140k/],
+    ["conduct cold calling and cold emailing campaigns", "<p>You will conduct cold calling and cold emailing campaigns.</p>", /conduct cold calling/],
+    ["cold calling is part of the role", "<p>Cold calling is part of the role.</p>", /cold calling is part of/],
+    ["responsible for cold calling", "<p>You are responsible for cold calling.</p>", /responsible for cold calling/],
+    ["bulleted cold calling and ...", "<ul><li>Cold calling and outbound prospecting to build pipeline.</li></ul>", /cold calling and outbound prospecting/],
+    ["commission eligible alone in this role's pay clause", "<p>This role is commission eligible.</p>", /commission eligible/],
+  ])("rejects and quotes the sentence: %s", (_label, body, term) => {
+    const result = gate("Senior Database Architect", `${BASE}${body}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+    expect(result.evidence_quotes[0]).toMatch(/^Explicit sales-target duty: "/);
+    expect(result.evidence_quotes[0]).toMatch(term);
+  });
+});

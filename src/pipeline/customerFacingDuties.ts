@@ -156,11 +156,11 @@ function scan(text: string, patterns: readonly Pattern[]): string | null {
  * "commissioning", "commissioned work", and bodies such as the European Commission.
  */
 /** Commission governed by other roles or a company-wide policy ("most sales positions are eligible for commission under the applicable plan"). */
-const OTHER_ROLES = /\b(?:most|some|certain|select|other|many|several)[ \t]+(?:sales[ \t]+)?(?:positions?|roles?|jobs?|employees|team[ \t]+members)\b|\bsales[ \t]+(?:positions?|roles?|team(?:[ \t]+members)?|representatives?|staff|employees)\b|\beligible[ \t]+(?:roles?|positions?)\b|\bapplicable[ \t]+(?:commission[ \t]+|sales[ \t]+)?(?:plan|policy|programs?)\b|\bfor[ \t]+(?:some|certain|select)\b|\bfor[ \t]+(?:[\w-]+[ \t]+){0,2}(?:roles?|positions?)\b/;
+const OTHER_ROLES = /\b(?:most|some|certain|select|other|many|several)[ \t]+(?:sales[ \t]+)?(?:positions?|roles?|jobs?|employees|team[ \t]+members)\b|\bsales[ \t]+(?:positions?|roles?|team(?:[ \t]+members)?|representatives?|staff|employees)\b|\beligible[ \t]+(?:roles?|positions?)\b|\bapplicable[ \t]+(?:commission[ \t]+|sales[ \t]+)?(?:plan|policy|programs?)\b|\bfor[ \t]+(?:some|certain|select)\b|\bfor[ \t]+(?:[\w-]+[ \t]+){0,2}(?:roles?|positions?)\b|\b(?:account[ \t]+executives?|aes|sales[ \t]+reps?|sdrs?|bdrs?|(?:business|sales)[ \t]+development[ \t]+representatives?)\b|\bquota[- ]based\b|\bour[ \t]+sales\b/;
 /** The clause speaks to this role or the applicant. */
 const THIS_ROLE = /\b(?:this|the|your)[ \t]+(?:role|position|job|opportunity)\b|\bthis[ \t]+is[ \t]+an?\b|\byou(?:r|['’]ll)?\b|\bthe[ \t]+successful\b/;
 /** A generic option list: "a performance-driven annual bonus or commission", "bonus, commission, or incentive program". */
-const GENERIC_PAY_LIST = /\b(?:bonus(?:es)?|incentives?)[ \t]*(?:,|or|and|\/)[ \t]*(?:(?:an?|the|annual|performance[- ]based|performance[- ]driven)[ \t]+)*commissions?\b|\bcommissions?[ \t]*(?:,|or|and|\/)[ \t]*(?:(?:an?|the|annual|other)[ \t]+)*(?:bonus(?:es)?|incentive)/;
+const GENERIC_PAY_LIST = /\b(?:bonus(?:es)?|incentives?)[ \t]*(?:,|or|and|\/)[ \t]*(?:(?:an?|the|annual|performance[- ]based|performance[- ]driven)[ \t]+)*commissions?\b|\bcommissions?(?:[- ]eligible)?[ \t]*(?:,|or|and|\/)[ \t]*(?:(?:an?|the|annual|other)[ \t]+)*(?:bonus(?:es)?|incentive)/;
 /** Commission paid to others or tracked as a function: "track affiliate commissions", "referral commission". */
 const COMMISSION_FOR_OTHERS = /\b(?:affiliate|referral|partner|channel|vendor|marketplace|publisher|agent|broker)s?[ \t]+commissions?\b|\b(?:track|calculate|process|reconcile|administer|audit)(?:s|ing)?[ \t]+(?:[\w-]+[ \t]+){0,2}commissions?\b/;
 const COMMISSION_NEGATED = /\b(?:no|not|without|never|neither|nor)\b[^.]{0,25}\bcommissions?\b|\bcommissions?[- ](?:free|less)\b/;
@@ -222,8 +222,10 @@ const EXPLICIT_SALES_PATTERNS: readonly Pattern[] = [
   { regex: /\bcommission[- ]eligible\b|\beligible[ \t]+(?:for|to[ \t]+(?:receive|earn))[ \t]+(?:(?:sales|performance|variable)[ \t]+)?commissions?\b/g, anySubject: true, payClause: true, accept: commissionClauseOk },
   // "you will earn / receive commission": the clause must speak to this role (the mixed case "Sales roles earn commission, and you will receive commission too").
   { regex: /\b(?:earn|receive|get)(?:s|ing)?[ \t]+(?:an?[ \t]+)?(?:(?:uncapped|sales)[ \t]+)?commissions?\b(?![ \t]+(?:opportunit|incentive|program|plan))/g, anySubject: true, payClause: true, accept: (clause) => clauseFacts(clause).youEarnOk },
-  // Cold calling / outbound prospecting as this role's own duty: a duty verb, or the clause starts with the term.
-  { regex: /\b(?:make|making|do|doing|perform|performing|conduct|conducting|handle|handling|own|owning|drive|driving|responsible[ \t]+for)[ \t]+(?:(?:daily|regular|high[- ]volume)[ \t]+)?(?:cold[- ]call(?:s|ing)?|cold[ \t]+outreach|outbound[ \t]+prospecting|outbound[ \t]+sales)\b|^(?:cold[- ]call(?:s|ing)?|cold[ \t]+outreach|outbound[ \t]+prospecting|outbound[ \t]+sales)\b/g },
+  // Cold calling / cold emailing / outbound prospecting as this role's own duty: a duty verb, or a clause that starts with the
+  // term as a duty ("Cold calling and outbound prospecting to build pipeline", "Cold emailing prospects ..."). "Cold calls are made
+  // by our SDRs" and "Cold calling experience is a plus" are not duties of this role.
+  { regex: /\b(?:make|making|do|doing|perform|performing|conduct|conducting|handle|handling|own|owning|drive|driving|run|running|lead|leading|include|includes|including|responsible[ \t]+for)[ \t]+(?:(?:daily|regular|high[- ]volume|structured|outbound)[ \t]+)?(?:cold[- ]call(?:s|ing)?|cold[ \t]+(?:outreach|emails?|emailing)|outbound[ \t]+prospecting|outbound[ \t]+sales)\b|^(?:cold[- ]call(?:s|ing)?|cold[ \t]+(?:outreach|emails?|emailing)|outbound[ \t]+prospecting|outbound[ \t]+sales)(?=[ \t]*(?:$|[,:(&\/-]|and\b|to\b|for\b|campaigns?\b|outreach\b|is[ \t]+part\b|(?:prospects?|leads?|accounts?|customers?|clients?|buyers?)\b))/g },
 ];
 
 /** The first clause that states a quota, sales target, commission-based pay or cold outbound duty, quoted; null when none. */
