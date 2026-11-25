@@ -139,7 +139,7 @@ describe("commission counts only as pay (owner decision 2026-11-25)", () => {
 });
 
 describe("sales-engineer and pre-sales TITLES keep rejecting; solutions titles pass", () => {
-  it.each(["Sales Engineer", "Senior Sales Engineer - Singapore", "Pre-Sales Engineer", "Presales Consultant", "Sales Engineering Lead"])(
+  it.each(["Sales Engineer", "Senior Sales Engineer - Singapore", "Pre-Sales Engineer", "Presales Consultant", "Pre-Sales Solutions Consultant", "Sales Engineering Lead"])(
     "title %s rejects",
     (title) => {
       const result = gate(title, BASE);
@@ -148,7 +148,7 @@ describe("sales-engineer and pre-sales TITLES keep rejecting; solutions titles p
     },
   );
 
-  it.each(["Solutions Engineer", "Solution Architect", "Senior Solutions Architect"])("title %s passes", (title) => {
+  it.each(["Solutions Engineer", "Solution Architect", "Senior Solutions Architect", "Implementation Manager"])("title %s passes", (title) => {
     const result = gate(title, BASE);
     expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
     expect(result.status).toBe("PASS");
