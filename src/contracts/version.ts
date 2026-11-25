@@ -23,6 +23,10 @@ export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
 // 2026-11.5: a pre-sales title ("Presales", "Pre-Sales", "Pre Sales") is GATE_HIGH_INTERACTION.
 // 2026-11.6: no change to any decision rule. A version-change re-gate whose outcome is unchanged only stamps the audit row
 // (runHardGates versionRefresh); flagNeedsVerification records a work-fact contradiction as NEEDS_VERIFICATION (hardGate.ts).
-export const GATE_VERSION = "gate-2026-11.6" as const;
+// 2026-11.7: owner decision 2026-11-25 (decision #213): a bare pre-sales / customer-engagement duty phrase or the keywords
+// "sales engineering" / "presales" / "pre-sales" no longer reject; GATE_HIGH_INTERACTION needs explicit evidence (quota, sales
+// target, commission-based pay, cold outbound duty, pre-sales or FDE title, interaction share over the cap). The phrase is a
+// role-shape downrank (role_shape_v2).
+export const GATE_VERSION = "gate-2026-11.7" as const;
 export const PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;
 

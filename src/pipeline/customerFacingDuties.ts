@@ -1,7 +1,11 @@
 /**
  * Pre-sales, post-sales and customer-engagement duties of THIS role (gate-2026-11.4).
  *
- * Owner policy: a presales or high-interaction role is a hard reject for any title,
+ * gate-2026-11.7 (owner decision 2026-11-25): these duty phrases no longer reject. A single phrase with no workability
+ * fact lowers the rank (role-shape CUSTOMER_FACING_DELIVERY); only explicit sales-target evidence rejects
+ * (findExplicitSalesDuty below). The text below describes what the duty phrases are.
+ *
+ * Earlier owner policy: a presales or high-interaction role was a hard reject for any title,
  * including "Solutions Architect" and "Product Specialist". A posting is such a role when
  * it places this role in a pre-sales, post-sales, customer success, customer engagement or
  * sales engineering organisation ("This role sits within our post-sales organization",
@@ -38,6 +42,8 @@ interface Pattern {
   readonly regex: RegExp;
   /** Extra test on the clause and the text after the match; false skips the match. */
   readonly accept?: (clause: string, start: number, end: number) => boolean;
+  /** Skip the subject check (a descriptor such as "commission-based" has no subject). */
+  readonly anySubject?: boolean;
 }
 
 const after = (clause: string, end: number): string => clause.slice(end);
@@ -103,25 +109,47 @@ function subjectIsThisRole(before: string): boolean {
   return SUBJECT.test(subject === "" ? "" : `${subject} `) || SUBJECT.test(subject);
 }
 
-/**
- * The first clause that makes this role a pre-sales, post-sales or customer-engagement role,
- * quoted (lowercase, up to 240 characters); null when there is none.
- */
-export function findCustomerFacingRoleDuty(text: string): string | null {
+function scan(text: string, patterns: readonly Pattern[]): string | null {
   for (const clause of clauses(String(text ?? "").toLowerCase())) {
     if (BOILERPLATE.test(clause) || HEDGE.test(clause)) continue;
-    for (const pattern of PATTERNS) {
+    for (const pattern of patterns) {
       pattern.regex.lastIndex = 0;
       for (const match of clause.matchAll(pattern.regex)) {
         const start = match.index ?? 0;
         const end = start + match[0].length;
         const before = clause.slice(0, start);
         if (NEGATION_BEFORE.test(before.slice(-40))) continue;
-        if (!subjectIsThisRole(before)) continue;
+        if (!pattern.anySubject && !subjectIsThisRole(before)) continue;
         if (pattern.accept && !pattern.accept(clause, start, end)) continue;
         return clause.length > 240 ? clause.slice(Math.max(0, start - 80), start + 160).trim() : clause;
       }
     }
   }
   return null;
+}
+
+/**
+ * Explicit sales-target evidence (gate-2026-11.7): the only description evidence that still hard-rejects as
+ * GATE_HIGH_INTERACTION. A stated quota, sales or revenue target, commission-based pay, or cold calling / outbound
+ * prospecting as a duty of this role. A bare customer-engagement duty phrase is not enough (owner decision 2026-11-25,
+ * decision #213: it lowers the rank through the role-shape CUSTOMER_FACING_DELIVERY signal and never rejects).
+ */
+const EXPLICIT_SALES_PATTERNS: readonly Pattern[] = [
+  { regex: /\b(?:carry|carrying|own|owning|meet|meeting|exceed|exceeding|hit|hitting|achieve|achieving)[ \t]+(?:an?[ \t]+|the[ \t]+|your[ \t]+)?(?:(?:individual|annual|quarterly|monthly|sales|revenue|new[- ]business|bookings)[ \t]+){0,3}(?:quotas?|sales[ \t]+targets?|revenue[ \t]+targets?|bookings[ \t]+targets?)\b/g },
+  { regex: /\b(?:quota[- ]carrying|commission[- ](?:based|only|driven))\b/g, anySubject: true },
+  { regex: /\b(?:cold[- ]call(?:s|ing)?|cold[ \t]+outreach|outbound[ \t]+prospecting|outbound[ \t]+sales)\b/g },
+];
+
+/** The first clause that states a quota, sales target, commission-based pay or cold outbound duty, quoted; null when none. */
+export function findExplicitSalesDuty(text: string): string | null {
+  return scan(text, EXPLICIT_SALES_PATTERNS);
+}
+
+/**
+ * The first clause that makes this role a pre-sales, post-sales or customer-engagement role,
+ * quoted (lowercase, up to 240 characters); null when there is none. Since gate-2026-11.7 this is a
+ * downrank signal (roleShape.ts), not a rejection.
+ */
+export function findCustomerFacingRoleDuty(text: string): string | null {
+  return scan(text, PATTERNS);
 }
