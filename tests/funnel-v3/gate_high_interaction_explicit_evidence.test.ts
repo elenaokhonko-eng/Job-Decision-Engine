@@ -221,3 +221,59 @@ describe("commission about other roles or a company-wide policy does not reject"
     expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
   });
 });
+
+describe("commission: runtime on hostile text, verb use and eligibility", () => {
+  it.each([
+    ["commission x10000", "commission ".repeat(10000)],
+    ["commission, x10000", "commission, ".repeat(10000)],
+  ])("stays fast on a large clause: %s", (label, text) => {
+    const started = performance.now();
+    const found = findExplicitSalesDuty(text);
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeLessThan(250);
+    // No pay context in these commission-only texts: nothing to find.
+    expect(found, label).toBeNull();
+  });
+
+  it("a hostile clause with a pay word still rejects, and is fast", () => {
+    const text = `${"commission, ".repeat(10000)} base plus commission`;
+    const started = performance.now();
+    expect(findExplicitSalesDuty(text)).not.toBeNull();
+    expect(performance.now() - started).toBeLessThan(250);
+  });
+
+  it.each([
+    "<p>You will commission and manage vendor contracts, with a base of operations in Berlin.</p>",
+    "<p>You will commission artwork, paid per piece.</p>",
+    "<p>You will commission equipment for the lab.</p>",
+    "<p>You may need to commission new data sources for the base layer.</p>",
+  ])("commission used as a verb does not reject: %s", (body) => {
+    const result = gate("Legal Solutions Lead", `${BASE}${body}`);
+    expect(result.status).not.toBe("HARD_REJECT");
+    expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
+  });
+
+  it.each([
+    "<p>This role is commission eligible.</p>",
+    "<p>This role is commission-eligible.</p>",
+    "<p>You are eligible for commission.</p>",
+    "<p>You are eligible for sales commission.</p>",
+    "<p>You are entitled to commission on closed deals.</p>",
+    "<p>Sales roles earn commission, and you will receive commission too.</p>",
+  ])("this role's commission eligibility rejects: %s", (body) => {
+    const result = gate("Senior Database Architect", `${BASE}${body}`);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+  });
+
+  it("other roles' eligibility does not reject", () => {
+    const result = gate("Senior Database Architect", `${BASE}<p>Most sales positions are eligible for commission.</p>`);
+    expect(result.status).not.toBe("HARD_REJECT");
+  });
+});
+
+it("a hostile quota clause is found (first match) and is fast", () => {
+  const started = performance.now();
+  expect(findExplicitSalesDuty("carry a quota ".repeat(10000))).not.toBeNull();
+  expect(performance.now() - started).toBeLessThan(250);
+});

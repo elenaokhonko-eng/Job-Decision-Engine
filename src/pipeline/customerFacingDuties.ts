@@ -111,6 +111,8 @@ function subjectIsThisRole(before: string): boolean {
   return SUBJECT.test(subject === "" ? "" : `${subject} `) || SUBJECT.test(subject);
 }
 
+const SUBJECT_WINDOW = 400;
+
 function scan(text: string, patterns: readonly Pattern[]): string | null {
   for (const clause of clauses(String(text ?? "").toLowerCase())) {
     if (HEDGE.test(clause)) continue;
@@ -121,7 +123,9 @@ function scan(text: string, patterns: readonly Pattern[]): string | null {
       for (const match of clause.matchAll(pattern.regex)) {
         const start = match.index ?? 0;
         const end = start + match[0].length;
-        const before = clause.slice(0, start);
+        // Only a bounded window before the match is read (a subject or negation is short), so a clause of thousands
+        // of matches stays linear.
+        const before = clause.slice(Math.max(0, start - SUBJECT_WINDOW), start);
         if (NEGATION_BEFORE.test(before.slice(-40))) continue;
         if (!pattern.anySubject && !subjectIsThisRole(before)) continue;
         if (pattern.accept && !pattern.accept(clause, start, end)) continue;
@@ -153,13 +157,36 @@ const OTHER_ROLES = /\b(?:most|some|certain|select|other|many|several)[ \t]+(?:s
 /** The clause speaks to this role or the applicant. */
 const THIS_ROLE = /\b(?:this|the|your)[ \t]+(?:role|position|job)\b|\byou(?:r|['’]ll)?\b|\bthe[ \t]+successful\b/;
 
+/** "commission" as a verb: "you will commission artwork", "to commission equipment" (but "entitled to commission" is pay). */
+const COMMISSION_VERB_BEFORE = /\b(?:will|to|must|should|can|shall|would|may|please|also|help|who)[ \t]+$/;
+const COMMISSION_ENTITLED_BEFORE = /\b(?:entitled|eligible|due|right)[ \t]+to[ \t]+$/;
+/** This role's pay: "eligible for (sales) commission", "commission eligible", "commission-eligible". */
+const COMMISSION_ELIGIBLE_BEFORE = /\beligible[ \t]+(?:for|to[ \t]+(?:receive|earn))[ \t]+(?:(?:sales|performance|variable)[ \t]+)?$/;
+const COMMISSION_ELIGIBLE_AFTER = /^[- ]eligible\b/;
+
+interface ClauseFacts { readonly otherRolesOnly: boolean; readonly payContext: boolean }
+let memoClause = "";
+let memoFacts: ClauseFacts = { otherRolesOnly: false, payContext: false };
+
+/** Clause-level facts, computed once per clause (a clause with thousands of "commission" words stays linear). */
+function clauseFacts(clause: string): ClauseFacts {
+  if (clause !== memoClause) {
+    memoClause = clause;
+    memoFacts = { otherRolesOnly: OTHER_ROLES.test(clause) && !THIS_ROLE.test(clause), payContext: PAY_CONTEXT.test(clause) };
+  }
+  return memoFacts;
+}
+
 function isCommissionAsPay(clause: string, start: number, end: number): boolean {
-  if (OTHER_ROLES.test(clause) && !THIS_ROLE.test(clause)) return false;
+  const facts = clauseFacts(clause);
+  if (facts.otherRolesOnly) return false;
   const before = clause.slice(Math.max(0, start - 60), start);
   const afterText = clause.slice(end, end + 40);
+  if (COMMISSION_ELIGIBLE_BEFORE.test(before) || COMMISSION_ELIGIBLE_AFTER.test(afterText)) return true;
+  if (COMMISSION_VERB_BEFORE.test(before) && !COMMISSION_ENTITLED_BEFORE.test(before)) return false;
   if (COMMISSION_NOT_PAY_BEFORE.test(before) || COMMISSION_NOT_PAY_AFTER.test(afterText)) return false;
   if (COMMISSION_PAY_AFTER.test(afterText) || COMMISSION_INCLUDES_BEFORE.test(before)) return true;
-  return PAY_CONTEXT.test(clause);
+  return facts.payContext;
 }
 
 const EXPLICIT_SALES_PATTERNS: readonly Pattern[] = [
@@ -168,7 +195,7 @@ const EXPLICIT_SALES_PATTERNS: readonly Pattern[] = [
   // Commission as part of the pay (owner decision 2026-11-25): "commission-based", "commission-only", "base plus commission",
   // "earn commission on sales", "uncapped commission", "commission structure". Not the word alone: "commission-free", "European
   // Commission", "Securities and Exchange Commission", "commissioning", "commissioned work" and a negation ("no commission").
-  { regex: /\bcommission[- ](?:based|only|driven)\b/g, anySubject: true, payClause: true, accept: (clause) => !OTHER_ROLES.test(clause) || THIS_ROLE.test(clause) },
+  { regex: /\bcommission[- ](?:based|only|driven)\b/g, anySubject: true, payClause: true, accept: (clause) => !clauseFacts(clause).otherRolesOnly },
   // Any other "commission" counts only when the clause is about pay (PAY_CONTEXT) and the word is not a body, a noun
   // that follows it, a rate or "-free" (isCommissionAsPay).
   { regex: /\bcommissions?\b/g, anySubject: true, payClause: true, accept: isCommissionAsPay },
