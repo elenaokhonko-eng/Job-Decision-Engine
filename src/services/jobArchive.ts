@@ -89,6 +89,7 @@ interface CandidateRow extends pg.QueryResultRow {
   title: string;
   company: string;
   versions: unknown;
+  has_saved_source_observation: boolean;
   has_active_application: boolean;
   has_active_document_run: boolean;
   has_active_document_task: boolean;
@@ -224,8 +225,11 @@ function parseVersions(value: unknown): JobArchiveVersionEvidence[] {
   return rows;
 }
 
+const OWNER_SAVED_SOURCE_SQL_LIST = OWNER_SAVED_SOURCE_NAMES.map((name) => `'${name}'`).join(", ");
+
 /**
- * Archive protections shared by both rules: active application, active document run or task,
+ * Archive protections shared by every automatic rule: a job the owner saved (LINKEDIN_SAVED or
+ * MCF_SAVED observation), active application, active document run or task,
  * running pipeline/evaluation lease, manual review, and an active archive hold. `$1` is the run
  * start time; `canonical` is the canonical_jobs alias.
  */
@@ -302,7 +306,17 @@ export function protectionColumnsSql(capabilities: ArchiveSchemaCapabilities): s
           AND evaluation.canonical_job_id = canonical.id
           AND evaluation.status = 'NEEDS_MANUAL_REVIEW'
       ) AS has_manual_review,
-      ${holdExists} AS has_active_archive_hold`;
+      ${holdExists} AS has_active_archive_hold,
+      EXISTS (
+        SELECT 1
+        FROM job_versions saved_version
+        JOIN raw_job_observations saved_observation
+          ON saved_observation.workspace_id = saved_version.workspace_id
+         AND saved_observation.job_version_id = saved_version.id
+        WHERE saved_version.workspace_id = canonical.workspace_id
+          AND saved_version.canonical_job_id = canonical.id
+          AND UPPER(saved_observation.source_name) IN (${OWNER_SAVED_SOURCE_SQL_LIST})
+      ) AS has_saved_source_observation`;
 }
 
 function candidateSelectSql(capabilities: ArchiveSchemaCapabilities, whereClause: string): string {
@@ -404,10 +418,11 @@ export type ArchiveProtectionFlags = Pick<CandidateRow,
   | "has_running_pipeline_lease"
   | "has_running_evaluation_lease"
   | "has_manual_review"
-  | "has_active_archive_hold">;
+  | "has_active_archive_hold"
+  | "has_saved_source_observation">;
 
 export function isProtected(row: ArchiveProtectionFlags): boolean {
-  return row.has_active_application || row.has_active_document_run ||
+  return row.has_saved_source_observation || row.has_active_application || row.has_active_document_run ||
     row.has_active_document_task || row.has_running_pipeline_lease ||
     row.has_running_evaluation_lease || row.has_manual_review || row.has_active_archive_hold;
 }
@@ -462,8 +477,6 @@ async function readCandidateForUpdate(
   return result.rows[0] ?? null;
 }
 
-const OWNER_SAVED_SOURCE_SQL_LIST = OWNER_SAVED_SOURCE_NAMES.map((name) => `'${name}'`).join(", ");
-
 /**
  * Candidate scan for the HARD_REJECTED_PERMANENT rule. `$1` is the run start time. The latest
  * gate_decisions row supplies the reference time and stored reason codes; a saved-source
@@ -482,16 +495,6 @@ function hardRejectedCandidateSelectSql(capabilities: ArchiveSchemaCapabilities,
       latest_gate.decision AS latest_gate_decision,
       latest_gate.created_at AS latest_gate_decided_at,
       latest_gate.rejection_codes AS latest_gate_rejection_codes,
-      EXISTS (
-        SELECT 1
-        FROM job_versions saved_version
-        JOIN raw_job_observations saved_observation
-          ON saved_observation.workspace_id = saved_version.workspace_id
-         AND saved_observation.job_version_id = saved_version.id
-        WHERE saved_version.workspace_id = canonical.workspace_id
-          AND saved_version.canonical_job_id = canonical.id
-          AND saved_observation.source_name IN (${OWNER_SAVED_SOURCE_SQL_LIST})
-      ) AS has_saved_source_observation,
       ${protectionColumnsSql(capabilities)}
     FROM canonical_jobs canonical
     LEFT JOIN LATERAL (
@@ -732,6 +735,14 @@ export async function archiveJobsAsPostingNotConfirmable(
   const archived: string[] = [];
   for (const id of input.canonicalJobIds) {
     uuidSchema.parse(id);
+    // Last line of defence for every caller (snippet expiry, availability re-check, link repair): a job the
+    // owner saved is never archived automatically, whatever the caller selected.
+    const saved = await client.query(
+      `SELECT ${protectionColumnsSql(capabilities)} FROM canonical_jobs canonical
+        WHERE canonical.workspace_id = $2::uuid AND canonical.id = $3::uuid`,
+      [now, input.workspaceId, id],
+    );
+    if (saved.rows[0]?.has_saved_source_observation === true) continue;
     const done = await applyArchiveTransition(client, capabilities, {
       workspaceId: input.workspaceId,
       canonicalJobId: id,
@@ -789,21 +800,11 @@ export async function readAutomaticArchiveProtection(
       [input.workspaceId, input.canonicalJobId],
     );
   }
-  const { rows } = await client.query<ArchiveProtectionFlags & { has_saved_source_observation: boolean }>(
-    `SELECT ${protectionColumnsSql(capabilities)},
-            EXISTS (
-              SELECT 1
-              FROM job_versions saved_version
-              JOIN raw_job_observations saved_observation
-                ON saved_observation.workspace_id = saved_version.workspace_id
-               AND saved_observation.job_version_id = saved_version.id
-              WHERE saved_version.workspace_id = canonical.workspace_id
-                AND saved_version.canonical_job_id = canonical.id
-                AND UPPER(saved_observation.source_name) = ANY($4::text[])
-            ) AS has_saved_source_observation
+  const { rows } = await client.query<ArchiveProtectionFlags>(
+    `SELECT ${protectionColumnsSql(capabilities)}
        FROM canonical_jobs canonical
       WHERE canonical.workspace_id = $2::uuid AND canonical.id = $3::uuid`,
-    [input.now, input.workspaceId, input.canonicalJobId, [...OWNER_SAVED_SOURCE_NAMES]],
+    [input.now, input.workspaceId, input.canonicalJobId],
   );
   const row = rows[0];
   if (!row) return { protected: false, reasons: [] };
