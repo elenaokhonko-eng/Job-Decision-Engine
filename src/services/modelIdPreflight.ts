@@ -7,6 +7,7 @@ import {
   DEFAULT_OPENAI_FALLBACK_MODEL,
   DOCUMENT_OPENAI_MODEL_CHAIN,
   EVALUATION_OPENAI_MODEL_CHAIN,
+  openAiBaseUrl,
 } from "./openAiModelRoles.js";
 
 /**
@@ -227,10 +228,10 @@ async function listGeminiModelIds(fetchImpl: typeof fetch, key: string, timeoutM
   throw new ModelListError(`more than ${MAX_GEMINI_PAGES} pages of models`);
 }
 
-async function listOpenAIModelIds(fetchImpl: typeof fetch, key: string, timeoutMs: number): Promise<Set<string>> {
+async function listOpenAIModelIds(fetchImpl: typeof fetch, key: string, timeoutMs: number, env: NodeJS.ProcessEnv = process.env): Promise<Set<string>> {
   const payload = (await fetchJson(
     fetchImpl,
-    "https://api.openai.com/v1/models",
+    `${openAiBaseUrl(env)}/models`,
     { Authorization: `Bearer ${key}` },
     timeoutMs,
   )) as { data?: Array<{ id?: unknown }> };
@@ -277,7 +278,7 @@ export async function checkConfiguredModelIds(options: ModelIdPreflightOptions =
 
   const providers: Array<{ provider: ModelIdProvider; key: string | null; list: typeof listGeminiModelIds }> = [
     ...(vertex ? [] : [{ provider: "gemini" as const, key: geminiKey(env), list: listGeminiModelIds }]),
-    { provider: "openai", key: openaiKey(env), list: listOpenAIModelIds },
+    { provider: "openai", key: openaiKey(env), list: (f: typeof fetch, k: string, t: number) => listOpenAIModelIds(f, k, t, env) },
   ];
 
   for (const { provider, key, list } of providers) {

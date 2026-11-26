@@ -51,7 +51,7 @@ import {
   type ModelServedPath,
 } from "./modelCallResilience.js";
 import { ensureFetchDispatcherTimeouts } from "./fetchDispatcherTimeouts.js";
-import { documentOpenAiModel, evaluationOpenAiModel } from "./openAiModelRoles.js";
+import { documentOpenAiModel, evaluationOpenAiModel, openAiBaseUrl } from "./openAiModelRoles.js";
 import {
   MULTI_LANE_SCORECARDS,
   ND_FRIENDLY_DIMENSIONS,
@@ -667,7 +667,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
 }
 
 async function tryOpenAI(openaiKey: string, options: any): Promise<string> {
-  const baseUrl = "https://api.openai.com/v1";
+  const baseUrl = openAiBaseUrl();
   const requestedModel = typeof options.model === "string" ? options.model : "";
   const model = requestedModel && !requestedModel.toLowerCase().startsWith("gemini")
     ? requestedModel
@@ -1726,7 +1726,7 @@ async function embedOpenAIRequest(texts: readonly string[], model: string): Prom
   }
 
   const timeoutMs = embeddingRequestTimeoutMs();
-  const oResponse = await fetch("https://api.openai.com/v1/embeddings", {
+  const oResponse = await fetch(`${openAiBaseUrl()}/embeddings`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

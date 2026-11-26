@@ -10,6 +10,9 @@
  * Empty values (an unset GitHub variable passed as '') fall through to the next entry.
  */
 
+/** Base URL for OpenAI-protocol calls (OPENAI_BASE_URL, validated; default the official endpoint). */
+export { resolveOpenAiBaseUrl as openAiBaseUrl } from "../platform/config/index.js";
+
 export const DEFAULT_OPENAI_FALLBACK_MODEL = "gpt-5.6-luna";
 
 export const EVALUATION_OPENAI_MODEL_CHAIN = ["EVALUATION_FALLBACK_MODEL", "OPENAI_MODEL"] as const;
