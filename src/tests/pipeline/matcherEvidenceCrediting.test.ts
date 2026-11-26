@@ -12,6 +12,7 @@ import {
   currentProfileMatchSql,
   profileMatchSupersededSql,
 } from '../../pipeline/profileMatchCurrency.js';
+import { currentMatcherPolicyVersion } from '../../pipeline/profileMatchCurrency.js';
 
 const policy = DEFAULT_EVIDENCE_STRENGTH_POLICY;
 
@@ -177,7 +178,7 @@ describe('computeRequirementEvidenceStrength', () => {
 describe('matcher scoring version currency', () => {
   it('treats an older-rules match run as superseded only when the matcher can re-match the job', () => {
     const superseded = profileMatchSupersededSql('c', 'mr');
-    expect(superseded).toContain(`mr.policy_version IS DISTINCT FROM '${DETERMINISTIC_MATCHER_POLICY_VERSION}'`);
+    expect(superseded).toContain(`mr.policy_version IS DISTINCT FROM '${currentMatcherPolicyVersion()}'`);
     expect(superseded).toContain(`c.description_quality_status = 'COMPLETE'`);
     // An older-rules match is still a complete match for the decision and AI enqueue paths.
     expect(currentProfileMatchSql('c', 'mr', 'jv')).not.toContain('policy_version');

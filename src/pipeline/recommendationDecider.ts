@@ -30,6 +30,7 @@ import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import { APPROXIMATE_DATE_UNIT_MS, isRepostFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
 import { MIN_CONFIRMED_REQUIREMENTS } from "../requirements/requirementKinds.js";
 import { DECIDER_VERSION } from "./deciderVersion.js";
+import { isActiveFitMeasureVersion } from "./scoringPolicy.js";
 import { applyRoleShapePenalty, assessRoleShape, roleShapeFingerprint, ROLE_SHAPE_POLICY_VERSION } from "./roleShape.js";
 import { assessCareerTrack, capOutcome, CAREER_TRACK_POLICY_VERSION, parseTrackExperience, type TrackRequirement } from "./careerTrack.js";
 import {
@@ -90,6 +91,8 @@ export interface RecommendationDeciderSummary {
   updated: number;
   decisionsInserted: number;
   errors: number;
+  /** Canonical jobs left untouched: their match score is on another fit measure, so it cannot meet the Review floor. */
+  awaitingFitMeasure?: string[];
   /** Jobs in `preserveStoredOutcome` mode whose recomputed outcome or eligibility differs from the stored one (nothing written for them). */
   outcomeConflicts?: number;
   /** One entry per conflict: the stored and the recomputed outcome and eligibility (ids and codes only). */
@@ -355,6 +358,7 @@ export async function runRecommendationDecider(
 ): Promise<RecommendationDeciderSummary> {
   const preserveStoredOutcome = options?.preserveStoredOutcome === true;
   let outcomeConflicts = 0;
+  const awaitingFitMeasure: string[] = [];
   const outcomeConflictDetails: OutcomeConflictDetail[] = [];
   console.log("Starting Deterministic Recommendation Decider...");
   const pool = clientOrPool || defaultPool;
@@ -647,6 +651,14 @@ export async function runRecommendationDecider(
         const matchIsUsable = !requiresCurrentMatch || currentMatch;
 
         const requirementScorePct = matchIsUsable ? asNumber(job.deterministic_match_score) : null;
+        // A score of another fit measure never meets the Review floor and is never read as "no score": the job keeps its
+        // stored decision until it is re-matched. Hard-rejected and POLICY_NO_MATCH jobs are exempt: no score changes SKIP.
+        const scoreDecidesOutcome = normalizedGateDecision !== "HARD_REJECT" && job.routing_disposition !== "POLICY_NO_MATCH";
+        if (requirementScorePct !== null && scoreDecidesOutcome && !isActiveFitMeasureVersion(job.match_policy_version)) {
+          awaitingFitMeasure.push(job.canonical_job_id);
+          await client.query("ROLLBACK");
+          continue;
+        }
         const coverageScorePct = matchIsUsable ? asNumber(job.deterministic_match_coverage) : null;
 
         const rawRequirementScore =
@@ -1368,6 +1380,7 @@ export async function runRecommendationDecider(
       updated,
       decisionsInserted,
       errors,
+      awaitingFitMeasure,
       outcomeConflicts,
       outcomeConflictDetails,
       policySnapshotId: snapshot.snapshotId,

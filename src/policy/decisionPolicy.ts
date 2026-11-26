@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { stableStringify, sha256Hex } from '../config/structuredLoader.js';
 import { getActiveConfigRevision } from '../config/registry.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
+import { requireReviewFitFloor, ReviewFitFloorUnsetError } from '../pipeline/reviewFitFloor.js';
 import { RuleExprSchema, evaluateRuleExpr, type DecisionEvalContext, type RuleExpr } from './ruleDsl.js';
 
 type QueryClient = {
@@ -138,6 +139,32 @@ export interface LoadedDecisionPolicy {
   contentHash?: string;
 }
 
+/** The outcome rule whose threshold is the Review floor. */
+export const REVIEW_FLOOR_RULE_ID = 'outcome_review_threshold';
+
+/**
+ * The live policy: the Review rule's threshold is the approved fit floor (reviewFitFloorSetting.ts), whatever the built-in or
+ * registry policy says. The 0.5 in DEFAULT_DECISION_POLICY is the legacy-scale value, kept for replaying stored history only.
+ * Throws when no floor is approved, or when the policy has no single rule to carry it.
+ */
+export function applyReviewFitFloor(policy: DecisionPolicyConfig): DecisionPolicyConfig {
+  const floor = requireReviewFitFloor();
+  let applied = 0;
+  const outcomeRules = policy.outcome_rules.map((rule) => {
+    if (rule.id !== REVIEW_FLOOR_RULE_ID) return rule;
+    applied += 1;
+    return {
+      ...rule,
+      description: `Review fit floor ${floor.version}`,
+      when: { op: 'gte' as const, field: 'requirement_score' as const, value: floor.fraction },
+    };
+  });
+  if (applied !== 1) {
+    throw new ReviewFitFloorUnsetError(`the active decision policy has ${applied} '${REVIEW_FLOOR_RULE_ID}' rules; exactly one must carry the floor.`);
+  }
+  return { ...policy, outcome_rules: outcomeRules };
+}
+
 export function hashDecisionPolicy(policy: DecisionPolicyConfig): string {
   return sha256Hex(stableStringify(policy));
 }
@@ -156,17 +183,19 @@ export async function loadActiveDecisionPolicy(
     const active = await getActiveConfigRevision('decision_policy', client as any, { context: ctx });
 
     if (!active) {
+      const policy = applyReviewFitFloor(DEFAULT_DECISION_POLICY);
       return {
-        policy: DEFAULT_DECISION_POLICY,
-        policyHash: hashDecisionPolicy(DEFAULT_DECISION_POLICY),
+        policy,
+        policyHash: hashDecisionPolicy(policy),
         source: 'DEFAULT_FALLBACK',
       };
     }
 
-    const parsed = DecisionPolicyConfigSchema.parse(active.content);
+    const parsed = applyReviewFitFloor(DecisionPolicyConfigSchema.parse(active.content));
     return {
       policy: parsed,
-      policyHash: active.contentHash || hashDecisionPolicy(parsed),
+      // The hash covers the applied floor, not only the registry content.
+      policyHash: hashDecisionPolicy(parsed),
       source: 'REGISTRY',
       configRevisionId: active.configRevisionId,
       contentHash: active.contentHash,

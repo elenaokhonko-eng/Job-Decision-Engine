@@ -1,5 +1,5 @@
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
-import { activeScoringPolicy, matcherPolicyVersionFor } from "./scoringPolicy.js";
+import { ACTIVE_FIT_MEASURE_SUFFIX, activeScoringPolicy, matcherPolicyVersionFor } from "./scoringPolicy.js";
 
 /**
  * Which deterministic outcomes are AI-evaluated, and when a job's profile match is current.
@@ -104,16 +104,44 @@ export const DETERMINISTIC_MATCHER_POLICY_VERSION = "deterministic_v3";
 export const DETERMINISTIC_MATCHER_FINGERPRINT_VERSION = "deterministic_matcher_v3";
 
 /**
- * The matcher policy version in force: the legacy version, or the legacy version plus the top-K
- * scoring policy when SCORING_POLICY selects it (see scoringPolicy.ts). Read at call time so the
- * flag moves the matcher, the match-run stamp and task currentness together.
+ * The matcher policy version in force: the matcher rules version plus the active fit measure (see
+ * scoringPolicy.ts). The matcher, the match-run stamp and task currentness all read this one value.
  */
-export function currentMatcherPolicyVersion(env: NodeJS.ProcessEnv = process.env): string {
-  return matcherPolicyVersionFor(activeScoringPolicy(env), DETERMINISTIC_MATCHER_POLICY_VERSION);
+export function currentMatcherPolicyVersion(): string {
+  return matcherPolicyVersionFor(activeScoringPolicy(), DETERMINISTIC_MATCHER_POLICY_VERSION);
 }
 
-export function currentMatcherFingerprintVersion(env: NodeJS.ProcessEnv = process.env): string {
-  return matcherPolicyVersionFor(activeScoringPolicy(env), DETERMINISTIC_MATCHER_FINGERPRINT_VERSION);
+export function currentMatcherFingerprintVersion(): string {
+  return matcherPolicyVersionFor(activeScoringPolicy(), DETERMINISTIC_MATCHER_FINGERPRINT_VERSION);
+}
+
+/** SQL predicate: the match run (alias `mr`) holds a score of another fit measure than the active one. */
+export function otherFitMeasureSql(matchAlias: string): string {
+  const mr = alias(matchAlias, "match alias");
+  return `(RIGHT(COALESCE(${mr}.policy_version, ''), ${ACTIVE_FIT_MEASURE_SUFFIX.length}) <> '${ACTIVE_FIT_MEASURE_SUFFIX}')`;
+}
+
+/**
+ * SQL predicate: a live routed job whose latest match run (alias `mr`) holds a score of another fit measure, and which the
+ * matcher can select. Wider than the profile re-match (any outcome and eligibility): the decider will not compare such a
+ * score with the Review floor, so every job it could decide must get a score of the active measure first. Matching only;
+ * hard gates and lane routing are not replayed.
+ */
+export function fitMeasureRematchSql(canonicalAlias: string, matchAlias: string): string {
+  const c = alias(canonicalAlias, "canonical alias");
+  const mr = alias(matchAlias, "match alias");
+  return `(
+    ${c}.archived_at IS NULL
+    AND COALESCE(${c}.processing_state, ${c}.processing_status) IN (${sqlList([...AI_ENQUEUE_PROCESSING_STATES, "EVALUATING", "AI_EVALUATED", "EVALUATED"])})
+    AND ${c}.primary_lane IS NOT NULL
+    AND ${c}.primary_lane <> 'UNCLASSIFIED'
+    AND ${mr}.id = ${c}.latest_match_run_id
+    AND ${mr}.job_version_id = ${c}.latest_job_version_id
+    AND ${uniqueActiveProfileSql(c)} IS NOT NULL
+    AND ${otherFitMeasureSql(mr)}
+    AND ${c}.description_quality_status = 'COMPLETE'
+    AND ${sourceContentEvidencePredicate(`${c}.workspace_id`, `${c}.latest_job_version_id`)}
+  )`;
 }
 
 /** SQL predicate: match run (alias `mr`) was scored under the current matcher rules. */

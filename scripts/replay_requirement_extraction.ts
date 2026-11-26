@@ -25,7 +25,7 @@
  *   npm run replay:requirements -- --apply --scope matched (also every job that already has a match)
  *   npm run replay:requirements -- --scope live-pass   (every live, gate-passed job with a confirmed link; prints job count and cost estimate)
  *   npm run replay:requirements -- --apply --regate --scope live-pass   (re-runs the hard gates with the current rules first)
- *   npm run replay:requirements -- --apply --rematch-only (re-match and re-decide; e.g. SCORING_POLICY=topk_capability_semantic_v1)
+ *   npm run replay:requirements -- --apply --rematch-only (re-match and re-decide)
  */
 import dotenv from 'dotenv';
 import pg from 'pg';

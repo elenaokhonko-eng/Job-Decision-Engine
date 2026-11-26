@@ -53,14 +53,20 @@ the result with `npm run measure:ranking`.
 `npm run preview:requirements` runs the extractor in memory over the stored descriptions of
 the saved and non-fit jobs and prints counts only: no writes, no AI calls, no posting text.
 
-## Job score policy (`SCORING_POLICY`)
+## Fit measure and Review floor
 
-The ranking score is chosen by the `SCORING_POLICY` environment variable and is off by default.
+The match score is the fit measure `topk_capability_semantic_v1`. It is set in code
+(`src/pipeline/scoringPolicy.ts`); there is no environment variable.
 
 | Policy | Job score |
 | --- | --- |
-| `legacy_weighted_v1` (default) | Weighted share of all requirements credited by evidence. |
-| `topk_capability_semantic_v1` | Mean semantic similarity of the 7 best capability requirements (0-100). |
+| `topk_capability_semantic_v1` (active) | Mean semantic similarity of the 7 best capability requirements (0-100). |
+| `legacy_weighted_v1` (experiments only) | Weighted share of all requirements credited by evidence. |
+
+The fit score decides entry to Review as a floor; it is not the ranking (owner, 26 November). The
+floor is one versioned setting, `src/pipeline/reviewFitFloorSetting.ts`, on the 0-100 scale of the
+score. It is unset until a value is approved, and until then the matcher, the decider and the task
+worker fail with `REVIEW_FIT_FLOOR_UNSET`. Change `version` in the same commit as the value.
 
 Why: on the replay branch, with 5-fold cross-validation, word overlap alone separates saved from
 non-fit jobs no better than chance (0.51), and years, degree and certificate rows match almost
@@ -74,9 +80,11 @@ must-haves lowered separation at every weight tried, so it is not in the score.
   (`src/pipeline/careerTrack.ts` reads the requirement rows, not the score).
 - Unmatched must-haves are reported beside each job (`unmatchedMustHaves` in
   `src/pipeline/scoringPolicy.ts`), not scored.
-- The policy has its own matcher version (`deterministic_v3+topk_capability_semantic_v1`), so
-  turning it on makes older matches superseded and the queue re-matches them. Existing cut-offs
-  (`recommendation_*` thresholds) are on the legacy scale and must be re-fitted before the flag is
-  turned on in production; the cut-offs are not fitted here.
+- The measure has its own matcher version (`deterministic_v3+topk_capability_semantic_v1`), so
+  legacy-scale matches are superseded and the queue re-matches them. A legacy-scale score is never
+  compared with the floor. The PRIORITY cut-offs are still legacy-scale numbers and must be decided
+  before the floor is set.
+- Several lists and caps still read the stored score; the ordering by role type and lane is a
+  separate change.
 - Role fit (lane, track, title family) is deliberately not in the score yet: most jobs have no lane
   until the production replay.

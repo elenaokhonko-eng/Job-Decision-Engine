@@ -103,6 +103,24 @@ describe.skipIf(skipReal)("stage no-op guards and the decide reopen rule (Postgr
   beforeAll(async () => { stack = await openPipelineStack(databaseUrl, "noop_guards"); }, 180_000);
   afterAll(async () => { await stack?.close(); });
 
+  it("a decide task for a score awaiting the fit-measure re-match closes as a designed no-op, not a lost result", async () => {
+    const job = await terminalJob("awaiting-measure", "HARD_REJECTED", "SKIP", "INELIGIBLE");
+    await oldDecision(job);
+    expect((await seedDecide(job)).byType.DECIDE_RECOMMENDATION?.inserted).toBe(1);
+    const run = await drain(["DECIDE_RECOMMENDATION"], {
+      ...defaultPipelineStageWorkerDependencies,
+      runRecommendationDecider: async () => ({
+        updated: 0, decisionsInserted: 0, errors: 0, awaitingFitMeasure: [job.canonicalJobId], policySnapshotId: "p", policySnapshotHash: "h",
+      }),
+    } as unknown as Deps, [job.jobVersionId]);
+    expect(run.failed).toBe(0);
+    expect(await tasks(job, "DECIDE_RECOMMENDATION")).toEqual([
+      expect.objectContaining({ status: "COMPLETED", repair_action: "DECISION_NOT_STAMPABLE:AWAITING_FIT_MEASURE_REMATCH" }),
+    ]);
+    expect(await stamped(job)).toBe(0);
+    expect(await reported()).not.toContain(job.jobVersionId);
+  }, 120_000);
+
   it("a COMPLETED no-op reassessment with no decision under the current decider version is reopened by the seed and stamped on drain", async () => {
     const job = await terminalJob("reopen", "HARD_REJECTED", "SKIP", "INELIGIBLE");
     await oldDecision(job);

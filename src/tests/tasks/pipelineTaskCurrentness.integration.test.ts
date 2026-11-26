@@ -1091,20 +1091,20 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       [recommendationJob.latestVersionId],
     );
     decisionPayload.content_hash = versionContent.rows[0]?.content_hash ?? "";
-    const decisionTaskKey = `DECIDE_RECOMMENDATION:${recommendationJob.latestVersionId}:recommendation_decider_v2:repair`;
+    const decisionTaskKey = `DECIDE_RECOMMENDATION:${recommendationJob.latestVersionId}:${DECIDER_VERSION}:repair`;
     const staleDecisionTaskId = await insertPendingTask({
       taskType: "DECIDE_RECOMMENDATION",
       taskKey: decisionTaskKey,
       payload: { ...decisionPayload, profile_version_id: oldProfileVersionId },
       fingerprintTaskType: "DECIDE_RECOMMENDATION",
-      fingerprintTaskVersion: "recommendation_decider_v2",
+      fingerprintTaskVersion: DECIDER_VERSION,
     });
     const currentDecisionTaskId = await insertPendingTask({
       taskType: "DECIDE_RECOMMENDATION",
       taskKey: decisionTaskKey,
       payload: decisionPayload,
       fingerprintTaskType: "DECIDE_RECOMMENDATION",
-      fingerprintTaskVersion: "recommendation_decider_v2",
+      fingerprintTaskVersion: DECIDER_VERSION,
     });
 
     let normalizationCalls = 0;

@@ -1,3 +1,5 @@
+import { REVIEW_FIT_FLOOR_SETTING } from "./reviewFitFloorSetting.js";
+
 /**
  * The version of the recommendation decider's rules. One value, used for the decision context fingerprint (task version and
  * the `decider_version` payload key), the stage-version table in pipelineTaskCurrentness, the policy snapshot, and the
@@ -10,7 +12,11 @@
  * written in the decision's INSERT, and it is part of the decision context fingerprint so a post-migration decision never
  * collides with an unstamped row of the same inputs.
  */
-export const DECIDER_VERSION = "recommendation_decider_v2" as const;
+/**
+ * v3: the requirement score is the top-K fit measure and the Review threshold is the approved floor. The floor's own version
+ * is part of the value, so a new floor version re-decides existing jobs.
+ */
+export const DECIDER_VERSION = `recommendation_decider_v3+${REVIEW_FIT_FLOOR_SETTING.version}`;
 
 /** SQL (alias `c` = canonical_jobs) true when the job's latest decision was made by another decider version. */
 export function deciderVersionRefreshSql(canonicalAlias = "c", options: { includeTestFixtures?: boolean } = {}): string {

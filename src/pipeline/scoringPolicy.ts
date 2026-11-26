@@ -25,9 +25,20 @@ export type ScoringPolicy = typeof LEGACY_SCORING_POLICY | typeof TOPK_SCORING_P
 /** Fixed at the middle of the measured plateau (K = 6..8). Do not tune further on the same data. */
 export const TOPK_K = 7;
 
-/** The flag. Anything other than the policy name keeps the legacy score. */
-export function activeScoringPolicy(env: NodeJS.ProcessEnv = process.env): ScoringPolicy {
-  return env.SCORING_POLICY?.trim() === TOPK_SCORING_POLICY ? TOPK_SCORING_POLICY : LEGACY_SCORING_POLICY;
+/**
+ * The fit measure in force, set here and not by an environment variable, so every process that matches, seeds or decides
+ * agrees. It decides entry to Review through the floor in reviewFitFloorSetting.ts. The legacy score is kept for experiments.
+ */
+export function activeScoringPolicy(): ScoringPolicy {
+  return TOPK_SCORING_POLICY;
+}
+
+/** match_runs.policy_version suffix of a run scored by the active fit measure. */
+export const ACTIVE_FIT_MEASURE_SUFFIX = `+${TOPK_SCORING_POLICY}`;
+
+/** True when a match run's stored score is on the scale of the active fit measure (and so may meet the Review floor). */
+export function isActiveFitMeasureVersion(matchPolicyVersion: string | null | undefined): boolean {
+  return (matchPolicyVersion ?? '').endsWith(ACTIVE_FIT_MEASURE_SUFFIX);
 }
 
 /** Requirement types that are checks, not ranking evidence. */
@@ -113,8 +124,8 @@ export function unmatchedMustHaves(rows: readonly RankingEvidenceRow[]): { unmat
 
 /**
  * The matcher policy version written to match_runs and compared by task currentness. The top-K
- * score has its own version, so turning the flag on makes older matches superseded and re-matches
- * them under the new score.
+ * score has its own version, so older legacy-scale matches are superseded and re-matched under the
+ * new score.
  */
 export function matcherPolicyVersionFor(policy: ScoringPolicy, legacyVersion: string): string {
   return policy === TOPK_SCORING_POLICY ? `${legacyVersion}+${TOPK_SCORING_POLICY}` : legacyVersion;

@@ -27,6 +27,7 @@ import {
   currentProfileMatchSql,
   decisionOnLatestMatchSql,
   eligibleRoutedJobSql,
+  fitMeasureRematchSql,
   isAiEvaluationOutcome,
   profileMatchSupersededSql,
   uniqueActiveProfileSql,
@@ -140,8 +141,8 @@ export const SUPERSEDED_LANE_ROUTING_SQL = `(
  * active profile; DECIDE_RECOMMENDATION and (for PRIORITY/REVIEW) ENQUEUE_EXPLANATION follow as
  * normal successors. Hard gates and lane routing are not replayed.
  */
-// A function, not a constant: the matcher policy version (SCORING_POLICY) is read when the SQL is built,
-// the same moment the matcher and task currentness read it, so they cannot disagree about the active policy.
+// A function, not a constant: it embeds the matcher policy version, which the matcher and task currentness also read.
+// Third branch: a score of another fit measure is re-matched whatever its outcome (fitMeasureRematchSql).
 // Second branch: an UNMATCHED job parked by an older matcher policy (see unmatchedParkedByOtherMatcherSql); the seed and the
 // matcher stale-stage check share this one function, so they cannot disagree.
 export const supersededProfileMatchSql = (): string => `(
@@ -150,6 +151,7 @@ export const supersededProfileMatchSql = (): string => `(
     AND ${profileMatchSupersededSql("c", "mr")}
   )
   OR ${unmatchedParkedByOtherMatcherSql("c", "mr")}
+  OR ${fitMeasureRematchSql("c", "mr")}
 )`;
 
 export type PipelineStageTaskType = (typeof PIPELINE_STAGE_TASK_TYPES)[number];
@@ -3994,6 +3996,12 @@ async function executeStageTask(
       // A terminal job keeps its stored outcome, eligibility and scores: the decision is stamped only if it agrees with them.
       ...(terminalWithOutcome ? { preserveStoredOutcome: true } : {}),
     });
+    if ((summary.awaitingFitMeasure ?? []).length > 0) {
+      // The stored score is on another fit measure: nothing was written. The fit-measure re-match (seed) gives the job a new
+      // score and its own DECIDE successor.
+      onDesignedNoOp(decisionNotStampable("AWAITING_FIT_MEASURE_REMATCH"));
+      return;
+    }
     if ((summary.outcomeConflicts ?? 0) > 0) {
       throw new TerminalOutcomeConflictError(jobVersionId, summary.outcomeConflictDetails ?? []);
     }

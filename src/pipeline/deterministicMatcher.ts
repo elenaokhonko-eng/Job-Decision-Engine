@@ -29,6 +29,7 @@ import {
   selectOverallScore,
   type RankingEvidenceRow,
 } from "./scoringPolicy.js";
+import { requireReviewFitFloor } from "./reviewFitFloor.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -555,6 +556,8 @@ export async function runDeterministicMatcher(
   }
 ): Promise<DeterministicMatchSummary> {
   console.log("Starting Deterministic Matcher...");
+  // Before any write: scores of the new measure must not replace stored ones while no Review floor can read them.
+  requireReviewFitFloor();
 
   const pool = clientOrPool || defaultPool;
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
