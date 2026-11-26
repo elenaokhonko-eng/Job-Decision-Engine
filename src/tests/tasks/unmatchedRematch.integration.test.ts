@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { isLocalPostgresConnectionString } from "../../db/pgSsl.js";
 import { runLaneRouter } from "../../pipeline/laneRouter.js";
-import { DETERMINISTIC_MATCHER_POLICY_VERSION, currentMatcherPolicyVersion } from "../../pipeline/profileMatchCurrency.js";
+import { currentMatcherPolicyVersion } from "../../pipeline/profileMatchCurrency.js";
 import { staleStageResults } from "../../tasks/integrityZeroChecks.js";
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
 import { runPipelineStageTaskWorker, seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
@@ -100,7 +100,7 @@ describe.skipIf(skipReal)("UNMATCHED job parked by an older matcher policy (Post
     await s().publishEmbeddings();
     await runLaneRouter(s().db, { context: s().ctx, jobVersionIds: Object.values(jobs).map((job) => job.jobVersionId) });
     parkedRunIds.parked = (await park(jobs.parked, "deterministic_v1", "ROUTED"))!;
-    parkedRunIds.current = (await park(jobs.current, DETERMINISTIC_MATCHER_POLICY_VERSION, "ROUTED"))!;
+    parkedRunIds.current = (await park(jobs.current, currentMatcherPolicyVersion(), "ROUTED"))!;
     parkedRunIds.repark = (await park(jobs.repark, "deterministic_v1", "ROUTED"))!;
     await park(jobs.policyNoMatch, null, "POLICY_NO_MATCH");
     // POLICY_NO_MATCH (the lane router owns it) that still carries an OLDER-policy match run: not this branch's.

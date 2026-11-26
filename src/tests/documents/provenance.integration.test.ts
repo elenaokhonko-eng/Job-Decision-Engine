@@ -12,6 +12,8 @@ import { persistDocumentProvenance } from "../../documents/provenance.js";
 import { reconcileStalePendingPipelineTasks } from "../../tasks/pipelineTaskCurrentness.js";
 import { seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
+import { currentMatcherPolicyVersion } from "../../pipeline/profileMatchCurrency.js";
+import { DECIDER_VERSION } from "../../pipeline/deciderVersion.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
@@ -161,8 +163,8 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
       `INSERT INTO match_runs (
          workspace_id, canonical_job_id, job_version_id, profile_version_id,
          requirement_set_id, job_content_hash, context_fingerprint, status,
-         requirement_count, matched_count, completed_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'COMPLETED', 1, 1, NOW())
+         requirement_count, matched_count, completed_at, policy_version
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'COMPLETED', 1, 1, NOW(), '${currentMatcherPolicyVersion()}')
        RETURNING id`,
       [
         workspace.workspaceId,
@@ -448,7 +450,7 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
          created_by_user_id, preference_user_id, preference_context_id,
          readiness_json, evidence_revision_hash, readiness_fingerprint, decider_version
        ) VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, 'ELIGIBLE', 'REVIEW',
-         $7, $8, NULL, NULL, $9::jsonb, $10, $11, 'recommendation_decider_v2')
+         $7, $8, NULL, NULL, $9::jsonb, $10, $11, '${DECIDER_VERSION}')
        RETURNING id`,
       [
         workspace.workspaceId,

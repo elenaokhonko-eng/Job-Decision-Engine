@@ -335,7 +335,8 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
         `UPDATE canonical_jobs SET primary_lane = $2, recommendation_eligibility = $3, description_quality_status = $4 WHERE id = $1`,
         [j.canonicalJobId, over.lane === undefined ? "CORE_AI_DATA" : over.lane, over.eligibility ?? "ELIGIBLE", over.quality ?? "COMPLETE"]);
       if (over.content !== false) await observation(ws, j.jobVersionId, "LEVER");
-      await matchRun(ws, j, profileVersionId, over.policy ?? "matcher-old");
+      // Older matcher rules on the active fit measure: only the profile re-match scope counts these.
+      await matchRun(ws, j, profileVersionId, over.policy ?? "matcher-old+topk_capability_semantic_v1");
       return j.canonicalJobId;
     };
     const counted = [
@@ -343,6 +344,8 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
       await make({ outcome: "TRACK" }),
       await make({ state: "QUEUED_FOR_AI", outcome: "PRIORITY" }), // eligible and routed: the seed re-matches it
     ];
+    // A legacy-measure score is counted whatever the outcome or eligibility: it must be re-matched before it is decided.
+    counted.push(await make({ outcome: "SKIP", policy: "deterministic_v3" }), await make({ eligibility: "VERIFY", policy: "deterministic_v3" }));
     await make({ policy: currentMatcherPolicyVersion() });
     await make({ outcome: "SKIP" });
     await make({ eligibility: "VERIFY" });
@@ -351,7 +354,7 @@ describe.skipIf(skipReal)("must-be-zero checks (PostgreSQL)", () => {
     await make({ quality: "INCOMPLETE" });
     await make({ content: false });
     const check = await staleStageResults(db(), ws);
-    expect(check.detail?.matcher).toBe(3);
+    expect(check.detail?.matcher).toBe(5);
     expect([...check.sample].filter((id) => id.startsWith("matcher:")).sort())
       .toEqual(counted.map((id) => `matcher:${id}`).sort());
   });

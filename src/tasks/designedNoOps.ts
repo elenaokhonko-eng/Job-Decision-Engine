@@ -21,7 +21,9 @@ export type DecisionNotStampableReason =
   /** The job was removed by the user (MANUALLY_REMOVED) before or while the task ran. */
   | "JOB_REMOVED"
   /** The job was archived between the claim and the decider run. */
-  | "JOB_ARCHIVED";
+  | "JOB_ARCHIVED"
+  /** The latest match score is on another fit measure than the active one; it is re-matched before it is decided. */
+  | "AWAITING_FIT_MEASURE_REMATCH";
 
 export function decisionNotStampable(reason: DecisionNotStampableReason): string {
   return `${DECISION_NOT_STAMPABLE_PREFIX}${reason}`;

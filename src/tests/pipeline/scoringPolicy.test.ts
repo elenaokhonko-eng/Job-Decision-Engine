@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { assessCareerTrack, capOutcome, type TrackExperience, type TrackRequirement } from "../../pipeline/careerTrack.js";
 import {
   activeScoringPolicy,
+  isActiveFitMeasureVersion,
   isRankingRequirementType,
   LEGACY_SCORING_POLICY,
   matcherPolicyVersionFor,
@@ -32,34 +33,28 @@ const row = (
   ...over,
 });
 
-describe("scoring policy flag", () => {
-  it("keeps the legacy score unless the top-K policy is named", () => {
-    expect(activeScoringPolicy({} as NodeJS.ProcessEnv)).toBe(LEGACY_SCORING_POLICY);
-    expect(activeScoringPolicy({ SCORING_POLICY: "nonsense" } as unknown as NodeJS.ProcessEnv)).toBe(LEGACY_SCORING_POLICY);
-    expect(activeScoringPolicy({ SCORING_POLICY: TOPK_SCORING_POLICY } as unknown as NodeJS.ProcessEnv)).toBe(TOPK_SCORING_POLICY);
-  });
-
-  it("gives the top-K score its own matcher policy version, so turning it on supersedes older matches", () => {
-    const off = {} as NodeJS.ProcessEnv;
-    const on = { SCORING_POLICY: TOPK_SCORING_POLICY } as unknown as NodeJS.ProcessEnv;
-    expect(currentMatcherPolicyVersion(off)).toBe(DETERMINISTIC_MATCHER_POLICY_VERSION);
-    expect(currentMatcherPolicyVersion(on)).not.toBe(DETERMINISTIC_MATCHER_POLICY_VERSION);
-    expect(currentMatcherPolicyVersion(on)).toContain(TOPK_SCORING_POLICY);
-    expect(currentMatcherFingerprintVersion(on)).not.toBe(currentMatcherFingerprintVersion(off));
-    expect(matcherPolicyVersionFor(LEGACY_SCORING_POLICY, "x")).toBe("x");
-  });
-
-  it("builds the currency SQL from the version in force", () => {
+describe("the active fit measure", () => {
+  it("is top-K, set in code: the SCORING_POLICY variable no longer changes it", () => {
     const before = process.env.SCORING_POLICY;
     try {
-      delete process.env.SCORING_POLICY;
-      expect(currentMatcherPolicySql("mr")).toContain(`'${DETERMINISTIC_MATCHER_POLICY_VERSION}'`);
-      process.env.SCORING_POLICY = TOPK_SCORING_POLICY;
-      expect(currentMatcherPolicySql("mr")).toContain(TOPK_SCORING_POLICY);
+      for (const value of ["", "nonsense", LEGACY_SCORING_POLICY]) {
+        process.env.SCORING_POLICY = value;
+        expect(activeScoringPolicy()).toBe(TOPK_SCORING_POLICY);
+      }
     } finally {
       if (before === undefined) delete process.env.SCORING_POLICY;
       else process.env.SCORING_POLICY = before;
     }
+  });
+
+  it("has its own matcher policy version, so legacy-scale matches are superseded", () => {
+    expect(currentMatcherPolicyVersion()).toBe(`${DETERMINISTIC_MATCHER_POLICY_VERSION}+${TOPK_SCORING_POLICY}`);
+    expect(currentMatcherFingerprintVersion()).toContain(TOPK_SCORING_POLICY);
+    expect(currentMatcherPolicySql("mr")).toContain(`'${currentMatcherPolicyVersion()}'`);
+    expect(matcherPolicyVersionFor(LEGACY_SCORING_POLICY, "x")).toBe("x");
+    expect(isActiveFitMeasureVersion(currentMatcherPolicyVersion())).toBe(true);
+    expect(isActiveFitMeasureVersion(DETERMINISTIC_MATCHER_POLICY_VERSION)).toBe(false);
+    expect(isActiveFitMeasureVersion(null)).toBe(false);
   });
 });
 
@@ -177,9 +172,8 @@ describe("what the matcher stores under each policy", () => {
     expect(selectOverallScore(TOPK_SCORING_POLICY, 42, [row(null), row(null)])).toBe(0);
   });
 
-  it("follows the SCORING_POLICY flag end to end: unset is legacy, the top-K name selects top-K", () => {
-    expect(selectOverallScore(activeScoringPolicy({} as NodeJS.ProcessEnv), 42, rows)).toBe(42);
-    expect(selectOverallScore(activeScoringPolicy({ SCORING_POLICY: TOPK_SCORING_POLICY } as NodeJS.ProcessEnv), 42, rows)).toBe(70);
+  it("stores the top-K score under the active measure", () => {
+    expect(selectOverallScore(activeScoringPolicy(), 42, rows)).toBe(70);
   });
 
   it("treats a k below 1 as 1 (the single best requirement)", () => {

@@ -5,6 +5,7 @@ import { runDeterministicMatcher } from "../../pipeline/deterministicMatcher.js"
 import { runLaneRouter } from "../../pipeline/laneRouter.js";
 import { supersededProfileMatchSql } from "../../tasks/stageTaskWorker.js";
 import { openPipelineStack, type PipelineStack, type StackJob } from "../fixtures/pipelineStackFixture.js";
+import { currentMatcherPolicyVersion } from "../../pipeline/profileMatchCurrency.js";
 
 // The UNMATCHED re-match seed (supersededProfileMatchSql) and the matcher select must agree: every row the seed reaches is
 // selected by the matcher (so its task can finish), and the matcher takes no UNMATCHED job the seed does not reach.
@@ -57,7 +58,7 @@ describe.skipIf(skipReal)("UNMATCHED re-match: seed predicate equals the matcher
     await runLaneRouter(s().db, { context: s().ctx, jobVersionIds: SHAPES.map((shape) => jobs[shape].jobVersionId) });
     for (const shape of SHAPES) {
       const job = jobs[shape];
-      const runId = shape === "policyNoMatch" ? null : await parkedRun(job, shape === "currentPolicy" ? "deterministic_v3" : "deterministic_v1");
+      const runId = shape === "policyNoMatch" ? null : await parkedRun(job, shape === "currentPolicy" ? currentMatcherPolicyVersion() : "deterministic_v1");
       await s().db.query(
         `UPDATE canonical_jobs SET processing_state = 'UNMATCHED', processing_status = 'UNMATCHED',
                 routing_disposition = $3, latest_match_run_id = $4, recommendation_eligibility = 'INELIGIBLE', recommendation_outcome = 'SKIP'

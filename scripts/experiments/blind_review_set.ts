@@ -5,7 +5,7 @@
  * scores or ranks shown. The sheet goes to the user; the key stays in a separate file so the
  * labels can be scored afterwards.
  *
- *   SCORING_POLICY is not needed: this reads the scores the replay already wrote.
+ *   This reads the scores the replay already wrote.
  *   npx tsx scripts/experiments/blind_review_set.ts <sheet.md> <key.json> [--seed=<text>] [--exclude=<earlier key.json> ...]
  */
 import { createHash } from 'node:crypto';

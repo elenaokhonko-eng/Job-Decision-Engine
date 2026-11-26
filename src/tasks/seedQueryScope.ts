@@ -1,5 +1,6 @@
 import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
 import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
+import { otherFitMeasureSql } from "../pipeline/profileMatchCurrency.js";
 
 export interface SeedQueryScope {
   readonly jobVersionIds?: readonly string[];
@@ -103,7 +104,17 @@ export function deciderSeedableSql(alias = "c"): string {
         WHERE conflict_task.workspace_id = ${alias}.workspace_id AND conflict_task.task_type = 'DECIDE_RECOMMENDATION'
           AND conflict_task.status = 'COMPLETED' AND conflict_task.repair_action = '${OUTCOME_CONFLICT_REPAIR_ACTION}'
           AND conflict_task.payload->'outcome_conflict'->>'decider_version' = '${DECIDER_VERSION}'
-          AND conflict_task.payload->>'job_version_id' = ${alias}.latest_job_version_id::text))`;
+          AND conflict_task.payload->>'job_version_id' = ${alias}.latest_job_version_id::text)
+     -- A score of another fit measure is not decided (the decider leaves the job untouched until it is re-matched), so it
+     -- must not take a seed slot. Same exemptions as the decider: hard-rejected and POLICY_NO_MATCH jobs.
+     AND (COALESCE(${alias}.processing_state, ${alias}.processing_status) = 'HARD_REJECTED'
+       OR ${alias}.gate_decision IS NOT DISTINCT FROM 'HARD_REJECT'
+       OR ${alias}.routing_disposition IS NOT DISTINCT FROM 'POLICY_NO_MATCH'
+       OR ${alias}.deterministic_match_score IS NULL
+       OR NOT EXISTS (
+         SELECT 1 FROM match_runs measure_run
+          WHERE measure_run.workspace_id = ${alias}.workspace_id AND measure_run.id = ${alias}.latest_match_run_id
+            AND ${otherFitMeasureSql("measure_run")})))`;
 }
 
 /**

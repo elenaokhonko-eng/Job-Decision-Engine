@@ -123,7 +123,7 @@ describe.skipIf(skipReal)("decider-version seed cap (PostgreSQL)", () => {
   }, 60_000);
 
   it("a job decided under the previous decider version (role_shape_v1 era) is re-seeded for DECIDE; one at the current version is not", async () => {
-    expect(DECIDER_VERSION).toBe("recommendation_decider_v2");
+    expect(DECIDER_VERSION).toBe("recommendation_decider_v3+review_fit_floor_v1");
     const old = await decidedJob("recommendation_decider_v1");
     const current = await decidedJob(DECIDER_VERSION);
     await seedRecoverablePipelineTasks(db(), {

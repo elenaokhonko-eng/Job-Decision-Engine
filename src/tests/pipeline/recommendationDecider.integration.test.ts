@@ -11,6 +11,8 @@ import pg from "pg";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
+import { currentMatcherPolicyVersion } from "../../pipeline/profileMatchCurrency.js";
+import { DECIDER_VERSION } from "../../pipeline/deciderVersion.js";
 
 const DB_URL = process.env.DATABASE_URL || "";
 const isCI = isLocalPostgresConnectionString(DB_URL);
@@ -247,8 +249,8 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     const decide = async (rawScore: number, fingerprint: string) => {
       const run = await q(
         `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, requirement_set_id, job_content_hash, context_fingerprint,
-                                 status, requirement_count, matched_count, coverage_score, overall_match_score)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'COMPLETED', 8, 8, 100, $8) RETURNING id`,
+                                 status, requirement_count, matched_count, coverage_score, overall_match_score, policy_version)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'COMPLETED', 8, 8, 100, $8, '${currentMatcherPolicyVersion()}') RETURNING id`,
         [workspaceId, JOB_ID, VERSION_ID, profileVersion.rows[0].id, set.rows[0].id, hash.rows[0].content_hash, fingerprint, rawScore],
       );
       await q(
@@ -301,8 +303,8 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     const hash = await q(`SELECT content_hash FROM job_versions WHERE id = $1`, [VERSION_ID]);
     const run = await q(
       `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, requirement_set_id, job_content_hash, context_fingerprint,
-                               status, requirement_count, matched_count, coverage_score, overall_match_score)
-       VALUES ($1, $2, $3, $4, $5, $6, 'thin-context', 'COMPLETED', 2, 2, 100, 95) RETURNING id`,
+                               status, requirement_count, matched_count, coverage_score, overall_match_score, policy_version)
+       VALUES ($1, $2, $3, $4, $5, $6, 'thin-context', 'COMPLETED', 2, 2, 100, 95, '${currentMatcherPolicyVersion()}') RETURNING id`,
       [workspaceId, JOB_ID, VERSION_ID, profileVersion.rows[0].id, set.rows[0].id, hash.rows[0].content_hash],
     );
     await q(
@@ -359,8 +361,8 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     const hash = await q(`SELECT content_hash FROM job_versions WHERE id = $1`, [VERSION_ID]);
     const run = await q(
       `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, requirement_set_id, job_content_hash, context_fingerprint,
-                               status, requirement_count, matched_count, coverage_score, overall_match_score)
-       VALUES ($1, $2, $3, $4, $5, $6, 'degree-context', 'COMPLETED', 4, 3, 75, 70) RETURNING id`,
+                               status, requirement_count, matched_count, coverage_score, overall_match_score, policy_version)
+       VALUES ($1, $2, $3, $4, $5, $6, 'degree-context', 'COMPLETED', 4, 3, 75, 70, '${currentMatcherPolicyVersion()}') RETURNING id`,
       [workspaceId, JOB_ID, VERSION_ID, profileVersion.rows[0].id, set.rows[0].id, hash.rows[0].content_hash],
     );
     await q(
@@ -403,7 +405,7 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
 
     // decider_version is written in the INSERT of the decision (rows are immutable), outside decision_hash.
     const stamped = await q(`SELECT decider_version FROM deterministic_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [JOB_ID]);
-    expect(stamped.rows[0].decider_version).toBe("recommendation_decider_v2");
+    expect(stamped.rows[0].decider_version).toBe(DECIDER_VERSION);
     const check = readiness.checks.find((entry: { key: string }) => entry.key === "MANDATORY_QUALIFICATIONS");
     expect(check.status).toBe("MET");
     expect(check.reason_code).not.toBe("DEGREE_GAP_FLAGGED");

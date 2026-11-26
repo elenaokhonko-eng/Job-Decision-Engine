@@ -1,4 +1,5 @@
 import { checkWorkerTaskTypes } from "../src/tasks/workerTaskTypeGuard.js";
+import { requireReviewFitFloor } from "../src/pipeline/reviewFitFloor.js";
 import { appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
@@ -483,6 +484,10 @@ export async function processPipelineTasks(): Promise<void> {
   console.log("====================================================");
   console.log("          PROCESS PIPELINE TASK WORKER              ");
   console.log("====================================================");
+
+  // Before the lock, the seed and any claim: without an approved Review fit floor every match and decision would fail
+  // and spend task retries. Exits non-zero with the reason and changes nothing.
+  requireReviewFitFloor();
 
   const taskTypeGuard = checkWorkerTaskTypes(process.env.PIPELINE_TASK_WORKER_TASK_TYPES);
   if (taskTypeGuard.action === "FAIL") throw new Error(taskTypeGuard.message);

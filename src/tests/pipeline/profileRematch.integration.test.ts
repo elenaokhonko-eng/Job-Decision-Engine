@@ -16,7 +16,7 @@ import {
   seedRecoverablePipelineTasks,
 } from "../../tasks/stageTaskWorker.js";
 import { currentMatcherPolicyVersion, DETERMINISTIC_MATCHER_POLICY_VERSION, profileMatchSupersededSql } from "../../pipeline/profileMatchCurrency.js";
-import { TOPK_SCORING_POLICY } from "../../pipeline/scoringPolicy.js";
+import { runRecommendationDecider } from "../../pipeline/recommendationDecider.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { batchEmbeddingFromPerInput } from "../fixtures/embeddingBatchMock.js";
 import { insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
@@ -207,7 +207,7 @@ async function recordMatchAndDecision(
        coverage_score, overall_match_score, policy_version,
        job_content_hash, context_fingerprint, embedding_space_id, completed_at
      ) VALUES ($1, $2, $3, $4, $5, 'COMPLETED', 1, 1, 100.00, $6,
-               '${DETERMINISTIC_MATCHER_POLICY_VERSION}', $7, $8, $9, NOW())
+               '${currentMatcherPolicyVersion()}', $7, $8, $9, NOW())
      RETURNING id`,
     [workspaceId, job.canonicalJobId, job.jobVersionId, profileVersionId, job.requirementSetId,
      score, job.contentHash, fingerprint, await primaryEmbeddingSpaceId()],
@@ -696,7 +696,7 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
          coverage_score, overall_match_score, policy_version,
          job_content_hash, context_fingerprint, embedding_space_id, completed_at
        ) VALUES ($1, $2, $3, $4, $5, 'COMPLETED', 1, 1, 100.00, 80.00,
-                 '${DETERMINISTIC_MATCHER_POLICY_VERSION}', $6, 'zebra-rematch-fresh', $7, NOW())
+                 '${currentMatcherPolicyVersion()}', $6, 'zebra-rematch-fresh', $7, NOW())
        RETURNING id`,
       [ctx().workspaceId, job.canonicalJobId, job.jobVersionId, profileV2, job.requirementSetId, job.contentHash,
        await primaryEmbeddingSpaceId()],
@@ -813,7 +813,7 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
       `SELECT policy_version FROM match_runs WHERE workspace_id = $1 AND id = $2`,
       [ctx().workspaceId, after.latest_match_run_id],
     );
-    expect(newRun.rows[0].policy_version).toBe(DETERMINISTIC_MATCHER_POLICY_VERSION);
+    expect(newRun.rows[0].policy_version).toBe(currentMatcherPolicyVersion());
 
     // Once re-matched under the current rules, nothing is superseded any more.
     const reseeded = await seedRecoverablePipelineTasks(db(), {
@@ -824,59 +824,66 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
     expect(reseeded.supersededProfileMatch).toBe(0);
   }, 120_000);
 
-  it("flipping SCORING_POLICY supersedes matches made under the other policy, re-matches under the new one, and settles", async () => {
+  it("never decides on a legacy-measure score: the job is left untouched, re-matched whatever its eligibility, then decided", async () => {
     const job = jobs.trackCurrent;
-    const previous = process.env.SCORING_POLICY;
-    const seed = () => seedRecoverablePipelineTasks(db(), { context: ctx(), taskTypes: ["MATCH_PROFILE_EVIDENCE"], includeTestFixtures: true });
-    const supersededFor = async () => {
-      const { rows } = await db().query<{ superseded: boolean }>(
-        `SELECT COALESCE(${profileMatchSupersededSql("c", "mr")}, FALSE) AS superseded
-           FROM canonical_jobs c LEFT JOIN match_runs mr ON mr.id = c.latest_match_run_id
-          WHERE c.workspace_id = $1 AND c.id = $2`,
-        [ctx().workspaceId, job.canonicalJobId],
-      );
-      return rows[0]!.superseded;
-    };
-    try {
-      delete process.env.SCORING_POLICY;
-      // The job's latest match is current under the default (legacy) policy.
-      const legacyRun = (await jobState(job)).latest_match_run_id;
-      const legacyStamp = await db().query<{ policy_version: string }>(`SELECT policy_version FROM match_runs WHERE workspace_id = $1 AND id = $2`, [ctx().workspaceId, legacyRun]);
-      expect(legacyStamp.rows[0].policy_version).toBe(DETERMINISTIC_MATCHER_POLICY_VERSION);
-      expect(await supersededFor()).toBe(false);
+    const legacyRun = (await jobState(job)).latest_match_run_id;
+    // As before the switch: a legacy-scale match run, on a VERIFY job the profile re-match never selects.
+    await db().query(
+      `UPDATE match_runs SET policy_version = $3 WHERE workspace_id = $1 AND id = $2`,
+      [ctx().workspaceId, legacyRun, DETERMINISTIC_MATCHER_POLICY_VERSION],
+    );
+    await db().query(
+      `UPDATE canonical_jobs SET recommendation_eligibility = 'VERIFY', recommendation_outcome = 'REVIEW',
+              description_quality_status = 'COMPLETE' WHERE workspace_id = $1 AND id = $2`,
+      [ctx().workspaceId, job.canonicalJobId],
+    );
+    const stored = async () => (await db().query(
+      `SELECT recommendation_eligibility, recommendation_outcome, recommendation_requirement_score,
+              latest_deterministic_decision_id, latest_match_run_id
+         FROM canonical_jobs WHERE workspace_id = $1 AND id = $2`,
+      [ctx().workspaceId, job.canonicalJobId],
+    )).rows[0];
+    const before = await stored();
 
-      // Turn the flag on: every match made under the legacy policy is superseded, this job's included,
-      // and a re-match task is queued for it.
-      process.env.SCORING_POLICY = TOPK_SCORING_POLICY;
-      const topkVersion = currentMatcherPolicyVersion();
-      expect(topkVersion).not.toBe(DETERMINISTIC_MATCHER_POLICY_VERSION);
-      expect(await supersededFor()).toBe(true);
-      expect((await seed()).supersededProfileMatch).toBeGreaterThanOrEqual(1);
-      expect(await tasksFor(job, "MATCH_PROFILE_EVIDENCE")).toEqual(expect.arrayContaining([expect.objectContaining({ status: "PENDING" })]));
+    const summary = await runRecommendationDecider(db(), { context: ctx(), canonicalJobIds: [job.canonicalJobId] });
+    expect(summary).toMatchObject({ awaitingFitMeasure: [job.canonicalJobId], errors: 0, updated: 0, decisionsInserted: 0 });
+    expect(await stored()).toEqual(before);
+    // Nor does the DECIDE seed give it a slot while it waits.
+    expect((await seedRecoverablePipelineTasks(db(), {
+      context: ctx(),
+      taskTypes: ["DECIDE_RECOMMENDATION"],
+      includeTestFixtures: true,
+      jobVersionIds: [job.jobVersionId],
+    })).byType.DECIDE_RECOMMENDATION?.inserted ?? 0).toBe(0);
 
-      // The re-match runs the real matcher and stamps the top-K policy on the new run.
-      const recovered = await runPipelineStageTaskWorker(db(), {
-        ...workerOptions,
-        context: ctx(),
-        taskTypes: ["MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION"],
-        jobVersionIds: [job.jobVersionId],
-        maxTasks: 6,
-      });
-      expect(recovered.errors).toEqual([]);
-      const topkRun = (await jobState(job)).latest_match_run_id;
-      expect(topkRun).not.toBe(legacyRun);
-      const topkStamp = await db().query<{ policy_version: string }>(`SELECT policy_version FROM match_runs WHERE workspace_id = $1 AND id = $2`, [ctx().workspaceId, topkRun]);
-      expect(topkStamp.rows[0].policy_version).toBe(topkVersion);
+    const seeded = await seedRecoverablePipelineTasks(db(), {
+      context: ctx(),
+      taskTypes: ["MATCH_PROFILE_EVIDENCE"],
+      includeTestFixtures: true,
+      jobVersionIds: [job.jobVersionId],
+    });
+    expect(seeded.supersededProfileMatch).toBe(1);
 
-      // Settled for this job: not superseded again under the same flag, so no re-enqueue loop.
-      expect(await supersededFor()).toBe(false);
-
-      // Turning the flag back off supersedes the top-K match in the other direction.
-      delete process.env.SCORING_POLICY;
-      expect(await supersededFor()).toBe(true);
-    } finally {
-      if (previous === undefined) delete process.env.SCORING_POLICY;
-      else process.env.SCORING_POLICY = previous;
-    }
+    const recovered = await runPipelineStageTaskWorker(db(), {
+      ...workerOptions,
+      context: ctx(),
+      taskTypes: ["MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION"],
+      jobVersionIds: [job.jobVersionId],
+      maxTasks: 6,
+    });
+    expect(recovered.errors).toEqual([]);
+    const after = await jobState(job);
+    expect(after.latest_match_run_id).not.toBe(legacyRun);
+    expect(after.decision_match_run_id).toBe(after.latest_match_run_id);
+    const stamp = await db().query<{ policy_version: string }>(`SELECT policy_version FROM match_runs WHERE workspace_id = $1 AND id = $2`, [ctx().workspaceId, after.latest_match_run_id]);
+    expect(stamp.rows[0].policy_version).toBe(currentMatcherPolicyVersion());
+    // Settled: not selected again.
+    const reseeded = await seedRecoverablePipelineTasks(db(), {
+      context: ctx(),
+      taskTypes: ["MATCH_PROFILE_EVIDENCE"],
+      includeTestFixtures: true,
+      jobVersionIds: [job.jobVersionId],
+    });
+    expect(reseeded.supersededProfileMatch).toBe(0);
   }, 120_000);
 });
