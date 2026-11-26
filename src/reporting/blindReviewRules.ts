@@ -20,13 +20,14 @@ export function verifiedOnReviewDate(verifiedAt: Date | null, now: Date): boolea
 }
 
 /**
- * Why a scored job is left out. A job is counted once, under the first reason that applies, in this order. Availability comes
- * last, so NOT_VERIFIED_OPEN_ON_DRAW_DATE counts jobs that would be eligible if their posting were confirmed open that day.
+ * Why a scored job is left out. A job is counted once, under the first reason that applies, in this order. Availability and
+ * duplicates come last, so NOT_VERIFIED_OPEN_ON_DRAW_DATE counts the postings (not known to be closed) that would be eligible
+ * if confirmed open that day. DUPLICATE_POSTING is decided across the pool by the loader, not by blindReviewExclusion.
  */
 export const BLIND_REVIEW_EXCLUSIONS = [
   "ARCHIVED", "TEST_FIXTURE", "NOT_GATE_PASSED", "MANUALLY_REMOVED", "SAVED_BY_USER", "HAS_APPLICATION", "ALREADY_LABELLED",
   "SAME_POSTING_AS_SAVED_APPLIED_OR_LABELLED", "LINKEDIN", "AWAITING_CONTENT", "NO_POSTING_LINK", "NO_CURRENT_TOPK_MATCH",
-  "AWAITING_RECOMPUTE", "NOT_CONFIRMED_OPEN", "NOT_VERIFIED_OPEN_ON_DRAW_DATE",
+  "AWAITING_RECOMPUTE", "CONFIRMED_CLOSED", "NOT_VERIFIED_OPEN_ON_DRAW_DATE", "DUPLICATE_POSTING",
 ] as const;
 export type BlindReviewExclusion = (typeof BLIND_REVIEW_EXCLUSIONS)[number];
 
@@ -44,6 +45,7 @@ export interface BlindReviewFacts {
   hasPostingLink: boolean;
   currentTopKMatch: boolean;
   awaitingRecompute: boolean;
+  confirmedClosed: boolean;
   availabilityCurrent: boolean;
   availabilityVerifiedAt: Date | null;
 }
@@ -62,8 +64,9 @@ export function blindReviewExclusion(facts: BlindReviewFacts, now: Date): BlindR
   if (!facts.hasPostingLink) return "NO_POSTING_LINK";
   if (!facts.currentTopKMatch) return "NO_CURRENT_TOPK_MATCH";
   if (facts.awaitingRecompute) return "AWAITING_RECOMPUTE";
-  if (!facts.availabilityCurrent) return "NOT_CONFIRMED_OPEN";
-  if (!verifiedOnReviewDate(facts.availabilityVerifiedAt, now)) return "NOT_VERIFIED_OPEN_ON_DRAW_DATE";
+  if (facts.confirmedClosed) return "CONFIRMED_CLOSED";
+  // Never verified, window run out, or verified on another day.
+  if (!facts.availabilityCurrent || !verifiedOnReviewDate(facts.availabilityVerifiedAt, now)) return "NOT_VERIFIED_OPEN_ON_DRAW_DATE";
   return null;
 }
 
@@ -90,25 +93,39 @@ export function postingLink(value: string | null | undefined): string | null {
   return url && !/^https?:\/\/himalayas\.app\/jobs\/([0-9a-f]{16,}|api)/i.test(url) ? url : null;
 }
 
-/** Untrusted text as one line of plain text in a Markdown table cell: no line breaks, Markdown, HTML or autolinks. */
+/**
+ * Untrusted text as one line of plain text in a Markdown table cell: no line breaks, format characters, Markdown or HTML.
+ * Autolink triggers (@, //, www., mailto:, xmpp:) get a zero-width space, so they stay broken after entities are decoded.
+ */
 export function markdownText(value: string | null | undefined): string {
   const line = (value ?? "")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]+/g, " ")
+    .replace(/[\p{Cc}\u2028\u2029]+/gu, " ")
+    .replace(/\p{Cf}+/gu, "")
     .replace(/\s+/g, " ")
     .trim();
-  return line.replace(/www\.|:\/\/|[&<>@\\`*_[\]()|~!]/gi, (match) => {
-    if (match.length === 4) return `${match.slice(0, 3)}&#46;`;
-    if (match === "://") return "&#58;//";
+  return line.replace(/www\.|mailto:|xmpp:|\/(?=\/)|[&<>@\\`*_[\]()|~!]/gi, (match) => {
+    if (/^www\.$/i.test(match)) return `${match.slice(0, 3)}&#8203;&#46;`;
+    if (match.endsWith(":")) return `${match.slice(0, -1)}&#58;&#8203;`;
+    if (match === "/") return "&#47;&#8203;";
     if (match === "&") return "&amp;";
     if (match === "<") return "&lt;";
     if (match === ">") return "&gt;";
-    if (match === "@") return "&#64;";
+    if (match === "@") return "&#64;&#8203;";
     return `\\${match}`;
   });
 }
 
-/** True when the link is on LinkedIn, including a redirect wrapper that carries a LinkedIn URL in its query. */
+/** A LinkedIn host followed by a path, with or without a scheme, anywhere in a decoded path, query or fragment. */
+const CARRIED_LINKEDIN_URL = /(?:^|[/=?&#:,;|\s])(?:[a-z0-9-]+\.)*(?:linkedin\.com|lnkd\.in)\.?(?::\d+)?\//i;
+
+function percentDecoded(value: string): string {
+  let text = value;
+  // Redirect wrappers may encode more than once.
+  for (let i = 0; i < 3; i += 1) text = text.replace(/%([0-9a-f]{2})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+  return text;
+}
+
+/** True when the link is on LinkedIn, or is a redirect wrapper that carries a LinkedIn URL in its path, query or fragment. */
 export function isLinkedInLink(value: string | null | undefined, depth = 0): boolean {
   const raw = (value ?? "").trim();
   if (!raw) return false;
@@ -120,6 +137,7 @@ export function isLinkedInLink(value: string | null | undefined, depth = 0): boo
   }
   const host = url.hostname.toLowerCase().replace(/\.$/, "");
   if (host === "linkedin.com" || host.endsWith(".linkedin.com") || host === "lnkd.in") return true;
+  if (CARRIED_LINKEDIN_URL.test(percentDecoded(`${url.pathname}${url.search}${url.hash}`))) return true;
   return depth < 2 && [...url.searchParams.values()].some((v) => /^https?:\/\//i.test(v) && isLinkedInLink(v, depth + 1));
 }
 

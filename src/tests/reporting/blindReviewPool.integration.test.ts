@@ -48,6 +48,7 @@ interface JobOptions {
   policy?: string | null;
   score?: number | null;
   identityHash?: string;
+  runStatus?: "STARTED" | "COMPLETED" | "FAILED";
 }
 
 interface Seeded {
@@ -82,9 +83,9 @@ async function seedJob(options: JobOptions = {}): Promise<Seeded> {
     const run = await db().query<{ id: string }>(
       `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, job_content_hash, context_fingerprint, status,
                                requirement_count, matched_count, policy_version, completed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 'COMPLETED', 5, 3, $7, NOW()) RETURNING id`,
+       VALUES ($1, $2, $3, $4, $5, $6, $8, 5, 3, $7, NOW()) RETURNING id`,
       [ctx().workspaceId, jobId, versionId, profileVersionId, `hash-${versionId}`, `ctx-${versionId}`,
-        options.policy ?? "deterministic_v3_topk_capability_semantic_v1"],
+        options.policy ?? "deterministic_v3_topk_capability_semantic_v1", options.runStatus ?? "COMPLETED"],
     );
     await db().query(`UPDATE canonical_jobs SET latest_match_run_id = $2 WHERE id = $1`, [jobId, run.rows[0]!.id]);
   }
@@ -105,17 +106,32 @@ async function seedJob(options: JobOptions = {}): Promise<Seeded> {
 
 async function observe(
   job: Seeded | null,
-  options: { source: string; url?: string; applyUrl?: string; company?: string; derivedFrom?: string },
+  options: { source: string; url?: string; applyUrl?: string; company?: string; derivedFrom?: string; pluginKey?: string; evidence?: object },
 ): Promise<string> {
   const id = randomUUID();
   await db().query(
     `INSERT INTO raw_job_observations (id, workspace_id, source_name, source_url, canonical_apply_url, company_name, title, description_raw,
-                                       location_raw, raw_payload_hash, job_version_id, derived_from_observation_id)
-     VALUES ($1, $2, $3, $4, $5, $6, 'fixture role', 'fixture', 'Singapore', $7, $8, $9)`,
+                                       location_raw, raw_payload_hash, job_version_id, derived_from_observation_id, source_plugin_key,
+                                       normalized_evidence, evidence_schema_version)
+     VALUES ($1, $2, $3, $4, $5, $6, 'fixture role', 'fixture', 'Singapore', $7, $8, $9, $10, $11, $12)`,
     [id, ctx().workspaceId, options.source, options.url ?? job?.url ?? null, options.applyUrl ?? null, options.company ?? "Fixture Co",
-      createHash("sha256").update(id).digest("hex"), job?.versionId ?? null, options.derivedFrom ?? null],
+      createHash("sha256").update(id).digest("hex"), job?.versionId ?? null, options.derivedFrom ?? null, options.pluginKey ?? null,
+      options.evidence ? JSON.stringify({ schema_version: "job_source_evidence_v1", ...options.evidence }) : null,
+      options.evidence ? "job_source_evidence_v1" : null],
   );
   return id;
+}
+
+/** A source disposition row: a sighting of a job, optionally pointing at an observation. */
+async function dispose(job: Seeded, options: { observationId?: string; url?: string; pluginKey?: string }): Promise<void> {
+  const run = await db().query<{ id: string }>(`INSERT INTO source_runs (workspace_id) VALUES ($1) RETURNING id`, [ctx().workspaceId]);
+  await db().query(
+    `INSERT INTO source_candidate_dispositions (workspace_id, source_run_id, source_plugin_key, plan_key, source_url, raw_payload_hash,
+                                                raw_payload, disposition, canonical_job_id, job_observation_id)
+     VALUES ($1, $2, $3, 'fixture', $4, $5, '{}', 'DUPLICATE', $6, $7)`,
+    [ctx().workspaceId, run.rows[0]!.id, options.pluginKey ?? "greenhouse", options.url ?? null,
+      createHash("sha256").update(randomUUID()).digest("hex"), job.jobId, options.observationId ?? null],
+  );
 }
 
 async function apply(job: Seeded, status: string): Promise<void> {
@@ -188,13 +204,15 @@ describe.skipIf(skipReal)("blind review pool (PostgreSQL)", () => {
     await seedJob({ url: "javascript:alert(1)" });
     await seedJob({ policy: null });
     await seedJob({ policy: "deterministic_v3_other_policy" });
+    await seedJob({ runStatus: "FAILED" });
+    await seedJob({ runStatus: "STARTED" });
     await seedJob({ state: "PREQUALIFIED" });
     await seedJob({ availability: "CLOSED" });
     await seedJob({ recheckAt: new Date(Date.now() - 60_000) });
     await seedJob({ score: null }); // never scored: reported separately
     const result = await expectOnly(good, {
       ARCHIVED: 1, TEST_FIXTURE: 1, NOT_GATE_PASSED: 1, MANUALLY_REMOVED: 1, AWAITING_CONTENT: 1, NO_POSTING_LINK: 2,
-      NO_CURRENT_TOPK_MATCH: 2, AWAITING_RECOMPUTE: 1, NOT_CONFIRMED_OPEN: 2,
+      NO_CURRENT_TOPK_MATCH: 4, AWAITING_RECOMPUTE: 1, CONFIRMED_CLOSED: 1, NOT_VERIFIED_OPEN_ON_DRAW_DATE: 1,
     });
     expect(result.notYetDecided).toBe(1);
   });
@@ -210,6 +228,89 @@ describe.skipIf(skipReal)("blind review pool (PostgreSQL)", () => {
     expect([result.drawDate, result.timeZone]).toEqual(["2026-01-11", "Asia/Singapore"]);
     // The next day neither is eligible.
     expect((await load([], new Date("2026-01-12T01:00:00Z"))).excluded.NOT_VERIFIED_OPEN_ON_DRAW_DATE).toBe(2);
+  });
+
+  it("counts closed apart from never verified, window run out and verified earlier", async () => {
+    const good = await seedJob();
+    await seedJob({ availability: "CLOSED" });
+    await seedJob({ availability: "CLOSED", verifiedAt: new Date(Date.now() - 3 * DAY), recheckAt: new Date(Date.now() - 2 * DAY) });
+    await seedJob({ verifiedAt: new Date(Date.now() - 8 * DAY), recheckAt: new Date(Date.now() - DAY) }); // window run out
+    await seedJob({ verifiedAt: new Date(Date.now() - 3 * DAY) }); // still inside its window
+    const never = await seedJob();
+    await db().query(
+      `UPDATE job_versions SET availability_status = NULL, availability_verified_at = NULL, availability_recheck_at = NULL WHERE id = $1`,
+      [never.versionId],
+    );
+    await expectOnly(good, { CONFIRMED_CLOSED: 2, NOT_VERIFIED_OPEN_ON_DRAW_DATE: 3 });
+  });
+
+  it("takes availability from the read model, where the latest source evidence overrides the job version", async () => {
+    const availability = (status: string) =>
+      ({ availability: { status, verified_at: new Date().toISOString(), expires_at: new Date(Date.now() + 7 * DAY).toISOString() } });
+    // The job version is stale; today's evidence says open.
+    const good = await seedJob({ verifiedAt: new Date(Date.now() - 8 * DAY), recheckAt: new Date(Date.now() - DAY) });
+    await observe(good, { source: "GREENHOUSE", evidence: availability("OPEN") });
+    // The job version says open today; the latest evidence says closed.
+    const closed = await seedJob();
+    await observe(closed, { source: "GREENHOUSE", evidence: availability("CLOSED") });
+    await expectOnly(good, { CONFIRMED_CLOSED: 1 });
+  });
+
+  it("keeps one record of a posting, the best scored, and counts the others", async () => {
+    const good = await seedJob({ company: "Twin Co", title: "analyst", score: 0.9 });
+    await seedJob({ company: "Twin Co", title: "analyst", score: 0.8 });
+    await seedJob({ company: "Twin Co", title: "analyst", score: 0.95, verifiedAt: new Date(Date.now() - 3 * DAY) }); // unverified twin
+    // Two unverified records of one further posting: confirming would add one, not two.
+    await seedJob({ company: "Further Co", title: "lead", verifiedAt: new Date(Date.now() - 3 * DAY) });
+    await seedJob({ company: "Further Co", title: "lead", verifiedAt: new Date(Date.now() - 3 * DAY) });
+    await expectOnly(good, { DUPLICATE_POSTING: 3, NOT_VERIFIED_OPEN_ON_DRAW_DATE: 1 });
+  });
+
+  it("finds a saved observation tied to the job only through a source disposition", async () => {
+    const good = await seedJob();
+    const saved = await seedJob();
+    await dispose(saved, { observationId: await observe(null, { source: "MCF_SAVED", url: "https://www.mycareersfuture.gov.sg/job/x/y" }) });
+    await expectOnly(good, { SAVED_BY_USER: 1 });
+  });
+
+  it("finds LinkedIn in a disposition's link or source plugin, and in an observation's source plugin", async () => {
+    const good = await seedJob();
+    await dispose(await seedJob(), { url: "https://www.linkedin.com/jobs/view/1" });
+    await dispose(await seedJob(), { pluginKey: "searchapi_linkedin", url: "https://boards.example.test/1" });
+    await observe(await seedJob(), { source: "SEARCHAPI", pluginKey: "searchapi_linkedin" });
+    await expectOnly(good, { LINKEDIN: 3 });
+  });
+
+  it.each(["applied", "saved", "labelled"])("takes the posting keys of a %s job, also when it was never scored or matched", async (kind) => {
+    const good = await seedJob();
+    const ids: string[] = [];
+    for (const [company, unscored] of [["Scored Co", false], ["Unscored Co", true]] as const) {
+      const taken = await seedJob({ company, title: "taken role", ...(unscored ? { score: null, policy: null } : {}) });
+      if (kind === "applied") await apply(taken, "SUBMITTED");
+      // The saved observation names another employer and title, so only the job's own record can match the second record.
+      if (kind === "saved") await observe(taken, { source: "MCF_SAVED", url: `https://saved.example.test/${taken.jobId}`, company: "Card Co" });
+      if (kind === "labelled") ids.push(taken.jobId);
+      await seedJob({ company, title: "taken role" });
+    }
+    const own = ({ applied: "HAS_APPLICATION", saved: "SAVED_BY_USER", labelled: "ALREADY_LABELLED" } as Record<string, BlindReviewExclusion>)[kind]!;
+    // Only the scored taken job is in the count; the unscored one has no adjusted score to leave out.
+    await expectOnly(good, { [own]: 1, SAME_POSTING_AS_SAVED_APPLIED_OR_LABELLED: 2 }, ids);
+  });
+
+  it.each(["url", "applyUrl"] as const)("uses the %s of a job's observations in its posting keys", async (field) => {
+    const good = await seedJob();
+    const labelled = await seedJob({ company: "Link Co", title: "first title" });
+    const shared = "https://boards.example.test/link-co/42";
+    await observe(labelled, { source: "GREENHOUSE", company: "Link Co", [field]: shared });
+    await seedJob({ company: "Link Co", title: "second title", url: shared });
+    await expectOnly(good, { ALREADY_LABELLED: 1, SAME_POSTING_AS_SAVED_APPLIED_OR_LABELLED: 1 }, [labelled.jobId]);
+  });
+
+  it("matches labelled ids whatever their letter case", async () => {
+    const good = await seedJob();
+    const labelled = await seedJob();
+    const result = await expectOnly(good, { ALREADY_LABELLED: 1 }, [labelled.jobId.toUpperCase()]);
+    expect(result.labelledNotFound).toBe(0);
   });
 
   it.each(["LINKEDIN_SAVED", "MCF_SAVED"])("leaves out a job the owner saved (%s)", async (source) => {

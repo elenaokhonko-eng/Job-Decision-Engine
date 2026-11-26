@@ -16,7 +16,7 @@ import {
 /**
  * The candidate pool for the blind review sheet (read only). The rules are in blindReviewRules.ts; this file reads the facts.
  * A job is drawn only if it is live, gate PASS, content complete, confirmed open on the draw date, not saved, not applied to,
- * not labelled before and not on LinkedIn. This is not the Streamlit Review list's filter: it does not look at the
+ * not labelled before, not on LinkedIn and not a second record of a posting already in the pool. This is not the Streamlit Review list's filter: it does not look at the
  * recommendation outcome, and it is stricter on availability, saved jobs and LinkedIn.
  * Every job with a stored adjusted score is either drawn from or counted under exactly one reason.
  */
@@ -73,6 +73,7 @@ interface JobRow {
   content_complete: boolean;
   current_topk_match: boolean;
   awaiting_recompute: boolean;
+  confirmed_closed: boolean;
   availability_current: boolean;
   availability_verified_at: Date | null;
   identity_hashes: Array<string | null> | null;
@@ -145,6 +146,7 @@ export async function loadBlindReviewPool(
             mr.id IS NOT NULL AS current_topk_match,
             COALESCE(cj.recommendation_outcome IS NOT NULL
                      AND COALESCE(cj.processing_state, cj.processing_status) IN ('PREQUALIFIED','NEEDS_VERIFICATION','RAW_STAGED','GATE_PASSED','LANE_ROUTED'), FALSE) AS awaiting_recompute,
+            av.availability_state IS NOT DISTINCT FROM 'CLOSED' AS confirmed_closed,
             av.availability_current IS TRUE AS availability_current,
             av.availability_verified_at,
             (SELECT ARRAY_AGG(v.source_posting_identity_hash) FROM job_versions v
@@ -180,7 +182,8 @@ export async function loadBlindReviewPool(
   }
 
   const excluded = Object.fromEntries(BLIND_REVIEW_EXCLUSIONS.map((reason) => [reason, 0])) as Record<BlindReviewExclusion, number>;
-  const eligible: BlindReviewCandidate[] = [];
+  const eligible: Array<{ keys: string[]; candidate: BlindReviewCandidate }> = [];
+  const unverified: string[][] = [];
   let scored = 0;
   let notYetDecided = 0;
   for (const job of jobs) {
@@ -207,19 +210,38 @@ export async function loadBlindReviewPool(
       hasPostingLink: link !== null,
       currentTopKMatch: job.current_topk_match,
       awaitingRecompute: job.awaiting_recompute,
+      confirmedClosed: job.confirmed_closed,
       availabilityCurrent: job.availability_current,
       availabilityVerifiedAt: job.availability_verified_at,
     }, input.now);
-    if (exclusion) excluded[exclusion] += 1;
+    if (exclusion === "NOT_VERIFIED_OPEN_ON_DRAW_DATE") unverified.push(postingKeys(record(job)));
+    else if (exclusion) excluded[exclusion] += 1;
     else {
       eligible.push({
-        id: job.id, company_name: job.company_name, title: job.title, location: job.location ?? "not stated",
-        canonical_url: link!, score: job.score, unmatched_must: job.unmatched_must,
+        keys: postingKeys(record(job)),
+        candidate: {
+          id: job.id, company_name: job.company_name, title: job.title, location: job.location ?? "not stated",
+          canonical_url: link!, score: job.score, unmatched_must: job.unmatched_must,
+        },
       });
     }
   }
+  // One posting, one entry: the best-scored eligible record stays. Unverified records are checked after the eligible ones, so
+  // the unverified count is the number of further postings that confirming would add.
+  const pooledKeys = new Set<string>();
+  const isDuplicate = (keys: string[]) => {
+    const duplicate = keys.some((key) => pooledKeys.has(key));
+    for (const key of keys) pooledKeys.add(key);
+    return duplicate;
+  };
+  const rows: BlindReviewCandidate[] = [];
+  for (const { keys, candidate } of eligible) {
+    if (isDuplicate(keys)) excluded.DUPLICATE_POSTING += 1;
+    else rows.push(candidate);
+  }
+  for (const keys of unverified) excluded[isDuplicate(keys) ? "DUPLICATE_POSTING" : "NOT_VERIFIED_OPEN_ON_DRAW_DATE"] += 1;
   return {
-    rows: eligible, excluded, scored, notYetDecided, labelledNotFound: labelled.size - labelledFound,
+    rows, excluded, scored, notYetDecided, labelledNotFound: labelled.size - labelledFound,
     drawDate: reviewDate(input.now), timeZone: BLIND_REVIEW_TIME_ZONE,
   };
 }

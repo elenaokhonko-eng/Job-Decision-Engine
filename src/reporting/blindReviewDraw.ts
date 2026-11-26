@@ -70,7 +70,7 @@ export function drawBlindReview(pool: BlindReviewPool, seed: string): BlindRevie
   if (rows.length < MIN_BLIND_REVIEW_POOL) {
     throw new Error(
       `Blind review not drawn: ${rows.length} eligible jobs, ${MIN_BLIND_REVIEW_POOL} required. The sample is not reduced. ` +
-      `${pool.excluded.NOT_VERIFIED_OPEN_ON_DRAW_DATE} jobs pass every other rule but were not confirmed open on ${pool.drawDate} (${pool.timeZone}).\n` +
+      `${pool.excluded.NOT_VERIFIED_OPEN_ON_DRAW_DATE} more postings pass every other rule and are not known to be closed, but were not confirmed open on ${pool.drawDate} (${pool.timeZone}).\n` +
       blindReviewPoolSummary(pool),
     );
   }

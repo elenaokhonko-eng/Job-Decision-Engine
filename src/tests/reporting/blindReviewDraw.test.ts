@@ -1,13 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 import { drawBlindReview, labelledIdsFromKeys, parseBlindReviewArgs, renderBlindReviewSheet } from "../../reporting/blindReviewDraw.js";
 import type { BlindReviewCandidate, BlindReviewPool } from "../../reporting/blindReviewPool.js";
 import {
-  BLIND_REVIEW_EXCLUSIONS, blindReviewExclusion, isLinkedInLink, markdownText, reviewDate, safeHttpUrl,
+  BLIND_REVIEW_EXCLUSIONS, blindReviewExclusion, isLinkedInLink, markdownText, postingKeys, reviewDate, safeHttpUrl,
   type BlindReviewFacts,
 } from "../../reporting/blindReviewRules.js";
+import { STAGE1_3_STAGING_IDENTITY_EXPECTATIONS } from "../../db/stagingDatabaseIdentity.js";
 import { requireReplayDatabaseUrl } from "../../reporting/replayGuard.js";
 
 const candidate = (i: number): BlindReviewCandidate => ({
@@ -27,7 +29,7 @@ const poolOf = (size: number): BlindReviewPool => ({
 const eligible: BlindReviewFacts = {
   archived: false, testFixture: false, gatePassed: true, manuallyRemoved: false, savedByUser: false, hasApplication: false,
   labelled: false, samePostingAsTaken: false, linkedIn: false, contentComplete: true, hasPostingLink: true, currentTopKMatch: true,
-  awaitingRecompute: false, availabilityCurrent: true, availabilityVerifiedAt: new Date("2026-11-26T02:00:00Z"),
+  awaitingRecompute: false, confirmedClosed: false, availabilityCurrent: true, availabilityVerifiedAt: new Date("2026-11-26T02:00:00Z"),
 };
 
 describe("blind review rules", () => {
@@ -44,7 +46,8 @@ describe("blind review rules", () => {
     ["ALREADY_LABELLED", { labelled: true }], ["SAME_POSTING_AS_SAVED_APPLIED_OR_LABELLED", { samePostingAsTaken: true }],
     ["LINKEDIN", { linkedIn: true }], ["AWAITING_CONTENT", { contentComplete: false }], ["NO_POSTING_LINK", { hasPostingLink: false }],
     ["NO_CURRENT_TOPK_MATCH", { currentTopKMatch: false }], ["AWAITING_RECOMPUTE", { awaitingRecompute: true }],
-    ["NOT_CONFIRMED_OPEN", { availabilityCurrent: false }],
+    ["CONFIRMED_CLOSED", { confirmedClosed: true, availabilityCurrent: false }],
+    ["NOT_VERIFIED_OPEN_ON_DRAW_DATE", { availabilityCurrent: false }],
     ["NOT_VERIFIED_OPEN_ON_DRAW_DATE", { availabilityVerifiedAt: new Date("2026-11-25T02:00:00Z") }],
     ["NOT_VERIFIED_OPEN_ON_DRAW_DATE", { availabilityVerifiedAt: null }],
   ])("%s", (reason, change) => {
@@ -54,10 +57,14 @@ describe("blind review rules", () => {
 
   it("recognises LinkedIn links, including wrapped ones, and not look-alikes", () => {
     for (const url of ["https://www.linkedin.com/jobs/view/1", "linkedin.com/jobs/view/1", "https://lnkd.in/x",
-      "https://www.google.com/url?q=https%3A%2F%2Fsg.linkedin.com%2Fjobs%2Fview%2F1"]) {
+      "https://www.google.com/url?q=https%3A%2F%2Fsg.linkedin.com%2Fjobs%2Fview%2F1",
+      "https://click.example.test/r?u=www.linkedin.com%2Fjobs%2Fview%2F1", "https://click.example.test/r?u=linkedin.com/jobs/view/1",
+      "https://click.example.test/r/www.linkedin.com/jobs/view/1", "https://click.example.test/r/https%3A%2F%2Flinkedin.com%2Fjobs%2F1",
+      "https://click.example.test/r?u=https%253A%252F%252Fwww.linkedin.com%252Fjobs", "https://click.example.test/r#//lnkd.in/x"]) {
       expect(isLinkedInLink(url), url).toBe(true);
     }
-    for (const url of ["https://notlinkedin.com/jobs/1", "https://linkedin.com.example.test/x", "https://example.test/linkedin.com", "", null]) {
+    for (const url of ["https://notlinkedin.com/jobs/1", "https://linkedin.com.example.test/x", "https://example.test/linkedin.com",
+      "https://example.test/r?utm_source=linkedin.com", "https://example.test/r/notlinkedin.com/jobs", "", null]) {
       expect(isLinkedInLink(url), String(url)).toBe(false);
     }
   });
@@ -66,9 +73,41 @@ describe("blind review rules", () => {
     const cell = markdownText("Lead\r\n| 99 | <img src=x onerror=1> [click](javascript:1) ![i](u) **b** `c` https://evil.test www.evil.test a@b.test \\");
     expect(cell).not.toMatch(/[\r\n<>@]/);
     expect(cell).not.toMatch(/(?<!\\)[|[\]()*`!]/);
-    expect(cell).not.toContain("://");
     expect(cell).not.toMatch(/www\./i);
     expect(cell.endsWith("\\\\")).toBe(true);
+  });
+
+  it("leaves nothing for a linkifier to find in the text as rendered", () => {
+    // What a Markdown viewer shows for the cell: entities and backslash escapes decoded. Linkifiers run over that text.
+    const rendered = (markdown: string) => markdown.replace(
+      /\\([!-/:-@[-`{-~])|&#(\d+);|&(amp|lt|gt);/g,
+      (_, escaped?: string, code?: string, name?: string) =>
+        escaped ?? (code ? String.fromCodePoint(Number(code)) : ({ amp: "&", lt: "<", gt: ">" } as Record<string, string>)[name!]!),
+    );
+    // linkify-it is the linkifier the mail parser dependency ships; fuzzy domains are off because GFM does not link them.
+    const LinkifyIt = createRequire(import.meta.url)("linkify-it");
+    const linkify = new LinkifyIt({ fuzzyLink: false, fuzzyEmail: true });
+    const found = (text: string): string[] => [
+      ...((linkify.match(text) ?? []) as Array<{ raw: string }>).map((m) => m.raw),
+      ...(text.match(/www\.[a-z0-9-]|(?:mailto|xmpp):[a-z0-9]|\/\/[a-z0-9]|[a-z0-9._+-]+@[a-z0-9-]+\./gi) ?? []),
+    ];
+    for (const hostile of ["a@b.test", "mailto:a@b.test", "MAILTO:someone", "xmpp:a@b.test/room", "//evil.test/x", "////evil.test",
+      "https://evil.test", "ftp://evil.test", "www.evil.test", "a\u00ad@\u200bb.test"]) {
+      expect(found(hostile.replace(/\p{Cf}/gu, "")).length, `control: ${hostile}`).toBeGreaterThan(0);
+      expect(found(rendered(markdownText(hostile))), hostile).toEqual([]);
+    }
+  });
+
+  it("strips every format character", () => {
+    expect(markdownText("a\u00adb\u200bc\u2060d\u{e0041}e\u061cf\u180eg\u202eh\ufeffi")).toBe("abcdefghi");
+  });
+
+  it("gives no posting keys without a known company name", () => {
+    const record = { title: "Role", location: "Singapore", urls: ["https://example.test/1"], identityHashes: ["x:1"] };
+    for (const company of [null, "", "Unknown", "Unknown Company", "https://logo.example.test/a.png"]) {
+      expect(postingKeys({ ...record, company }), String(company)).toEqual([]);
+    }
+    expect(postingKeys({ ...record, company: "Acme" }).length).toBeGreaterThan(0);
   });
 
   it("accepts only http and https links, encoded", () => {
@@ -100,7 +139,7 @@ describe("blind review draw", () => {
   it("draws from exactly 100, and refuses 99 with the cause and the counts instead of a smaller sample", () => {
     expect(drawBlindReview(poolOf(100), "seed")).toHaveLength(30);
     expect(() => drawBlindReview(poolOf(99), "seed")).toThrow(
-      /99 eligible jobs, 100 required.*sample is not reduced.*12 jobs pass every other rule but were not confirmed open on 2026-11-26 \(Asia\/Singapore\)/,
+      /99 eligible jobs, 100 required.*sample is not reduced.*12 more postings pass every other rule.*not confirmed open on 2026-11-26 \(Asia\/Singapore\)/,
     );
     expect(() => drawBlindReview(poolOf(99), "seed")).toThrow(/LINKEDIN=7/);
   });
@@ -144,7 +183,15 @@ describe("blind review draw", () => {
     expect(() => requireReplayDatabaseUrl("  ")).toThrow(/not set/);
     expect(() => requireReplayDatabaseUrl("secret-token")).toThrow(/^REPLAY_DATABASE_URL is not a valid URL\.$/);
     expect(() => requireReplayDatabaseUrl("https://example.test/db")).toThrow(/not a postgres URL/);
-    expect(() => requireReplayDatabaseUrl("postgres://u:p@ep-damp-glade-az7npbae.c-3.ap-southeast-1.aws.neon.tech/neondb")).toThrow(/known production host/);
+    for (const production of STAGE1_3_STAGING_IDENTITY_EXPECTATIONS.knownProductionHostnames) {
+      const [first, ...rest] = production.split(".");
+      for (const host of [production, [`${first}-pooler`, ...rest].join("."), `${production.toUpperCase()}.`]) {
+        expect(() => requireReplayDatabaseUrl(`postgres://u:p@${host}/db`)).toThrow(/known production host/);
+      }
+    }
+    for (const query of ["host=db.example.test", "HOST=db.example.test", "hostaddr=10.0.0.1"]) {
+      expect(() => requireReplayDatabaseUrl(`postgres://u:p@localhost/db?${query}`)).toThrow(/host in its query/);
+    }
     expect(requireReplayDatabaseUrl(" postgres://u:p@localhost:5432/db ")).toBe("postgres://u:p@localhost:5432/db");
   });
 });

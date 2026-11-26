@@ -12,7 +12,8 @@ export interface ReplayTargetIdentity {
 
 /**
  * Checks REPLAY_DATABASE_URL before any connection is opened: it must be set, be a postgres URL and not name a known
- * production host. The connected branch is still checked by requireApprovedReplayTarget. Throws without echoing the URL.
+ * production host (direct or "-pooler" form) or carry a host override in its query. The connected branch is still checked by
+ * requireApprovedReplayTarget. Throws without echoing the URL.
  */
 export function requireReplayDatabaseUrl(value: string | undefined): string {
   const url = value?.trim();
@@ -26,8 +27,13 @@ export function requireReplayDatabaseUrl(value: string | undefined): string {
   if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
     throw new Error('REPLAY_DATABASE_URL is not a postgres URL.');
   }
-  const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
-  if (!host || STAGE1_3_STAGING_IDENTITY_EXPECTATIONS.knownProductionHostnames.includes(host)) {
+  // The driver lets a query parameter replace the host the URL appears to name.
+  if ([...parsed.searchParams.keys()].some((key) => /^host(addr)?$/i.test(key))) {
+    throw new Error('Refusing to connect: REPLAY_DATABASE_URL must not set the host in its query.');
+  }
+  const endpoint = (name: string) => name.toLowerCase().replace(/\.$/, '').replace(/^([^.]+)-pooler(?=\.|$)/, '$1');
+  const host = endpoint(decodeURIComponent(parsed.hostname));
+  if (!host || STAGE1_3_STAGING_IDENTITY_EXPECTATIONS.knownProductionHostnames.map(endpoint).includes(host)) {
     throw new Error('Refusing to connect: REPLAY_DATABASE_URL has no host or names a known production host.');
   }
   return url;
