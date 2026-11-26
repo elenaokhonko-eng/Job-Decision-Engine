@@ -381,7 +381,7 @@ describe.skipIf(skipReal)("lane routing against a gate outcome that changed afte
     expect(await taskRow(taskId)).toMatchObject({ status: "COMPLETED", repair_action: "SUPERSEDED_BY_GATE_OUTCOME" });
   });
 
-  it("guard: MATCH_PROFILE_EVIDENCE on a gate-rejected job is unchanged (silent no-op completion, no match run, no decision task)", async () => {
+  it("guard: MATCH_PROFILE_EVIDENCE on a gate-rejected job is a recorded no-op (MATCH_NOT_APPLICABLE, no match run, no decision task)", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const job = await insertJob("LANE_ROUTED");
@@ -397,7 +397,7 @@ describe.skipIf(skipReal)("lane routing against a gate outcome that changed afte
     const summary = await runWorker("MATCH_PROFILE_EVIDENCE", { runDeterministicMatcher } as never);
     expect(summary).toMatchObject({ claimed: 1, completed: 1, failed: 0, deadLettered: 0 });
     expect(runDeterministicMatcher).not.toHaveBeenCalled();
-    expect(await taskRow(enqueued.taskId)).toMatchObject({ status: "COMPLETED", repair_action: null });
+    expect(await taskRow(enqueued.taskId)).toMatchObject({ status: "COMPLETED", repair_action: "MATCH_NOT_APPLICABLE:HARD_REJECTED" });
     expect((await db().query(`SELECT 1 FROM match_runs WHERE canonical_job_id = $1`, [job.canonicalJobId])).rows).toEqual([]);
     expect((await db().query(`SELECT 1 FROM pipeline_tasks WHERE task_type = 'DECIDE_RECOMMENDATION' AND payload->>'job_version_id' = $1`, [job.jobVersionId])).rows).toEqual([]);
     expect((await jobRow(job.canonicalJobId)).processing_state).toBe("HARD_REJECTED");

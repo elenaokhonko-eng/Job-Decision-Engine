@@ -12,7 +12,7 @@ import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.j
 import { LANE_ROUTER_RULE_VERSION } from "../pipeline/laneRouter.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
 import { routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
-import { OUTCOME_CONFLICT_REPAIR_ACTION, deciderSeedableSql } from "./seedQueryScope.js";
+import { OUTCOME_CONFLICT_REPAIR_ACTION, deciderReachableSql, deciderSeedableSql } from "./seedQueryScope.js";
 import { ROUTABLE_VERIFICATION_SQL, supersededProfileMatchSql } from "./stageTaskWorker.js";
 import { findTasksCompletedWithoutResult } from "./completedWithoutResult.js";
 
@@ -173,36 +173,6 @@ export async function terminalOutcomeConflicts(db: Queryable, workspaceId: strin
   return result("terminal_outcome_conflict", rows.map((row) => row.id));
 }
 
-/**
- * Live jobs (alias c) the DECIDE seed can reach AND the DECIDE handler can stamp: an outcome, a complete posting with source
- * content, a state past lane routing, and either a state the seed always selects (HARD_REJECTED, NEEDS_VERIFICATION,
- * ROUTING_DEFERRED) or a current completed match run. Equal to the seed's own WHERE (stageTaskWorker.ts), so the check can
- * be zero after a drain. Jobs outside it (UNMATCHED without a match run, LANE_ROUTED without a match) are reported by
- * `reportedDecisionCounts`, never failed.
- */
-const DECIDER_REACHABLE_SQL = `${deciderSeedableSql("c")}
-             AND c.recommendation_outcome IS NOT NULL
-             AND c.latest_job_version_id IS NOT NULL
-             AND c.description_quality_status = 'COMPLETE'
-             AND ${sourceContentEvidencePredicate("c.workspace_id", "c.latest_job_version_id")}
-             AND (
-               COALESCE(c.processing_state, c.processing_status) IN ('HARD_REJECTED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED')
-               OR EXISTS (
-                 SELECT 1
-                   FROM job_versions target_jv
-                   JOIN profile_versions current_profile
-                     ON current_profile.workspace_id = target_jv.workspace_id AND current_profile.status = 'ACTIVE'
-                   JOIN match_runs current_match
-                     ON current_match.workspace_id = c.workspace_id AND current_match.canonical_job_id = c.id
-                    AND current_match.id = c.latest_match_run_id AND current_match.job_version_id = target_jv.id
-                    AND current_match.profile_version_id = current_profile.id
-                    AND current_match.requirement_set_id = target_jv.active_requirement_set_id
-                    AND current_match.job_content_hash = target_jv.content_hash
-                    AND current_match.context_fingerprint IS NOT NULL AND current_match.status = 'COMPLETED'
-                  WHERE target_jv.workspace_id = c.workspace_id AND target_jv.id = c.latest_job_version_id
-               )
-             )`;
-
 export interface ReportedDecisionCounts {
   /** Live jobs with an outcome and a stale or unstamped latest decision that no seed reaches, by state. Never an error. */
   readonly unseeded_stale_decisions: Record<string, number>;
@@ -226,7 +196,7 @@ export async function reportedDecisionCounts(db: Queryable, workspaceId: string)
     return Object.fromEntries(rows.map((row) => [row.state, row.n]));
   };
   return {
-    unseeded_stale_decisions: await count(`AND ${deciderVersionRefreshSql("c")} AND NOT (${DECIDER_REACHABLE_SQL})`),
+    unseeded_stale_decisions: await count(`AND ${deciderVersionRefreshSql("c")} AND NOT (${deciderReachableSql("c")})`),
     outcome_without_latest_decision: await count("AND c.latest_deterministic_decision_id IS NULL"),
   };
 }
@@ -305,7 +275,7 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
     sql: `SELECT c.id::text AS id
             FROM canonical_jobs c
            WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
-             AND ${DECIDER_REACHABLE_SQL}
+             AND ${deciderReachableSql("c")}
              AND ${deciderVersionRefreshSql("c")}`,
     params: [],
   };

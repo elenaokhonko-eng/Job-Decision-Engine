@@ -30,6 +30,7 @@ import {
   isAiEvaluationOutcome,
   profileMatchSupersededSql,
   uniqueActiveProfileSql,
+  unmatchedParkedByOtherMatcherSql,
 } from "../pipeline/profileMatchCurrency.js";
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
@@ -51,6 +52,8 @@ import {
 } from "./pipelineWorkerLanes.js";
 import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
 import { OUTCOME_CONFLICT_REPAIR_ACTION, applyLiveJobScope, deciderSeedableSql, scopeSeedQuery } from "./seedQueryScope.js";
+import { decidableJobVersionSql } from "./completedWithoutResult.js";
+import { decisionNotStampable, matchNotApplicable } from "./designedNoOps.js";
 import { deciderVersionReassessmentReason, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import {
   pipelineTaskStageVersion,
@@ -139,9 +142,14 @@ export const SUPERSEDED_LANE_ROUTING_SQL = `(
  */
 // A function, not a constant: the matcher policy version (SCORING_POLICY) is read when the SQL is built,
 // the same moment the matcher and task currentness read it, so they cannot disagree about the active policy.
+// Second branch: an UNMATCHED job parked by an older matcher policy (see unmatchedParkedByOtherMatcherSql); the seed and the
+// matcher stale-stage check share this one function, so they cannot disagree.
 export const supersededProfileMatchSql = (): string => `(
-  ${eligibleRoutedJobSql("c", PROFILE_REMATCH_OUTCOMES)}
-  AND ${profileMatchSupersededSql("c", "mr")}
+  (
+    ${eligibleRoutedJobSql("c", PROFILE_REMATCH_OUTCOMES)}
+    AND ${profileMatchSupersededSql("c", "mr")}
+  )
+  OR ${unmatchedParkedByOtherMatcherSql("c", "mr")}
 )`;
 
 export type PipelineStageTaskType = (typeof PIPELINE_STAGE_TASK_TYPES)[number];
@@ -542,16 +550,66 @@ class TerminalOutcomeConflictError extends Error {
   }
 }
 
+/** A DECIDE task for the current version of a HARD_REJECTED or UNMATCHED job whose version the decider cannot select. */
+async function isAwaitingContentTerminalDecide(
+  task: ClaimedPipelineTask,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+): Promise<boolean> {
+  const jobVersionId = optionalStringPayload(task, "job_version_id");
+  if (!jobVersionId) return false;
+  const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
+  if (state.latestJobVersionId !== jobVersionId) return false;
+  if (!["HARD_REJECTED", "UNMATCHED"].includes(state.processingState || "")) return false;
+  return !(await jobVersionIsDecidable(clientOrPool, ctx, jobVersionId));
+}
+
+/** The job's latest match run is `matchRunId` and it parked the job UNMATCHED under another matcher policy version. */
+async function isUnmatchedParkedByOtherMatcher(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+  matchRunId: string,
+): Promise<boolean> {
+  const { rows } = await clientOrPool.query<{ parked: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM canonical_jobs c
+         JOIN match_runs mr ON mr.workspace_id = c.workspace_id AND mr.id = c.latest_match_run_id
+        WHERE c.workspace_id = $1 AND c.latest_job_version_id = $2::uuid AND mr.id = $3::uuid
+          AND ${unmatchedParkedByOtherMatcherSql("c", "mr")}) AS parked`,
+    [ctx.workspaceId, jobVersionId, matchRunId],
+  );
+  return Boolean(rows[0]?.parked);
+}
+
 async function jobVersionHasDecision(
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
   jobVersionId: string,
+  /** Only a decision stamped under this decider version counts (a decider-version reassessment). */
+  deciderVersion?: string,
 ): Promise<boolean> {
   const { rows } = await clientOrPool.query(
-    `SELECT 1 FROM deterministic_decisions WHERE workspace_id = $1 AND job_version_id = $2 LIMIT 1`,
-    [ctx.workspaceId, jobVersionId],
+    `SELECT 1 FROM deterministic_decisions
+      WHERE workspace_id = $1 AND job_version_id = $2 AND ($3::text IS NULL OR decider_version = $3) LIMIT 1`,
+    [ctx.workspaceId, jobVersionId, deciderVersion ?? null],
   );
   return rows.length > 0;
+}
+
+/** True when the decider can select the version: a complete description with source content evidence. */
+async function jobVersionIsDecidable(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<boolean> {
+  const { rows } = await clientOrPool.query<{ decidable: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM job_versions v JOIN canonical_jobs c ON c.workspace_id = v.workspace_id AND c.id = v.canonical_job_id
+        WHERE v.workspace_id = $1 AND v.id = $2 AND ${decidableJobVersionSql("c", "v")}) AS decidable`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return Boolean(rows[0]?.decidable);
 }
 
 async function enqueueStageTaskResult(
@@ -2079,7 +2137,9 @@ async function jobVersionHasCompletedRequirementsExtraction(
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
   jobVersionId: string,
-  runType: "DETERMINISTIC" | "LLM_QUOTED"
+  runType: "DETERMINISTIC" | "LLM_QUOTED",
+  /** When set, the active requirement set must have been made by this deterministic extractor version. */
+  extractorVersion?: string,
 ): Promise<boolean> {
   const { rows } = await (clientOrPool as QueryClient).query<{ exists: boolean }>(
     `SELECT EXISTS (
@@ -2099,8 +2159,14 @@ async function jobVersionHasCompletedRequirementsExtraction(
          AND jv.id = $2
          AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
          AND ps.stage_status = 'COMPLETED'
+         AND ($4::text IS NULL OR EXISTS (
+           SELECT 1 FROM requirement_sets active_set
+             JOIN requirement_set_identities active_identity
+               ON active_identity.workspace_id = active_set.workspace_id AND active_identity.id = active_set.requirement_identity_id
+            WHERE active_set.workspace_id = jv.workspace_id AND active_set.id = jv.active_requirement_set_id
+              AND active_identity.deterministic_extractor_version = $4))
        ) AS exists`,
-    [ctx.workspaceId, jobVersionId, runType]
+    [ctx.workspaceId, jobVersionId, runType, extractorVersion ?? null]
   );
   return Boolean(rows[0]?.exists);
 }
@@ -3185,6 +3251,7 @@ async function executeStageTask(
   onSuccessorTaskCreated: () => void,
   onTaskRerouted: () => void,
   onStampOnly: () => void = () => undefined,
+  onDesignedNoOp: (repairAction: string) => void = () => undefined,
 ): Promise<string | void> {
   if (taskType === "RECHECK_AVAILABILITY") {
     // The read result (verdict, counters, next read) is recorded by the task itself; it has no successor stage.
@@ -3436,6 +3503,11 @@ async function executeStageTask(
       // retry/manual-review noise for a job that cannot advance.
       return;
     }
+    // A version-stale active set with a completed run is treated as cached by the extractor unless it is told to reprocess, so a
+    // plain task (a state outside the stale seed's list) would leave the old set in place: force the re-extraction.
+    const staleActiveSet = !reprocess && !(await jobVersionHasCompletedRequirementsExtraction(
+      clientOrPool, ctx, jobVersionId, "DETERMINISTIC", DETERMINISTIC_EXTRACTOR_VERSION,
+    )) && (await jobVersionHasCompletedRequirementsExtraction(clientOrPool, ctx, jobVersionId, "DETERMINISTIC"));
     const summary = await dependencies.runRequirementsExtraction(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
@@ -3443,19 +3515,24 @@ async function executeStageTask(
       quotedMode: "deterministic_only",
       failFastOnQuotedProviderFailure: false,
       ignoreRetryWindow: true,
-      reprocess,
+      reprocess: reprocess || staleActiveSet,
     });
     if (summary.errors > 0) {
       throw new Error(`Deterministic requirement extraction failed for job_version_id=${jobVersionId}.`);
     }
+    // The task is done only when the CURRENT extractor version made the active requirement set: an older-version run that the
+    // extractor left in place is not a result of this task (it would hide a stale extraction behind a completed task).
     const hasCompletedDeterministicRun = await jobVersionHasCompletedRequirementsExtraction(
       clientOrPool,
       ctx,
       jobVersionId,
-      "DETERMINISTIC"
+      "DETERMINISTIC",
+      DETERMINISTIC_EXTRACTOR_VERSION,
     );
     if (!hasCompletedDeterministicRun) {
-      throw new Error(`No completed deterministic requirement extraction found for job_version_id=${jobVersionId}.`);
+      throw new Error(
+        `No completed deterministic requirement extraction by extractor ${DETERMINISTIC_EXTRACTOR_VERSION} found for job_version_id=${jobVersionId}.`,
+      );
     }
     return;
   }
@@ -3717,10 +3794,20 @@ async function executeStageTask(
       // ROUTING_DEFERRED and NEEDS_VERIFICATION intentionally have no profile
       // match to perform. Complete stale tasks without converting a holding or
       // verification state into a retry/manual-review failure.
+      onDesignedNoOp(matchNotApplicable(matchState.processingState || "UNKNOWN_STATE"));
       return;
     }
+    const unmatchedSupersededMatchRunId = matchState.processingState === "UNMATCHED"
+      ? optionalStringPayload(task, "superseded_match_run_id")
+      : undefined;
     if (matchState.processingState === "UNMATCHED") {
-      return;
+      // An UNMATCHED job is re-matched only for an explicit re-match of a run the matcher made under an older policy version
+      // (the seed's superseded_match_run_id) while that run is still the job's latest. Any other UNMATCHED job (parked by the
+      // current matcher, or a POLICY_NO_MATCH job the lane router owns) has no match to perform.
+      if (!unmatchedSupersededMatchRunId || !(await isUnmatchedParkedByOtherMatcher(clientOrPool, ctx, jobVersionId, unmatchedSupersededMatchRunId))) {
+        onDesignedNoOp(matchNotApplicable("UNMATCHED"));
+        return;
+      }
     }
     // A MATCHED job is done only when its latest match is current for the active profile. After
     // the active profile changes, a MATCHED job still points at the superseded profile's match and
@@ -3795,6 +3882,13 @@ async function executeStageTask(
     }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (state.processingState === "UNMATCHED") {
+      if (unmatchedSupersededMatchRunId && await isUnmatchedParkedByOtherMatcher(clientOrPool, ctx, jobVersionId, unmatchedSupersededMatchRunId)) {
+        // The matcher select equals the seed predicate (unmatchedParkedByOtherMatcherSql), so it can skip the job only if it
+        // changed between the seed and the run. The job was UNMATCHED and stays so: a recorded close, never a failure of a
+        // job that carries a valid outcome.
+        onDesignedNoOp(matchNotApplicable("UNMATCHED_NOT_SELECTABLE"));
+        return;
+      }
       return;
     }
     if (state.processingState === "MATCHED") {
@@ -3835,19 +3929,28 @@ async function executeStageTask(
       // decision task can survive a retry or historical replay while the job
       // is still in the pre-lane funnel; it is not a dependency failure and
       // must not create a permanent blocked/manual-review record.
+      onDesignedNoOp(decisionNotStampable("PRE_ROUTING_STATE"));
       return;
     }
+    if (decisionState.processingState === "MANUALLY_REMOVED") {
+      // The user removed the job while its decision task was pending: nothing to decide, and not a failure.
+      onDesignedNoOp(decisionNotStampable("JOB_REMOVED"));
+      return;
+    }
+    const decidePayload = (task.payload || {}) as Record<string, unknown>;
+    // Only a decider-version reassessment bypasses the terminal no-op: other enqueuers (a rematch successor, a readiness
+    // refresh) set reprocess_existing_state too and must not re-run the decider on a terminal job that already has a decision.
+    const reassessment = typeof decidePayload.reassessment_reason === "string" && decidePayload.reassessment_reason.startsWith("DECIDER_VERSION:");
     let terminalWithOutcome = false;
     if (decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) {
       // A terminal job with a recorded outcome needs no decision run, but only when a decision row already exists for this
       // version (the "completed without result" check expects one) and the task is not a reassessment: a decider-version or
       // readiness reassessment must stamp a decision under the current decider_version. The decider never changes the job's
       // processing state, so a HARD_REJECTED job stays HARD_REJECTED.
-      // Only a decider-version reassessment bypasses the no-op: other enqueuers (a rematch successor, a readiness refresh)
-      // set reprocess_existing_state too and must not re-run the decider on a terminal job that already has a decision.
-      const payload = (task.payload || {}) as Record<string, unknown>;
-      const reassessment = typeof payload.reassessment_reason === "string" && payload.reassessment_reason.startsWith("DECIDER_VERSION:");
-      if (!reassessment && await jobVersionHasDecision(clientOrPool, ctx, jobVersionId)) return;
+      if (!reassessment && await jobVersionHasDecision(clientOrPool, ctx, jobVersionId)) {
+        onDesignedNoOp(decisionNotStampable("TERMINAL_HAS_DECISION"));
+        return;
+      }
       terminalWithOutcome = true;
     }
     const matchDependentStates = new Set([
@@ -3897,6 +4000,34 @@ async function executeStageTask(
     if (summary.errors > 0) {
       throw new Error(`Recommendation decider reported ${summary.errors} error(s).`);
     }
+    // Completion guard: the task is a success only when a decision row exists for this version (stamped under the current
+    // decider version for a reassessment), or the decider could not select the job by design, recorded as a repair_action. A
+    // decider run that wrote nothing for a job it should have decided is a failure, never a silent completion.
+    if (!(await jobVersionHasDecision(clientOrPool, ctx, jobVersionId, reassessment ? DECIDER_VERSION : undefined))) {
+      // The job was removed or archived between the claim and the decider run (the decider selects live jobs only).
+      const racedState = await (clientOrPool as QueryClient).query<{ archived: boolean; removed: boolean }>(
+        `SELECT archived_at IS NOT NULL AS archived, COALESCE(processing_state, processing_status) = 'MANUALLY_REMOVED' AS removed
+           FROM canonical_jobs WHERE workspace_id = $1 AND latest_job_version_id = $2::uuid`,
+        [ctx.workspaceId, jobVersionId],
+      );
+      if (racedState.rows[0]?.removed) {
+        onDesignedNoOp(decisionNotStampable("JOB_REMOVED"));
+        return;
+      }
+      if (racedState.rows[0]?.archived) {
+        onDesignedNoOp(decisionNotStampable("JOB_ARCHIVED"));
+        return;
+      }
+      if (!(await jobVersionIsDecidable(clientOrPool, ctx, jobVersionId))) {
+        onDesignedNoOp(decisionNotStampable("AWAITING_CONTENT_NOT_DECIDABLE"));
+        return;
+      }
+      if (isUnmatched && !(await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId, { requireCurrentMatcherRules: false }))) {
+        onDesignedNoOp(decisionNotStampable("NO_CURRENT_MATCH_RUN"));
+        return;
+      }
+      throw new Error(`Recommendation decider wrote no decision for decidable job_version_id=${jobVersionId}.`);
+    }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (!state.recommendationOutcome) {
       throw new Error(`Recommendation decider left job_version_id=${jobVersionId} without recommendation_outcome.`);
@@ -3921,6 +4052,8 @@ interface PipelineTaskRunMetrics {
   rerouted: boolean;
   /** A version-refresh gate stamp: the task completes without any successor enqueue. */
   stampOnly?: boolean;
+  /** A designed no-op: the task completes without a stage result and records why (src/tasks/designedNoOps.ts). */
+  noOpRepairAction?: string;
 }
 
 /** Job states a deterministic gate decision leaves a job in; lane routing cannot act on them. */
@@ -4041,6 +4174,16 @@ async function processClaimedTask(
         return;
       }
     }
+    if (taskType === "DECIDE_RECOMMENDATION" && (await isAwaitingContentTerminalDecide(task, clientOrPool, ctx))) {
+      // A terminal job whose version the decider cannot select (incomplete description or no source content) is awaiting
+      // content: its stored outcome is information only. Close with an explicit recorded reason, not a blocked dependency and not a
+      // silent no-result; the completed-without-result check and the reopen rule tell it from a lost result by this code.
+      await completePipelineTaskAndRun(task, clientOrPool, {
+        context: ctx,
+        repairAction: decisionNotStampable("AWAITING_CONTENT_NOT_DECIDABLE"),
+      });
+      return;
+    }
     let retrievedObservationId: Awaited<ReturnType<typeof executeStageTask>>;
     try {
       retrievedObservationId = await executeStageTask(
@@ -4053,6 +4196,7 @@ async function processClaimedTask(
         () => { metrics.successorTasksCreated += 1; },
         () => { metrics.rerouted = true; },
         () => { metrics.stampOnly = true; },
+        (repairAction) => { metrics.noOpRepairAction = repairAction; },
       );
     } catch (error) {
       if (!(error instanceof TerminalOutcomeConflictError)) throw error;
@@ -4073,6 +4217,7 @@ async function processClaimedTask(
     }
     await completePipelineTaskAndRun(task, clientOrPool, {
       context: ctx,
+      ...(metrics.noOpRepairAction ? { repairAction: metrics.noOpRepairAction } : {}),
       afterComplete: async (transactionClient) => {
         if (!metrics.rerouted && !metrics.stampOnly) {
           metrics.successorTasksCreated += await maybeEnqueueAfterTask(
@@ -4525,3 +4670,6 @@ export async function runPipelineStageTaskWorker(
     }
   }
 }
+
+/** The production stage dependencies, for tests that replace a single stage. */
+export const defaultPipelineStageWorkerDependencies: PipelineStageWorkerDependencies = defaultDependencies;

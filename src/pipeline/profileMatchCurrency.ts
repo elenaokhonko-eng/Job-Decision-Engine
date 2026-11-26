@@ -150,6 +150,53 @@ export function profileMatchSupersededSql(canonicalAlias: string, matchAlias: st
 }
 
 /**
+ * SQL predicate: an UNMATCHED job that was parked by the matcher (routing_disposition ROUTED: lane routing found a lane, a
+ * match run then failed a mandatory qualification) whose latest match run was made under another matcher policy version, for a
+ * job the matcher can select. A version change reopens work for every stage (a rule that no longer fails the job removes the
+ * parking), so the job is re-matched once under the current rules. A job parked by the CURRENT matcher policy stays UNMATCHED and
+ * is not selected. Not a POLICY_NO_MATCH job (the lane router owns those: routing_disposition is not ROUTED, there is no match
+ * run). Selectable means what the matcher and its handler need to finish: a lane, a complete description with source content,
+ * and an active requirement set whose deterministic extraction completed. The re-match never replays hard gates or lane
+ * routing and changes neither.
+ */
+export function unmatchedParkedByOtherMatcherSql(
+  canonicalAlias: string,
+  matchAlias: string,
+  /** The caller has already resolved the unique ACTIVE profile (the matcher does and throws without one). */
+  options: { activeProfileResolved?: boolean } = {},
+): string {
+  const c = alias(canonicalAlias, "canonical alias");
+  const mr = alias(matchAlias, "match alias");
+  return `(
+    ${c}.archived_at IS NULL
+    AND COALESCE(${c}.processing_state, ${c}.processing_status) = 'UNMATCHED'
+    AND ${c}.routing_disposition = 'ROUTED'
+    AND ${c}.primary_lane IS NOT NULL
+    AND ${c}.primary_lane <> 'UNCLASSIFIED'
+    AND ${mr}.id IS NOT NULL
+    AND ${mr}.id = ${c}.latest_match_run_id
+    AND ${mr}.job_version_id = ${c}.latest_job_version_id
+    ${options.activeProfileResolved ? "" : `AND ${uniqueActiveProfileSql(c)} IS NOT NULL`}
+    AND ${mr}.policy_version IS DISTINCT FROM '${currentMatcherPolicyVersion()}'
+    AND ${c}.description_quality_status = 'COMPLETE'
+    AND ${sourceContentEvidencePredicate(`${c}.workspace_id`, `${c}.latest_job_version_id`)}
+    AND EXISTS (
+      SELECT 1
+      FROM job_versions parked_jv
+      JOIN job_version_pipeline_state parked_ps
+        ON parked_ps.workspace_id = parked_jv.workspace_id AND parked_ps.job_version_id = parked_jv.id
+       AND parked_ps.current_stage = 'REQUIREMENTS_EXTRACTED' AND parked_ps.stage_status = 'COMPLETED'
+      JOIN requirement_extraction_runs parked_rer
+        ON parked_rer.workspace_id = parked_jv.workspace_id AND parked_rer.job_version_id = parked_jv.id
+       AND parked_rer.run_type = 'DETERMINISTIC' AND parked_rer.status = 'COMPLETED'
+       AND parked_rer.requirement_set_id = parked_jv.active_requirement_set_id
+      WHERE parked_jv.workspace_id = ${c}.workspace_id AND parked_jv.id = ${c}.latest_job_version_id
+        AND parked_jv.active_requirement_set_id IS NOT NULL
+    )
+  )`;
+}
+
+/**
  * SQL predicate: the latest match run (alias `mr`) is current for the latest job version (alias
  * `jv`) and the unique active profile. Same conditions as the explanation enqueuer's match join.
  */

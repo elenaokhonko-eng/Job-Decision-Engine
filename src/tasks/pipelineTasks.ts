@@ -4,6 +4,8 @@ import { z } from "zod";
 import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { archivedJobForPipelineTask, pipelineTaskTargetsArchivedJobSql } from "./jobArchiveGuard.js";
+import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
+import { OUTCOME_CONFLICT_REPAIR_ACTION, deciderReachableSql } from "./seedQueryScope.js";
 import {
   createTaskIntentV2,
   TaskIntentV2Schema,
@@ -261,6 +263,53 @@ export async function enqueuePipelineTask(
         inserted: false,
         reactivated: reactivated.rows.length > 0,
       };
+    }
+
+    // A decider-version reassessment that completed WITHOUT stamping a decision under the current decider version is a lost
+    // result, not a discharged obligation: the same task identity would otherwise keep the closed row forever. Reopen it,
+    // but only for a job the DECIDE seed and handler can stamp (deciderReachableSql: one predicate with the seed and the
+    // zero check) and never an outcome conflict closed under this same decider version (it would conflict again; a version
+    // bump or reopenOutcomeConflictTasks resolves it). Idempotent: a reopened row is PENDING, so a repeat enqueue is a no-op.
+    if (existing.rows[0].status === "COMPLETED" && input.taskType === "DECIDE_RECOMMENDATION") {
+      const reopened = await (client as QueryClient).query<{ id: string }>(
+        `
+          UPDATE pipeline_tasks t
+          SET status = 'PENDING',
+              available_at = NOW(),
+              lease_id = NULL,
+              lease_expires_at = NULL,
+              heartbeat_at = NULL,
+              claimed_by = NULL,
+              attempt_count = 0,
+              last_error = NULL,
+              blocked_on = NULL,
+              blocked_reason = NULL,
+              repair_action = NULL,
+              completed_at = NULL,
+              updated_at = NOW()
+          WHERE t.workspace_id = $1
+            AND t.id = $2
+            AND t.status = 'COMPLETED'
+            AND t.task_type = 'DECIDE_RECOMMENDATION'
+            AND LEFT(COALESCE(t.payload->>'reassessment_reason', ''), 16) = 'DECIDER_VERSION:'
+            AND NOT (COALESCE(t.repair_action, '') = '${OUTCOME_CONFLICT_REPAIR_ACTION}'
+                     AND COALESCE(t.payload->'outcome_conflict'->>'decider_version', '') = $3)
+            AND NOT EXISTS (
+              SELECT 1 FROM deterministic_decisions stamped
+               WHERE stamped.workspace_id = t.workspace_id AND stamped.job_version_id::text = t.payload->>'job_version_id'
+                 AND stamped.decider_version = $3)
+            AND EXISTS (
+              SELECT 1 FROM canonical_jobs c
+               WHERE c.workspace_id = t.workspace_id AND c.latest_job_version_id::text = t.payload->>'job_version_id'
+                 AND c.archived_at IS NULL AND c.is_test_fixture IS NOT TRUE
+                 AND ${deciderReachableSql("c")})
+          RETURNING t.id
+        `,
+        [ctx.workspaceId, existing.rows[0].id, DECIDER_VERSION]
+      );
+      if (reopened.rows.length > 0) {
+        return { taskId: existing.rows[0].id, inserted: false, reactivated: true };
+      }
     }
 
     return { taskId: existing.rows[0].id, inserted: false, reactivated: false };
