@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { applyGlobalGates, nonTechnicalFunctionTitle } from "../../src/services/criteria.js";
 import { applyPersistedRequirementGates } from "../../src/pipeline/hardGate.js";
+import { assessHiringTerritoryReadiness } from "../../src/eligibility/workabilityReadiness.js";
+import { DECIDER_VERSION } from "../../src/pipeline/deciderVersion.js";
 import {
   evaluateWorkerTerritoryRequirements,
   loadWorkabilityPolicy,
@@ -110,6 +112,28 @@ describe("stated restrictions still reject", () => {
   it("quotes the posting's own words, pronoun included", () => {
     const [requirement] = extractExplicitWorkerTerritoryRequirements("Tell us you must reside in Germany");
     expect(requirement.evidenceText).toBe("Tell us you must reside in Germany");
+  });
+});
+
+// The decider reads the same extractor through readiness, so its version moves with this change.
+describe("decider readiness reads the same extractor", () => {
+  const readiness = (description: string) => assessHiringTerritoryReadiness(description, null, "HYBRID", {
+    authorizedRegions: ["SINGAPORE"],
+    remoteWithoutTerritoryAllowed: true,
+    rejectExplicitForeignTerritory: true,
+    unknownWorkAuthorizationNeedsVerification: true,
+  });
+
+  it("does not block on the pronoun and never invents a pass", () => {
+    expect(readiness(NO_RESTRICTION[0][2]).status).toBe("NEEDS_VERIFICATION");
+  });
+
+  it("still blocks a stated US-only residency", () => {
+    expect(readiness("Candidates must reside in the US.").status).toBe("BLOCKED");
+  });
+
+  it("re-seeds decisions made by earlier decider versions", () => {
+    expect(DECIDER_VERSION).toBe("recommendation_decider_v4");
   });
 });
 
