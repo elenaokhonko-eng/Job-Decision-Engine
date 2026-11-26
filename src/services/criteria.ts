@@ -4,7 +4,7 @@ import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
 import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
 import { findExplicitOnsiteStatement, isSingaporeLocatedJob, withoutNonOfferedWorkModes } from "../pipeline/onsiteStatements.js";
 import { findPostingLocationLine, isUnknownJobLocation } from "../pipeline/postingLocationLine.js";
-import { findCustomerFacingRoleDuty } from "../pipeline/customerFacingDuties.js";
+import { findExplicitSalesDuty } from "../pipeline/customerFacingDuties.js";
 import { isOccurrenceNegated } from "../requirements/clauseAnalysis.js";
 
 export { normalizeWorkMode };
@@ -110,7 +110,10 @@ export function nonTechnicalFunctionTitle(title: string): string | null {
 // 1c. Owner policy (gate-2026-11.5): a pre-sales title ("Presales Solutions Architect",
 // "Solutions Engineer (Pre-Sales)") is GATE_HIGH_INTERACTION for any title, whatever the
 // description says and whatever the external-client policy allows.
-const PRESALES_TITLE = /\bpre[\s‐‑-]?sales?\b/i;
+// gate-2026-11.7: sales-engineer titles ("Sales Engineer", "Senior Sales Engineer", "Sales Engineering Lead") are the same role
+// and keep rejecting as titles; before, only the bare "sales engineering" keyword in the description (removed in 11.7) did.
+// "Solutions Engineer" and "Solution Architect" are not matched.
+const PRESALES_TITLE = /\b(?:pre[\s‐‑-]?sales?|sales[\s‐‑-]+engineer(?:s|ing)?)\b/i;
 
 /** The matched pre-sales title phrase, or null. */
 export function presalesTitle(title: string): string | null {
@@ -1459,15 +1462,18 @@ function evaluateGlobalGates(
   }
 
   // ── 6. Sales / Client-facing ──
-  // Owner policy (gate-2026-11.4): a role placed in a pre-sales, post-sales, customer success
-  // or customer engagement organisation, or whose own duties are the customer journey, proof
-  // of value, representing the company or sales-cycle revenue, is a hard reject for any
-  // title (no architect exception). Company boilerplate and "our customers" never count.
-  const customerFacingDuty = effectivePolicy.externalClientPrimaryAllowed ? null : findCustomerFacingRoleDuty(d);
-  if (customerFacingDuty) {
-    return makeReject(["GATE_HIGH_INTERACTION"], [`Pre-sales / customer-engagement role duty: "${customerFacingDuty}"`]);
+  // Owner decision 2026-11-25 (gate-2026-11.7, decision #213): a bare customer-engagement or pre-sales duty phrase
+  // ("own the customer journey", "works with the pre-sales team", "sales engineering experience") is not a
+  // workability fact. It lowers the rank (role-shape CUSTOMER_FACING_DELIVERY) and never rejects. A hard reject needs
+  // explicit evidence: a stated quota, sales target, commission-based pay or cold outbound duty, a pre-sales or
+  // forward-deployed title, or an interaction share over the cap (the rules above and below).
+  const explicitSalesDuty = effectivePolicy.externalClientPrimaryAllowed ? null : findExplicitSalesDuty(d);
+  if (explicitSalesDuty) {
+    return makeReject(["GATE_HIGH_INTERACTION"], [`Explicit sales-target duty: "${explicitSalesDuty}"`]);
   }
-  const highInteractionKw = ["sales engineering", "presales", "pre-sales", "client relationship management", "manage large teams", "escalations manager"];
+  // Bare keywords "sales engineering", "presales" and "pre-sales" are no longer here (same decision); the keywords below
+  // are unchanged and still reject on the phrase alone (reported to the owner).
+  const highInteractionKw = ["client relationship management", "manage large teams", "escalations manager"];
   const targetTechnicalClientRole = isTechnicalRole(job.title || "", d).isTechnical
     && /\barchitect\b/i.test(t)
     && /\b(?:ai|ml|genai|machine learning|data|bioinformatics|genomics|regtech|legaltech|quant|fintech|trading|market data|software|cloud|technology)\b/i.test(`${t}\n${d}`)

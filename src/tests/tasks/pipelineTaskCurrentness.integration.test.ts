@@ -18,6 +18,7 @@ import {
   type PipelineStageWorkerDependencies,
 } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
+import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -162,6 +163,16 @@ async function publishJobEmbedding(embeddingSpaceId: string, jobVersionId: strin
   );
 }
 
+
+/** The DECIDE seed selects only what the decider can process: a complete posting with source content. */
+async function makeDecidable(versions: { canonicalJobId: string; latestVersionId: string }): Promise<void> {
+  await getClient().query(`UPDATE job_versions SET description_text = $2 WHERE id = $1`, [versions.latestVersionId, COMPLETE_TEST_POSTING_DESCRIPTION]);
+  await insertCompletePostingEvidence(getClient(), {
+    workspaceId: getContext().workspaceId, jobVersionId: versions.latestVersionId, companyName: "Currentness Fixture Co",
+    title: "fixture role", sourceUrl: `https://example.test/decidable/${versions.canonicalJobId}`, description: COMPLETE_TEST_POSTING_DESCRIPTION,
+  });
+}
+
 describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () => {
   beforeAll(async () => {
     pool = new pg.Pool(pgConnectionConfig(databaseUrl));
@@ -286,6 +297,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
        WHERE workspace_id = $1 AND id = $2`,
       [getContext().workspaceId, versions.canonicalJobId],
     );
+    await makeDecidable(versions);
 
     const seeded = await seedRecoverablePipelineTasks(database, {
       context: getContext(),
@@ -999,7 +1011,10 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       `UPDATE canonical_jobs
        SET processing_state = 'HARD_REJECTED',
            processing_status = 'HARD_REJECTED',
-           gate_decision = 'HARD_REJECT'
+           gate_decision = 'HARD_REJECT',
+           -- A decidable job (complete description and source evidence): an undecidable terminal job is awaiting content and
+           -- its decide task completes without running the decider.
+           description_quality_status = 'COMPLETE'
        WHERE workspace_id = $1 AND id = $2`,
       [getContext().workspaceId, recommendationJob.canonicalJobId],
     );
@@ -1157,6 +1172,17 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
            WHERE workspace_id = $1 AND id = $2`,
           [getContext().workspaceId, recommendationJob.canonicalJobId],
         );
+        // A decider that completes writes a decision for the version: the worker's completion guard requires one.
+        await getClient().query(
+          `WITH snapshot AS (
+             INSERT INTO workspace_policy_snapshots (workspace_id, snapshot_hash, resolved_snapshot)
+             VALUES ($1, 'snapshot-' || gen_random_uuid()::text, '{}'::jsonb) RETURNING id)
+           INSERT INTO deterministic_decisions (workspace_id, canonical_job_id, job_version_id, policy_snapshot_id, decision_hash, decision_json,
+                                                recommendation_eligibility, recommendation_outcome, decider_version)
+           SELECT $1, $2, $3, snapshot.id, 'decision-' || gen_random_uuid()::text, '{}'::jsonb, 'INELIGIBLE', 'SKIP', $4
+             FROM snapshot`,
+          [getContext().workspaceId, recommendationJob.canonicalJobId, recommendationJob.latestVersionId, DECIDER_VERSION],
+        );
         return { updated: 1, decisionsInserted: 1, errors: 0, policySnapshotId: "policy", policySnapshotHash: "hash" };
       }),
       runExplanationQueueEnqueuer: vi.fn(async () => ({ enqueued: 0, updated: 0, deferred: 0 })),
@@ -1258,6 +1284,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
         [workspaceId, versions.canonicalJobId, versions.latestVersionId, snapshot.rows[0].id, `decision-${versions.canonicalJobId}`, deciderVersion],
       );
       await database.query(`UPDATE canonical_jobs SET latest_deterministic_decision_id = $2 WHERE id = $1`, [versions.canonicalJobId, decision.rows[0].id]);
+      await makeDecidable(versions);
       return { canonicalJobId: versions.canonicalJobId, versionId: versions.latestVersionId };
     }
 

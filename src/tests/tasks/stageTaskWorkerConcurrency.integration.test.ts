@@ -6,6 +6,7 @@ import dotenv from "dotenv";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { ModelRateLimitedError } from "../../services/modelCallResilience.js";
+import { DECIDER_VERSION } from "../../pipeline/deciderVersion.js";
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
 import {
   runPipelineStageTaskWorker,
@@ -121,6 +122,19 @@ function deciderProbe(behaviour: (jobVersionId: string, client: pg.Pool | pg.Poo
            AND version.canonical_job_id = canonical.id
            AND version.id = $1::uuid`,
         [jobVersionId],
+      );
+      // A decider that completes writes a decision for the version: the worker's completion guard requires one.
+      await client.query(
+        `WITH snapshot AS (
+           INSERT INTO workspace_policy_snapshots (workspace_id, snapshot_hash, resolved_snapshot)
+           SELECT version.workspace_id, 'snapshot-' || gen_random_uuid()::text, '{}'::jsonb FROM job_versions version WHERE version.id = $1::uuid
+           RETURNING id, workspace_id)
+         INSERT INTO deterministic_decisions (workspace_id, canonical_job_id, job_version_id, policy_snapshot_id, decision_hash, decision_json,
+                                              recommendation_eligibility, recommendation_outcome, decider_version)
+         SELECT version.workspace_id, version.canonical_job_id, version.id, snapshot.id, 'decision-' || gen_random_uuid()::text,
+                '{}'::jsonb, 'INELIGIBLE', 'SKIP', $2
+           FROM job_versions version, snapshot WHERE version.id = $1::uuid`,
+        [jobVersionId, DECIDER_VERSION],
       );
       return { updated: 1, decisionsInserted: 0, errors: 0, policySnapshotId: "fixture", policySnapshotHash: "fixture" };
     } finally {

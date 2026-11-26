@@ -21,6 +21,14 @@ export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
 // "Work Type: Office Working" is full on-site; each gate verification names its own open fact;
 // pre-sales / post-sales / customer-engagement role duties are GATE_HIGH_INTERACTION for any title.
 // 2026-11.5: a pre-sales title ("Presales", "Pre-Sales", "Pre Sales") is GATE_HIGH_INTERACTION.
-export const GATE_VERSION = "gate-2026-11.5" as const;
+// 2026-11.6: no change to any decision rule. A version-change re-gate whose outcome is unchanged only stamps the audit row
+// (runHardGates versionRefresh); flagNeedsVerification records a work-fact contradiction as NEEDS_VERIFICATION (hardGate.ts).
+// 2026-11.7: owner decision 2026-11-25 (decision #213): a bare pre-sales / customer-engagement duty phrase or the keywords
+// "sales engineering" / "presales" / "pre-sales" no longer reject; GATE_HIGH_INTERACTION needs explicit evidence (quota, sales
+// target, commission-based pay, cold outbound duty, pre-sales or FDE title, interaction share over the cap). The phrase is a
+// role-shape downrank (role_shape_v2).
+// 2026-11.8: commission, OTE, quota and cold calling reject only as this role's main variable pay or explicit sales duty (customerFacingDuties.ts);
+// generic option lists, commission opportunities, commission paid to others and other roles' commission no longer reject.
+export const GATE_VERSION = "gate-2026-11.8" as const;
 export const PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;
 

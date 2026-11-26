@@ -49,7 +49,7 @@ describe("pipeline artifact context", () => {
     const decision = {
       ...base,
       taskType: "DECIDE_RECOMMENDATION",
-      taskVersion: "recommendation_decider_v1",
+      taskVersion: "recommendation_decider_v2",
       payload: { ...base.payload, [key]: original },
     };
     const changedDecision = {
@@ -113,13 +113,13 @@ describe("pipeline artifact context", () => {
     const initialFingerprint = buildPipelineTaskContextFingerprint({
       ...base,
       taskType: "DECIDE_RECOMMENDATION",
-      taskVersion: "recommendation_decider_v1",
+      taskVersion: "recommendation_decider_v2",
       payload: { ...base.payload, [field]: initialValue },
     });
     const changedFingerprint = buildPipelineTaskContextFingerprint({
       ...base,
       taskType: "DECIDE_RECOMMENDATION",
-      taskVersion: "recommendation_decider_v1",
+      taskVersion: "recommendation_decider_v2",
       payload: { ...base.payload, [field]: changedValue },
     });
 
@@ -149,7 +149,7 @@ describe("pipeline artifact context", () => {
   });
 
   it("the role-downrank policy version and assessment hash are part of the decision context", () => {
-    const base = { workspaceId: "w", taskType: "DECIDE_RECOMMENDATION" as const, taskVersion: "recommendation_decider_v1" };
+    const base = { workspaceId: "w", taskType: "DECIDE_RECOMMENDATION" as const, taskVersion: "recommendation_decider_v2" };
     const none = buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j", role_downrank_policy_version: "role_shape_v1", role_downrank_assessment_hash: "a" } });
     const other = buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j", role_downrank_policy_version: "role_shape_v1", role_downrank_assessment_hash: "b" } });
     const newPolicy = buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j", role_downrank_policy_version: "role_shape_v2", role_downrank_assessment_hash: "a" } });
@@ -158,7 +158,7 @@ describe("pipeline artifact context", () => {
   });
 
   it("decider_version is part of the decision context", () => {
-    const base = { workspaceId: "w", taskType: "DECIDE_RECOMMENDATION" as const, taskVersion: "recommendation_decider_v1" };
+    const base = { workspaceId: "w", taskType: "DECIDE_RECOMMENDATION" as const, taskVersion: "recommendation_decider_v2" };
     expect(buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j", decider_version: "v1" } }))
       .not.toBe(buildPipelineTaskContextFingerprint({ ...base, payload: { canonical_job_id: "j" } }));
   });

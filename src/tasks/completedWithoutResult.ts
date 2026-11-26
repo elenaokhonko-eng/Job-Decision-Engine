@@ -9,7 +9,23 @@
  */
 import type pg from "pg";
 
+import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
+import { DESIGNED_COMPLETION_REPAIR_ACTION_PREFIXES } from "./designedNoOps.js";
+
 type Queryable = Pick<pg.PoolClient, "query">;
+
+/**
+ * SQL predicate (canonical alias, version alias) that is TRUE when the decider can select the job version: a complete
+ * description and source content evidence. A version that fails it genuinely cannot be decided; a version that passes it
+ * must get a decision row. One definition for the worker and for this check.
+ */
+export function decidableJobVersionSql(canonicalAlias: string, versionAlias: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(canonicalAlias) || !/^[a-z_][a-z0-9_]*$/i.test(versionAlias)) {
+    throw new Error("A decidable-version alias must be a plain identifier.");
+  }
+  return `(${canonicalAlias}.description_quality_status = 'COMPLETE'
+    AND ${sourceContentEvidencePredicate(`${canonicalAlias}.workspace_id`, `${versionAlias}.id`)})`;
+}
 
 /** Task type -> SQL predicate (alias task, version job_version_id) that is TRUE when the result exists. */
 export const COMPLETED_RESULT_PREDICATES: Readonly<Record<string, string>> = {
@@ -49,9 +65,10 @@ export interface CompletedWithoutResultReport {
 export async function findTasksCompletedWithoutResult(
   client: Queryable,
   workspaceId: string,
-  options: { sampleLimit?: number } = {},
+  /** sampleLimit is clamped to 200 for reporting; `all: true` returns every row (the repair path). */
+  options: { sampleLimit?: number; all?: boolean } = {},
 ): Promise<CompletedWithoutResultReport> {
-  const sampleLimit = Math.max(0, Math.min(options.sampleLimit ?? 20, 200));
+  const sampleLimit = options.all ? Number.MAX_SAFE_INTEGER : Math.max(0, Math.min(options.sampleLimit ?? 20, 200));
   const missing = Object.entries(COMPLETED_RESULT_PREDICATES)
     .map(([type, exists]) => `(task.task_type = '${type}' AND NOT ${exists})`)
     .join("\n          OR ");
@@ -64,7 +81,9 @@ export async function findTasksCompletedWithoutResult(
          ON canonical.workspace_id = version.workspace_id AND canonical.id = version.canonical_job_id
       WHERE task.workspace_id = $1::uuid
         AND task.status = 'COMPLETED'
-        AND task.repair_action IS NULL
+        -- Only a designed repair_action explains a missing result; an unknown one does not hide it.
+        AND (task.repair_action IS NULL OR NOT EXISTS (
+          SELECT 1 FROM unnest($3::text[]) designed(prefix) WHERE starts_with(task.repair_action, designed.prefix)))
         AND task.task_type = ANY($2::text[])
         AND canonical.latest_job_version_id = version.id
         AND canonical.archived_at IS NULL
@@ -72,13 +91,31 @@ export async function findTasksCompletedWithoutResult(
         AND COALESCE(canonical.processing_state, canonical.processing_status) <> 'MANUALLY_REMOVED'
         -- A technically deferred route (ROUTING_DEFERRED) leaves no lane decision by design; it is its own waiting state.
         AND NOT (task.task_type = 'ROUTE_LANE' AND COALESCE(canonical.processing_state, canonical.processing_status) = 'ROUTING_DEFERRED')
+        -- The worker completes a profile match without a match run, by design, for a job that has no match to perform:
+        -- no active lane match (UNMATCHED), a technical routing deferral, verification still open, or a hard rejection.
+        -- (A task closed after this change also carries a repair_action; these states cover the rows closed before it.)
+        AND NOT (task.task_type = 'MATCH_PROFILE_EVIDENCE' AND COALESCE(canonical.processing_state, canonical.processing_status)
+                 IN ('UNMATCHED', 'ROUTING_DEFERRED', 'NEEDS_VERIFICATION', 'HARD_REJECTED'))
+        -- A decision task for a job still before lane routing is a stale task the worker closes without a decision, by design.
+        AND NOT (task.task_type = 'DECIDE_RECOMMENDATION' AND COALESCE(canonical.processing_state, canonical.processing_status)
+                 IN ('RAW_STAGED', 'PREQUALIFIED'))
+        -- A terminal job whose version the decider cannot select (incomplete description or no source content) cannot get a decision.
+        AND NOT (task.task_type = 'DECIDE_RECOMMENDATION' AND COALESCE(canonical.processing_state, canonical.processing_status)
+                 IN ('HARD_REJECTED', 'UNMATCHED') AND NOT ${decidableJobVersionSql("canonical", "version")})
+        -- Designed case only: lane routing decided POLICY_NO_MATCH (no lane matched, so there is no match run) and stored a
+        -- deterministic outcome. The decider could stamp such a job, but the decide seed and reopen rule cannot reach it
+        -- (deciderReachableSql needs a current match run for UNMATCHED), and older workers completed its DECIDE task without
+        -- a decision. It stays visible in reported_counts.outcome_without_latest_decision. Any other UNMATCHED job (for
+        -- example disposition ROUTED), or one with no stored outcome, is NOT excluded: a lost result there is an error.
+        AND NOT (task.task_type = 'DECIDE_RECOMMENDATION' AND COALESCE(canonical.processing_state, canonical.processing_status) = 'UNMATCHED'
+                 AND canonical.routing_disposition = 'POLICY_NO_MATCH' AND canonical.recommendation_outcome IS NOT NULL)
         -- RECHECK_AVAILABILITY skips (and completes without an event) a job that has no observation to read.
         AND NOT (task.task_type = 'RECHECK_AVAILABILITY' AND NOT EXISTS (
           SELECT 1 FROM raw_job_observations skip_observation
            WHERE skip_observation.workspace_id = version.workspace_id AND skip_observation.job_version_id = version.id))
         AND (${missing})
       ORDER BY task.completed_at ASC NULLS FIRST, task.id ASC`,
-    [workspaceId, [...COMPLETED_RESULT_TASK_TYPES]],
+    [workspaceId, [...COMPLETED_RESULT_TASK_TYPES], [...DESIGNED_COMPLETION_REPAIR_ACTION_PREFIXES]],
   );
   const byTaskType: Record<string, number> = {};
   for (const row of rows) byTaskType[row.task_type] = (byTaskType[row.task_type] ?? 0) + 1;

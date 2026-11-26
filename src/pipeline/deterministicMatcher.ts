@@ -21,6 +21,7 @@ import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import {
   currentMatcherFingerprintVersion,
   currentMatcherPolicyVersion,
+  unmatchedParkedByOtherMatcherSql,
 } from "./profileMatchCurrency.js";
 import {
   activeScoringPolicy,
@@ -69,6 +70,24 @@ export interface DeterministicMatchSummary {
   matchedJobs: number;
   skippedJobs: number;
   errors: number;
+  /**
+   * Canonical jobs left unmatched because a requirement of their active set has no published embedding in any space that holds
+   * the profile's facts. No match run and no score is stored for them; the stage task blocks on the embedding task and the job
+   * is matched once the embeddings exist.
+   */
+  blockedOnRequirementEmbeddings?: string[];
+}
+
+/**
+ * Callers outside the task worker (scripts) must not treat a blocked or failed match as success (invariant 7): throws, loudly,
+ * when the matcher reported errors or left jobs blocked on missing requirement embeddings.
+ */
+export function assertMatchSummaryComplete(summary: DeterministicMatchSummary, label: string): void {
+  const blocked = summary.blockedOnRequirementEmbeddings ?? [];
+  if (summary.errors > 0) throw new Error(`${label}: the matcher reported ${summary.errors} error(s).`);
+  if (blocked.length > 0) {
+    throw new Error(`${label}: ${blocked.length} job(s) were NOT matched because a requirement has no published embedding (ids: ${blocked.slice(0, 10).join(", ")}${blocked.length > 10 ? ", ..." : ""}). Publish the embeddings and run again.`);
+  }
 }
 
 function tokenize(text: string): Set<string> {
@@ -545,6 +564,7 @@ export async function runDeterministicMatcher(
 
   let matchedJobs = 0;
   let skippedJobs = 0;
+  const blockedOnRequirementEmbeddings: string[] = [];
   let errors = 0;
 
   try {
@@ -723,6 +743,16 @@ export async function runDeterministicMatcher(
                  $${explicitTargetsParam}::boolean
                  AND COALESCE(c.processing_state, c.processing_status) IN (
                    'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
+                 )
+               )
+               -- An explicit target that the matcher itself parked UNMATCHED under an older policy version is re-matched
+               -- (never selected without an explicit target, and never one parked by the current policy).
+               OR (
+                 $${explicitTargetsParam}::boolean
+                 AND EXISTS (
+                   SELECT 1 FROM match_runs parked_mr
+                    WHERE parked_mr.workspace_id = c.workspace_id AND parked_mr.id = c.latest_match_run_id
+                      AND ${unmatchedParkedByOtherMatcherSql("c", "parked_mr", { activeProfileResolved: true })}
                  )
                )
              )
@@ -928,6 +958,15 @@ export async function runDeterministicMatcher(
             semanticEmbeddingSpaceId = candidate;
             break;
           }
+        }
+
+        // Never match (or score) on partial embeddings: when a space holds the profile's facts but no space holds every requirement,
+        // the job waits for its requirement embeddings. The transaction is rolled back, so no match run exists for it.
+        const scoredRequirementCount = reqRes.rows.filter((req) => isCapabilityRequirementType(req.requirement_type)).length;
+        if (semanticSpaceCandidates.length > 0 && scoredRequirementCount > 0 && factIds.length > 0 && !semanticEmbeddingSpaceId) {
+          await client.query("ROLLBACK");
+          blockedOnRequirementEmbeddings.push(job.id);
+          continue;
         }
 
         const factEmbeddings =
@@ -1352,6 +1391,9 @@ export async function runDeterministicMatcher(
                END,
                rejection_reason = CASE
                  WHEN $9::boolean THEN $10
+                 -- A re-match that no longer parks an UNMATCHED job (only the explicit re-match of a matcher-parked job reaches
+                 -- an UNMATCHED row here) removes the stale parking reason.
+                 WHEN NOT $8::boolean AND COALESCE(processing_state, processing_status) = 'UNMATCHED' THEN NULL
                  ELSE rejection_reason
                END,
                recommendation_eligibility = CASE
@@ -1407,9 +1449,9 @@ export async function runDeterministicMatcher(
   }
 
   console.log(
-    `Deterministic Matcher complete. Matched: ${matchedJobs}, Skipped: ${skippedJobs}, Errors: ${errors}`
+    `Deterministic Matcher complete. Matched: ${matchedJobs}, Skipped: ${skippedJobs}, Blocked on requirement embeddings: ${blockedOnRequirementEmbeddings.length}, Errors: ${errors}`
   );
-  return { matchedJobs, skippedJobs, errors };
+  return { matchedJobs, skippedJobs, errors, blockedOnRequirementEmbeddings };
 }
 
 /**
@@ -1438,8 +1480,9 @@ export async function rematchActionableJobs(
     try {
       const { materializeApplicationRankings } = await import("../services/applicationRankingMaterializer.js");
       if (typeof (pool as any).connect === "function") {
-        await materializeApplicationRankings(pool as pg.Pool, ctx.workspaceId);
-        rankingsMaterialized = true;
+        const rankings = await materializeApplicationRankings(pool as pg.Pool, ctx.workspaceId);
+        rankingsMaterialized = rankings.policyError === undefined;
+        if (rankings.policyError) console.warn("Ranking policy is invalid; no rankings were materialized:", rankings.policyError);
       }
     } catch (err) {
       console.warn("Ranking materialization after rematch encountered non-fatal error:", publicErrorSummary(err, "pipeline"));

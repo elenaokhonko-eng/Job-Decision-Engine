@@ -4,7 +4,7 @@ import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import { runHardGates } from "../src/pipeline/hardGate.js";
 import { runLaneRouting } from "../src/pipeline/laneRouter.js";
-import { runDeterministicMatcher } from "../src/pipeline/deterministicMatcher.js";
+import { assertMatchSummaryComplete, runDeterministicMatcher } from "../src/pipeline/deterministicMatcher.js";
 import { runRecommendationDecider } from "../src/pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer } from "../src/pipeline/explanationQueueEnqueuer.js";
 import { loadWorkspaceLanesConfig } from "../src/pipeline/laneConfigLoader.js";
@@ -823,6 +823,7 @@ async function main() {
       canonicalJobIds: canaryJobIds,
     });
     console.log("Canary Deterministic Match Results:", canaryMatchResult);
+    assertMatchSummaryComplete(canaryMatchResult, "canary match");
 
     // Query detailed state for each canary job
     for (const [id, meta] of canaryMap.entries()) {
@@ -1031,6 +1032,7 @@ async function main() {
       canonicalJobIds: affectedJobIds,
     });
     console.log("Affected Cohort Deterministic Match Results:", fullMatchResult);
+    assertMatchSummaryComplete(fullMatchResult, "affected cohort match");
 
     // Step 4d: Recompute recommendations only for affected records.
     console.log("Executing Recommendation Decider for affected historical cohort...");
@@ -1113,6 +1115,7 @@ async function main() {
       canonicalJobIds: affectedJobIds,
     });
     console.log("Second affected-cohort match run (should be 0 newly matched):", secondMatchResult);
+    assertMatchSummaryComplete(secondMatchResult, "second affected cohort match");
 
     const secondRecommendationResult = await runRecommendationDecider(pool, {
       context: ctx,

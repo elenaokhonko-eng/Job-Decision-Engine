@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { ROLE_SHAPE_POLICY_VERSION, assessRoleShape } from "../../pipeline/roleShape.js";
 
-// Synthetic sentences only. role_shape_v2: contract negation / permanent wording, and a strong cue for people management.
-describe("role shape v2: contract negation and permanent wording", () => {
+// Synthetic sentences only. role_shape_v3 (the file keeps its first name): contract negation / permanent wording, and a strong cue for people management.
+describe("role shape v3: contract negation and permanent wording", () => {
   const codes = (description: string, employmentType = "") => assessRoleShape({ title: "Analyst", description, employmentType }).signals.map((s) => s.code);
 
   it("the version moved with the detector change", () => {
-    expect(ROLE_SHAPE_POLICY_VERSION).toBe("role_shape_v2");
+    expect(ROLE_SHAPE_POLICY_VERSION).toBe("role_shape_v3");
   });
 
   it.each([
@@ -31,7 +31,7 @@ describe("role shape v2: contract negation and permanent wording", () => {
   });
 });
 
-describe("role shape v2: people management needs a strong cue with a title", () => {
+describe("role shape v3: people management needs a strong cue with a title", () => {
   const codes = (title: string, description: string) => assessRoleShape({ title, description }).signals.map((s) => s.code);
 
   it("an individual contributor with a senior or director title and one weak mention is not flagged", () => {
@@ -46,7 +46,7 @@ describe("role shape v2: people management needs a strong cue with a title", () 
   });
 });
 
-describe("role shape v2: permanent wording only counts when it modifies the contract", () => {
+describe("role shape v3: permanent wording only counts when it modifies the contract", () => {
   const codes = (description: string, employmentType = "") => assessRoleShape({ title: "Analyst", description, employmentType }).signals.map((s) => s.code);
 
   it.each([
@@ -64,7 +64,7 @@ describe("role shape v2: permanent wording only counts when it modifies the cont
   });
 });
 
-describe("role shape v2: negation recall (review MED-3)", () => {
+describe("role shape v3: negation recall (review MED-3)", () => {
   const codes = (description: string, employmentType = "") => assessRoleShape({ title: "Analyst", description, employmentType }).signals.map((s) => s.code);
 
   it.each([
@@ -78,6 +78,38 @@ describe("role shape v2: negation recall (review MED-3)", () => {
 
   it("an employment type with a Unicode dash is still read", () => {
     expect(codes("", "Non‑permanent contract")).toEqual(["CONTRACT_EMPLOYMENT"]);
+  });
+
+  // A negation of something else in the same clause must not hide the contract (no punctuation between them).
+  it.each([
+    "We offer no relocation for this 12-month contract.",
+    "We offer no relocation - 12-month contract.",
+    "We offer no relocation (12-month contract).",
+    "Not a permanent role - 6-month contract.",
+    "Relocation is not offered for this 6-month contract.",
+    "This role is not remote and is a 6-month contract.",
+    "Visa sponsorship: No\n6-month contract",
+    "This is not a permanent contract role.",
+    "Never miss a deadline on this 6-month contract.",
+  ])("flags a contract beside an unrelated negation: %s", (text) => {
+    expect(codes(text)).toEqual(["CONTRACT_EMPLOYMENT"]);
+  });
+
+  it.each([
+    "This is not a contract position.",
+    "This isn’t a contract role.",
+    "There are no contract roles on this team.",
+    "We do not offer fixed-term contract arrangements; this is not a contract role.",
+    "We cannot engage an independent contractor.",
+    "You will not be employed as a freelancer.",
+    "This is not a short-term or fixed-term contract.",
+    "Hired without a fixed‑term contract.",
+  ])("does not flag a negation that governs the contract: %s", (text) => {
+    expect(codes(text)).toEqual([]);
+  });
+
+  it("an employment type that says not a permanent contract is a contract", () => {
+    expect(codes("", "Not a permanent contract")).toEqual(["CONTRACT_EMPLOYMENT"]);
   });
 
   it("still does not flag a negation inside the contract clause", () => {

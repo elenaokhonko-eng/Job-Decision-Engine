@@ -7,8 +7,11 @@
  */
 import { createHash } from "node:crypto";
 
-export const ROLE_SHAPE_POLICY_VERSION = "role_shape_v2";
-// v2: contract detection ignores permanent / negated wording; people management needs a strong cue (direct reports, a team
+import { findCustomerFacingRoleDuty } from "./customerFacingDuties.js";
+
+export const ROLE_SHAPE_POLICY_VERSION = "role_shape_v3";
+// v2 (shipped with gate-2026-11.7): one customer-engagement duty phrase is a downrank.
+// v3: contract detection ignores permanent / negated wording; people management needs a strong cue (direct reports, a team
 // of N, people or line management) with a management title, so one weak mention ("performance reviews") never flags.
 /** The combined downrank never exceeds this share of the score, so a job can lose rank but is never erased by it. */
 export const ROLE_SHAPE_MAX_TOTAL_PENALTY = 0.15;
@@ -73,6 +76,13 @@ export const detectCustomerFacingDelivery: RoleShapeDetector = ({ title, descrip
     const first = hits[0]!.match!;
     return { code: "CUSTOMER_FACING_DELIVERY", penalty: 0.06, source: "DESCRIPTION", quote: excerpt(description, first.index ?? 0, first[0].length) };
   }
+  // role_shape_v2 (gate-2026-11.7, owner decision 2026-11-25, decision #213): one pre-sales or customer-engagement duty
+  // phrase of this role is a downrank here, no longer a gate rejection (src/pipeline/customerFacingDuties.ts).
+  const duty = findCustomerFacingRoleDuty(description);
+  if (duty) {
+    const at = description.toLowerCase().indexOf(duty);
+    return { code: "CUSTOMER_FACING_DELIVERY", penalty: 0.06, source: "DESCRIPTION", quote: at >= 0 ? excerpt(description, at, duty.length) : duty.slice(0, EVIDENCE_QUOTE_MAX) };
+  }
   return null;
 };
 
@@ -120,13 +130,19 @@ export const detectPeopleManagementCore: RoleShapeDetector = ({ title, descripti
 const CONTRACT_DESCRIPTION =
   /\b(?:(?:\d{1,2}|six|twelve|twelve|nine|three)[- ]months?(?: fixed[- ]term)? contract|fixed[- ]term contract|contract (?:role|position|basis|opportunity)|freelance(?:r)?|independent contractor|contractor position)\b/i;
 
-// A negation only reaches the contract phrase within the same clause: punctuation (comma, semicolon, colon, full stop) ends it, so
-// "We offer no relocation, 12-month contract" is still a contract. "non" is not a negation word here ("non-permanent" negates permanent).
-const CONTRACT_NOT_CONTRACT_BEFORE = /\b(?:not|no|isn'?t|is not|without|never)\b[^.,;:\n]{0,24}$/i;
+// A negation counts only when it governs the contract phrase: the negation word, then nothing but the linking words below. Any other
+// word, punctuation, dash, bracket or line break ends its reach, so "We offer no relocation, 12-month contract" and "Relocation is
+// not offered for this 12-month contract" are still contracts. "non" is not a negation word here ("non-permanent" negates permanent).
+const NEGATION_WORD = String.raw`(?:\b(?:not|no|never|without|cannot)|n['’]t)`;
+const NEGATION_LINK = String.raw`(?:a|an|the|any|be|being|been|going to be|offer|offered|offering|hire|hired|hiring|engage|engaged|engaging|employ|employed|considered|looking for|on|as|via|through|or|rolling|temporary|(?:short|long|fixed)[- ]term)`;
+const WORD_GAP = String.raw`[^\S\r\n]+`;
+const CONTRACT_NOT_CONTRACT_BEFORE = new RegExp(`${NEGATION_WORD}${WORD_GAP}(?:${NEGATION_LINK}${WORD_GAP}){0,6}$`, "i");
+/** "non-permanent", "not permanent", "not a permanent": a negated "permanent", which says nothing against the contract. */
+const NEGATED_PERMANENT = /\b(?:non[- ]?|not (?:an? )?)(?:permanent|open[- ]ended|indefinite)\b/gi;
 /** Unicode dashes (hyphen, non-breaking hyphen, en and em dash, minus) become "-", one character for one character so indexes hold. */
 const normaliseDashes = (text: string): string => text.replace(/[‐-―−]/g, "-");
-// "permanent" only counts when it is not negated ("non-permanent", "not permanent"): the lookbehinds keep "non-permanent" a contract.
-const PERMANENT_WORD = String.raw`(?<!non[- ]?)(?<!not )(?<!un)\b(?:permanent|open[- ]ended|indefinite)\b`;
+// "permanent" only counts when it is not negated ("non-permanent", "not a permanent"): the lookbehinds keep those a contract.
+const PERMANENT_WORD = String.raw`(?<!non[- ]?)(?<!not (?:an? )?)(?<!un)\b(?:permanent|open[- ]ended|indefinite)\b`;
 /** Permanent wording that modifies the contract itself ("permanent contract basis"): directly before the contract phrase. */
 const PERMANENT_BEFORE_CONTRACT = new RegExp(`${PERMANENT_WORD}[\\s,-]*$`, "i");
 const PERMANENT_IN_TYPE = new RegExp(PERMANENT_WORD, "i");
@@ -142,7 +158,8 @@ export const detectContractEmployment: RoleShapeDetector = ({ description: rawDe
     const index = hit.index ?? 0;
     const before = description.slice(Math.max(0, index - 40), index);
     // "not a fixed-term contract" is not a contract; "non-permanent" / "not permanent" is a negated permanent, not a negated contract.
-    const beforeWithoutNegatedPermanent = before.replace(/\b(?:non[- ]?|not )(?:permanent|open[- ]ended|indefinite)\b/gi, "");
+    // It is replaced by a full stop so that removing it never joins an earlier negation to the contract phrase.
+    const beforeWithoutNegatedPermanent = before.replace(NEGATED_PERMANENT, ".");
     if (CONTRACT_NOT_CONTRACT_BEFORE.test(beforeWithoutNegatedPermanent)) continue;
     // "permanent contract basis" is a permanent job. "contract role, may convert to permanent" is still a contract.
     if (PERMANENT_BEFORE_CONTRACT.test(before)) continue;

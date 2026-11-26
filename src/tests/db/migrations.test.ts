@@ -618,7 +618,15 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       expect(Object.keys(policy.weights)).toEqual(expect.arrayContaining(requiredWeights));
       const weights = Object.values(policy.weights);
       expect(weights.every((weight) => Number.isFinite(weight) && weight >= 0)).toBe(true);
-      expect(weights.reduce((total, weight) => total + weight, 0)).toBeCloseTo(100, 8);
+      const total = weights.reduce((sum, weight) => sum + weight, 0);
+      expect(Object.keys(policy.weights).sort()).toEqual([...requiredWeights].sort());
+      if (Math.abs(total - 100) > 1e-8) {
+        // Migration 122 shape: every AI weight is exactly 0 and the deterministic terms total 72.5.
+        for (const aiWeight of ['autonomy', 'politicsRisk', 'sensoryWorkloadRisk', 'strategicValue']) {
+          expect(policy.weights[aiWeight]).toBe(0);
+        }
+        expect(total).toBeCloseTo(72.5, 8);
+      }
     }
 
     const { rows: activePolicies } = await realPool.query<{ minimum_ranking_confidence: number }>(`

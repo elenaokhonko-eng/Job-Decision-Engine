@@ -898,6 +898,63 @@ export function evaluateHardGatesForJob(input: {
   );
 }
 
+/**
+ * How a version-refresh re-gate relates to the stored gate decision of this job version.
+ *  - STAMP: same decision and same set of codes (the canonical gate_decision must agree too).
+ *  - CLEAR_FLAG: the stored decision is a flagNeedsVerification flag (facts_conflict present) and the gate now passes: the flag is
+ *    cleared like a stamp, without resetting downstream state.
+ *  - RESET: anything else; the normal reset path runs.
+ * Compared: decision and code set. NOT compared: evidence quotes, workability facts and the policy hash (the stamp refreshes the
+ * gate-owned canonical columns from the new result) and workplace_type (the work-mode enrichment writes it before the gate runs,
+ * from the posting text; it is not downstream state and is not part of the gate outcome).
+ */
+type GateRefreshKind = "STAMP" | "CLEAR_FLAG" | "KEEP_FLAG" | "RESET";
+interface GateRefreshClassification {
+  kind: GateRefreshKind;
+  storedFacts: Record<string, unknown> | null;
+  storedQuotes: string[];
+  /** Codes of the stored audit row, in stored order: the canonical rejection_reason is gate-owned only while it equals their join. */
+  storedCodes: string[];
+}
+
+async function classifyGateRefresh(
+  client: { query: (text: string, values?: unknown[]) => Promise<{ rows: any[] }> },
+  workspaceId: string,
+  jobId: string,
+  jobVersionId: string,
+  result: { status: string; rejection_codes: readonly string[] },
+): Promise<GateRefreshClassification> {
+  const { rows } = await client.query(
+    `SELECT gd.decision, gd.rejection_codes, c.gate_decision, c.workability_facts, c.gate_evidence_quotes
+       FROM canonical_jobs c
+       JOIN LATERAL (
+         SELECT decision, rejection_codes FROM gate_decisions
+          WHERE workspace_id = c.workspace_id AND canonical_job_id = c.id AND job_version_id = $3
+          ORDER BY created_at DESC, id DESC LIMIT 1
+       ) gd ON TRUE
+      WHERE c.workspace_id = $1 AND c.id = $2`,
+    [workspaceId, jobId, jobVersionId],
+  );
+  const stored = rows[0];
+  const reset: GateRefreshClassification = { kind: "RESET", storedFacts: null, storedQuotes: [], storedCodes: [] };
+  if (!stored || stored.gate_decision !== stored.decision) return reset;
+  const storedFacts = (stored.workability_facts ?? null) as Record<string, unknown> | null;
+  const storedQuotes = Array.isArray(stored.gate_evidence_quotes) ? stored.gate_evidence_quotes.map(String) : [];
+  const storedCodes = Array.isArray(stored.rejection_codes) ? stored.rejection_codes.map(String) : [];
+  const codes = (value: unknown): string => (Array.isArray(value) ? [...new Set(value.map(String))].sort().join("|") : "");
+  if (stored.decision === result.status && codes(stored.rejection_codes) === codes(result.rejection_codes)) {
+    return { kind: "STAMP", storedFacts, storedQuotes, storedCodes };
+  }
+  if (stored.decision === "NEEDS_VERIFICATION" && result.status === "PASS" && storedFacts && storedFacts.facts_conflict) {
+    // The gate reads the posting text, not the availability re-check or feed that set most flags, so a passing re-gate says nothing
+    // about their conflict: only a flag whose evidence came from the posting text is cleared; any other flag stays until a new
+    // re-check or a human resolves it (the audit row is re-stamped with the stored decision).
+    const source = (storedFacts.facts_conflict as { source?: unknown }).source;
+    return { kind: source === "POSTING_TEXT" ? "CLEAR_FLAG" : "KEEP_FLAG", storedFacts, storedQuotes, storedCodes };
+  }
+  return reset;
+}
+
 export async function runHardGates(
   clientOrPool?: pg.Pool | pg.PoolClient,
   options?: {
@@ -906,6 +963,13 @@ export async function runHardGates(
     canonicalJobIds?: string[];
     limit?: number;
     reprocess?: boolean;
+    /**
+     * A re-gate caused by a gate VERSION change (not a forced recalculation). If the gate outcome (decision plus
+     * rejection and needs-verification codes) is unchanged from the stored one, only the audit row with the new gate_version
+     * is written: processing state, lane, match, decision, score and evaluation are left untouched. A changed outcome takes the
+     * normal reset path.
+     */
+    versionRefresh?: boolean;
     /** Optional immutable answer context supplied by a task caller. */
     verificationAnswerContext?: VerificationAnswerContext | null;
     /** Answer revision identity from the task payload; stale revisions are ignored. */
@@ -917,13 +981,14 @@ export async function runHardGates(
     /** Alias retained for direct callers that already use the shorter name. */
     answerContext?: VerificationAnswerContext | null;
   }
-): Promise<{ passed: number; hardRejected: number; needsVerification: number; errors: number }> {
+): Promise<{ passed: number; hardRejected: number; needsVerification: number; errors: number; /** Jobs whose version-refresh re-gate only stamped the audit row (outcome unchanged or flag cleared). */ stamped?: number }> {
   console.log("Starting Hard Gate engine on RAW_STAGED canonical jobs...");
   const pool = clientOrPool || defaultPool;
 
   let passedCount = 0;
   let rejectedCount = 0;
   let needsVerificationCount = 0;
+  let stampedCount = 0;
   let errorCount = 0;
 
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
@@ -1199,8 +1264,50 @@ export async function runHardGates(
             passedCount++;
         }
 
+        // Version refresh with an unchanged outcome: stamp the new gate_version in the audit row only.
+        const refresh: GateRefreshClassification = options?.versionRefresh === true
+          ? await classifyGateRefresh(client as any, ctx.workspaceId, job.id, job.job_version_id, gateResult)
+          : { kind: "RESET", storedFacts: null, storedQuotes: [], storedCodes: [] };
+        const stampOnly = refresh.kind !== "RESET";
+
         // Update canonical job with gate outcome + structured workability facts + evidence
-        const canonicalUpdate = await client.query(
+        // A stamp refreshes the gate-OWNED columns only (quotes, facts, rejection reason); a cleared flag also takes the new PASS and, for a
+        // job still waiting at the gate, moves it on. Lane, match, decision, score, the ranking columns and evaluations stay as they are.
+        const keepFlagConflict = refresh.kind === "STAMP" && refresh.storedFacts?.facts_conflict
+          ? { facts_conflict: refresh.storedFacts.facts_conflict }
+          : {};
+        const keepFlag = refresh.kind === "KEEP_FLAG";
+        const stampFacts = keepFlag ? (refresh.storedFacts ?? {}) : { ...gateResult.workability_facts, ...keepFlagConflict };
+        const stampQuotes = keepFlag
+          ? refresh.storedQuotes
+          : refresh.kind === "STAMP" && refresh.storedFacts?.facts_conflict
+            ? [...new Set([...refresh.storedQuotes, ...gateResult.evidence_quotes])]
+            : gateResult.evidence_quotes;
+        const canonicalUpdate = keepFlag
+          ? { rowCount: 1 }
+          : stampOnly
+          ? await client.query(
+            `UPDATE canonical_jobs
+                SET gate_evidence_quotes = $3::jsonb,
+                    workability_facts = $4::jsonb,
+                    -- rejection_reason also carries operational history (an exhausted embedding repair, an engine error): the stamp
+                    -- replaces it only while it still is what the gate itself wrote (empty, or the stored audit codes).
+                    rejection_reason = CASE WHEN rejection_reason IS NULL OR rejection_reason = '' OR rejection_reason = $7 THEN $5 ELSE rejection_reason END,
+                    workplace_type = CASE WHEN $8::varchar = 'PASS' AND ($4::jsonb->>'workplace_type') = 'ASSUMED_HYBRID' THEN 'ASSUMED_HYBRID' ELSE workplace_type END,
+                    gate_decision = CASE WHEN $6::boolean THEN 'PASS' ELSE gate_decision END,
+                    processing_state = CASE WHEN $6::boolean AND COALESCE(processing_state, processing_status) = 'NEEDS_VERIFICATION' THEN 'PREQUALIFIED' ELSE processing_state END,
+                    processing_status = CASE WHEN $6::boolean AND COALESCE(processing_state, processing_status) = 'NEEDS_VERIFICATION' THEN 'PREQUALIFIED' ELSE processing_status END,
+                    updated_at = NOW()
+              WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL`,
+            [
+              ctx.workspaceId, job.id, JSON.stringify(stampQuotes), JSON.stringify(stampFacts),
+              gateResult.rejection_codes.length > 0 ? gateResult.rejection_codes.join(", ") : null,
+              refresh.kind === "CLEAR_FLAG",
+              refresh.storedCodes.join(", "),
+              gateResult.status,
+            ],
+          )
+          : await client.query(
           `UPDATE canonical_jobs
            SET gate_decision      = $1::varchar,
                processing_state   = $2,
@@ -1241,7 +1348,10 @@ export async function runHardGates(
             JSON.stringify(gateResult.workability_facts),
             ctx.workspaceId,
             job.id,
-            reprocess
+            // A version-refresh re-gate whose outcome changed keeps lane, match, decision, score and ranking columns until the
+            // recompute overwrites them (they are only cleared for HARD_REJECT, by the SQL above). A plain forced reprocess
+            // is an explicit operator reset and clears them.
+            reprocess && options?.versionRefresh !== true
           ]
         );
         if (canonicalUpdate.rowCount !== 1) {
@@ -1257,10 +1367,10 @@ export async function runHardGates(
           pipeline_run_id: pipelineRunId,
           gate_version: GATE_VERSION,
           workability_policy_hash: policyResolution.policyHash,
-          status: gateResult.status,
-          rejection_codes: gateResult.rejection_codes,
-          evidence_quotes: gateResult.evidence_quotes,
-          workability_facts: gateResult.workability_facts,
+          status: keepFlag ? "NEEDS_VERIFICATION" : gateResult.status,
+          rejection_codes: keepFlag ? refresh.storedCodes : gateResult.rejection_codes,
+          evidence_quotes: stampOnly ? stampQuotes : gateResult.evidence_quotes,
+          workability_facts: stampOnly ? stampFacts : gateResult.workability_facts,
           evaluated_at: new Date().toISOString(),
         });
 
@@ -1270,8 +1380,8 @@ export async function runHardGates(
              workspace_id,
              canonical_job_id, job_version_id, pipeline_run_id, gate_version, workability_policy_hash,
              decision, rejection_codes, evidence_quotes, workability_facts,
-             preference_user_id, preference_context_id
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+             preference_user_id, preference_context_id, created_at
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, clock_timestamp())`,
           [
             ctx.workspaceId,
             persistedGateDecision.canonical_job_id,
@@ -1289,6 +1399,7 @@ export async function runHardGates(
         );
 
         await client.query("COMMIT");
+        if (stampOnly) stampedCount++;
 
         const codeStr = gateResult.rejection_codes.length ? ` [${gateResult.rejection_codes.join(", ")}]` : "";
         // Job ids only: Actions logs are public, so employer names and titles are not logged.
@@ -1313,5 +1424,175 @@ export async function runHardGates(
     hardRejected: rejectedCount,
     needsVerification: needsVerificationCount,
     errors: errorCount,
+    stamped: stampedCount,
   };
+}
+
+/**
+ * Gate-owned write for "the posting or feed contradicts a known work fact": the job is flagged NEEDS_VERIFICATION, with the
+ * evidence stored. It is not a re-gate and never a rejection.
+ *
+ *  - Writes canonical_jobs (gate_decision, rejection_reason, gate_evidence_quotes, workability_facts) and the same immutable
+ *    gate_decisions audit row the gate itself writes, so verificationQuestionService finds the question from the codes and
+ *    quotes, exactly as for a gate NEEDS_VERIFICATION.
+ *  - Idempotent: the same code with the same quote on the current gate decision is reported as ALREADY_FLAGGED.
+ *  - No-op for a hard-rejected, manually removed, archived or never-gated (RAW_STAGED) job, and for a job without a job version.
+ *  - A job already past matching keeps its processing state: QUEUED_FOR_AI, EVALUATING, AI_EVALUATED, EVALUATED, DEFERRED_BUDGET
+ *    and NEEDS_MANUAL_REVIEW are not moved (an in-flight or finished evaluation is not disturbed); gate_decision and the audit
+ *    row carry the flag and the decider treats the job as NEEDS_VERIFICATION. Earlier states move to NEEDS_VERIFICATION.
+ *  - A later normal re-gate writes its own result; the flag is replaced only when the gate itself no longer needs verification.
+ *
+ * The caller owns the transaction: the row lock (FOR UPDATE) and the two writes (canonical_jobs, gate_decisions) must commit together.
+ * The availability recheck calls this inside its own transaction.
+ */
+type Queryable = Pick<pg.PoolClient, "query">;
+
+export const FLAGGABLE_REASON_CODES = ["GATE_UNKNOWN_WORK_MODE", "NEEDS_VERIFICATION_LOCATION_DETAIL"] as const;
+export type FlagReasonCode = (typeof FLAGGABLE_REASON_CODES)[number];
+
+export interface FlagNeedsVerificationInput {
+  workspaceId: string;
+  jobId: string;
+  reasonCode: FlagReasonCode;
+  evidence: {
+    /** The posting or feed words that contradict the known fact. Required: the question shows it. */
+    quote: string;
+    /** Where the contradiction was read (for example RECHECK_AVAILABILITY). */
+    source?: string;
+    /** Structured facts recorded with the conflict (known value, value seen now). */
+    facts?: Record<string, unknown>;
+  };
+}
+
+export type FlagNeedsVerificationResult =
+  | { applied: true; stateKept: boolean; gateDecisionId: string }
+  | { applied: false; reason: "NOT_FOUND" | "ARCHIVED" | "HARD_REJECTED" | "MANUALLY_REMOVED" | "RAW_STAGED" | "NO_JOB_VERSION" | "ALREADY_FLAGGED" };
+
+/** States past matching: the flag is recorded but the processing state is left alone. */
+const STATES_KEPT = new Set(["QUEUED_FOR_AI", "EVALUATING", "RETRY_WAIT", "AI_EVALUATED", "EVALUATED", "DEFERRED_BUDGET", "NEEDS_MANUAL_REVIEW"]);
+
+function uniqueStrings(values: readonly unknown[]): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === "string" && value.trim() !== ""))];
+}
+
+export async function flagNeedsVerification(
+  client: Queryable,
+  input: FlagNeedsVerificationInput,
+): Promise<FlagNeedsVerificationResult> {
+  if (!FLAGGABLE_REASON_CODES.includes(input.reasonCode)) {
+    throw new Error(`flagNeedsVerification: ${String(input.reasonCode)} is not a flaggable reason code.`);
+  }
+  const quote = input.evidence.quote.trim();
+  if (!quote) throw new Error("flagNeedsVerification: evidence.quote is required.");
+
+  const { rows } = await client.query<{
+    archived_at: string | null;
+    gate_decision: string | null;
+    state: string | null;
+    latest_job_version_id: string | null;
+    workability_facts: Record<string, unknown> | null;
+    gate_evidence_quotes: unknown;
+  }>(
+    `SELECT archived_at, gate_decision, COALESCE(processing_state, processing_status) AS state,
+            latest_job_version_id, workability_facts, gate_evidence_quotes
+       FROM canonical_jobs
+      WHERE workspace_id = $1 AND id = $2
+      FOR UPDATE`,
+    [input.workspaceId, input.jobId],
+  );
+  const job = rows[0];
+  if (!job) return { applied: false, reason: "NOT_FOUND" };
+  if (job.archived_at) return { applied: false, reason: "ARCHIVED" };
+  if (job.gate_decision === "HARD_REJECT" || job.state === "HARD_REJECTED") return { applied: false, reason: "HARD_REJECTED" };
+  if (job.state === "MANUALLY_REMOVED") return { applied: false, reason: "MANUALLY_REMOVED" };
+  if (job.state === "RAW_STAGED" || job.gate_decision === null) return { applied: false, reason: "RAW_STAGED" };
+  if (!job.latest_job_version_id) return { applied: false, reason: "NO_JOB_VERSION" };
+
+  const previous = (await client.query<{
+    decision: string;
+    rejection_codes: unknown;
+    evidence_quotes: unknown;
+    workability_policy_hash: string | null;
+  }>(
+    `SELECT decision, rejection_codes, evidence_quotes, workability_policy_hash
+       FROM gate_decisions
+      WHERE workspace_id = $1 AND canonical_job_id = $2 AND job_version_id = $3
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1`,
+    [input.workspaceId, input.jobId, job.latest_job_version_id],
+  )).rows[0];
+
+  const previousCodes = Array.isArray(previous?.rejection_codes) ? uniqueStrings(previous.rejection_codes) : [];
+  const previousQuotes = Array.isArray(previous?.evidence_quotes) ? uniqueStrings(previous.evidence_quotes) : [];
+  if (previous?.decision === "NEEDS_VERIFICATION" && previousCodes.includes(input.reasonCode) && previousQuotes.includes(quote)) {
+    return { applied: false, reason: "ALREADY_FLAGGED" };
+  }
+
+  const codes = uniqueStrings([...(previous?.decision === "NEEDS_VERIFICATION" ? previousCodes : []), input.reasonCode, "NEEDS_VERIFICATION"]);
+  const currentQuotes = Array.isArray(job.gate_evidence_quotes) ? uniqueStrings(job.gate_evidence_quotes) : [];
+  const quotes = uniqueStrings([...currentQuotes, quote]);
+  const facts = {
+    ...(job.workability_facts ?? {}),
+    facts_conflict: {
+      reason_code: input.reasonCode,
+      source: input.evidence.source ?? null,
+      facts: input.evidence.facts ?? null,
+      recorded_at: new Date().toISOString(),
+    },
+  };
+  const stateKept = job.state !== null && STATES_KEPT.has(job.state);
+
+  await client.query(
+    `UPDATE canonical_jobs
+        SET gate_decision = 'NEEDS_VERIFICATION',
+            rejection_reason = $3,
+            gate_evidence_quotes = $4::jsonb,
+            workability_facts = $5::jsonb,
+            processing_state = CASE WHEN $6::boolean THEN processing_state ELSE 'NEEDS_VERIFICATION' END,
+            processing_status = CASE WHEN $6::boolean THEN processing_status ELSE 'NEEDS_VERIFICATION' END,
+            updated_at = NOW()
+      WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL`,
+    [input.workspaceId, input.jobId, codes.join(", "), JSON.stringify(quotes), JSON.stringify(facts), stateKept],
+  );
+  // The same policy identity a gate run records: the workability policy hash in force and the preference context it used.
+  const flagContext = await resolveWorkspaceContext(client as any);
+  if (flagContext.workspaceId !== input.workspaceId) throw new Error("flagNeedsVerification: the workspace does not match the resolved workspace context.");
+  const flagPreferences = await resolveWorkspacePreferenceContext(client as pg.PoolClient, flagContext, ["stage3"]);
+  const flagPolicy = await resolveEffectiveWorkabilityPolicy(client as any, { context: flagContext, stage3: flagPreferences.stage3 ?? {} });
+  const envelope = PersistedGateDecisionSchema.parse({
+    schema_version: SCHEMA_VERSION,
+    canonical_job_id: input.jobId,
+    job_version_id: job.latest_job_version_id,
+    pipeline_run_id: crypto.randomUUID(),
+    gate_version: GATE_VERSION,
+    workability_policy_hash: flagPolicy.policyHash,
+    status: "NEEDS_VERIFICATION",
+    rejection_codes: codes,
+    evidence_quotes: quotes,
+    workability_facts: facts,
+    evaluated_at: new Date().toISOString(),
+  });
+  // created_at = clock_timestamp(): within one transaction NOW() is constant, so a flag and a gate row written together would tie
+  // and order by random id; the latest-decision readers order by created_at DESC.
+  const audit = await client.query<{ id: string }>(
+    `INSERT INTO gate_decisions (
+       workspace_id, canonical_job_id, job_version_id, pipeline_run_id, gate_version, workability_policy_hash,
+       decision, rejection_codes, evidence_quotes, workability_facts, preference_user_id, preference_context_id, created_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, 'NEEDS_VERIFICATION', $7::jsonb, $8::jsonb, $9::jsonb, $10, $11, clock_timestamp())
+     RETURNING id`,
+    [
+      input.workspaceId,
+      envelope.canonical_job_id,
+      envelope.job_version_id,
+      envelope.pipeline_run_id,
+      envelope.gate_version,
+      envelope.workability_policy_hash,
+      JSON.stringify(envelope.rejection_codes),
+      JSON.stringify(envelope.evidence_quotes),
+      JSON.stringify(envelope.workability_facts),
+      flagPreferences.contextId ? flagContext.userId : null,
+      flagPreferences.contextId,
+    ],
+  );
+  return { applied: true, stateKept, gateDecisionId: audit.rows[0]!.id };
 }

@@ -197,7 +197,7 @@ async function main(): Promise<void> {
 
     const { runRequirementsExtraction } = await import('../src/pipeline/requirementsExtractor.js');
     const { runEmbeddingBatchWithFallback } = await import('../src/embeddings/batchCoordinator.js');
-    const { runDeterministicMatcher } = await import('../src/pipeline/deterministicMatcher.js');
+    const { runDeterministicMatcher, assertMatchSummaryComplete } = await import('../src/pipeline/deterministicMatcher.js');
     const { runRecommendationDecider } = await import('../src/pipeline/recommendationDecider.js');
 
     const totals = emptyReplayTotals();
@@ -231,7 +231,12 @@ async function main(): Promise<void> {
           embed: async (ids) => (await runEmbeddingBatchWithFallback(2000, pool as never, { context: workspace, jobVersionIds: ids })).primary,
           // A re-gate leaves jobs before lane routing; the matcher only takes routed jobs. Route again with the active lane revisions.
           route: regate ? (ids) => runLaneRouting(pool as never, { context: workspace, canonicalJobIds: ids, limit: CHUNK, reprocessExisting: true }) : undefined,
-          match: (ids) => runDeterministicMatcher(pool as never, { context: workspace, canonicalJobIds: ids }),
+          match: async (ids) => {
+            const summary = await runDeterministicMatcher(pool as never, { context: workspace, canonicalJobIds: ids });
+            // A job left unmatched for missing requirement embeddings is a failed replay stage, not a held-back match.
+            assertMatchSummaryComplete(summary, 'replay match');
+            return summary;
+          },
           decide: (ids) => runRecommendationDecider(pool as never, { context: workspace, canonicalJobIds: ids }),
         },
         { canonicalJobIds, jobVersionIds: chunk.map((row) => row.job_version_id), extractJobVersionIds: toExtract.map((row) => row.job_version_id) },
