@@ -254,20 +254,13 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
     const summary = await runDeterministicMatcher(undefined, { context });
 
     expect(summary.matchedJobs).toBe(0);
-    expect(summary.skippedJobs).toBe(1);
     expect(summary.errors).toBe(0);
-
-    const canonicalUpdate = (mPool.query as any).mock.calls.find(
-      (call: any[]) =>
-        typeof call[0] === 'string' &&
-        call[0].includes('UPDATE canonical_jobs') &&
-        call[0].includes("processing_state = CASE")
-    );
-    expect(canonicalUpdate).toBeDefined();
-    expect(canonicalUpdate?.[1][5]).toBe('UNKNOWN');
-    expect(canonicalUpdate?.[1][7]).toBe(true);
-    expect(canonicalUpdate?.[0]).toContain("THEN 'LANE_ROUTED'");
-    expect(canonicalUpdate?.[0]).not.toContain("processing_state = 'MATCHED'");
+    // A requirement without an embedding blocks the job: no match run is stored and nothing is published for it.
+    expect(summary.blockedOnRequirementEmbeddings).toEqual(['33333333-3333-4333-8333-333333333333']);
+    const calls = (mPool.query as any).mock.calls.map((call: any[]) => String(call[0]));
+    expect(calls).toContain('ROLLBACK');
+    expect(calls.some((sql: string) => sql.includes('UPDATE canonical_jobs') && sql.includes('processing_state = CASE'))).toBe(false);
+    expect(calls.some((sql: string) => sql.includes("status = 'COMPLETED'") && sql.includes('UPDATE match_runs'))).toBe(false);
   });
 
   it('allows an explicitly requeued stale match to run from MATCHED state', async () => {

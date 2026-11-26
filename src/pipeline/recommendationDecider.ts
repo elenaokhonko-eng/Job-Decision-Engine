@@ -73,10 +73,27 @@ export function applyThinPostingCap<T extends string>(outcome: T, confidence: { 
   return confidence.level === "LOW" && outcome === "PRIORITY" ? "REVIEW" : outcome;
 }
 
+export interface OutcomeConflictDetail {
+  canonical_job_id: string;
+  job_version_id: string;
+  stored_outcome: string | null;
+  recomputed_outcome: string;
+  stored_eligibility: string | null;
+  recomputed_eligibility: string;
+  eligibility_rule_id: string | null;
+  outcome_rule_id: string | null;
+  /** Rule and note codes of the recomputation (posting quotes left out). */
+  recomputed_notes: string[];
+}
+
 export interface RecommendationDeciderSummary {
   updated: number;
   decisionsInserted: number;
   errors: number;
+  /** Jobs in `preserveStoredOutcome` mode whose recomputed outcome or eligibility differs from the stored one (nothing written for them). */
+  outcomeConflicts?: number;
+  /** One entry per conflict: the stored and the recomputed outcome and eligibility (ids and codes only). */
+  outcomeConflictDetails?: OutcomeConflictDetail[];
   policySnapshotId: string;
   policySnapshotHash: string;
 }
@@ -327,8 +344,18 @@ export async function runRecommendationDecider(
     jobVersionIds?: string[];
     canonicalJobIds?: string[];
     limit?: number;
+    /**
+     * Reassessment of a terminal (HARD_REJECTED / UNMATCHED) job that already carries an outcome: the decision row is
+     * stamped only when the recomputed outcome and eligibility equal the stored ones (otherwise nothing is written and
+     * the job counts as an outcome conflict), and the job row keeps every recommendation column; only
+     * latest_deterministic_decision_id moves to the stamped decision.
+     */
+    preserveStoredOutcome?: boolean;
   }
 ): Promise<RecommendationDeciderSummary> {
+  const preserveStoredOutcome = options?.preserveStoredOutcome === true;
+  let outcomeConflicts = 0;
+  const outcomeConflictDetails: OutcomeConflictDetail[] = [];
   console.log("Starting Deterministic Recommendation Decider...");
   const pool = clientOrPool || defaultPool;
 
@@ -368,6 +395,7 @@ export async function runRecommendationDecider(
       canonical_latest_job_version_id: string | null;
       processing_state: string | null;
       gate_decision: string | null;
+      rejection_reason: string | null;
       deterministic_match_score: any;
       deterministic_match_coverage: any;
       workplace_type: string | null;
@@ -425,6 +453,7 @@ export async function runRecommendationDecider(
         c.latest_job_version_id AS canonical_latest_job_version_id,
         COALESCE(c.processing_state, c.processing_status) AS processing_state,
         c.gate_decision,
+        c.rejection_reason,
         c.deterministic_match_score,
         c.deterministic_match_coverage,
         c.workplace_type,
@@ -1087,6 +1116,22 @@ export async function runRecommendationDecider(
           adjustedNotes.push("application_readiness_blocked");
         }
 
+        if (preserveStoredOutcome
+          && (job.recommendation_outcome !== adjustedOutcome || job.recommendation_eligibility !== adjustedEligibility)) {
+          outcomeConflicts += 1;
+          outcomeConflictDetails.push({
+            canonical_job_id: job.canonical_job_id,
+            job_version_id: job.job_version_id,
+            stored_outcome: job.recommendation_outcome,
+            recomputed_outcome: adjustedOutcome,
+            stored_eligibility: job.recommendation_eligibility,
+            recomputed_eligibility: adjustedEligibility,
+            eligibility_rule_id: evaluation.eligibilityRuleId ?? null,
+            outcome_rule_id: evaluation.outcomeRuleId ?? null,
+            recomputed_notes: adjustedNotes.filter((note) => !note.startsWith("degree_asked_for")),
+          });
+          throw new Error("OUTCOME_CONFLICT_ON_TERMINAL_JOB: the recomputed outcome differs from the stored one; nothing was written.");
+        }
         const decisionJson = RecommendationDecisionSchema.parse({
           canonical_job_id: job.canonical_job_id,
           job_version_id: job.job_version_id,
@@ -1163,6 +1208,12 @@ export async function runRecommendationDecider(
             evidence_confidence_min_requirements: MIN_CONFIRMED_REQUIREMENTS,
             role_downrank_assessment_hash: roleShapeFingerprint(shape),
             ...(confirmedFactsHash ? { confirmed_job_facts_hash: confirmedFactsHash } : {}),
+            // A gate outcome other than a plain PASS is part of the decision context: a re-gate that flips PASS and NEEDS_VERIFICATION
+            // (or changes the codes) on an identical match run must write a new decision row and a new DECIDE task key, or the old
+            // decision would be returned by the conflict clause. PASS adds nothing, so existing fingerprints do not move.
+            ...(normalizedGateDecision && normalizedGateDecision !== "PASS"
+              ? { gate_outcome_hash: sha256Json({ decision: normalizedGateDecision, reason: job.rejection_reason ?? null }) }
+              : {}),
           },
         });
 
@@ -1240,7 +1291,16 @@ export async function runRecommendationDecider(
           decisionsInserted += 1;
         }
 
-        const updateRes = await client.query<{ id: string }>(
+        const updateRes = preserveStoredOutcome
+          ? await client.query<{ id: string }>(
+            `UPDATE canonical_jobs c
+                SET latest_deterministic_decision_id = $3
+              WHERE c.workspace_id = $1 AND c.id = $2 AND c.archived_at IS NULL
+                AND c.latest_deterministic_decision_id IS DISTINCT FROM $3
+              RETURNING c.id`,
+            [ctx.workspaceId, job.canonical_job_id, decisionId],
+          )
+          : await client.query<{ id: string }>(
           `
           UPDATE canonical_jobs c
           SET recommendation_eligibility = $2,
@@ -1308,6 +1368,8 @@ export async function runRecommendationDecider(
       updated,
       decisionsInserted,
       errors,
+      outcomeConflicts,
+      outcomeConflictDetails,
       policySnapshotId: snapshot.snapshotId,
       policySnapshotHash: snapshot.snapshotHash,
     };

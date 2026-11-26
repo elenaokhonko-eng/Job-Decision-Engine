@@ -196,6 +196,29 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     expect((await latest()).trace.role_downrank).toMatchObject({ total_penalty: 0, signals: [] });
   });
 
+  it("a re-gate that flips the gate outcome on an identical match context writes a NEW decision row (the old one is not returned by the conflict clause); flipping back reuses the first row", async () => {
+    const { runRecommendationDecider } = await import("../../pipeline/recommendationDecider.js");
+    const linked = async () => (await q(`SELECT latest_deterministic_decision_id::text AS id, recommendation_eligibility AS eligibility FROM canonical_jobs WHERE id = $1`, [JOB_ID])).rows[0];
+    await q(`UPDATE canonical_jobs SET gate_decision = 'PASS', rejection_reason = NULL WHERE id = $1`, [JOB_ID]);
+    const first = await runRecommendationDecider(client);
+    expect(first.errors).toBe(0);
+    const passRow = await linked();
+    expect(passRow.id).toBeTruthy();
+
+    await q(`UPDATE canonical_jobs SET gate_decision = 'NEEDS_VERIFICATION', rejection_reason = 'GATE_UNKNOWN_WORK_MODE, NEEDS_VERIFICATION', processing_state = 'LANE_ROUTED', processing_status = 'LANE_ROUTED' WHERE id = $1`, [JOB_ID]);
+    const flipped = await runRecommendationDecider(client);
+    expect(flipped.errors).toBe(0);
+    expect(flipped.decisionsInserted).toBe(1);
+    const verifyRow = await linked();
+    expect(verifyRow.id).not.toBe(passRow.id);
+
+    await q(`UPDATE canonical_jobs SET gate_decision = 'PASS', rejection_reason = NULL, processing_state = 'LANE_ROUTED', processing_status = 'LANE_ROUTED' WHERE id = $1`, [JOB_ID]);
+    const back = await runRecommendationDecider(client);
+    expect(back.errors).toBe(0);
+    expect(back.decisionsInserted).toBe(0);
+    expect((await linked()).id).toBe(passRow.id);
+  });
+
   it("fully satisfied is judged on the RAW score: raw 0.92 with a penalised 0.865 stays PRIORITY; raw 0.85 does not", async () => {
     const { runRecommendationDecider } = await import("../../pipeline/recommendationDecider.js");
     const workspace = await q(`SELECT workspace_id FROM canonical_jobs WHERE id = $1`, [JOB_ID]);
@@ -380,7 +403,7 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
 
     // decider_version is written in the INSERT of the decision (rows are immutable), outside decision_hash.
     const stamped = await q(`SELECT decider_version FROM deterministic_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [JOB_ID]);
-    expect(stamped.rows[0].decider_version).toBe("recommendation_decider_v1");
+    expect(stamped.rows[0].decider_version).toBe("recommendation_decider_v2");
     const check = readiness.checks.find((entry: { key: string }) => entry.key === "MANDATORY_QUALIFICATIONS");
     expect(check.status).toBe("MET");
     expect(check.reason_code).not.toBe("DEGREE_GAP_FLAGGED");

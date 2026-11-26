@@ -5,11 +5,14 @@
  */
 import type pg from "pg";
 
-import { AVAILABILITY_RECHECK_ARCHIVE_RULE } from "../services/jobArchive.js";
 import { OWNER_SAVED_SOURCE_NAMES } from "../services/jobArchiveHardRejectedPolicy.js";
+import { GATE_VERSION } from "../contracts/version.js";
+import { DECIDER_VERSION, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
+import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
 import { LANE_ROUTER_RULE_VERSION } from "../pipeline/laneRouter.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
 import { routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
+import { OUTCOME_CONFLICT_REPAIR_ACTION, deciderReachableSql, deciderSeedableSql } from "./seedQueryScope.js";
 import { ROUTABLE_VERIFICATION_SQL, supersededProfileMatchSql } from "./stageTaskWorker.js";
 import { findTasksCompletedWithoutResult } from "./completedWithoutResult.js";
 
@@ -109,23 +112,18 @@ export async function routableVerificationJobsStranded(db: Queryable, workspaceI
 }
 
 /**
- * A job the owner saved, applied to or held BEFORE the availability re-check archived it as not
- * confirmable. Only archives made by that rule (latest ARCHIVED event details.rule) count, and the
- * protection must predate the archive and have been in force at that moment (a hold counts only if not
- * released and not expired then). A job saved or held after a legitimate archive is not a violation.
+ * A job the owner saved, applied to or held BEFORE any automatic archive rule archived it (age rule, hard-reject
+ * rule, snippet expiry, availability re-check, link repair). Any archive whose reason is not a manual one counts,
+ * and the protection must predate the archive and have been in force at that moment (a hold counts only if not
+ * released and not expired then). A job saved or held after a legitimate archive is not a violation. The detail
+ * counts violations per archive reason (POSTING_NOT_CONFIRMABLE is always present).
  */
 export async function protectedJobsAutoArchived(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
-  const { rows } = await db.query<{ id: string }>(
-    `SELECT c.id::text AS id
+  const { rows } = await db.query<{ id: string; archive_reason: string | null }>(
+    `SELECT c.id::text AS id, c.archive_reason
        FROM canonical_jobs c
-       JOIN LATERAL (
-         SELECT event.details->>'rule' AS rule
-           FROM job_archive_events event
-          WHERE event.workspace_id = c.workspace_id AND event.canonical_job_id = c.id AND event.action = 'ARCHIVED'
-          ORDER BY event.event_at DESC, event.id DESC
-          LIMIT 1
-       ) archived_by ON archived_by.rule = $3
-      WHERE c.workspace_id = $1::uuid AND c.archived_at IS NOT NULL AND c.archive_reason = 'POSTING_NOT_CONFIRMABLE'
+      WHERE c.workspace_id = $1::uuid AND c.archived_at IS NOT NULL
+        AND UPPER(COALESCE(c.archive_reason, '')) NOT LIKE 'MANUAL%'
         AND (
           EXISTS (SELECT 1 FROM job_versions v JOIN raw_job_observations o
                     ON o.workspace_id = v.workspace_id AND o.job_version_id = v.id
@@ -140,9 +138,67 @@ export async function protectedJobsAutoArchived(db: Queryable, workspaceId: stri
                         AND h.expires_at > c.archived_at AND (h.released_at IS NULL OR h.released_at > c.archived_at))
         )
       ORDER BY c.id`,
-    [workspaceId, [...OWNER_SAVED_SOURCE_NAMES], AVAILABILITY_RECHECK_ARCHIVE_RULE],
+    [workspaceId, [...OWNER_SAVED_SOURCE_NAMES]],
   );
-  return result("protected_job_auto_archived", rows.map((row) => row.id), { POSTING_NOT_CONFIRMABLE: rows.length });
+  const detail: Record<string, number> = { POSTING_NOT_CONFIRMABLE: 0 };
+  for (const row of rows) detail[row.archive_reason ?? "UNKNOWN"] = (detail[row.archive_reason ?? "UNKNOWN"] ?? 0) + 1;
+  return result("protected_job_auto_archived", rows.map((row) => row.id), detail);
+}
+
+/**
+ * A terminal (HARD_REJECTED / UNMATCHED) job whose decider-version reassessment would have changed its stored outcome: the task
+ * was closed with repair_action OUTCOME_CONFLICT_ON_TERMINAL_JOB, the job was left untouched, and its latest decision is still
+ * stale. It stays red until an operator resolves it (fixes the stored outcome or the rule). Excluded from the decider stage
+ * (deciderSeedableSql), so a conflicted job is counted once, here, and not also as a stale decision.
+ */
+export async function terminalOutcomeConflicts(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT DISTINCT c.id::text AS id
+       FROM pipeline_tasks t
+       JOIN canonical_jobs c ON c.workspace_id = t.workspace_id AND c.latest_job_version_id::text = t.payload->>'job_version_id'
+      WHERE t.workspace_id = $1::uuid AND t.task_type = 'DECIDE_RECOMMENDATION' AND t.status = 'COMPLETED'
+        AND t.repair_action = '${OUTCOME_CONFLICT_REPAIR_ACTION}'
+        AND t.payload->'outcome_conflict'->>'decider_version' = $2
+        AND c.archived_at IS NULL AND NOT c.is_test_fixture
+        AND COALESCE(c.processing_state, c.processing_status) IN ('HARD_REJECTED', 'UNMATCHED')
+        AND c.recommendation_outcome IS NOT NULL
+        -- Still unresolved: no decision stamped under the current decider version exists for this version (also true when
+        -- the job never had a decision, which the stale-decision arm cannot see).
+        AND NOT EXISTS (
+          SELECT 1 FROM deterministic_decisions d
+           WHERE d.workspace_id = c.workspace_id AND d.job_version_id = c.latest_job_version_id AND d.decider_version = $2)
+      ORDER BY 1`,
+    [workspaceId, DECIDER_VERSION],
+  );
+  return result("terminal_outcome_conflict", rows.map((row) => row.id));
+}
+
+export interface ReportedDecisionCounts {
+  /** Live jobs with an outcome and a stale or unstamped latest decision that no seed reaches, by state. Never an error. */
+  readonly unseeded_stale_decisions: Record<string, number>;
+  /** Live jobs with an outcome but no latest decision at all, by state. The decider-version seed needs a decision to compare. Never an error. */
+  readonly outcome_without_latest_decision: Record<string, number>;
+}
+
+/** Visibility only: states the decider-version seed cannot reach must not stay invisible, and must not fail a reconcile. */
+export async function reportedDecisionCounts(db: Queryable, workspaceId: string): Promise<ReportedDecisionCounts> {
+  const count = async (extra: string): Promise<Record<string, number>> => {
+    const { rows } = await db.query<{ state: string; n: number }>(
+      `SELECT COALESCE(c.processing_state, c.processing_status) AS state, COUNT(*)::int AS n
+         FROM canonical_jobs c
+        WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+          AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+          AND c.recommendation_outcome IS NOT NULL
+          ${extra}
+        GROUP BY 1 ORDER BY 1`,
+      [workspaceId],
+    );
+    return Object.fromEntries(rows.map((row) => [row.state, row.n]));
+  };
+  return {
+    unseeded_stale_decisions: await count(`AND ${deciderVersionRefreshSql("c")} AND NOT (${deciderReachableSql("c")})`),
+    outcome_without_latest_decision: await count("AND c.latest_deterministic_decision_id IS NULL"),
+  };
 }
 
 /**
@@ -212,6 +268,41 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
       params: [LANE_ROUTER_RULE_VERSION],
     },
   };
+  // Seed-equal, like the stages above. decider: the DECIDE seed's decider-version arm (a live job whose latest decision
+  // has another or no decider_version), limited to what the decider itself processes (complete description with source
+  // content). gate: the gate version seed (latest gate decision older than the running version, no gate task in flight).
+  stages.decider = {
+    sql: `SELECT c.id::text AS id
+            FROM canonical_jobs c
+           WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+             AND ${deciderReachableSql("c")}
+             AND ${deciderVersionRefreshSql("c")}`,
+    params: [],
+  };
+  stages.gate = {
+    sql: `SELECT c.id::text AS id
+            FROM canonical_jobs c
+            JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
+            JOIN LATERAL (
+              SELECT gate.gate_version FROM gate_decisions gate
+               WHERE gate.workspace_id = c.workspace_id AND gate.job_version_id = jv.id
+               ORDER BY gate.created_at DESC, gate.id DESC LIMIT 1
+            ) latest_gate ON TRUE
+           WHERE c.workspace_id = $1::uuid AND c.archived_at IS NULL AND NOT c.is_test_fixture
+             AND COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'MANUALLY_REMOVED')
+             AND c.description_quality_status = 'COMPLETE'
+             AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
+             AND CASE WHEN latest_gate.gate_version ~ '^(gate-)?[0-9]{1,17}([-.][0-9]{1,17})*$'
+                 THEN regexp_split_to_array(regexp_replace(latest_gate.gate_version, '^gate-', ''), '[-.]')::bigint[]
+                      < regexp_split_to_array(regexp_replace($2::text, '^gate-', ''), '[-.]')::bigint[]
+                 ELSE TRUE END
+             AND NOT EXISTS (
+               SELECT 1 FROM pipeline_tasks inflight
+                WHERE inflight.workspace_id = c.workspace_id AND inflight.task_type = 'APPLY_HARD_GATES'
+                  AND inflight.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+                  AND inflight.payload->>'job_version_id' = jv.id::text)`,
+    params: [GATE_VERSION],
+  };
   const ids: string[] = [];
   const detail: Record<string, number> = {};
   for (const [stage, query] of Object.entries(stages)) {
@@ -232,14 +323,16 @@ export async function runZeroChecks(
   workspaceId: string,
   options: { phase?: "pre" | "post" } = {},
 ): Promise<ZeroCheckResult[]> {
-  const stale = options.phase === "pre" ? [] : [await staleStageResults(db, workspaceId)];
+  // Post phase only, like the stale-stage check: a job-local policy disagreement that processing cannot fix must stay visible and
+  // failing, but must not stop the drain that runs after the pre-drain reconcile.
+  const postOnly = options.phase === "pre" ? [] : [await terminalOutcomeConflicts(db, workspaceId), await staleStageResults(db, workspaceId)];
   return [
     await rejectedJobsWithRecommendation(db, workspaceId),
     await listedJobsNotCurrentlyOpen(db, workspaceId),
     await completedTasksWithoutResult(db, workspaceId),
     await routableVerificationJobsStranded(db, workspaceId),
     await protectedJobsAutoArchived(db, workspaceId),
-    ...stale,
+    ...postOnly,
   ];
 }
 

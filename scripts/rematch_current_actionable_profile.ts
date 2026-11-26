@@ -6,7 +6,7 @@ import dotenv from 'dotenv';
 import pg from 'pg';
 
 import { isPooledPostgresConnectionString, pgPoolConfig } from '../src/db/pgSsl.js';
-import { runDeterministicMatcher } from '../src/pipeline/deterministicMatcher.js';
+import { assertMatchSummaryComplete, runDeterministicMatcher } from '../src/pipeline/deterministicMatcher.js';
 import { runRecommendationDecider } from '../src/pipeline/recommendationDecider.js';
 import { runExplanationQueueEnqueuer } from '../src/pipeline/explanationQueueEnqueuer.js';
 import { materializeApplicationRankings } from '../src/services/applicationRankingMaterializer.js';
@@ -194,6 +194,7 @@ async function main(): Promise<void> {
       limit: jobVersionIds.length,
     });
     if (matching.errors > 0) throw new Error(`Bounded profile matching reported ${matching.errors} error(s).`);
+    assertMatchSummaryComplete(matching, 'rematch_current_actionable_profile');
 
     const dependencyFailures = await pool.query<{ failed_count: number | string }>(
       `WITH latest_match_runs AS (
@@ -231,6 +232,7 @@ async function main(): Promise<void> {
     });
 
     const rankings = await materializeApplicationRankings(pool, context.workspaceId, { context });
+    if (rankings.policyError) process.exitCode = 1;
     console.log(JSON.stringify({ matching, decisions, evaluations, rankings }, null, 2));
   } finally {
     await pool.end();

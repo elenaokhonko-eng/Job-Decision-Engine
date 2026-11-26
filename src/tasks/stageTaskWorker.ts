@@ -1,3 +1,4 @@
+import { GATE_VERSION } from "../contracts/version.js";
 import crypto from "crypto";
 import pg from "pg";
 import dotenv from "dotenv";
@@ -29,6 +30,7 @@ import {
   isAiEvaluationOutcome,
   profileMatchSupersededSql,
   uniqueActiveProfileSql,
+  unmatchedParkedByOtherMatcherSql,
 } from "../pipeline/profileMatchCurrency.js";
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
@@ -48,7 +50,10 @@ import {
   SERIAL_PIPELINE_TASK_TYPES,
   pipelineTaskTargetKey,
 } from "./pipelineWorkerLanes.js";
-import { scopeSeedQuery } from "./seedQueryScope.js";
+import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
+import { OUTCOME_CONFLICT_REPAIR_ACTION, applyLiveJobScope, deciderSeedableSql, scopeSeedQuery } from "./seedQueryScope.js";
+import { decidableJobVersionSql } from "./completedWithoutResult.js";
+import { decisionNotStampable, matchNotApplicable } from "./designedNoOps.js";
 import { deciderVersionReassessmentReason, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import {
   pipelineTaskStageVersion,
@@ -102,6 +107,11 @@ export const PIPELINE_STAGE_TASK_TYPES = [
 ] as const;
 
 const SEMANTIC_MATCH_REPAIR_GENERATION = "semantic_match_repair_v2";
+/** Rounds of PUBLISH_EMBEDDING repair a job's requirement embeddings get before the job goes to NEEDS_MANUAL_REVIEW. */
+export const MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS = 3;
+/** Hard ceiling on repair tasks per job version (progress resets the round counter, this never resets). */
+export const MAX_REQUIREMENT_EMBEDDING_REPAIR_SEQUENCE = 50;
+export const EMBEDDING_REPAIR_EXHAUSTED_REASON = "REQUIREMENT_EMBEDDING_REPAIR_EXHAUSTED";
 export const ROUTABLE_VERIFICATION_SQL = routableWorkabilityVerificationSql("c");
 
 /**
@@ -132,9 +142,14 @@ export const SUPERSEDED_LANE_ROUTING_SQL = `(
  */
 // A function, not a constant: the matcher policy version (SCORING_POLICY) is read when the SQL is built,
 // the same moment the matcher and task currentness read it, so they cannot disagree about the active policy.
+// Second branch: an UNMATCHED job parked by an older matcher policy (see unmatchedParkedByOtherMatcherSql); the seed and the
+// matcher stale-stage check share this one function, so they cannot disagree.
 export const supersededProfileMatchSql = (): string => `(
-  ${eligibleRoutedJobSql("c", PROFILE_REMATCH_OUTCOMES)}
-  AND ${profileMatchSupersededSql("c", "mr")}
+  (
+    ${eligibleRoutedJobSql("c", PROFILE_REMATCH_OUTCOMES)}
+    AND ${profileMatchSupersededSql("c", "mr")}
+  )
+  OR ${unmatchedParkedByOtherMatcherSql("c", "mr")}
 )`;
 
 export type PipelineStageTaskType = (typeof PIPELINE_STAGE_TASK_TYPES)[number];
@@ -198,6 +213,12 @@ export interface SeedPipelineTasksSummary {
   deferredByBudget: number;
   timeBudgetExceeded: boolean;
   byType: Record<string, { inserted: number; existing: number }>;
+  /**
+   * Seed candidates the enqueue refused because the job is archived (JOB_ARCHIVED). Reported on its own, never
+   * as `existing`: the seed queries filter archived jobs before their cap, so a non-zero count means a seed
+   * selected a job it should not have, and it must stay visible instead of looking like already-queued work.
+   */
+  skippedArchived: number;
   /**
    * Eligible routed jobs found with a lane decision from superseded lane routing content in
    * this seeding pass; each gets a ROUTE_LANE re-route task (inserted or already existing).
@@ -331,10 +352,13 @@ function isPool(value: pg.Pool | pg.PoolClient): value is pg.Pool {
 function incrementSeed(
   summary: SeedPipelineTasksSummary,
   taskType: PipelineStageTaskType,
-  inserted: boolean
+  inserted: boolean,
+  skippedReason?: "JOB_ARCHIVED",
 ): void {
   summary.byType[taskType] ??= { inserted: 0, existing: 0 };
-  if (inserted) {
+  if (skippedReason === "JOB_ARCHIVED") {
+    summary.skippedArchived += 1;
+  } else if (inserted) {
     summary.inserted += 1;
     summary.byType[taskType].inserted += 1;
   } else {
@@ -513,6 +537,94 @@ async function enqueueStageTask(
     mode?: "ENSURE_CURRENT" | "FORCE_RECOMPUTE";
   },
 ): Promise<boolean> {
+  return (await enqueueStageTaskResult(taskType, id, payload, clientOrPool, context, intentOptions)).inserted;
+}
+
+/**
+ * A reassessment of a terminal job would change its stored outcome. Deterministic, so never retried and never an engine error:
+ * the task is closed with a repair action, the job is untouched, and the terminal_outcome_conflict zero check keeps it visible.
+ */
+class TerminalOutcomeConflictError extends Error {
+  constructor(readonly jobVersionId: string, readonly details: readonly unknown[]) {
+    super(`${OUTCOME_CONFLICT_REPAIR_ACTION}: job_version_id=${jobVersionId}; the decider would change the stored outcome, so nothing was written.`);
+  }
+}
+
+/** A DECIDE task for the current version of a HARD_REJECTED or UNMATCHED job whose version the decider cannot select. */
+async function isAwaitingContentTerminalDecide(
+  task: ClaimedPipelineTask,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+): Promise<boolean> {
+  const jobVersionId = optionalStringPayload(task, "job_version_id");
+  if (!jobVersionId) return false;
+  const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
+  if (state.latestJobVersionId !== jobVersionId) return false;
+  if (!["HARD_REJECTED", "UNMATCHED"].includes(state.processingState || "")) return false;
+  return !(await jobVersionIsDecidable(clientOrPool, ctx, jobVersionId));
+}
+
+/** The job's latest match run is `matchRunId` and it parked the job UNMATCHED under another matcher policy version. */
+async function isUnmatchedParkedByOtherMatcher(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+  matchRunId: string,
+): Promise<boolean> {
+  const { rows } = await clientOrPool.query<{ parked: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM canonical_jobs c
+         JOIN match_runs mr ON mr.workspace_id = c.workspace_id AND mr.id = c.latest_match_run_id
+        WHERE c.workspace_id = $1 AND c.latest_job_version_id = $2::uuid AND mr.id = $3::uuid
+          AND ${unmatchedParkedByOtherMatcherSql("c", "mr")}) AS parked`,
+    [ctx.workspaceId, jobVersionId, matchRunId],
+  );
+  return Boolean(rows[0]?.parked);
+}
+
+async function jobVersionHasDecision(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+  /** Only a decision stamped under this decider version counts (a decider-version reassessment). */
+  deciderVersion?: string,
+): Promise<boolean> {
+  const { rows } = await clientOrPool.query(
+    `SELECT 1 FROM deterministic_decisions
+      WHERE workspace_id = $1 AND job_version_id = $2 AND ($3::text IS NULL OR decider_version = $3) LIMIT 1`,
+    [ctx.workspaceId, jobVersionId, deciderVersion ?? null],
+  );
+  return rows.length > 0;
+}
+
+/** True when the decider can select the version: a complete description with source content evidence. */
+async function jobVersionIsDecidable(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<boolean> {
+  const { rows } = await clientOrPool.query<{ decidable: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM job_versions v JOIN canonical_jobs c ON c.workspace_id = v.workspace_id AND c.id = v.canonical_job_id
+        WHERE v.workspace_id = $1 AND v.id = $2 AND ${decidableJobVersionSql("c", "v")}) AS decidable`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return Boolean(rows[0]?.decidable);
+}
+
+async function enqueueStageTaskResult(
+  taskType: PipelineStageTaskType,
+  id: string,
+  payload: Record<string, unknown>,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  context: WorkspaceContext,
+  intentOptions?: {
+    producer?: string;
+    requestId?: string;
+    triggerRevisionId?: string | null;
+    mode?: "ENSURE_CURRENT" | "FORCE_RECOMPUTE";
+  },
+) {
   const maxAttempts = MODEL_BACKED_STAGE_TASK_TYPES.has(taskType) ? 3 : 8;
   let taskPayload = payload;
   let profileVersionId: string | undefined;
@@ -614,8 +726,33 @@ async function enqueueStageTask(
     taskPayload.superseded_match_run_id.trim() !== ""
       ? taskPayload.superseded_match_run_id.trim()
       : null;
-  const taskVariant = routingReplayVersion
+  // One embedding task per requirement set: a new active set (a re-extraction) is a new task.
+  const embeddingRequirementSetId =
+    taskType === "PUBLISH_EMBEDDING" &&
+    typeof taskPayload.embedding_requirement_set_id === "string" &&
+    taskPayload.embedding_requirement_set_id.trim() !== ""
+      ? taskPayload.embedding_requirement_set_id.trim()
+      : null;
+  // Each requirement-embedding repair round is its own task: a repeat repair of the same job version is not a no-op.
+  const embeddingRepairSequence =
+    taskType === "PUBLISH_EMBEDDING" && Number.isInteger(payload.embedding_repair_seq) && Number(payload.embedding_repair_seq) > 0
+      ? Number(payload.embedding_repair_seq)
+      : null;
+  // A gate rule change is a new task: the key carries the gate version the job was last gated under.
+  const gateRuleVersion =
+    taskType === "APPLY_HARD_GATES" &&
+    typeof taskPayload.gate_rule_version === "string" &&
+    taskPayload.gate_rule_version.trim() !== ""
+      ? taskPayload.gate_rule_version.trim()
+      : null;
+  const taskVariant = embeddingRepairSequence !== null
+    ? `repair-embedding-${embeddingRepairSequence}`
+    : routingReplayVersion
     ? `repair-${routingReplayVersion}`
+    : embeddingRequirementSetId
+      ? `embed-${embeddingRequirementSetId}`
+    : gateRuleVersion
+      ? `gate-${gateRuleVersion}`
     : laneRoutingRerouteVersion
       ? `reroute-${laneRoutingRerouteVersion}`
       : supersededMatchRunId
@@ -644,7 +781,7 @@ async function enqueueStageTask(
     clientOrPool,
     { context }
   );
-  return result.inserted;
+  return result;
 }
 
 function stageVersion(taskType: PipelineStageTaskType): string {
@@ -697,7 +834,11 @@ async function selectAndEnqueue(
     summary.timeBudgetExceeded = true;
     return;
   }
-  const scopedQuery = scopeSeedQuery(sql, params, seedScope, maxSeedPerType);
+  // The live-job scope sits inside the query, before its LIMIT. Only the observation seed has no canonical job.
+  const liveQuery = taskType === "NORMALIZE_OBSERVATION"
+    ? { sql, params }
+    : applyLiveJobScope(sql, params, { includeTestFixtures });
+  const scopedQuery = scopeSeedQuery(liveQuery.sql, liveQuery.params, seedScope, maxSeedPerType);
   const { rows } = await client.query<Record<string, unknown>>(scopedQuery.sql, scopedQuery.params);
   const candidates = rows.map(build);
   const canonicalJobIds = [...new Set(candidates
@@ -727,8 +868,8 @@ async function selectAndEnqueue(
     if (!task) continue;
     const canonicalJobId = task.payload.canonical_job_id;
     if (!includeTestFixtures && typeof canonicalJobId === "string" && fixtureIds.has(canonicalJobId)) continue;
-    const inserted = await enqueueStageTask(taskType, task.id, task.payload, client as any, ctx);
-    incrementSeed(summary, taskType, inserted);
+    const enqueued = await enqueueStageTaskResult(taskType, task.id, task.payload, client as any, ctx);
+    incrementSeed(summary, taskType, enqueued.inserted, enqueued.skippedReason);
   }
 }
 
@@ -744,6 +885,8 @@ export async function seedRecoverablePipelineTasks(
     includeTestFixtures?: boolean;
     routingDeferredReplayVersion?: string;
     timeBudgetMs?: number;
+    /** The running gate version; defaults to GATE_VERSION. Injectable so the unparseable-version path is testable. */
+    gateVersion?: string;
   } = {}
 ): Promise<SeedPipelineTasksSummary> {
   const pool = clientOrPool || defaultPool;
@@ -754,6 +897,7 @@ export async function seedRecoverablePipelineTasks(
     existing: 0,
     deferredByBudget: 0,
     timeBudgetExceeded: false,
+    skippedArchived: 0,
     byType: {},
   };
   const maxPerType = options.maxSeedPerType ?? 200;
@@ -1078,6 +1222,79 @@ export async function seedRecoverablePipelineTasks(
     maxPerType,
     );
 
+    // The running gate version is parsed here, not in SQL: Postgres does not guarantee AND short-circuit, so a
+    // bad running version could make the cast error instead of selecting nothing. Unparseable: no query at all
+    // (an empty type set makes selectAndEnqueue return before querying).
+    const runningGateVersion = options.gateVersion ?? GATE_VERSION;
+    const runningGateVersionParses = /^(gate-)?[0-9]{1,17}([-.][0-9]{1,17})*$/.test(runningGateVersion);
+    if (!runningGateVersionParses) console.warn("APPLY_HARD_GATES version seed skipped: the running gate version does not parse as a dotted number.");
+    const gateVersionSeedTypes = runningGateVersionParses ? enabledTypes : new Set<PipelineStageTaskType>();
+    // Jobs last gated under an older gate version get a stamp-only version refresh, bounded by
+    // the per-type cap. The task key carries the gate version, so an unchanged version enqueues nothing.
+    await selectAndEnqueue(
+      client as any,
+      ctx,
+      summary,
+      "APPLY_HARD_GATES",
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+       FROM canonical_jobs c
+       JOIN job_versions jv
+         ON jv.workspace_id = c.workspace_id
+        AND jv.id = COALESCE(c.latest_job_version_id, (
+          SELECT jv2.id FROM job_versions jv2
+           WHERE jv2.workspace_id = c.workspace_id AND jv2.canonical_job_id = c.id
+           ORDER BY jv2.observed_at DESC LIMIT 1))
+       JOIN LATERAL (
+         SELECT gate.gate_version
+         FROM gate_decisions gate
+         WHERE gate.workspace_id = c.workspace_id AND gate.job_version_id = jv.id
+         ORDER BY gate.created_at DESC, gate.id DESC
+         LIMIT 1
+       ) latest_gate ON TRUE
+       WHERE c.workspace_id = $1
+         AND c.archived_at IS NULL
+         AND ($4::boolean OR c.is_test_fixture IS NOT TRUE)
+         AND COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'MANUALLY_REMOVED')
+         -- The gate skips a job whose posting is incomplete or has no source content; selecting it would only
+         -- refill the cap every run.
+         AND c.description_quality_status = 'COMPLETE'
+         AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
+         -- "Older than", not "different from": a job a newer worker (desktop, rollback target) gated under a
+         -- newer version is never reopened. A stored version that does not parse as a dotted number (segments of
+         -- 1 to 17 digits, so the bigint cast cannot overflow) counts as older. The running version ($3) is
+         -- parsed in JS before this query is issued; an unparseable one selects nothing.
+         AND CASE WHEN latest_gate.gate_version ~ '^(gate-)?[0-9]{1,17}([-.][0-9]{1,17})*$'
+             THEN regexp_split_to_array(regexp_replace(latest_gate.gate_version, '^gate-', ''), '[-.]')::bigint[]
+                  < regexp_split_to_array(regexp_replace($3::text, '^gate-', ''), '[-.]')::bigint[]
+             ELSE TRUE END
+         -- One forced gate per job version: skip a job that already has a gate task in flight (for example the
+         -- successor of a forced re-extraction).
+         AND NOT EXISTS (
+           SELECT 1 FROM pipeline_tasks inflight
+            WHERE inflight.workspace_id = c.workspace_id AND inflight.task_type = 'APPLY_HARD_GATES'
+              AND inflight.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+              AND inflight.payload->>'job_version_id' = jv.id::text)
+       ORDER BY jv.observed_at ASC
+       LIMIT $2`,
+      [ctx.workspaceId, maxPerType, runningGateVersion, includeTestFixtures],
+      (row) => ({
+        id: requiredSeedValue(row, "job_version_id"),
+        payload: {
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
+          // Stamp-only refresh: the handler (gate 11.6, #275) records the new gate version without clearing
+          // lane, match, decision or ranking state. Never force_policy_recalculation here.
+          version_refresh: true,
+          gate_rule_version: runningGateVersion,
+        },
+      }),
+      gateVersionSeedTypes,
+      includeTestFixtures,
+      deadlineAt,
+      seedScope,
+      maxPerType,
+    );
+
     await selectAndEnqueue(
       client as any,
       ctx,
@@ -1116,6 +1333,66 @@ export async function seedRecoverablePipelineTasks(
       deadlineAt,
     seedScope,
     maxPerType,
+    );
+
+    // A job whose ACTIVE requirement set has a requirement with no embedding input, or an input with no
+    // published embedding in the configured primary space, gets its embeddings published (one task per set,
+    // idempotent). Without this, a re-extraction (new requirement set) leaves the new texts without vectors.
+    const embeddingConfiguration = getEmbeddingSpaceRegistryConfiguration();
+    await selectAndEnqueue(
+      client as any,
+      ctx,
+      summary,
+      "PUBLISH_EMBEDDING",
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id, jv.active_requirement_set_id AS requirement_set_id
+       FROM canonical_jobs c
+       JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
+       WHERE c.workspace_id = $1
+         AND c.archived_at IS NULL
+         AND ($6::boolean OR c.is_test_fixture IS NOT TRUE)
+         AND jv.active_requirement_set_id IS NOT NULL
+         AND COALESCE(c.processing_state, c.processing_status) NOT IN ('RAW_STAGED', 'HARD_REJECTED', 'MANUALLY_REMOVED')
+         -- One attempt per requirement set: a task for this set in ANY state (completed or failed included)
+         -- ends the candidacy, so attempted jobs cannot sit ahead of fresh ones under the cap.
+         AND NOT EXISTS (
+           SELECT 1 FROM pipeline_tasks attempted
+            WHERE attempted.workspace_id = c.workspace_id AND attempted.task_type = 'PUBLISH_EMBEDDING'
+              AND attempted.task_key LIKE 'PUBLISH_EMBEDDING:' || jv.id::text || ':%:embed-' || jv.active_requirement_set_id::text)
+         AND EXISTS (
+           SELECT 1 FROM job_requirements r
+            WHERE r.workspace_id = c.workspace_id AND r.requirement_set_id = jv.active_requirement_set_id
+              -- The embedding builder embeds only VALIDATED requirements; others can never be published.
+              AND r.status = 'VALIDATED'
+              AND NOT EXISTS (
+                SELECT 1 FROM embedding_inputs ei
+                 WHERE ei.workspace_id = r.workspace_id AND ei.source_type = 'JOB_REQUIREMENT' AND ei.source_id = r.id AND ei.is_current
+                   AND EXISTS (
+                     SELECT 1 FROM v_published_semantic_embeddings se
+                       JOIN embedding_spaces sp ON sp.workspace_id = se.workspace_id AND sp.id = se.embedding_space_id
+                      WHERE se.workspace_id = ei.workspace_id AND se.embedding_input_id = ei.id
+                        AND sp.active = TRUE AND sp.is_fallback_space = FALSE AND LOWER(sp.provider) = LOWER($3)
+                        AND sp.model = $4 AND sp.dimensions = $5)))
+         AND NOT EXISTS (
+           SELECT 1 FROM pipeline_tasks inflight
+            WHERE inflight.workspace_id = c.workspace_id AND inflight.task_type = 'PUBLISH_EMBEDDING'
+              AND inflight.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+              AND inflight.payload->>'job_version_id' = jv.id::text)
+       ORDER BY jv.observed_at ASC
+       LIMIT $2`,
+      [ctx.workspaceId, maxPerType, embeddingConfiguration.primary.provider, embeddingConfiguration.primary.model, embeddingConfiguration.primary.dimensions, includeTestFixtures],
+      (row) => ({
+        id: requiredSeedValue(row, "job_version_id"),
+        payload: {
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
+          embedding_requirement_set_id: requiredSeedValue(row, "requirement_set_id"),
+        },
+      }),
+      enabledTypes,
+      includeTestFixtures,
+      deadlineAt,
+      seedScope,
+      maxPerType,
     );
 
     await selectAndEnqueue(
@@ -1560,6 +1837,17 @@ export async function seedRecoverablePipelineTasks(
          LIMIT 1
        ) jv ON TRUE
        WHERE c.workspace_id = $1
+         -- Only what the decider will process (it skips an incomplete posting and one without source content): a skipped job
+         -- would keep the oldest updated_at and fill the cap on every pass.
+         AND c.description_quality_status = 'COMPLETE'
+         -- The states the handler can stamp, shared with the decider zero check (RAW_STAGED and PREQUALIFIED are no-ops there).
+         AND ${deciderSeedableSql("c")}
+         AND EXISTS (
+           SELECT 1 FROM job_versions decidable_version
+            WHERE decidable_version.workspace_id = c.workspace_id
+              AND decidable_version.id = COALESCE(c.latest_job_version_id, jv.id)
+              AND ${sourceContentEvidencePredicate("decidable_version.workspace_id", "decidable_version.id")}
+         )
          AND (
            COALESCE(c.processing_state, c.processing_status) IN (
              'HARD_REJECTED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED',
@@ -1849,7 +2137,9 @@ async function jobVersionHasCompletedRequirementsExtraction(
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
   jobVersionId: string,
-  runType: "DETERMINISTIC" | "LLM_QUOTED"
+  runType: "DETERMINISTIC" | "LLM_QUOTED",
+  /** When set, the active requirement set must have been made by this deterministic extractor version. */
+  extractorVersion?: string,
 ): Promise<boolean> {
   const { rows } = await (clientOrPool as QueryClient).query<{ exists: boolean }>(
     `SELECT EXISTS (
@@ -1869,8 +2159,14 @@ async function jobVersionHasCompletedRequirementsExtraction(
          AND jv.id = $2
          AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
          AND ps.stage_status = 'COMPLETED'
+         AND ($4::text IS NULL OR EXISTS (
+           SELECT 1 FROM requirement_sets active_set
+             JOIN requirement_set_identities active_identity
+               ON active_identity.workspace_id = active_set.workspace_id AND active_identity.id = active_set.requirement_identity_id
+            WHERE active_set.workspace_id = jv.workspace_id AND active_set.id = jv.active_requirement_set_id
+              AND active_identity.deterministic_extractor_version = $4))
        ) AS exists`,
-    [ctx.workspaceId, jobVersionId, runType]
+    [ctx.workspaceId, jobVersionId, runType, extractorVersion ?? null]
   );
   return Boolean(rows[0]?.exists);
 }
@@ -1918,6 +2214,9 @@ function classifyRoutingDependency(laneEvidence: string | null): AutomaticDepend
   return { code: "JOB_EMBEDDING_MISSING", repairTaskType: "PUBLISH_EMBEDDING" };
 }
 
+// NOTE: the space and fact filters here are written independently of the matcher's listSemanticEmbeddingSpaceCandidates, so for a
+// job the matcher blocked this can name EMBEDDING_SPACE_INCOMPATIBLE instead of REQUIREMENT_EMBEDDING_MISSING; both repair with
+// PUBLISH_EMBEDDING. Aligning the two selections is tracked as follow-up work.
 async function classifySemanticMatchDependency(
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
@@ -2064,12 +2363,111 @@ async function classifySemanticMatchDependency(
   return { code: "EMBEDDING_SPACE_INCOMPATIBLE", repairTaskType: "PUBLISH_EMBEDDING" };
 }
 
+/**
+ * Requirements the matcher would score (VALIDATED, in the active requirement set) that have no published embedding in the best
+ * single space (a space of this workspace; the guard needs ONE space that holds them all). With no active space every
+ * requirement counts as missing.
+ */
+async function countRequirementsWithoutEmbedding(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<{ missing: number; validated: number }> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ validated: number; missing: number | null }>(
+    `WITH requirements AS (
+       SELECT jr.id
+         FROM job_versions jv
+         JOIN job_requirements jr ON jr.workspace_id = jv.workspace_id AND jr.requirement_set_id = jv.active_requirement_set_id
+        WHERE jv.workspace_id = $1 AND jv.id = $2::uuid AND jv.active_requirement_set_id IS NOT NULL AND jr.status = 'VALIDATED'
+     ),
+     spaces AS (SELECT id FROM embedding_spaces WHERE workspace_id = $1 AND active = TRUE),
+     per_space AS (
+       SELECT s.id,
+              (SELECT COUNT(*) FROM requirements r
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM embedding_inputs ei
+                    JOIN v_published_semantic_embeddings se ON se.embedding_input_id = ei.id AND se.embedding_space_id = s.id
+                   WHERE ei.source_type = 'JOB_REQUIREMENT' AND ei.source_id = r.id AND ei.is_current = TRUE)) AS missing
+         FROM spaces s
+     )
+     SELECT (SELECT COUNT(*)::int FROM requirements) AS validated,
+            COALESCE((SELECT MIN(missing)::int FROM per_space), (SELECT COUNT(*)::int FROM requirements)) AS missing`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return { missing: rows[0]?.missing ?? 0, validated: rows[0]?.validated ?? 0 };
+}
+
+interface EmbeddingRepairPlan {
+  exhausted: boolean;
+  /** Rounds without progress so far, including the one about to be queued. */
+  round: number;
+  /** Total repair tasks queued for this job version: the unique part of each task key. */
+  sequence: number;
+  missing: number;
+}
+
+/**
+ * A repair round that embedded at least one more requirement than the previous block saw is progress and resets the round
+ * counter, so a job with many requirements finishes; MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS rounds in a row without progress
+ * exhaust the repair.
+ */
+async function planRequirementEmbeddingRepair(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<EmbeddingRepairPlan> {
+  const { missing, validated } = await countRequirementsWithoutEmbedding(clientOrPool, ctx, jobVersionId);
+  // Absolute bound on the total number of repair tasks, whatever the progress reading says (the missing count is not monotonic).
+  const maxSequence = Math.min(MAX_REQUIREMENT_EMBEDDING_REPAIR_SEQUENCE, Math.ceil(validated / 200) + MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS);
+  const { rows } = await (clientOrPool as QueryClient).query<{ payload: Record<string, unknown> | null }>(
+    `SELECT payload
+       FROM pipeline_tasks
+      WHERE workspace_id = $1 AND task_type = 'PUBLISH_EMBEDDING'
+        AND payload->>'job_version_id' = $2 AND payload ? 'embedding_repair_seq'
+      ORDER BY (payload->>'embedding_repair_seq')::int DESC
+      LIMIT 1`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  const previous = rows[0]?.payload ?? null;
+  if (!previous) return { exhausted: false, round: 1, sequence: 1, missing };
+  const previousMissing = Number(previous.missing_requirements);
+  const previousRound = Number(previous.embedding_repair_round);
+  const previousSequence = Number(previous.embedding_repair_seq);
+  const progressed = Number.isFinite(previousMissing) && missing < previousMissing;
+  const round = progressed ? 1 : previousRound + 1;
+  return {
+    exhausted: round > MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS || previousSequence >= maxSequence,
+    round,
+    sequence: previousSequence + 1,
+    missing,
+  };
+}
+
+export async function moveJobToManualReviewForEmbeddings(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+  rounds: number,
+): Promise<void> {
+  // Only states from which the matcher runs: never a job that is queued for, in, or past AI evaluation, never a hard rejection.
+  const reason = `${EMBEDDING_REPAIR_EXHAUSTED_REASON}: requirement embeddings still missing after ${rounds} repair round(s) without progress (infrastructure failure, not a career outcome)`;
+  await (clientOrPool as QueryClient).query(
+    `UPDATE canonical_jobs
+        SET processing_state = 'NEEDS_MANUAL_REVIEW', processing_status = 'NEEDS_MANUAL_REVIEW', rejection_reason = $3, updated_at = NOW()
+      WHERE workspace_id = $1 AND latest_job_version_id = $2::uuid AND archived_at IS NULL
+        AND COALESCE(processing_state, processing_status) IN ('LANE_ROUTED', 'MATCHED')`,
+    [ctx.workspaceId, jobVersionId, reason],
+  );
+  console.error(`Requirement embeddings still missing for job_version_id=${jobVersionId} after ${rounds} repair round(s): NEEDS_MANUAL_REVIEW (${EMBEDDING_REPAIR_EXHAUSTED_REASON}).`);
+}
+
 async function enqueueDependencyRepair(
   dependency: AutomaticDependency,
   task: ClaimedPipelineTask,
   jobVersionId: string,
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
+  extraPayload: Record<string, unknown> = {},
 ): Promise<boolean> {
   const payload = task.payload as Record<string, unknown> | null;
   const repairPayload = {
@@ -2078,6 +2476,7 @@ async function enqueueDependencyRepair(
     repair_dependency: dependency.code,
     repair_generation: SEMANTIC_MATCH_REPAIR_GENERATION,
     repair_attempt: task.attemptNumber,
+    ...extraPayload,
     ...(dependency.repairTaskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS"
       ? { repair_existing_state: true }
       : { reprocess_existing_state: true }),
@@ -2720,10 +3119,23 @@ async function maybeEnqueueAfterTask(
   const stagePayload = {
     canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
     job_version_id: jobVersionId,
-    ...(payload.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
+    // A gate-version refresh whose outcome changed re-runs the downstream stages for the SAME job version: its successors need
+    // repair-variant task keys, or the completed tasks of the first run would suppress them and the job would wait forever.
+    ...(payload.reprocess_existing_state === true || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
+      ? { reprocess_existing_state: true }
+      : {}),
+    ...(payload.repair_existing_state === true || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
+      ? { repair_existing_state: true }
+      : {}),
     ...(typeof payload.repair_dependency === "string" ? { repair_dependency: payload.repair_dependency } : {}),
     ...(typeof payload.repair_generation === "string" ? { repair_generation: payload.repair_generation } : {}),
     ...(typeof payload.repair_match_run_id === "string" ? { repair_match_run_id: payload.repair_match_run_id } : {}),
+    // Each gate version gets its own successor identities: a COMPLETED repair-variant task of the same job version (an earlier
+    // repair seed, or an earlier gate-version flip) must not turn this changed-outcome successor into a silent no-op.
+    // repair_generation is whitelisted into the task context and propagates down the chain.
+    ...(taskType === "APPLY_HARD_GATES" && payload.version_refresh === true
+      ? { repair_generation: typeof payload.gate_rule_version === "string" && payload.gate_rule_version.trim() !== "" ? payload.gate_rule_version.trim() : GATE_VERSION }
+      : {}),
   };
 
   if (taskType === "APPLY_HARD_GATES") {
@@ -2749,7 +3161,11 @@ async function maybeEnqueueAfterTask(
 
   if (taskType === "PUBLISH_EMBEDDING") {
     await reactivateBlockedDependencyTasks("PUBLISH_EMBEDDING", jobVersionId, clientOrPool, ctx);
-    await enqueueSuccessor("ROUTE_LANE", jobVersionId, stagePayload);
+    // A gate-version refresh can move the job to HARD_REJECTED/NEEDS_VERIFICATION while an embedding repair is queued;
+    // lane routing has nothing to do for such a job, so no ROUTE_LANE task is created for it.
+    if (!gateOutcomeEndsRouting(state)) {
+      await enqueueSuccessor("ROUTE_LANE", jobVersionId, stagePayload);
+    }
     return insertedSuccessors;
   }
 
@@ -2834,6 +3250,8 @@ async function executeStageTask(
   budgetRunId: string,
   onSuccessorTaskCreated: () => void,
   onTaskRerouted: () => void,
+  onStampOnly: () => void = () => undefined,
+  onDesignedNoOp: (repairAction: string) => void = () => undefined,
 ): Promise<string | void> {
   if (taskType === "RECHECK_AVAILABILITY") {
     // The read result (verdict, counters, next read) is recorded by the task itself; it has no successor stage.
@@ -3085,6 +3503,11 @@ async function executeStageTask(
       // retry/manual-review noise for a job that cannot advance.
       return;
     }
+    // A version-stale active set with a completed run is treated as cached by the extractor unless it is told to reprocess, so a
+    // plain task (a state outside the stale seed's list) would leave the old set in place: force the re-extraction.
+    const staleActiveSet = !reprocess && !(await jobVersionHasCompletedRequirementsExtraction(
+      clientOrPool, ctx, jobVersionId, "DETERMINISTIC", DETERMINISTIC_EXTRACTOR_VERSION,
+    )) && (await jobVersionHasCompletedRequirementsExtraction(clientOrPool, ctx, jobVersionId, "DETERMINISTIC"));
     const summary = await dependencies.runRequirementsExtraction(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
@@ -3092,19 +3515,24 @@ async function executeStageTask(
       quotedMode: "deterministic_only",
       failFastOnQuotedProviderFailure: false,
       ignoreRetryWindow: true,
-      reprocess,
+      reprocess: reprocess || staleActiveSet,
     });
     if (summary.errors > 0) {
       throw new Error(`Deterministic requirement extraction failed for job_version_id=${jobVersionId}.`);
     }
+    // The task is done only when the CURRENT extractor version made the active requirement set: an older-version run that the
+    // extractor left in place is not a result of this task (it would hide a stale extraction behind a completed task).
     const hasCompletedDeterministicRun = await jobVersionHasCompletedRequirementsExtraction(
       clientOrPool,
       ctx,
       jobVersionId,
-      "DETERMINISTIC"
+      "DETERMINISTIC",
+      DETERMINISTIC_EXTRACTOR_VERSION,
     );
     if (!hasCompletedDeterministicRun) {
-      throw new Error(`No completed deterministic requirement extraction found for job_version_id=${jobVersionId}.`);
+      throw new Error(
+        `No completed deterministic requirement extraction by extractor ${DETERMINISTIC_EXTRACTOR_VERSION} found for job_version_id=${jobVersionId}.`,
+      );
     }
     return;
   }
@@ -3112,8 +3540,11 @@ async function executeStageTask(
   if (taskType === "APPLY_HARD_GATES") {
     const payload = (task.payload || {}) as Record<string, unknown>;
     const verificationAnswerRevisionId = optionalStringPayload(task, "verification_answer_revision_id");
+    // A gate-version refresh: re-evaluate, and when the outcome is unchanged only stamp the audit row (see runHardGates).
+    const versionRefresh = payload.version_refresh === true;
     const reprocess = payload.force_policy_recalculation === true ||
       payload.reprocess === true ||
+      versionRefresh ||
       verificationAnswerRevisionId !== undefined;
     const currentState = await lookupJobState(clientOrPool, ctx, jobVersionId);
 
@@ -3148,6 +3579,7 @@ async function executeStageTask(
       jobVersionIds: [jobVersionId],
       limit: 1,
       reprocess,
+      ...(versionRefresh ? { versionRefresh: true } : {}),
       verificationJobVersionId: jobVersionId,
       ...(verificationAnswerRevisionId
         ? { verificationAnswerRevisionId }
@@ -3155,6 +3587,12 @@ async function executeStageTask(
     });
     if (summary.errors > 0) {
       throw new Error(`Hard gate failed for job_version_id=${jobVersionId}.`);
+    }
+    if (versionRefresh && (summary.stamped ?? 0) > 0) {
+      // Stamp-only re-gate: the job keeps its state and its downstream work. Nothing to enqueue and nothing to verify; the
+      // after-complete successor logic is skipped too (it would enqueue PUBLISH_EMBEDDING / DECIDE_RECOMMENDATION from the state).
+      onStampOnly();
+      return;
     }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (!["PREQUALIFIED", "HARD_REJECTED", "NEEDS_VERIFICATION"].includes(state.processingState || "")) {
@@ -3331,6 +3769,16 @@ async function executeStageTask(
     ) {
       return;
     }
+    if (matchState.processingState === "NEEDS_MANUAL_REVIEW") {
+      const exhausted = await (clientOrPool as QueryClient).query<{ rejection_reason: string | null }>(
+        `SELECT rejection_reason FROM canonical_jobs WHERE workspace_id = $1 AND latest_job_version_id = $2::uuid LIMIT 1`,
+        [ctx.workspaceId, jobVersionId],
+      );
+      if ((exhausted.rows[0]?.rejection_reason ?? "").startsWith(EMBEDDING_REPAIR_EXHAUSTED_REASON)) {
+        // A retry of an exhausted match must not complete silently: fail with the explicit reason until a person re-opens the repair.
+        throw new Error(`${EMBEDDING_REPAIR_EXHAUSTED_REASON}: job_version_id=${jobVersionId} is waiting for manual review of its requirement embeddings.`);
+      }
+    }
     if (
       ![
         "LANE_ROUTED",
@@ -3346,10 +3794,20 @@ async function executeStageTask(
       // ROUTING_DEFERRED and NEEDS_VERIFICATION intentionally have no profile
       // match to perform. Complete stale tasks without converting a holding or
       // verification state into a retry/manual-review failure.
+      onDesignedNoOp(matchNotApplicable(matchState.processingState || "UNKNOWN_STATE"));
       return;
     }
+    const unmatchedSupersededMatchRunId = matchState.processingState === "UNMATCHED"
+      ? optionalStringPayload(task, "superseded_match_run_id")
+      : undefined;
     if (matchState.processingState === "UNMATCHED") {
-      return;
+      // An UNMATCHED job is re-matched only for an explicit re-match of a run the matcher made under an older policy version
+      // (the seed's superseded_match_run_id) while that run is still the job's latest. Any other UNMATCHED job (parked by the
+      // current matcher, or a POLICY_NO_MATCH job the lane router owns) has no match to perform.
+      if (!unmatchedSupersededMatchRunId || !(await isUnmatchedParkedByOtherMatcher(clientOrPool, ctx, jobVersionId, unmatchedSupersededMatchRunId))) {
+        onDesignedNoOp(matchNotApplicable("UNMATCHED"));
+        return;
+      }
     }
     // A MATCHED job is done only when its latest match is current for the active profile. After
     // the active profile changes, a MATCHED job still points at the superseded profile's match and
@@ -3394,8 +3852,43 @@ async function executeStageTask(
     if (summary.errors > 0) {
       throw new Error(`Deterministic matching reported ${summary.errors} error(s).`);
     }
+    if ((summary.blockedOnRequirementEmbeddings ?? []).length > 0) {
+      // The matcher stored no match run: a requirement of this job has no published embedding. Queue the embedding repair and
+      // wait on it; the match runs once the embeddings exist (never on partial embeddings).
+      const dependency = await classifySemanticMatchDependency(clientOrPool, ctx, jobVersionId);
+      // Bounded repair: each round is a new PUBLISH_EMBEDDING task (the round is part of its key). A repair task that
+      // completed and left a requirement unembedded cannot stall the job forever: after the bound the job goes to
+      // NEEDS_MANUAL_REVIEW (an infrastructure failure, never a rejection or a career outcome).
+      const plan = await planRequirementEmbeddingRepair(clientOrPool, ctx, jobVersionId);
+      if (plan.exhausted) {
+        await moveJobToManualReviewForEmbeddings(clientOrPool, ctx, jobVersionId, MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS);
+        throw new Error(
+          `${EMBEDDING_REPAIR_EXHAUSTED_REASON}: job_version_id=${jobVersionId} still has ${plan.missing} requirement(s) without an embedding after ` +
+            `${MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS} repair round(s) without progress; the job is NEEDS_MANUAL_REVIEW.`,
+        );
+      }
+      if (await enqueueDependencyRepair(dependency, task, jobVersionId, clientOrPool, ctx, {
+        embedding_repair_round: plan.round,
+        embedding_repair_seq: plan.sequence,
+        missing_requirements: plan.missing,
+      })) {
+        onSuccessorTaskCreated();
+      }
+      throw new PipelineTaskDependencyBlockedError(
+        `${dependency.code}:${jobVersionId}`,
+        dependency.repairTaskType,
+        `Matching is blocked by ${dependency.code} for job_version_id=${jobVersionId} (embedding repair round ${plan.round} of ${MAX_REQUIREMENT_EMBEDDING_REPAIR_ROUNDS}, ${plan.missing} requirement(s) missing).`,
+      );
+    }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (state.processingState === "UNMATCHED") {
+      if (unmatchedSupersededMatchRunId && await isUnmatchedParkedByOtherMatcher(clientOrPool, ctx, jobVersionId, unmatchedSupersededMatchRunId)) {
+        // The matcher select equals the seed predicate (unmatchedParkedByOtherMatcherSql), so it can skip the job only if it
+        // changed between the seed and the run. The job was UNMATCHED and stays so: a recorded close, never a failure of a
+        // job that carries a valid outcome.
+        onDesignedNoOp(matchNotApplicable("UNMATCHED_NOT_SELECTABLE"));
+        return;
+      }
       return;
     }
     if (state.processingState === "MATCHED") {
@@ -3436,11 +3929,29 @@ async function executeStageTask(
       // decision task can survive a retry or historical replay while the job
       // is still in the pre-lane funnel; it is not a dependency failure and
       // must not create a permanent blocked/manual-review record.
+      onDesignedNoOp(decisionNotStampable("PRE_ROUTING_STATE"));
       return;
     }
-    if (decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) {
-      // Terminal jobs with recorded recommendation outcomes are complete.
+    if (decisionState.processingState === "MANUALLY_REMOVED") {
+      // The user removed the job while its decision task was pending: nothing to decide, and not a failure.
+      onDesignedNoOp(decisionNotStampable("JOB_REMOVED"));
       return;
+    }
+    const decidePayload = (task.payload || {}) as Record<string, unknown>;
+    // Only a decider-version reassessment bypasses the terminal no-op: other enqueuers (a rematch successor, a readiness
+    // refresh) set reprocess_existing_state too and must not re-run the decider on a terminal job that already has a decision.
+    const reassessment = typeof decidePayload.reassessment_reason === "string" && decidePayload.reassessment_reason.startsWith("DECIDER_VERSION:");
+    let terminalWithOutcome = false;
+    if (decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) {
+      // A terminal job with a recorded outcome needs no decision run, but only when a decision row already exists for this
+      // version (the "completed without result" check expects one) and the task is not a reassessment: a decider-version or
+      // readiness reassessment must stamp a decision under the current decider_version. The decider never changes the job's
+      // processing state, so a HARD_REJECTED job stays HARD_REJECTED.
+      if (!reassessment && await jobVersionHasDecision(clientOrPool, ctx, jobVersionId)) {
+        onDesignedNoOp(decisionNotStampable("TERMINAL_HAS_DECISION"));
+        return;
+      }
+      terminalWithOutcome = true;
     }
     const matchDependentStates = new Set([
       "LANE_ROUTED",
@@ -3480,9 +3991,42 @@ async function executeStageTask(
       context: ctx,
       jobVersionIds: [jobVersionId],
       limit: 1,
+      // A terminal job keeps its stored outcome, eligibility and scores: the decision is stamped only if it agrees with them.
+      ...(terminalWithOutcome ? { preserveStoredOutcome: true } : {}),
     });
+    if ((summary.outcomeConflicts ?? 0) > 0) {
+      throw new TerminalOutcomeConflictError(jobVersionId, summary.outcomeConflictDetails ?? []);
+    }
     if (summary.errors > 0) {
       throw new Error(`Recommendation decider reported ${summary.errors} error(s).`);
+    }
+    // Completion guard: the task is a success only when a decision row exists for this version (stamped under the current
+    // decider version for a reassessment), or the decider could not select the job by design, recorded as a repair_action. A
+    // decider run that wrote nothing for a job it should have decided is a failure, never a silent completion.
+    if (!(await jobVersionHasDecision(clientOrPool, ctx, jobVersionId, reassessment ? DECIDER_VERSION : undefined))) {
+      // The job was removed or archived between the claim and the decider run (the decider selects live jobs only).
+      const racedState = await (clientOrPool as QueryClient).query<{ archived: boolean; removed: boolean }>(
+        `SELECT archived_at IS NOT NULL AS archived, COALESCE(processing_state, processing_status) = 'MANUALLY_REMOVED' AS removed
+           FROM canonical_jobs WHERE workspace_id = $1 AND latest_job_version_id = $2::uuid`,
+        [ctx.workspaceId, jobVersionId],
+      );
+      if (racedState.rows[0]?.removed) {
+        onDesignedNoOp(decisionNotStampable("JOB_REMOVED"));
+        return;
+      }
+      if (racedState.rows[0]?.archived) {
+        onDesignedNoOp(decisionNotStampable("JOB_ARCHIVED"));
+        return;
+      }
+      if (!(await jobVersionIsDecidable(clientOrPool, ctx, jobVersionId))) {
+        onDesignedNoOp(decisionNotStampable("AWAITING_CONTENT_NOT_DECIDABLE"));
+        return;
+      }
+      if (isUnmatched && !(await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId, { requireCurrentMatcherRules: false }))) {
+        onDesignedNoOp(decisionNotStampable("NO_CURRENT_MATCH_RUN"));
+        return;
+      }
+      throw new Error(`Recommendation decider wrote no decision for decidable job_version_id=${jobVersionId}.`);
     }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (!state.recommendationOutcome) {
@@ -3506,6 +4050,22 @@ async function executeStageTask(
 interface PipelineTaskRunMetrics {
   successorTasksCreated: number;
   rerouted: boolean;
+  /** A version-refresh gate stamp: the task completes without any successor enqueue. */
+  stampOnly?: boolean;
+  /** A designed no-op: the task completes without a stage result and records why (src/tasks/designedNoOps.ts). */
+  noOpRepairAction?: string;
+}
+
+/** Job states a deterministic gate decision leaves a job in; lane routing cannot act on them. */
+function gateOutcomeEndsRouting(state: {
+  processingState: string | null;
+  gateDecision: string | null;
+  gateRejectionCodes: string[];
+}): boolean {
+  if (state.processingState === "HARD_REJECTED") return true;
+  // A routable workability verification (unknown work mode, office days, ...) continues through embedding, routing and matching.
+  return state.processingState === "NEEDS_VERIFICATION" &&
+    !isRoutableWorkabilityVerification(state.gateDecision, state.gateRejectionCodes);
 }
 
 async function processClaimedTask(
@@ -3539,6 +4099,21 @@ async function processClaimedTask(
       });
     }
     return;
+  }
+  // A lane-routing or embedding task whose job version a deterministic gate has since moved to HARD_REJECTED or to a non-routable
+  // NEEDS_VERIFICATION has nothing to act on (routing cannot advance it; embedding it only spends provider calls). Routable
+  // workability verification is not covered: it continues through embedding, routing and matching.
+  // That is the gate's decision, not a stage failure: record the task as superseded without retry or dead letter, and leave the
+  // job state and its gate evidence untouched.
+  if (taskType === "ROUTE_LANE" || taskType === "PUBLISH_EMBEDDING") {
+    const gateState = await lookupJobState(clientOrPool, ctx, requireStringPayload(task, "job_version_id"));
+    if (gateOutcomeEndsRouting(gateState)) {
+      await completePipelineTaskAndRun(task, clientOrPool, {
+        context: ctx,
+        repairAction: "SUPERSEDED_BY_GATE_OUTCOME",
+      });
+      return;
+    }
   }
   const isTestFixture = !options.includeTestFixtures && await taskTargetsTestFixture(task, clientOrPool, ctx);
 
@@ -3599,20 +4174,52 @@ async function processClaimedTask(
         return;
       }
     }
-    const retrievedObservationId = await executeStageTask(
-      taskType,
-      task,
-      clientOrPool,
-      ctx,
-      dependencies,
-      options.budgetRunId,
-      () => { metrics.successorTasksCreated += 1; },
-      () => { metrics.rerouted = true; },
-    );
+    if (taskType === "DECIDE_RECOMMENDATION" && (await isAwaitingContentTerminalDecide(task, clientOrPool, ctx))) {
+      // A terminal job whose version the decider cannot select (incomplete description or no source content) is awaiting
+      // content: its stored outcome is information only. Close with an explicit recorded reason, not a blocked dependency and not a
+      // silent no-result; the completed-without-result check and the reopen rule tell it from a lost result by this code.
+      await completePipelineTaskAndRun(task, clientOrPool, {
+        context: ctx,
+        repairAction: decisionNotStampable("AWAITING_CONTENT_NOT_DECIDABLE"),
+      });
+      return;
+    }
+    let retrievedObservationId: Awaited<ReturnType<typeof executeStageTask>>;
+    try {
+      retrievedObservationId = await executeStageTask(
+        taskType,
+        task,
+        clientOrPool,
+        ctx,
+        dependencies,
+        options.budgetRunId,
+        () => { metrics.successorTasksCreated += 1; },
+        () => { metrics.rerouted = true; },
+        () => { metrics.stampOnly = true; },
+        (repairAction) => { metrics.noOpRepairAction = repairAction; },
+      );
+    } catch (error) {
+      if (!(error instanceof TerminalOutcomeConflictError)) throw error;
+      // Close, do not retry or fail: the recompute is deterministic and the job must keep its state (no PROCESSING_ERROR).
+      await completePipelineTaskAndRun(task, clientOrPool, {
+        context: ctx,
+        repairAction: OUTCOME_CONFLICT_REPAIR_ACTION,
+        afterComplete: async (transactionClient) => {
+          await (transactionClient as QueryClient).query(
+            `UPDATE pipeline_tasks SET payload = payload || jsonb_build_object('outcome_conflict', $3::jsonb)
+              WHERE workspace_id = $1 AND id = $2`,
+            // The decider version the conflict was closed under scopes the seed exclusion and the zero check to this version.
+            [ctx.workspaceId, task.taskId, JSON.stringify({ decider_version: DECIDER_VERSION, details: error.details })],
+          );
+        },
+      });
+      return;
+    }
     await completePipelineTaskAndRun(task, clientOrPool, {
       context: ctx,
+      ...(metrics.noOpRepairAction ? { repairAction: metrics.noOpRepairAction } : {}),
       afterComplete: async (transactionClient) => {
-        if (!metrics.rerouted) {
+        if (!metrics.rerouted && !metrics.stampOnly) {
           metrics.successorTasksCreated += await maybeEnqueueAfterTask(
             taskType,
             task,
@@ -4063,3 +4670,6 @@ export async function runPipelineStageTaskWorker(
     }
   }
 }
+
+/** The production stage dependencies, for tests that replace a single stage. */
+export const defaultPipelineStageWorkerDependencies: PipelineStageWorkerDependencies = defaultDependencies;

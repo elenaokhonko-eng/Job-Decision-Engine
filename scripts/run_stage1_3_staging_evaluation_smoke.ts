@@ -378,6 +378,7 @@ async function main(): Promise<void> {
       context,
       jobVersionIds,
     });
+    if (rankings.policyError) process.exitCode = 1;
     const [readModels, workspaceDebtAfter] = await Promise.all([
       readReadModelCounts(pool, context, jobVersionIds),
       readWorkspaceDebtCounts(pool, context),

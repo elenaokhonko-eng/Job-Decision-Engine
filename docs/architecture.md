@@ -221,6 +221,8 @@ Matching needs a shared vocabulary: a requirement is about a concept, and a prof
 
 A stage is a task in `pipeline_tasks`. The worker is `scripts/process_pipeline_tasks.ts`, which runs `src/tasks/stageTaskWorker.ts`. Task types are defined there as `PIPELINE_STAGE_TASK_TYPES`.
 
+A `ROUTE_LANE` or `PUBLISH_EMBEDDING` task claimed for a job version whose canonical job is `HARD_REJECTED`, or `NEEDS_VERIFICATION` with a non-routable gate result (`isRoutableWorkabilityVerification`), completes with `repair_action = SUPERSEDED_BY_GATE_OUTCOME`. It is a recorded no-op, never a failure or dead letter, and it changes no job state or gate evidence. `PUBLISH_EMBEDDING` queues no `ROUTE_LANE` successor for such a job. A later enqueue of the same task identity reopens a superseded task. Every `enforcePipelineWorkerExitPolicy` failure message starts with `[rule=NAME]`, naming the rule that fired.
+
 | # | Task type | What it does | Code today | Target module |
 |---|---|---|---|---|
 | 1 | `FETCH_JOB_CONTENT` | Fetches the full posting for a discovered link | `src/ingestion/jobContentFetcher.ts` | `sourcing` |
@@ -243,6 +245,17 @@ Order of work:
 - If lane routing finds no lane, the job becomes `UNMATCHED` and stops. If routing could not run for a technical reason, the job becomes `ROUTING_DEFERRED` and goes to stage 9.
 - Stage 10 follows stage 9 only when eligibility is `ELIGIBLE` and the outcome is `PRIORITY` or `REVIEW`.
 
+Task seeds (`seedRecoverablePipelineTasks`, `src/tasks/stageTaskWorker.ts`):
+
+- Every capped seed selects live jobs only. `applyLiveJobScope` (`src/tasks/seedQueryScope.ts`) puts `archived_at IS NULL` and, unless fixtures are included, `is_test_fixture IS NOT TRUE` inside the query, before its `LIMIT`. Only the observation seed (`NORMALIZE_OBSERVATION`) has no canonical job and is exempt. A new seed gets the scope without writing it, and a query with no `WHERE c.workspace_id = $1` anchor throws.
+- A job the enqueue still refuses as archived is counted as `skippedArchived`, never as `existing`.
+- A `DECIDE_RECOMMENDATION` task for a `HARD_REJECTED` or `UNMATCHED` job with a recorded outcome completes without a decider run only when a decision row already exists for that version and the task is not a decider-version reassessment (`DECIDER_VERSION:` reason). A reassessment runs the decider in `preserveStoredOutcome` mode: the decision is stamped only if it agrees with the stored outcome and eligibility, the job's recommendation columns never change, and a disagreement closes the task with `repair_action = OUTCOME_CONFLICT_ON_TERMINAL_JOB` without writing (no retry, no `PROCESSING_ERROR`); the failing post-phase zero check `terminal_outcome_conflict` keeps it visible (cleared by a decider version bump or `reopenOutcomeConflictTasks` after a correction; not run in the pre-drain phase so it never blocks the drain). The DECIDE seed selects only jobs the decider can process (complete description with source content, a state past routing, no closed conflict). A job without complete content waits in the awaiting-content read model and is not decided.
+- The stale-stage zero check (`stage_result_older_than_rule_version`) covers the extractor, matcher, lane router, decider and gate stages. The decider stage equals what the DECIDE seed reaches and the handler can stamp; stale decisions outside it are reported as `reported_counts` by `reconcile_pipeline.ts`, never as errors.
+
+- A stage task completes successfully only when its result exists or it records a designed no-op in `repair_action` (`src/tasks/designedNoOps.ts`): `DECISION_NOT_STAMPABLE:<reason>` for DECIDE (reasons `PRE_ROUTING_STATE`, `TERMINAL_HAS_DECISION`, `AWAITING_CONTENT_NOT_DECIDABLE`, `NO_CURRENT_MATCH_RUN`) and `MATCH_NOT_APPLICABLE:<state>` for MATCH. A DECIDE task for a terminal job whose version the decider cannot select closes with `DECISION_NOT_STAMPABLE:AWAITING_CONTENT_NOT_DECIDABLE` before the content gate. A decider run that wrote no decision for a decidable job fails the task. An EXTRACT task forces a re-extraction of a version-stale active set and completes only when the current `DETERMINISTIC_EXTRACTOR_VERSION` made it. DECIDE also closes as `DECISION_NOT_STAMPABLE:JOB_REMOVED` / `JOB_ARCHIVED` for a removed or archived job, and a re-match the matcher no longer selects closes as `MATCH_NOT_APPLICABLE:UNMATCHED_NOT_SELECTABLE`. `ROUTE_LANE` is unchanged: its post-router returns happen only in a state the router itself produced, and the lane-router stale-stage arm already requires a current-version decision.
+- `enqueuePipelineTask` reopens a `COMPLETED` DECIDE task whose `reassessment_reason` starts `DECIDER_VERSION:` when its version has no decision stamped under the current decider version and `deciderReachableSql` (`src/tasks/seedQueryScope.ts`, shared with the seed handler and the `decider` stale-stage arm) accepts the job; an `OUTCOME_CONFLICT_ON_TERMINAL_JOB` closure under the current decider version stays closed.
+- The profile re-match seed (`supersededProfileMatchSql`, shared with the `matcher` stale-stage arm) also reopens a live `UNMATCHED` job with `routing_disposition = ROUTED` whose latest match run was made under another matcher policy version (a version change reopens every stage). The re-match never changes gate, lane or routing disposition; a job still failing a mandatory qualification under the current matcher stays `UNMATCHED`, and a `POLICY_NO_MATCH` job stays with the lane router.
+
 After the stages:
 
 | Step | Code today | Target module |
@@ -250,6 +263,27 @@ After the stages:
 | Advisory evaluation of queued jobs | `scripts/evaluate_queue.ts` | `evaluation` |
 | Ranking of Apply Now jobs into Top 10 Ready | `scripts/materialize_application_rankings.ts`, `src/services/applicationRankingMaterializer.ts` | `decision` |
 | Archiving of rejected and aged jobs | `scripts/archive_jobs.ts`, `src/services/jobArchive.ts` | `catalog` |
+
+### Ranking composite (policy version 5.5.0, migration 122)
+
+The overall rank is a weighted average of four deterministic terms, renormalised over the terms that are available. The AI-derived terms are labels and never enter the sort (AGENTS.md invariant 11).
+
+| Term | Weight | Share of the composite |
+|---|---|---|
+| `requirementFit` | 37.5 | 51.7% |
+| `requirementCoverage` | 15 | 20.7% |
+| `evidenceCompleteness` | 10 | 13.8% |
+| `laneConfidence` | 10 | 13.8% |
+
+Worked example: fit 80, coverage 60, evidence 70, lane 100 gives (80 x 37.5 + 60 x 15 + 70 x 10 + 100 x 10) / 72.5 = 77.241. A Low lane confidence (30) instead of High (100) costs 70 x 10 / 72.5 = 9.66 composite points.
+
+- Removed from the composite: autonomy, politics risk, sensory workload risk, culture priority fit, and the always-empty strategic value. Their weights are stored as 0 in `ranking_policies`; the materializer rejects a policy that gives any of them a positive weight.
+- The AI values stay stored on `job_ranking_snapshots` (`autonomy_score`, `politics_risk_score`, `sensory_workload_risk_score`, `focus_protection_score`, `culture_priority_score`, and the quotes in `component_provenance.culture_evidence`). They are exposed read-only as `ai_label_*` columns on the Stage 3 views. Configured culture priorities only change the label `culture_priority_score`; they no longer move any weight.
+- Top 10 no longer requires a current AI evaluation. A job without one is ranked from its deterministic terms, its snapshot has `ai_evaluation_id` NULL, and the Stage 3 views show `ai_notes_pending = TRUE`.
+- Apply Now priority is unchanged: 0.75 x composite + 0.125 x freshness + 0.125 x remote freedom.
+- Transient states, by design: (1) until the first materializer run after migration 122 the Top 10 is empty, because only snapshots of the latest policy version are read; (2) when an evaluation completes, the job keeps its snapshot without an evaluation (`ai_notes_pending = TRUE`) until the next materializer run writes the snapshot that carries it, and never has zero Top 10 rows in between (the views prefer a snapshot with a current evaluation and fall back to the one without).
+- A latest policy that gives an AI term a weight is refused for that workspace: the materializer returns `policyError`, writes nothing, and the script exits non-zero.
+- Version rule: a snapshot is keyed by `ranking_policy_version`, and the read models join the latest policy version, so a new `ranking_policies` row makes the materializer write a new snapshot for every eligible job (no AI call). Until it runs, the Top 10 is empty. The previous version's snapshots stay as history. `src/pipeline/rankingPolicyComparison.ts` compares two policy versions read-only (Top 10 side by side, rated rows marked, lane confidence effect).
 
 ## 10. Job states, decisions and status
 

@@ -145,6 +145,24 @@ describe("pipeline worker exit policy", () => {
     })).toThrow("created 1 DEAD_LETTER");
   });
 
+  it("names the rule that fired in the failure message", () => {
+    const rule = (input: Partial<typeof healthyInput>) => {
+      try {
+        enforcePipelineWorkerExitPolicy({ ...healthyInput, ...input });
+      } catch (error) {
+        return (error as Error).message.match(/^\[rule=([A-Z_]+)\]/)?.[1];
+      }
+      return undefined;
+    };
+    expect(rule({ deadLetteredThisRun: 1 })).toBe("DEAD_LETTERED_THIS_RUN");
+    expect(rule({ actionableCurrentDeadLetterCount: 1 })).toBe("ACTIONABLE_CURRENT_DEAD_LETTER");
+    expect(rule({ failOnRetryWait: true, failedThisRun: 1 })).toBe("FAIL_ON_RETRY_WAIT");
+    expect(rule({ retryWaitCount: 6 })).toBe("RETRY_BACKLOG_COUNT");
+    expect(rule({ oldestRetryWaitAgeSeconds: 4000 })).toBe("RETRY_BACKLOG_AGE");
+    expect(rule({ oldestActivePendingAgeSeconds: 4000 })).toBe("PENDING_QUEUE_AGE");
+    expect(rule({ claimedThisRun: 0, activePendingCount: 1, activeDuePendingCount: 1 })).toBe("NO_FORWARD_PROGRESS");
+  });
+
   it("fails for retry SLO breaches and no forward progress", () => {
     expect(() => enforcePipelineWorkerExitPolicy({
       ...healthyInput,

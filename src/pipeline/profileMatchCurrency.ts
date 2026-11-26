@@ -89,8 +89,11 @@ export function uniqueActiveProfileSql(canonicalAlias: string): string {
  * deterministic_v2: the best fact is chosen by credited contribution (score x evidence strength)
  * instead of raw similarity, and a structured DEGREE/CREDENTIAL match is credited by verification
  * status only, not by the hands-on evidence tier.
+ *
+ * deterministic_v3: a MUST DEGREE gap is no longer a mandatory-qualification failure (it no longer persists
+ * UNMATCHED / INELIGIBLE / SKIP with a rejection reason); the job is ranked lower and flagged instead (#247).
  */
-export const DETERMINISTIC_MATCHER_POLICY_VERSION = "deterministic_v2";
+export const DETERMINISTIC_MATCHER_POLICY_VERSION = "deterministic_v3";
 
 /**
  * matcher_version written into the MATCH_PROFILE_EVIDENCE context fingerprint. It moves with
@@ -98,7 +101,7 @@ export const DETERMINISTIC_MATCHER_POLICY_VERSION = "deterministic_v2";
  * also treats an older-rules match as not current. The stage task version used in task keys
  * (deterministic_matcher_v1) is deliberately unchanged.
  */
-export const DETERMINISTIC_MATCHER_FINGERPRINT_VERSION = "deterministic_matcher_v2";
+export const DETERMINISTIC_MATCHER_FINGERPRINT_VERSION = "deterministic_matcher_v3";
 
 /**
  * The matcher policy version in force: the legacy version, or the legacy version plus the top-K
@@ -142,6 +145,53 @@ export function profileMatchSupersededSql(canonicalAlias: string, matchAlias: st
         AND ${c}.description_quality_status = 'COMPLETE'
         AND ${sourceContentEvidencePredicate(`${c}.workspace_id`, `${c}.latest_job_version_id`)}
       )
+    )
+  )`;
+}
+
+/**
+ * SQL predicate: an UNMATCHED job that was parked by the matcher (routing_disposition ROUTED: lane routing found a lane, a
+ * match run then failed a mandatory qualification) whose latest match run was made under another matcher policy version, for a
+ * job the matcher can select. A version change reopens work for every stage (a rule that no longer fails the job removes the
+ * parking), so the job is re-matched once under the current rules. A job parked by the CURRENT matcher policy stays UNMATCHED and
+ * is not selected. Not a POLICY_NO_MATCH job (the lane router owns those: routing_disposition is not ROUTED, there is no match
+ * run). Selectable means what the matcher and its handler need to finish: a lane, a complete description with source content,
+ * and an active requirement set whose deterministic extraction completed. The re-match never replays hard gates or lane
+ * routing and changes neither.
+ */
+export function unmatchedParkedByOtherMatcherSql(
+  canonicalAlias: string,
+  matchAlias: string,
+  /** The caller has already resolved the unique ACTIVE profile (the matcher does and throws without one). */
+  options: { activeProfileResolved?: boolean } = {},
+): string {
+  const c = alias(canonicalAlias, "canonical alias");
+  const mr = alias(matchAlias, "match alias");
+  return `(
+    ${c}.archived_at IS NULL
+    AND COALESCE(${c}.processing_state, ${c}.processing_status) = 'UNMATCHED'
+    AND ${c}.routing_disposition = 'ROUTED'
+    AND ${c}.primary_lane IS NOT NULL
+    AND ${c}.primary_lane <> 'UNCLASSIFIED'
+    AND ${mr}.id IS NOT NULL
+    AND ${mr}.id = ${c}.latest_match_run_id
+    AND ${mr}.job_version_id = ${c}.latest_job_version_id
+    ${options.activeProfileResolved ? "" : `AND ${uniqueActiveProfileSql(c)} IS NOT NULL`}
+    AND ${mr}.policy_version IS DISTINCT FROM '${currentMatcherPolicyVersion()}'
+    AND ${c}.description_quality_status = 'COMPLETE'
+    AND ${sourceContentEvidencePredicate(`${c}.workspace_id`, `${c}.latest_job_version_id`)}
+    AND EXISTS (
+      SELECT 1
+      FROM job_versions parked_jv
+      JOIN job_version_pipeline_state parked_ps
+        ON parked_ps.workspace_id = parked_jv.workspace_id AND parked_ps.job_version_id = parked_jv.id
+       AND parked_ps.current_stage = 'REQUIREMENTS_EXTRACTED' AND parked_ps.stage_status = 'COMPLETED'
+      JOIN requirement_extraction_runs parked_rer
+        ON parked_rer.workspace_id = parked_jv.workspace_id AND parked_rer.job_version_id = parked_jv.id
+       AND parked_rer.run_type = 'DETERMINISTIC' AND parked_rer.status = 'COMPLETED'
+       AND parked_rer.requirement_set_id = parked_jv.active_requirement_set_id
+      WHERE parked_jv.workspace_id = ${c}.workspace_id AND parked_jv.id = ${c}.latest_job_version_id
+        AND parked_jv.active_requirement_set_id IS NOT NULL
     )
   )`;
 }

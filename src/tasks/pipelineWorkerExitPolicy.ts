@@ -31,25 +31,25 @@ export interface PipelineWorkerExitPolicyInput {
 export function enforcePipelineWorkerExitPolicy(input: PipelineWorkerExitPolicyInput): void {
   if (input.deadLetteredThisRun > 0) {
     throw new Error(
-      `Pipeline task worker created ${input.deadLetteredThisRun} DEAD_LETTER task(s) in this run.`,
+      `[rule=DEAD_LETTERED_THIS_RUN] Pipeline task worker created ${input.deadLetteredThisRun} DEAD_LETTER task(s) in this run.`,
     );
   }
   if (input.actionableCurrentDeadLetterCount > 0) {
     throw new Error(
-      `Pipeline task worker has ${input.actionableCurrentDeadLetterCount} actionable current DEAD_LETTER task(s).`,
+      `[rule=ACTIONABLE_CURRENT_DEAD_LETTER] Pipeline task worker has ${input.actionableCurrentDeadLetterCount} actionable current DEAD_LETTER task(s).`,
     );
   }
   if (input.failOnRetryWait && input.failedThisRun > 0) {
     throw new Error(
-      `Pipeline task worker moved ${input.failedThisRun} task(s) to RETRY_WAIT. See task errors above.`,
+      `[rule=FAIL_ON_RETRY_WAIT] Pipeline task worker moved ${input.failedThisRun} task(s) to RETRY_WAIT. See task errors above.`,
     );
   }
   if (input.retryWaitCount > input.maxRetryWaitCount) {
-    throw new Error(`Retry backlog exceeded SLO: ${input.retryWaitCount} > ${input.maxRetryWaitCount}.`);
+    throw new Error(`[rule=RETRY_BACKLOG_COUNT] Retry backlog exceeded SLO: ${input.retryWaitCount} > ${input.maxRetryWaitCount}.`);
   }
   if (input.oldestRetryWaitAgeSeconds > input.maxRetryWaitAgeSeconds) {
     throw new Error(
-      `Retry backlog age exceeded SLO: ${input.oldestRetryWaitAgeSeconds}s > ${input.maxRetryWaitAgeSeconds}s.`,
+      `[rule=RETRY_BACKLOG_AGE] Retry backlog age exceeded SLO: ${input.oldestRetryWaitAgeSeconds}s > ${input.maxRetryWaitAgeSeconds}s.`,
     );
   }
   // Old pending work is tolerated on bounded runs only when the measured backlog or age improves.
@@ -76,7 +76,7 @@ export function enforcePipelineWorkerExitPolicy(input: PipelineWorkerExitPolicyI
       ? ` The same oldest task remained pending for ${input.oldestPendingTaskSameRuns} consecutive runs.`
       : "";
     throw new Error(
-      `Pending queue age exceeded SLO: ${input.oldestActivePendingAgeSeconds}s > ${input.maxPendingAgeSeconds}s.${oldestStage}${repeatedOldest}`,
+      `[rule=PENDING_QUEUE_AGE] Pending queue age exceeded SLO: ${input.oldestActivePendingAgeSeconds}s > ${input.maxPendingAgeSeconds}s.${oldestStage}${repeatedOldest}`,
     );
   }
   // Only due work could have been claimed; tasks scheduled for later are not a stall.
@@ -84,7 +84,7 @@ export function enforcePipelineWorkerExitPolicy(input: PipelineWorkerExitPolicyI
     const scheduledPending = Math.max(0, input.activePendingCount - input.activeDuePendingCount);
     const scheduledNote = scheduledPending > 0 ? ` ${scheduledPending} more are scheduled for later.` : "";
     throw new Error(
-      `No forward progress: ${input.activeDuePendingCount} due PENDING task(s) remain claimable after the worker run.${scheduledNote}`,
+      `[rule=NO_FORWARD_PROGRESS] No forward progress: ${input.activeDuePendingCount} due PENDING task(s) remain claimable after the worker run.${scheduledNote}`,
     );
   }
 }

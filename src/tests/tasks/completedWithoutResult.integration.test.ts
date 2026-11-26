@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 
+import { insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import {
@@ -172,6 +173,60 @@ describe.skipIf(skipReal)("tasks completed without a result (PostgreSQL)", () =>
     expect(reported).not.toContain(gateOk);
     expect(reported).not.toContain(laneOk);
   });
+  it("a task the worker closes without a result by design is not reported; the same task on a job that should have one is", async () => {
+    const setState = (canonicalJobId: string, state: string) => db().query(
+      `UPDATE canonical_jobs SET processing_state = $2, processing_status = $2 WHERE id = $1`, [canonicalJobId, state]);
+    const designed: string[] = [];
+    for (const state of ["UNMATCHED", "ROUTING_DEFERRED", "NEEDS_VERIFICATION", "HARD_REJECTED"]) {
+      const j = await job();
+      await setState(j.canonicalJobId, state);
+      designed.push(await completedTask("MATCH_PROFILE_EVIDENCE", j.jobVersionId));
+    }
+    for (const state of ["RAW_STAGED", "PREQUALIFIED"]) {
+      const j = await job();
+      await setState(j.canonicalJobId, state);
+      designed.push(await completedTask("DECIDE_RECOMMENDATION", j.jobVersionId));
+    }
+    const shouldHaveMatch = await job();
+    await setState(shouldHaveMatch.canonicalJobId, "LANE_ROUTED");
+    const missingMatch = await completedTask("MATCH_PROFILE_EVIDENCE", shouldHaveMatch.jobVersionId);
+    const rejectedNoDecision = await job();
+    await setState(rejectedNoDecision.canonicalJobId, "HARD_REJECTED");
+    // Decidable: a complete description with source content, so the version must have a decision.
+    await db().query(`UPDATE canonical_jobs SET description_quality_status = 'COMPLETE' WHERE id = $1`, [rejectedNoDecision.canonicalJobId]);
+    await insertCompletePostingEvidence(db(), {
+      workspaceId: ctx().workspaceId, jobVersionId: rejectedNoDecision.jobVersionId, companyName: "Result Fixture Co",
+      title: "fixture role", sourceUrl: "https://example.test/r/decidable", description: "Synthetic decidable posting text.",
+    });
+    const undecidable = await job();
+    await setState(undecidable.canonicalJobId, "HARD_REJECTED");
+    const undecidableTask = await completedTask("DECIDE_RECOMMENDATION", undecidable.jobVersionId);
+    const missingDecision = await completedTask("DECIDE_RECOMMENDATION", rejectedNoDecision.jobVersionId);
+    const reported = (await findTasksCompletedWithoutResult(db(), ctx().workspaceId, { sampleLimit: 200 })).sample.map((row) => row.taskId);
+    for (const taskId of designed) expect(reported).not.toContain(taskId);
+    expect(reported).not.toContain(undecidableTask);
+    expect(reported).toContain(missingMatch);
+    expect(reported).toContain(missingDecision);
+  });
+
+  it("only a designed repair_action explains a missing result: an arbitrary or misspelled one still reports it", async () => {
+    const designed: string[] = [];
+    for (const action of ["DECISION_NOT_STAMPABLE:JOB_REMOVED", "SUPERSEDED_BY_GATE_OUTCOME", "OUTCOME_CONFLICT_ON_TERMINAL_JOB", "SKIPPED_ARCHIVED_JOB"]) {
+      const j = await job();
+      designed.push(await completedTask("DECIDE_RECOMMENDATION", j.jobVersionId, action));
+    }
+    const matchDesigned = await job();
+    designed.push(await completedTask("MATCH_PROFILE_EVIDENCE", matchDesigned.jobVersionId, "MATCH_NOT_APPLICABLE:UNMATCHED"));
+    const typo = await job();
+    const typoTask = await completedTask("DECIDE_RECOMMENDATION", typo.jobVersionId, "DECISION_NOT_STAMPABLE");
+    const arbitrary = await job();
+    const arbitraryTask = await completedTask("DECIDE_RECOMMENDATION", arbitrary.jobVersionId, "SOMETHING_ELSE");
+    const reported = (await findTasksCompletedWithoutResult(db(), ctx().workspaceId, { sampleLimit: 200 })).sample.map((row) => row.taskId);
+    for (const taskId of designed) expect(reported).not.toContain(taskId);
+    expect(reported).toContain(typoTask);
+    expect(reported).toContain(arbitraryTask);
+  });
+
   it("a match task with a match run is not reported; a technically deferred route is not reported", async () => {
     const matched = await job();
     const matchTask = await completedTask("MATCH_PROFILE_EVIDENCE", matched.jobVersionId);
