@@ -1043,8 +1043,10 @@ export function hasExplicitTerritoryRestriction(value: unknown, territory: strin
     // work-location condition in the same sentence keeps it a restriction.
     const namesWorkerLocation = /\b(?:citizen(?:s|ship)?|national(?:ity|s)?\s+only|work\s+permit|visa|right\s+to\s+work|eligible\s+to\s+work|authori[sz]ed\s+to\s+work|authori[sz]ation\s+to\s+work|work\s+authori[sz]ation|reside|residing|residen(?:cy|ts?)|(?:must|need\s+to|required\s+to)\s+(?:be\s+)?(?:based|located|living|relocate))\b/i.test(sentence);
     const isLanguageRequirement = /\b(?:fluen(?:t|cy)|proficien(?:t|cy)|speak(?:er|ers|ing)?|spoken|written|language|bilingual|native|mandarin|cantonese|putonghua|learn(?:ing)?\s+(?:french|german|spanish|italian|dutch|japanese|chinese|korean))\b/i.test(sentence);
+    // The export-control exemption never covers a sentence that also states who may do the work.
     const isExportControlCondition = /\bexport\s+(?:control|controls|laws?|regulations?|licen[cs]e|administration)\b/i.test(sentence)
-      && !/\bcitizen(?:s|ship)?\b|\bpermanent\s+resident\b/i.test(sentence);
+      && !namesWorkerLocation
+      && !/\b(?:permanent\s+resident|green\s+card|nationality|us\s+(?:persons?|nationals?))\b/i.test(sentence);
     if ((isLanguageRequirement && !namesWorkerLocation) || isExportControlCondition) return false;
 
     const hasExplicitWorkerConstraint = /\b(authorization|authorised|authorized|work\s+permit|visa|citizen(?:ship)?|residen(?:cy|tial|ts?)|right\s+to\s+work|eligible\s+to\s+work)\b/i.test(sentence)
