@@ -40,7 +40,7 @@ const NO_RESTRICTION: Array<[string, string, string]> = [
   ["an upper-case heading JOIN US", "Singapore", "JOIN US and bring the required curiosity"],
   ["'invest in us' with a requirement word", "Singapore", "The trust our clients place in us is only earned slowly"],
   ["export-control licence boilerplate", "Singapore",
-    "Some duties may need export-controlled material, and we decide whether a U.S. licence application is required."],
+    "Where a task touches export-controlled material, we alone decide whether to seek a U.S. government licence, which some tasks require."],
   ["a fair-chance hiring notice", "Remote",
     "For Los Angeles residents: we consider applicants with conviction records, as the Fair Chance rules require."],
   ["an employer licence from a foreign central bank", "Singapore",
@@ -71,6 +71,68 @@ describe("sentences that state no worker-territory restriction", () => {
     expect(result.status).toBe("NEEDS_VERIFICATION");
     expect(result.rejection_codes).toContain("NEEDS_VERIFICATION_HIRING_TERRITORY");
   });
+});
+
+// A worker condition beside boilerplate, and wordings the pronoun rule does not recognise. All invented.
+describe("boilerplate beside a real condition, and unrecognised wording, still reject", () => {
+  it.each([
+    // Export control beside a condition.
+    "Our lab is export-controlled, so hiring is limited to people living in the US only",
+    "Export-controlled tooling means every hire must be a US national",
+    "The export-controlled platform team needs US work authorization, which is required",
+    "Export controlled hardware: all staff must reside in the United States",
+    "An export-controlled contract, open only to U.S. nationals",
+    "Under ITAR export-controlled rules you must be a lawful US resident",
+    "Export-controlled build: a US government licence is required and only US residents may apply",
+    // Fair-chance and criminal-record wording beside a condition.
+    "We hire under fair chance rules: US residents only",
+    "Applicants must be US residents and clear a criminal record screen",
+    "You must be US-based and clear a criminal records review",
+    "A criminal history check applies and US work authorization is required",
+    "Hiring is only open to people in the United States who clear a criminal history check",
+    "US nationality required, with no criminal record",
+    "US residency is mandatory; a criminal records review follows",
+    "Los Angeles applicants only: fair chance rules apply",
+    // "authorized by" an immigration authority or government.
+    "Employment depends on being authorized by US immigration",
+    "Only people authorized by the US government may hold this post",
+    // Lower case and all capitals.
+    "applicants must carry a valid us passport",
+    "MUST CARRY US PASSPORT",
+    "us permanent residency is required",
+    "us employment visa sponsorship is required for nobody",
+    "open to all us employees only",
+    "a us green card is required",
+    "you must have the right to work us wide",
+    "only open to us.",
+    // A U+0130 elsewhere must not switch off the capital-US reading.
+    "Our \u0130stanbul team is hiring. You must carry a US passport",
+  ])("rejects %j", (description) => {
+    const result = gate(description);
+    expect(result.status, JSON.stringify(result.rejection_codes)).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+  });
+
+  it("still reads the pronoun when the posting holds a U+0130", () => {
+    expect(territories("\u0130zmir hub. You must be curious and help us grow")).toEqual([]);
+  });
+
+  it("stays fast on a 200,000 character posting", () => {
+    const inputs = [
+      `You must ${"tell us ".repeat(25_000)}`,
+      `must${" -".repeat(100_000)} us`,
+      `must be here${" ".repeat(200_000)}us only`,
+      "Come help us, as required. ".repeat(7_500),
+      `${"export controlled fair chance records ".repeat(5_300)} us only`,
+    ];
+    for (const input of inputs) {
+      expect(input.length).toBeGreaterThanOrEqual(195_000);
+      const started = performance.now();
+      extractExplicitWorkerTerritoryRequirements(input, { jobLocation: "Singapore", splitIgnoringCase: true });
+      // The whole-prefix version of the pronoun check took several seconds on the first input.
+      expect(performance.now() - started).toBeLessThan(2_500);
+    }
+  }, 60_000);
 });
 
 describe("stated restrictions still reject", () => {
@@ -162,6 +224,14 @@ describe("a title family rejects only as the main role", () => {
     "Infrastructure Engineer / DevOps",
     "AI Security Engineer",
     "Software Engineer, Test Automation",
+    // A department is not a role, and a data centre is infrastructure.
+    "Product Engineering - DevOps Engineer",
+    "AI Engineering | DevOps Lead",
+    "Product Engineering, QA Automation",
+    "Data Engineering - Site Reliability Engineer",
+    "Data Center Engineer - DevOps",
+    "Data Centre Engineer (Network Security)",
+    "Data Center Manager, Network Engineer",
     // Physical engineering names the domain of the work, wherever it appears.
     "AI Scientist - Domain Expert, Crashworthiness",
   ])("still rejects %j", (title) => {
