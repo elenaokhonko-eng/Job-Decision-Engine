@@ -10,6 +10,7 @@ import { runEmbeddingBatchWithFallback } from "../../embeddings/batchCoordinator
 import { upsertLaneRevision } from "../../lanes/registry.js";
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
+import { TEST_SCORE_POLICY } from "../fixtures/aiWorkSwitch.js";
 import { loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
 import { runLaneRouter } from "../../pipeline/laneRouter.js";
 import {
@@ -37,6 +38,7 @@ const ENV_KEYS = [
   "EMBEDDING_FALLBACK_DIMENSIONS",
   "AI_EVALUATION_ENABLED",
   "AI_EVALUATION_SCORE_CUTOFF",
+  "AI_EVALUATION_SCORE_POLICY",
 ] as const;
 const originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 
@@ -231,6 +233,7 @@ async function recordMatchAndDecision(
          processing_state = 'MATCHED', processing_status = 'MATCHED',
          deterministic_match_score = $3, deterministic_match_coverage = 100.00,
          recommendation_requirement_score = $3::numeric / 100,
+         recommendation_score_policy = '${TEST_SCORE_POLICY}',
          profile_match_status = 'POSITIVE_MATCH',
          recommendation_eligibility = 'ELIGIBLE', recommendation_outcome = $4
      WHERE workspace_id = $5 AND id = $6`,
@@ -323,6 +326,7 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
     // The owner's AI switch is closed by default; these cases need it open with a cut-off every match passes.
     process.env.AI_EVALUATION_ENABLED = "true";
     process.env.AI_EVALUATION_SCORE_CUTOFF = "0";
+    process.env.AI_EVALUATION_SCORE_POLICY = TEST_SCORE_POLICY;
     const agent = await import("../../services/agent.js");
     vi.spyOn(agent, "generateEmbedding").mockImplementation(syntheticEmbedding);
     vi.spyOn(agent, "generateEmbeddingWithProvider").mockImplementation(syntheticEmbedding as any);
@@ -891,10 +895,12 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
     const closeSwitch = () => {
       delete process.env.AI_EVALUATION_ENABLED;
       delete process.env.AI_EVALUATION_SCORE_CUTOFF;
+      delete process.env.AI_EVALUATION_SCORE_POLICY;
     };
-    const openSwitch = (cutoff: string) => {
+    const openSwitch = (cutoff: string, policy: string = TEST_SCORE_POLICY) => {
       process.env.AI_EVALUATION_ENABLED = "true";
       process.env.AI_EVALUATION_SCORE_CUTOFF = cutoff;
+      process.env.AI_EVALUATION_SCORE_POLICY = policy;
     };
     const taskRows = async (job: FixtureJob) => (await db().query(
       `SELECT id, status, attempt_count, blocked_on, updated_at, last_error FROM pipeline_tasks
@@ -950,6 +956,9 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
       // The switch without an approved cut-off is still closed.
       process.env.AI_EVALUATION_ENABLED = "true";
       expect((await runExplanationQueueEnqueuer(db(), { context: ctx() })).heldReason).toBe("AI_SCORE_CUTOFF_NOT_APPROVED");
+      // So is a cut-off without the score policy it was approved on.
+      process.env.AI_EVALUATION_SCORE_CUTOFF = "0";
+      expect((await runExplanationQueueEnqueuer(db(), { context: ctx() })).heldReason).toBe("AI_SCORE_POLICY_NOT_APPROVED");
       closeSwitch();
       expect(await counts()).toEqual(before);
       expect(await jobState(waiting)).toEqual(stateBefore);
@@ -990,6 +999,38 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
         .toEqual({ enqueued: 0, updated: 0, deferred: 0 });
       expect((await counts()).queue).toBe(before.queue);
       expect(await jobState(waiting)).toEqual(stateBefore);
+
+      expect(blocked.aiWork).toMatchObject({ mode: "OPEN", blockedOnScoreCutoff: 1 });
+
+      // The cut-off passes but the score policy is another one: still nothing, in the seed, the task and the enqueuer.
+      openSwitch("0", "deterministic_v3|role_shape_v1");
+      for (const job of [waiting, rematched]) {
+        const other = await run(job, ["ENQUEUE_EXPLANATION"]);
+        expect(other.seeded?.byType.ENQUEUE_EXPLANATION).toBeUndefined();
+        expect(other.completed).toBe(0);
+        expect(await runExplanationQueueEnqueuer(db(), { context: ctx(), canonicalJobIds: [job.canonicalJobId] }))
+          .toEqual({ enqueued: 0, updated: 0, deferred: 0 });
+      }
+      expect(await taskRows(rematched)).toEqual([]);
+      expect((await counts()).queue).toBe(before.queue);
+
+      // A job that does not qualify takes no seed slot: with a cap of one the older, lower job is passed over.
+      openSwitch("0.6");
+      await db().query(
+        `UPDATE canonical_jobs SET updated_at = NOW() - INTERVAL '10 days' WHERE workspace_id = $1 AND id = $2`,
+        [ctx().workspaceId, rematched.canonicalJobId],
+      );
+      const higher = await seedRoutableJob("held-higher", ["Zebra telemetry platform engineering experience"]);
+      await publishEmbeddings();
+      await runLaneRouter(db(), { context: ctx(), jobVersionIds: [higher.jobVersionId] });
+      await recordMatchAndDecision(higher, profileV2, "REVIEW", 90);
+      const capped = await seedRecoverablePipelineTasks(db(), {
+        context: ctx(), taskTypes: ["ENQUEUE_EXPLANATION"], includeTestFixtures: true,
+        jobVersionIds: [rematched.jobVersionId, higher.jobVersionId], maxSeedPerType: 1,
+      });
+      expect(capped.byType.ENQUEUE_EXPLANATION).toEqual({ inserted: 1, existing: 0 });
+      expect(await taskRows(higher)).toHaveLength(1);
+      expect(await taskRows(rematched)).toEqual([]);
 
       // The owner's go with a cut-off both pass: the blocked task and the never-created one both run.
       openSwitch("0");

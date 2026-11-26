@@ -20,7 +20,7 @@ import { DETERMINISTIC_MATCHER_POLICY_VERSION } from "../../pipeline/profileMatc
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { setLaneBudget } from "../../../scripts/workspace_lanes.js";
 import { batchEmbeddingFromPerInput } from "../fixtures/embeddingBatchMock.js";
-import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
+import { openAiWorkForSuite, TEST_SCORE_POLICY } from "../fixtures/aiWorkSwitch.js";
 
 // Real PostgreSQL: lane revisions, routing currency, the enqueuer, the seeder and the task worker
 // (including the real lane router) all run against migrated tables. Only the embedding provider
@@ -274,7 +274,7 @@ describe.skipIf(skipReal)("lane routing currency across lane revisions", () => {
         `UPDATE canonical_jobs
          SET processing_state = 'MATCHED', processing_status = 'MATCHED',
              recommendation_eligibility = 'ELIGIBLE', recommendation_outcome = 'PRIORITY',
-             recommendation_requirement_score = 0.8
+             recommendation_requirement_score = 0.8, recommendation_score_policy = '${TEST_SCORE_POLICY}'
          WHERE workspace_id = $1 AND id = $2`,
         [ctx().workspaceId, job.canonicalJobId],
       );

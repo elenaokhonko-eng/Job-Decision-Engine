@@ -10,7 +10,7 @@ import { loadGlobalLanesConfig, loadWorkspaceLanesConfig } from "../../pipeline/
 import { upsertLaneRevision } from "../../lanes/registry.js";
 import { withMaximumAiInterpretationsPerRun } from "../../lanes/evaluationBudgetConfig.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
-import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
+import { openAiWorkForSuite, TEST_SCORE_POLICY } from "../fixtures/aiWorkSwitch.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -123,12 +123,12 @@ async function seedBudgetFixture(): Promise<void> {
          location_summary, workplace_type, employment_type,
          processing_status, processing_state, gate_decision, primary_lane,
          semantic_score, deterministic_match_score, recommendation_eligibility,
-         recommendation_outcome, recommendation_requirement_score
+         recommendation_outcome, recommendation_requirement_score, recommendation_score_policy
        )
        VALUES (
          $1, $2, $3, $4, 'Remote', 'REMOTE', 'PERMANENT',
          'MATCHED', 'MATCHED', 'PASS', $5, 0.80, 80.00,
-         'ELIGIBLE', 'PRIORITY', 0.8
+         'ELIGIBLE', 'PRIORITY', 0.8, '${TEST_SCORE_POLICY}'
        )
        RETURNING id`,
       [

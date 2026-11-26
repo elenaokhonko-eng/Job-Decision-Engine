@@ -1,12 +1,15 @@
 import type { AiWorkSettings } from "../../../platform/config/index.js";
 import {
   selectHeldAiWorkCounts,
-  selectJobVersionScoreAbove,
+  selectJobVersionQualifies,
   type EvaluationQueryable,
   type HeldAiWorkCounts,
 } from "../../../platform/persistence/evaluation/index.js";
 
-/** FALSE while the owner's switch is closed, and for a job at or below the cut-off or without a ranking score. */
+/**
+ * FALSE while the owner's switch is closed, and for a job at or below the cut-off, without a ranking score, or
+ * scored under another score policy than the approved one.
+ */
 export async function jobVersionMayReceiveAiWork(
   db: EvaluationQueryable,
   workspaceId: string,
@@ -14,7 +17,7 @@ export async function jobVersionMayReceiveAiWork(
   settings: AiWorkSettings,
 ): Promise<boolean> {
   if (settings.mode === "HELD") return false;
-  return selectJobVersionScoreAbove(db, workspaceId, jobVersionId, settings.scoreCutoff);
+  return selectJobVersionQualifies(db, workspaceId, jobVersionId, settings);
 }
 
 export type AiWorkReport = AiWorkSettings & HeldAiWorkCounts;
@@ -26,5 +29,8 @@ export async function describeAiWork(
   outcomes: readonly string[],
   settings: AiWorkSettings,
 ): Promise<AiWorkReport> {
-  return { ...settings, ...(await selectHeldAiWorkCounts(db, workspaceId, outcomes)) };
+  return {
+    ...settings,
+    ...(await selectHeldAiWorkCounts(db, workspaceId, outcomes, settings.mode === "OPEN" ? settings : null)),
+  };
 }

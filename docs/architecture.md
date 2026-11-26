@@ -247,18 +247,29 @@ Order of work:
 
 ### The owner's AI switch
 
-Explanation and evaluation work fails closed. It is queued and run only when `AI_EVALUATION_ENABLED` is exactly `true` and `AI_EVALUATION_SCORE_CUTOFF` holds the cut-off the owner approved (`src/platform/config/aiWorkConfig.ts`). There is no default cut-off. A job qualifies when its stored ranking score (`canonical_jobs.recommendation_requirement_score`, 0 to 1) is strictly above it; a job with no score does not qualify. The rule is in `src/modules/evaluation/`.
+Explanation and evaluation work fails closed. It is queued and run only when all three are set (`src/platform/config/aiWorkConfig.ts`), with no defaults:
 
-| Path | Switch closed | Switch open, job not above the cut-off |
+| Setting | Value |
+|---|---|
+| `AI_EVALUATION_ENABLED` | exactly `true` |
+| `AI_EVALUATION_SCORE_CUTOFF` | the cut-off the owner approved, a decimal from 0 up to, not including, 1 |
+| `AI_EVALUATION_SCORE_POLICY` | the score scale it was approved on, as stored in `canonical_jobs.recommendation_score_policy` (`<match policy>\|<role-shape policy>`) |
+
+A job qualifies when its stored ranking score (`canonical_jobs.recommendation_requirement_score`) is strictly above the cut-off and its score policy equals the approved one. A job with no score, or scored under another policy, does not qualify. The rule is in `src/modules/evaluation/`.
+
+A value that is set but cannot be read holds the AI work and fails the run: the pipeline worker finishes its other stages and exits non-zero; the evaluation worker, the enqueuer, the scoped pilot and the model comparison stop at once.
+
+| Path | Switch closed | Switch open, job does not qualify |
 |---|---|---|
 | Creating an `ENQUEUE_EXPLANATION` task (successor of stage 9, successor of a lane re-route, recoverable seed) | Not created | Not created |
-| An `ENQUEUE_EXPLANATION` task already waiting | Not claimed and not reconciled; stays `PENDING` or `RETRY_WAIT`, unchanged | `BLOCKED_DEPENDENCY` on `AI_SCORE_CUTOFF:<job version>` when claimed |
+| An `ENQUEUE_EXPLANATION` task already waiting | Not claimed and not reconciled; stays `PENDING`, `RETRY_WAIT`, or `RUNNING` with its expired lease, unchanged | `BLOCKED_DEPENDENCY` on `AI_SCORE_CUTOFF:<job version id>` when claimed |
 | `runExplanationQueueEnqueuer` (any caller, including the re-match script) | Reads and writes nothing | No queue row, no deferral, no state change |
-| `scripts/evaluate_queue.ts` | Reads and changes no queue item, makes no model call | The queue row stays as it is |
+| `scripts/evaluate_queue.ts` | Reads and changes no queue item, makes no model call | Makes no model call for the row; the row stays queued |
+| `scripts/compare_evaluation_models.ts --run` | Refuses and exits non-zero | The job is left out of the sample |
 
-Holding is not a rejection: no job state, decision or deferral row changes. When the switch opens, the waiting tasks are claimed and the recoverable seed creates the missing ones. The worker summary and the evaluation worker report the switch and the waiting work (`aiWork`: waiting tasks, waiting queue rows, jobs without an evaluation). While the switch is closed, the worker's pending and retry SLOs leave the held tasks out; queue health still counts them. While it is closed, a waiting task also does not run its lane, profile or decision currency repairs; the lane re-route and profile re-match seeds still run.
+Holding is not a rejection: no job state, decision or deferral row changes. When the switch opens, waiting tasks are claimed and the recoverable seed creates the missing ones. A blocked task is reopened only when the same task identity is enqueued again; otherwise a new task is created and the blocked row stays, still counted.
 
-`scripts/compare_evaluation_models.ts` is a measurement tool the owner starts by hand. It calls the evaluator without the queue and is not covered by the switch.
+The worker summary and the evaluation worker report `aiWork`: the switch, waiting tasks (and how many of them have an expired lease), tasks blocked on the cut-off, unfinished queue rows (and, while open, how many do not qualify) and jobs without an evaluation. While the switch is closed, the pending and retry SLOs of the pipeline worker and of the scoped pilot leave held tasks out; queue health still counts them. The scoped pilot report names the hold in `aiHold`. While the switch is closed, a waiting task also does not run its lane, profile or decision currency repairs; the lane re-route and profile re-match seeds still run.
 
 Task seeds (`seedRecoverablePipelineTasks`, `src/tasks/stageTaskWorker.ts`):
 

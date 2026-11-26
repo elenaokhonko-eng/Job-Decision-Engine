@@ -21,6 +21,7 @@ import { LANE_ROUTER_RULE_VERSION, runLaneRouting as defaultRunLaneRouting } fro
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/laneRoutingCurrency.js";
 import {
+  AI_EVALUATION_OUTCOMES,
   AI_EVALUATION_OUTCOMES_SQL,
   PROFILE_REMATCH_OUTCOMES,
   currentMatcherPolicySql,
@@ -1010,6 +1011,7 @@ export async function seedRecoverablePipelineTasks(
          -- AI evaluation is for Apply Now outcomes only; TRACK is excluded by design.
          AND c.recommendation_outcome IN (${AI_EVALUATION_OUTCOMES_SQL})
          AND c.recommendation_requirement_score > $3::numeric
+         AND c.recommendation_score_policy = $4::text
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
          AND EXISTS (
            SELECT 1
@@ -1058,7 +1060,11 @@ export async function seedRecoverablePipelineTasks(
          )
        ORDER BY c.updated_at ASC
        LIMIT $2`,
-      [ctx.workspaceId, maxPerType, aiWork.mode === "OPEN" ? aiWork.scoreCutoff : null],
+      [
+        ctx.workspaceId,
+        maxPerType,
+        ...(aiWork.mode === "OPEN" ? [aiWork.scoreCutoff, aiWork.scorePolicy] : [null, null]),
+      ],
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
         payload: {
@@ -4064,7 +4070,7 @@ async function executeStageTask(
       throw new PipelineTaskDependencyBlockedError(
         `AI_SCORE_CUTOFF:${jobVersionId}`,
         "OWNER_AI_CUTOFF",
-        `job_version_id=${jobVersionId} is not above the approved AI score cut-off; it waits for the owner's cut-off or a new decision.`,
+        `job_version_id=${jobVersionId} does not qualify under the approved AI score cut-off and score policy; it waits for the owner's approval or a new decision.`,
       );
     }
     await dependencies.runExplanationQueueEnqueuer(clientOrPool, {
@@ -4696,7 +4702,7 @@ export async function runPipelineStageTaskWorker(
           ? "STAGE_LIMIT_REACHED"
           : "QUEUE_DRAINED";
     if (taskTypes.includes(AI_WORK_TASK_TYPE)) {
-      summary.aiWork = await describeAiWork(client, ctx.workspaceId, ["PRIORITY", "REVIEW"], aiWork);
+      summary.aiWork = await describeAiWork(client, ctx.workspaceId, AI_EVALUATION_OUTCOMES, aiWork);
       if (aiWork.mode === "HELD") {
         console.warn(`[pipeline-worker] AI work is held (${aiWork.reason}): ${JSON.stringify(summary.aiWork)}`);
       }

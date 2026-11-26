@@ -11,7 +11,7 @@ import {
   supersedeStaleEvaluationQueueRows,
 } from "../../pipeline/evaluationQueueLineage.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
-import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
+import { openAiWorkForSuite, TEST_SCORE_POLICY } from "../fixtures/aiWorkSwitch.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -170,7 +170,8 @@ async function createFixture(
      SET latest_job_version_id = $1,
          latest_match_run_id = $2,
          latest_deterministic_decision_id = $3,
-         recommendation_requirement_score = 0.8
+         recommendation_requirement_score = 0.8,
+         recommendation_score_policy = '${TEST_SCORE_POLICY}'
      WHERE workspace_id = $4 AND id = $5`,
     [jobVersionId, currentMatchRunId, currentDecisionId, workspaceId, canonicalJobId],
   );
@@ -319,13 +320,16 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
     expect(eligible[0]?.resolved_gate_decision_id).toBe(latestGateDecisionId);
   });
 
-  it("selects only queue rows whose job is strictly above the approved cut-off", async () => {
+  it("selects only queue rows above the approved cut-off under the approved score policy", async () => {
     const database = getClient();
     const workspaceId = getContext().workspaceId;
     const all = await selectEligibleEvaluationQueueRows(database, { workspaceId });
     expect(all.length).toBeGreaterThan(0);
-    expect(await selectEligibleEvaluationQueueRows(database, { workspaceId, scoreAbove: 0.79 })).toHaveLength(all.length);
-    expect(await selectEligibleEvaluationQueueRows(database, { workspaceId, scoreAbove: 0.8 })).toEqual([]);
+    const select = (scoreCutoff: number, scorePolicy: string) =>
+      selectEligibleEvaluationQueueRows(database, { workspaceId, approval: { scoreCutoff, scorePolicy } });
+    expect(await select(0.79, TEST_SCORE_POLICY)).toHaveLength(all.length);
+    expect(await select(0.8, TEST_SCORE_POLICY)).toEqual([]);
+    expect(await select(0, "deterministic_v3|role_shape_v1")).toEqual([]);
   });
 
   it("supersedes stale queue rows without deleting them or creating manual-review debt", async () => {
@@ -693,5 +697,50 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
     const untouched = after.rows.find((row) => row.status === "PENDING")!;
     expect(untouched.attempt_count).toBe(before.rows.find((row) => row.id === untouched.id)!.attempt_count);
   });
-});
 
+  it("never calls the evaluator for a queued row below the cut-off or scored under another policy", async () => {
+    const fixture = bulkFixtures[5]!;
+    const database = getClient();
+    const workspaceId = getContext().workspaceId;
+    const row = async () => (await database.query(
+      `SELECT status, attempt_count, lease_id, updated_at FROM evaluation_queue WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, fixture.queueId],
+    )).rows[0];
+    const setScore = (score: number | null, policy: string | null) => database.query(
+      `UPDATE canonical_jobs SET recommendation_requirement_score = $3, recommendation_score_policy = $4
+        WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, fixture.canonicalJobId, score, policy],
+    );
+    const before = await row();
+    expect(before.status).toBe("PENDING");
+    const evaluateMock = vi.fn(async (input: { canonicalJobId: string; jobVersionId: string }, runId: string, attempt: number) =>
+      syntheticEvaluation(input, runId, attempt, "STANDARD"));
+    vi.stubEnv("AI_EVALUATION_SCORE_CUTOFF", "0.5");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const evaluate = () => withMockedEvaluator(evaluateMock, (evaluateQueue) => evaluateQueue({
+      context: getContext(), profileVersionId, jobVersionIds: [fixture.jobVersionId],
+    }));
+    try {
+      for (const [score, policy] of [
+        [0.5, TEST_SCORE_POLICY],
+        [0.2, TEST_SCORE_POLICY],
+        [0.9, "deterministic_v3|role_shape_v1"],
+        [0.9, null],
+        [null, TEST_SCORE_POLICY],
+      ] as Array<[number | null, string | null]>) {
+        await setScore(score, policy);
+        expect(await evaluate()).toMatchObject({ eligible: 0, processed: 0, failed: 0 });
+        expect(evaluateMock).not.toHaveBeenCalled();
+        expect(await row()).toEqual(before);
+      }
+      expect(warn.mock.calls.some(([line]) => String(line).includes("do not qualify under the approved cut-off"))).toBe(true);
+
+      await setScore(0.9, TEST_SCORE_POLICY);
+      expect(await evaluate()).toMatchObject({ eligible: 1, processed: 1 });
+      expect(evaluateMock).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+      vi.stubEnv("AI_EVALUATION_SCORE_CUTOFF", "0");
+    }
+  });
+});

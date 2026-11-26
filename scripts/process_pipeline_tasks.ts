@@ -3,7 +3,7 @@ import { appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import dotenv from "dotenv";
-import { readAiWorkSettings } from "../src/platform/config/index.js";
+import { assertAiWorkSettingsValid, readAiWorkSettings } from "../src/platform/config/index.js";
 import { claimableTaskTypes, withoutHeldQueueRows } from "../src/modules/evaluation/index.js";
 import { isPooledPostgresConnectionString, pgConnectionConfig } from "../src/db/pgSsl.js";
 import {
@@ -853,6 +853,8 @@ export async function processPipelineTasks(): Promise<void> {
       maxPendingAgeSeconds,
       noProgressPendingThreshold,
     });
+    // An unreadable AI setting held the AI work above; the run still fails so that it is noticed.
+    assertAiWorkSettingsValid(aiWork);
 
     if (shutdownController.signal.aborted) {
       throw new PipelineWorkerCancelledError(

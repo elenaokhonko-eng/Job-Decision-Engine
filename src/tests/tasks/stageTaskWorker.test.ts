@@ -18,6 +18,51 @@ import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
 
 openAiWorkForSuite();
 
+describe("stage worker while the owner's AI switch is closed", () => {
+  const ctx = {
+    workspaceId: "11111111-1111-4111-8111-111111111111",
+    workspaceKey: "default",
+    userId: "22222222-2222-4222-8222-222222222222",
+    userKey: "local_user",
+    role: "OWNER" as const,
+  };
+  const statements = async (run: (client: any) => Promise<unknown>) => {
+    const calls: Array<[string, unknown[]]> = [];
+    const query = vi.fn(async (sql: string, params: unknown[] = []) => {
+      calls.push([sql, params]);
+      return { rows: [], rowCount: 0 };
+    });
+    vi.stubEnv("AI_EVALUATION_ENABLED", "false");
+    try {
+      await run({ query });
+    } finally {
+      vi.stubEnv("AI_EVALUATION_ENABLED", "true");
+    }
+    return calls;
+  };
+  const reconcileQueries = (calls: Array<[string, unknown[]]>) =>
+    calls.filter(([sql]) => sql.includes("FROM pipeline_tasks AS task") && sql.includes("task.status = 'PENDING'"));
+  const runWorker = (taskTypes: Array<"DECIDE_RECOMMENDATION" | "ENQUEUE_EXPLANATION">) => statements((client) =>
+    runPipelineStageTaskWorkerImpl(client, { context: ctx, seed: false, taskTypes, maxTasks: 1, heartbeatSeconds: 0 }));
+
+  it("reconciles only the types it may claim", async () => {
+    const calls = reconcileQueries(await runWorker(["DECIDE_RECOMMENDATION", "ENQUEUE_EXPLANATION"]));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![1]).toContainEqual(["DECIDE_RECOMMENDATION"]);
+    expect(JSON.stringify(calls[0]![1])).not.toContain("ENQUEUE_EXPLANATION");
+  });
+
+  it("does not reconcile at all when every requested type is held (an empty list would mean all types)", async () => {
+    expect(reconcileQueries(await runWorker(["ENQUEUE_EXPLANATION"]))).toEqual([]);
+  });
+
+  it("does not run the AI enqueue seed query", async () => {
+    const calls = await statements((client) =>
+      seedRecoverablePipelineTasks(client, { context: ctx, taskTypes: ["ENQUEUE_EXPLANATION"] }));
+    expect(calls.filter(([sql]) => sql.includes("last_deferral.budget_run_id"))).toEqual([]);
+  });
+});
+
 describe("stageTaskWorker", () => {
   it("parses a validated task allowlist for deterministic recovery", () => {
     expect(parsePipelineTaskTypes("FETCH_JOB_CONTENT,NORMALIZE_OBSERVATION")).toEqual([

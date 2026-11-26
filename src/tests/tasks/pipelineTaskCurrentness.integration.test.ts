@@ -19,7 +19,7 @@ import {
 } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
-import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
+import { openAiWorkForSuite, TEST_SCORE_POLICY } from "../fixtures/aiWorkSwitch.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -297,7 +297,8 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
            gate_decision = 'PASS',
            recommendation_eligibility = 'ELIGIBLE',
            recommendation_outcome = 'REVIEW',
-           recommendation_requirement_score = 0.8
+           recommendation_requirement_score = 0.8,
+           recommendation_score_policy = '${TEST_SCORE_POLICY}'
        WHERE workspace_id = $1 AND id = $2`,
       [getContext().workspaceId, versions.canonicalJobId],
     );

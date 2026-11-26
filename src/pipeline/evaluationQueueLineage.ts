@@ -1,3 +1,4 @@
+import type { AiScoreApproval } from "../platform/config/index.js";
 import pg from "pg";
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 
@@ -31,8 +32,11 @@ export interface EvaluationQueueSelection {
   readonly jobVersionIds?: readonly string[];
   readonly enqueuedAtOrAfter?: Date | string;
   readonly limit?: number;
-  /** Select only jobs whose stored ranking score is strictly above this (the owner's approved AI cut-off). */
-  readonly scoreAbove?: number;
+  /**
+   * Select only jobs whose stored ranking score is strictly above the owner's approved cut-off and was computed
+   * under the approved score policy.
+   */
+  readonly approval?: AiScoreApproval;
 }
 
 export interface EvaluationQueueReconciliation {
@@ -59,8 +63,9 @@ export async function selectEligibleEvaluationQueueRows(
   const enqueuedAfterFilter = selection.enqueuedAtOrAfter !== undefined
     ? `AND eq.enqueued_at >= $${params.push(selection.enqueuedAtOrAfter)}`
     : "";
-  const scoreFilter = selection.scoreAbove !== undefined
-    ? `AND c.recommendation_requirement_score > $${params.push(selection.scoreAbove)}::numeric`
+  const scoreFilter = selection.approval
+    ? `AND c.recommendation_requirement_score > $${params.push(selection.approval.scoreCutoff)}::numeric
+       AND c.recommendation_score_policy = $${params.push(selection.approval.scorePolicy)}::text`
     : "";
   const limitClause = selection.limit !== undefined
     ? `LIMIT $${params.push(selection.limit)}`

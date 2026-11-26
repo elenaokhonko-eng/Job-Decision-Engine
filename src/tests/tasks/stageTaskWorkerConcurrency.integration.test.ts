@@ -15,7 +15,7 @@ import {
 import { parsePipelineWorkerConcurrency } from "../../tasks/pipelineWorkerLanes.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
-import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
+import { openAiWorkForSuite, TEST_SCORE_POLICY } from "../fixtures/aiWorkSwitch.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -58,9 +58,10 @@ async function createDecisionJobs(
     const canonical = await db().query<{ id: string }>(
       `INSERT INTO canonical_jobs (
          workspace_id, company_name, normalized_title, canonical_url, location_summary,
-         workplace_type, employment_type, processing_state, processing_status, recommendation_requirement_score
+         workplace_type, employment_type, processing_state, processing_status, recommendation_requirement_score,
+         recommendation_score_policy
        ) VALUES ($1, $2, 'Concurrency Fixture Role', $3, 'Remote', 'REMOTE', 'FULL_TIME',
-         'ROUTING_DEFERRED', 'ROUTING_DEFERRED', 0.8)
+         'ROUTING_DEFERRED', 'ROUTING_DEFERRED', 0.8, '${TEST_SCORE_POLICY}')
        RETURNING id::text AS id`,
       [workspace().workspaceId, `Concurrency Fixture ${index}`, `https://concurrency.example.test/${crypto.randomUUID()}`],
     );

@@ -52,11 +52,22 @@ describe.skipIf(skipReal)("evaluation queue pool lifecycle (PostgreSQL)", () => 
     }
   });
 
+  it("fails, rather than holding quietly, on an unreadable switch value", async () => {
+    vi.stubEnv("AI_EVALUATION_ENABLED", "yes");
+    try {
+      const { evaluateQueue } = await import("../../../scripts/evaluate_queue.js");
+      await expect(evaluateQueue({ context: getContext() })).rejects.toThrow(/AI_EVALUATION_ENABLED_INVALID/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("reuses the worker pool across retry passes and closes it once from the caller", async () => {
     const previousGeminiKey = process.env.GEMINI_API_KEY;
     process.env.GEMINI_API_KEY = previousGeminiKey || "pool-lifecycle-test-key";
     vi.stubEnv("AI_EVALUATION_ENABLED", "true");
     vi.stubEnv("AI_EVALUATION_SCORE_CUTOFF", "0");
+    vi.stubEnv("AI_EVALUATION_SCORE_POLICY", "m|r");
     const poolEndSpy = vi.spyOn(pg.Pool.prototype, "end");
     let closePool: (() => Promise<void>) | undefined;
 

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
 import { loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
 import pg from "pg";
-import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
+import { openAiWorkForSuite, TEST_SCORE_POLICY } from "../fixtures/aiWorkSwitch.js";
 import type { WorkspaceContext } from "../../workspace/context.js";
 
 vi.mock("../../pipeline/laneConfigLoader.js", () => ({
@@ -138,7 +138,9 @@ describe("Pipeline Stage: Explanation Queue Enqueuer (P1)", () => {
     });
     expect(mainQuery?.[0]).toContain("WHEN lb.lane IS NULL THEN COALESCE(");
     expect(mainQuery?.[0]).toContain("lane_revision_matches IS NOT TRUE");
-    expect(mainQuery?.[1]).toHaveLength(7);
+    expect(mainQuery?.[1]).toHaveLength(8);
+    expect(mainQuery?.[0]).toContain("c.recommendation_score_policy = $8::text");
+    expect(mainQuery?.[1]?.[7]).toBe(TEST_SCORE_POLICY);
     expect(mainQuery?.[0]).toContain("c.recommendation_requirement_score > $7::numeric");
     expect(mainQuery?.[1]?.[6]).toBe(0);
     expect(mainQuery?.[1]?.[4]).toBe("FILES");

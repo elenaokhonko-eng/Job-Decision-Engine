@@ -10,7 +10,8 @@ import { isProfileFactModelShareable } from "../src/profile/privacy.js";
 import { ExperienceByTrackSchema } from "../src/profile/contracts.js";
 import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 import type { EvaluationQueueStats } from "../src/pipeline/evaluationQueuePolicy.js";
-import { readAiWorkSettings } from "../src/platform/config/index.js";
+import { assertAiWorkSettingsValid, readAiWorkSettings } from "../src/platform/config/index.js";
+import { AI_EVALUATION_OUTCOMES } from "../src/pipeline/profileMatchCurrency.js";
 import { describeAiWork } from "../src/modules/evaluation/index.js";
 import { runEvaluationQueueWithExitPolicy } from "../src/pipeline/evaluationQueueExitPolicy.js";
 import {
@@ -95,9 +96,10 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
   try {
     // Fail closed, before any model preflight or queue write: queued rows stay exactly as they are.
     const aiWork = readAiWorkSettings();
+    assertAiWorkSettingsValid(aiWork);
     if (aiWork.mode === "HELD") {
       const heldContext = options.context ?? await resolveWorkspaceContext(client as any);
-      const held = await describeAiWork(client, heldContext.workspaceId, ["PRIORITY", "REVIEW"], aiWork);
+      const held = await describeAiWork(client, heldContext.workspaceId, AI_EVALUATION_OUTCOMES, aiWork);
       console.warn(`AI evaluation is held (${aiWork.reason}); no queue item was read or changed: ${JSON.stringify(held)}`);
       return { processed: 0, failed: 0, manualReview: 0, eligible: 0, rateLimited: 0, notStarted: 0, heldReason: aiWork.reason };
     }
@@ -131,7 +133,7 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
         ...(options.profileVersionId ? { profileVersionId: options.profileVersionId } : {}),
         ...(jobVersionIds.length > 0 ? { jobVersionIds } : {}),
         ...(options.limit !== undefined ? { limit: options.limit } : {}),
-        scoreAbove: aiWork.scoreCutoff,
+        approval: aiWork,
       });
       await client.query("COMMIT");
     } catch (error) {
@@ -142,6 +144,12 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
       console.log(`Superseded ${supersededQueueCount} stale evaluation queue item(s).`);
     }
     eligibleCount = queueItems.length;
+    const report = await describeAiWork(client, ctx.workspaceId, AI_EVALUATION_OUTCOMES, aiWork);
+    if (report.queueRowsNotApproved) {
+      console.warn(
+        `${report.queueRowsNotApproved} queued evaluation(s) do not qualify under the approved cut-off and score policy; they stay queued.`
+      );
+    }
 
     console.log(`Found ${queueItems.length} items eligible for AI evaluation. Pipeline run: ${pipelineRunId}`);
 

@@ -9,7 +9,7 @@ import { PersistedEvaluationQueueItemSchema } from "../contracts/index.js";
 import { supersedeStaleEvaluationQueueRows } from "./evaluationQueueLineage.js";
 import { laneRoutingCurrentSql } from "../lanes/laneRoutingCurrency.js";
 import { AI_EVALUATION_OUTCOMES_SQL } from "./profileMatchCurrency.js";
-import { readAiWorkSettings, type AiWorkHoldReason } from "../platform/config/index.js";
+import { assertAiWorkSettingsValid, readAiWorkSettings, type AiWorkHoldReason } from "../platform/config/index.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -78,6 +78,7 @@ export async function runExplanationQueueEnqueuer(
 ): Promise<ExplanationQueueEnqueuerSummary> {
   // Fail closed for every caller (worker, rematch and replay scripts): no budget run, queue row, deferral or state change.
   const aiWork = readAiWorkSettings();
+  assertAiWorkSettingsValid(aiWork);
   if (aiWork.mode === "HELD") {
     console.warn(`Explanation Queue Enqueuer held (${aiWork.reason}); nothing was queued.`);
     return { enqueued: 0, updated: 0, deferred: 0, heldReason: aiWork.reason };
@@ -223,8 +224,10 @@ export async function runExplanationQueueEnqueuer(
         runSnapshot.source,
         runSnapshot.version,
       ];
-      // Jobs not above the approved cut-off are left alone: no queue row, no deferral, no state change.
-      const cutoffFilter = `AND c.recommendation_requirement_score > $${params.push(aiWork.scoreCutoff)}::numeric`;
+      // Jobs not above the approved cut-off, or scored under another score policy, are left alone: no queue row,
+      // no deferral, no state change.
+      const cutoffFilter = `AND c.recommendation_requirement_score > $${params.push(aiWork.scoreCutoff)}::numeric
+            AND c.recommendation_score_policy = $${params.push(aiWork.scorePolicy)}::text`;
       const jobVersionFilter = jobVersionIds.length > 0
         ? `AND COALESCE(c.latest_job_version_id, lv.id) = ANY($${params.push(jobVersionIds)}::uuid[])`
         : "";
