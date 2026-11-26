@@ -6,6 +6,8 @@ import { DECIDER_VERSION } from "../../src/pipeline/deciderVersion.js";
 import {
   evaluateWorkerTerritoryRequirements,
   loadWorkabilityPolicy,
+  extractTerritories,
+  isUnitedStatesOnlyLocation,
   extractExplicitWorkerTerritoryRequirements,
 } from "../../src/pipeline/workabilityPolicy.js";
 
@@ -103,6 +105,11 @@ describe("boilerplate beside a real condition, and unrecognised wording, still r
     "Given export controls, the post is restricted to U.S. nationals",
     "This post is open to US persons because of export-controlled hardware",
     "Hiring for this post is limited to United States nationals",
+    "We can hire only American citizens for this post",
+    "This post is open to American citizens only",
+    "Export control duties: we only hire American citizens",
+    "This post requires US person status",
+    "Export control duties mean the post requires U.S. person status",
     // Fair-chance and criminal-record wording beside a condition.
     "We hire under fair chance rules: US residents only",
     "Applicants must be US residents and clear a criminal record screen",
@@ -182,6 +189,23 @@ describe("stated restrictions still reject", () => {
     const result = persisted("Candidates must reside in the US.");
     expect(result.status).toBe("HARD_REJECT");
     expect(result.workability_facts.location_restriction).toBe("UNITED_STATES");
+  });
+
+  it.each([
+    "Our kiosk helps American citizens renew a library card",
+    "We welcome not only American citizens but everyone",
+    "The bursary is for Latin American citizens only",
+    "This post does not require US person status",
+    "The team studies how people obtain US person status",
+  ])("reads no restriction in %j", (description) => {
+    expect(territories(description)).toEqual([]);
+    expect(gate(description).rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+  });
+
+  it("does not make American a location name", () => {
+    expect(extractTerritories("American Fork")).toEqual([]);
+    expect(extractTerritories("American citizens only")).toEqual([]);
+    expect(isUnitedStatesOnlyLocation("American Fork")).toBe(false);
   });
 
   it("does not read a negated limit as a restriction", () => {

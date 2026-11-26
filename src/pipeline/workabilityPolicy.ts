@@ -692,6 +692,15 @@ function withoutBoilerplatePhrases(sentence: string): string {
   return text;
 }
 
+// "Only American citizens" is a restriction. "American" is not a territory alias, so locations are
+// read as before; only this phrasing is rewritten, and only in the text matched for restrictions.
+const ONLY_AMERICAN_CITIZENS = /(?<!\bnot\s)(\bonly(?:\s+(?:to|hire|accept|consider))?\s+)american(?=\s+citizens?\b)/gi;
+const AMERICAN_CITIZENS_ONLY = /(?<!\b(?:latin|south|central|north|native|african)[\s-])\bamerican(?=\s+citizens?\s+only\b)/gi;
+
+function nameAmericanCitizenRestriction(sentence: string): string {
+  return sentence.replace(ONLY_AMERICAN_CITIZENS, "$1US").replace(AMERICAN_CITIZENS_ONLY, "US");
+}
+
 export function extractExplicitWorkerTerritoryRequirements(value: unknown, context?: WorkerTerritoryContext): ExplicitWorkerTerritoryRequirement[] {
   const text = String(value ?? "");
   // U+0130 is the one character whose lower case is longer; it must not shift the offsets below.
@@ -702,7 +711,7 @@ export function extractExplicitWorkerTerritoryRequirements(value: unknown, conte
     // Both sources have the same length, so the offsets give the text as written.
     const sentence = text.slice(part.index, part.index + part[0].length).trim();
     if (!sentence) continue;
-    const matchText = neutralizePronounUs(sentence);
+    const matchText = nameAmericanCitizenRestriction(neutralizePronounUs(sentence));
     const territories = extractTerritories(matchText).filter((territory) => hasExplicitTerritoryRestriction(matchText, territory));
     if (territories.length === 0) continue;
     requirements.push({
@@ -1055,7 +1064,8 @@ export function hasExplicitTerritoryRestriction(value: unknown, territory: strin
       || /\b(?:remote\s+(?:only\s+in|only\s+from|eligible\s+only\s+in))\b/i.test(sentence)
       || /\b(?:open\s+only\s+to|eligible\s+only\s+in|based\s+in\s+[\w\s]+\s+only)\b/i.test(sentence)
       // "limited to US persons" states who may be hired without "only" or "must".
-      || /(?<!\bnot\s)\b(?:limited|restricted|open)\s+to\s+(?:the\s+)?(?:us|usa|united\s+states)\s+(?:persons?|nationals?)\b/i.test(sentence);
+      || /(?<!\bnot\s)\b(?:limited|restricted|open)\s+to\s+(?:the\s+)?(?:us|usa|united\s+states)\s+(?:persons?|nationals?)\b/i.test(sentence)
+      || /(?<!\bnot\s)\brequires?\s+(?:us|united\s+states)\s+person\s+status\b/i.test(sentence);
 
     if (isEmployerOrContext) {
       return hasExplicitWorkerConstraint;
