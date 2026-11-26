@@ -206,6 +206,8 @@ describe("a title family rejects only as the main role", () => {
     "Data Engineer (Site Reliability)",
     "Machine Learning Engineer, SRE collaboration",
     "AI Architect | DevOps and Delivery",
+    "Data Engineer / DevOps Engineer",
+    "Senior AI & Full-Stack Engineer, DevOps & Mentoring",
   ])("does not reject %j", (title) => {
     expect(nonTechnicalFunctionTitle(title)).toBeNull();
     const result = gate("Build data pipelines in Python.", "Singapore", title);
@@ -224,6 +226,10 @@ describe("a title family rejects only as the main role", () => {
     "Infrastructure Engineer / DevOps",
     "AI Security Engineer",
     "Software Engineer, Test Automation",
+    // Owner decision: systems administration and customer success reject on the title.
+    "Application Developer / Systems Administrator",
+    "Data Analyst, Customer Success",
+    "Product Manager - Customer Success",
     // A department is not a role, and a data centre is infrastructure.
     "Product Engineering - DevOps Engineer",
     "AI Engineering | DevOps Lead",

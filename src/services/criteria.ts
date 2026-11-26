@@ -103,6 +103,8 @@ const PHYSICAL_ENGINEERING_TITLE = NON_TECHNICAL_FUNCTION_TITLES[NON_TECHNICAL_F
 /** A role the title names in its own right, so a family word after it is a secondary mention. */
 // The role word names a person, so a department ("Product Engineering") is not a role; a data centre is infrastructure.
 const DISTINCT_MAIN_ROLE = /\b(?:ai|ml|llm|machine\s+learning|artificial\s+intelligence|data(?!\s+cent(?:er|re)s?\b)|full[\s-]?stack|back[\s-]?end|front[\s-]?end|product|applications?|analytics|research|quant(?:itative)?)\b[\w\s&\/+.-]{0,30}?\b(?:engineer|developer|scientist|architect|analyst|manager|lead|researcher)\b/i;
+/** Families that reject wherever the title names them, a distinct leading role or not (owner decision). */
+const NEVER_SECONDARY_FAMILY = /\b(?:customer success|systems?\s+administrators?|sysadmin)\b/i;
 /** Punctuation that starts a qualifier. A hyphen splits only when spaced ("full-stack" stays whole). */
 const TITLE_QUALIFIER_BREAK = /\s+-\s*|\s*-\s+|\s*[–—|(,:[]\s*/;
 /** A second role joined after a complete first role: "AI Engineer & DevOps Lead". */
@@ -124,7 +126,7 @@ export function nonTechnicalFunctionTitle(title: string): string | null {
   for (const pattern of NON_TECHNICAL_FUNCTION_TITLES) {
     const match = text.match(pattern);
     if (!match) continue;
-    if (hasDistinctMainRole && pattern !== PHYSICAL_ENGINEERING_TITLE && !pattern.test(mainRole)) continue;
+    if (hasDistinctMainRole && pattern !== PHYSICAL_ENGINEERING_TITLE && !pattern.test(mainRole) && !NEVER_SECONDARY_FAMILY.test(text)) continue;
     return match[0];
   }
   return null;
