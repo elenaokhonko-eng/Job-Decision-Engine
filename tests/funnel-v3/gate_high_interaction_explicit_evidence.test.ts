@@ -53,7 +53,7 @@ describe("GATE_HIGH_INTERACTION needs explicit evidence", () => {
     const description = `${BASE}
 Own the customer journey for our contract-review solution.`;
     const shape = assessRoleShape({ title: "Legal Solutions Lead", description });
-    expect(ROLE_SHAPE_POLICY_VERSION).toBe("role_shape_v2");
+    expect(ROLE_SHAPE_POLICY_VERSION).toBe("role_shape_v3");
     expect(shape.signals).toHaveLength(1);
     expect(shape.signals[0]).toMatchObject({ code: "CUSTOMER_FACING_DELIVERY", penalty: 0.06, source: "DESCRIPTION" });
     expect(shape.signals[0]!.quote.toLowerCase()).toContain("customer journey");
