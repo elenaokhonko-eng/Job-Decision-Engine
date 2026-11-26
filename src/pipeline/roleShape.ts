@@ -96,8 +96,8 @@ const PEOPLE_MANAGEMENT_TITLE =
 const STRONG_PEOPLE_CUES: RegExp[] = [
   /\bdirect reports?\b/i,
   /\bline[- ]manag(?:e|er|ement|ing)\b/i,
-  /\bpeople[- ]manag(?:e|er|ement|ing)\b/i,
-  /\b(?:(?:manage|lead|build|grow) (?:and (?:lead|develop|grow) )?a|(?:manage|lead) (?:our|the)) (?:global |distributed )?team of\b/i,
+  /\bpeople[- ](?:manag(?:e|er|ement|ing)|leadership)\b/i,
+  /\b(?:(?:manage|lead|build|grow) (?:and (?:lead|develop|grow) )?a|(?:manage|lead) (?:our|the)) (?:[\w-]+,? ){0,2}team of\b/i,
   /\b(?:manage|lead)(?: and develop)? engineering managers\b/i,
 ];
 /** "performance reviews", "hire and develop" and the like also appear in individual-contributor postings. */
@@ -105,8 +105,10 @@ const WEAK_PEOPLE_CUES: RegExp[] = [
   /\b(?:hire|hiring) and (?:develop|mentor|coach|retain)\b/i,
   /\bperformance reviews?\b/i,
   /\bcareer (?:development|growth) (?:of|for) (?:your|the) (?:team|reports|engineers)\b/i,
-  /\b(?:lead|manage) the team\b/i,
+  /\b(?:lead|manage) the team\b(?! of\b)/i, // "the team of ..." is the strong team-of cue, counted once
 ];
+/** Developing engineers counts only under a management title: individual contributors mentor engineers too. */
+const TITLED_PEOPLE_CUES: RegExp[] = [/\b(?:coach|coaching|mentor|mentoring|manage|managing) (?:[\w-]+ )?engineers\b/i];
 // A cue the posting denies ("no direct reports") or only advises others about is not this role's duty. Both patterns must end
 // where the cue starts, so any other word or punctuation in between leaves the cue counted.
 const PEOPLE_CUE_DENIED_BEFORE = /\b(?:no|without|not have(?: any)?)\s+$/i;
@@ -125,9 +127,10 @@ export const detectPeopleManagementCore: RoleShapeDetector = ({ title, descripti
   // Managing a team is the core of the role only when the description says so: two separate cues, or a management title plus
   // one STRONG cue. A senior or director title with a single weak mention ("performance reviews") is an individual role.
   const own = (cues: RegExp[]) => cues.map((cue) => ownCueMatch(description, cue)).filter((match): match is RegExpMatchArray => match !== null);
+  const titled = PEOPLE_MANAGEMENT_TITLE.test(title);
   const strongHits = own(STRONG_PEOPLE_CUES);
-  const hits = [...strongHits, ...own(WEAK_PEOPLE_CUES)];
-  if (hits.length >= 2 || (PEOPLE_MANAGEMENT_TITLE.test(title) && strongHits.length >= 1)) {
+  const hits = [...strongHits, ...own(WEAK_PEOPLE_CUES), ...(titled ? own(TITLED_PEOPLE_CUES) : [])];
+  if (hits.length >= 2 || (titled && strongHits.length >= 1)) {
     const first = hits[0]!; // a strong cue when there is one
     return { code: "PEOPLE_MANAGEMENT_CORE", penalty: 0.08, source: "DESCRIPTION", quote: excerpt(description, first.index ?? 0, first[0].length) };
   }
@@ -158,12 +161,13 @@ const CONTRACT_NOT_CONTRACT_BEFORE = new RegExp(
     String.raw`)\s+$`,
   "i",
 );
-/** Unicode dashes (hyphen, non-breaking hyphen, en and em dash, minus) become "-", one character for one character so indexes hold. */
-const normaliseDashes = (text: string): string => text.replace(/[‐-―−]/g, "-");
+/** Soft hyphens are dropped; Unicode dashes (hyphen, non-breaking hyphen, en and em dash, minus) become "-". Matching and quotes use this text. */
+const normaliseDashes = (text: string): string => text.replace(/\u00AD/g, "").replace(/[‐-―−]/g, "-");
 /** Permanent wording directly before the contract phrase ("permanent contract basis"). */
 const PERMANENT_BEFORE_CONTRACT = /\b(?:permanent|open[- ]ended|indefinite)[\s,-]*$/i;
 /** What stands before that permanent word when it is negated or only a prospect ("isn't a permanent", "temp-to-permanent"). */
-const PERMANENT_DENIED_BEFORE = /(?:(?:\b(?:not|no|never|instead of|rather than)|n['’]t)(?:\s+(?:a|an|the|strictly))*\s+|\bnon-|\bto[\s-]+)$/i;
+const PERMANENT_DENIED_BEFORE =
+  /(?:(?:\b(?:not|no|never|instead of|rather than)|n['’]t)(?:\s+(?:a|an|the|strictly|currently|yet|necessarily|fully|offered|as))*\s+|\bnon[\s-]*|\b(?:in)?to(?:\s+an?)?[\s-]+|\bbecome(?:\s+an?)?\s+)$/i;
 /** An employment type is permanent only when it holds nothing but these words: "Contract to permanent" or "no permanent headcount" is not. */
 const PERMANENT_TYPE_WORDS = /\b(?:permanent|open[- ]ended|indefinite|contract|employment|full[- ]time)\b/gi;
 

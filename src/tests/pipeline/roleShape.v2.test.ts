@@ -269,3 +269,79 @@ describe("role shape v3: denied people management is not management (re-review C
     expect(signal!.quote).not.toContain("Performance reviews");
   });
 });
+
+describe("role shape v3: real managers keep the downrank (second re-review)", () => {
+  const codes = (title: string, description: string) => assessRoleShape({ title, description }).signals.map((s) => s.code);
+
+  it.each([
+    ["Engineering Manager", "You will coach engineers and run performance reviews"],
+    ["Engineering Manager", "You will manage a high-performing team of engineers and run performance reviews"],
+    ["Head of AI", "Build and lead a high-performing team of ML engineers. Hire and mentor engineers"],
+    ["Director of Data", "Lead a talented team of analysts and own performance reviews"],
+    ["Engineering Manager", "People leadership experience: managing engineers, performance reviews"],
+    ["Data Lead", "People leadership experience and performance reviews"],
+    ["Director of Data", "Manage our small, global team of analysts."],
+    ["Engineering Manager", "Coaching our engineers and performance reviews"],
+    ["Engineering Manager", "Mentor engineers; performance reviews"],
+    ["Engineering Manager", "Mentoring engineers; performance reviews"],
+    ["Engineering Manager", "Coach engineers; manage engineers; performance reviews"],
+    ["Engineering Manager", "Manage engineers; performance reviews"],
+    ["Engineering Manager", "Managing engineers; performance reviews"],
+  ])("flags %s: %s", (title, text) => {
+    expect(codes(title, text)).toEqual(["PEOPLE_MANAGEMENT_CORE"]);
+  });
+
+  it("one team-of phrase is one cue, so it does not flag a title that is not a management title", () => {
+    expect(codes("Data Lead", "Lead the team of analysts")).toEqual([]);
+    expect(codes("Director of Data", "Lead the team of analysts")).toEqual(["PEOPLE_MANAGEMENT_CORE"]);
+  });
+
+  it("mentoring engineers does not count without a management title, and alone does not flag with one", () => {
+    expect(codes("Senior Engineer", "You will mentor engineers and join performance reviews.")).toEqual([]);
+    expect(codes("Director, Applied AI Research", "You will mentor engineers.")).toEqual([]);
+  });
+});
+
+describe("role shape v3: denied or prospective permanent (second re-review)", () => {
+  const codes = (description: string, employmentType = "") => assessRoleShape({ title: "Analyst", description, employmentType }).signals.map((s) => s.code);
+
+  it.each([
+    "non permanent contract role",
+    "Non Permanent contract basis",
+    "non - permanent contract role",
+    "non – permanent contract role",
+    "non­permanent contract role",
+    "non ­ permanent contract role",
+    "A con­tract role",
+    "not currently a permanent contract role",
+    "not yet a permanent contract role",
+    "not necessarily a permanent contract role",
+    "not a fully permanent contract role",
+    "could become a permanent contract position",
+    "could become permanent contract position",
+    "potential to convert into a permanent contract position",
+    "may turn into permanent contract position",
+    "convertible to a permanent contract position",
+    "leading to an open-ended contract position",
+    "isn't offered as a permanent contract position",
+  ])("stays a contract: %s", (text) => {
+    expect(codes(text)).toEqual(["CONTRACT_EMPLOYMENT"]);
+  });
+
+  it.each([
+    "non permanent contract",
+    "Non Permanent contract",
+    "non - permanent contract",
+    "Non­Permanent contract",
+  ])("employment type stays a contract: %s", (type) => {
+    expect(codes("", type)).toEqual(["CONTRACT_EMPLOYMENT"]);
+  });
+
+  it("a soft hyphen inside permanent does not hide a permanent role", () => {
+    expect(codes("This is a perma­nent contract role")).toEqual([]);
+  });
+
+  it("an offered permanent contract is still permanent", () => {
+    expect(codes("We offer you a permanent contract position")).toEqual([]);
+  });
+});
