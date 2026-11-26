@@ -7,7 +7,7 @@
  *
  * APPLY (only after the owner confirms the plan):
  *   AVAILABILITY_CHECK_APPLY_ALLOWED=true npx tsx scripts/check_availability_now.ts --jobs=<file> --apply \
- *     --confirm-workspace=<workspace uuid>
+ *     --confirm-workspace=<workspace uuid> --confirm-plan=<plan id>
  */
 import dotenv from "dotenv";
 

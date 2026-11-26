@@ -4,6 +4,7 @@ import pg from "pg";
 import { blockedLinkReason, loadJobBoardHosts } from "../../ingestion/availabilityCheckLinks.js";
 import { fetchJobContent, postingRequestUrl } from "../../ingestion/jobContentFetcher.js";
 import {
+  AvailabilityCheckRefusal,
   availabilityCheckExitCode,
   checkDate,
   formatPlan,
@@ -47,6 +48,37 @@ describe("links a manual check never requests", () => {
     }
   });
 
+  it("leaves out country domains of listed aggregators and hosts written with trailing dots", () => {
+    for (const url of ["https://www.glassdoor.co.uk/job/1", "https://www.glassdoor.sg/job/1", "https://indeed.fr/viewjob", "https://sg.indeed.com./x",
+      "https://www.jobstreet.com.sg/job/1", "https://jobstreet.com.my/job/1", "https://www.monster.de/job/1", "https://monster.co.uk/x",
+      "https://click.example.test/r/www.glassdoor.co.uk/job/1"]) {
+      expect(blockedLinkReason(url, BOARDS), url).toBe("AGGREGATOR_LINK");
+    }
+    for (const url of ["https://www.linkedin.com./jobs/view/1", "https://linkedin.com../jobs/view/1", "https://lnkd.in./x",
+      "https://click.example.test/r?u=https%3A%2F%2Fwww.linkedin.com.%2Fjobs%2Fview%2F1"]) {
+      expect(blockedLinkReason(url, BOARDS), url).toBe("LINKEDIN_LINK");
+    }
+    for (const url of ["https://monsterbeverage.com/jobs/1", "https://indeed.example.test/jobs/1", "https://careers.glassdoorfittings.com/1"]) {
+      expect(blockedLinkReason(url, BOARDS), url).toBeNull();
+    }
+  });
+
+  it("paces every redirect hop and reports every status", async () => {
+    const log: string[] = [];
+    await fetchJobContent("https://careers.example.test/jobs/1", { title: "Engineer", companyName: "Acme" }, {
+      beforeRequest: async (url) => { log.push(`wait ${url.pathname}`); },
+      onResponse: (_url, status) => { log.push(`status ${status}`); },
+      resolveAddresses: async () => [{ address: "93.184.216.34", family: 4 }],
+      fetchOnce: async (url) => {
+        log.push(`get ${url.pathname}`);
+        const moved = url.pathname === "/jobs/1";
+        const headers: Record<string, string> = moved ? { location: "/jobs/2" } : {};
+        return { status: moved ? 301 : 429, headers, body: Buffer.alloc(0), url: url.toString() };
+      },
+    });
+    expect(log).toEqual(["wait /jobs/1", "get /jobs/1", "status 301", "wait /jobs/2", "get /jobs/2", "status 429"]);
+  });
+
   it("names the host that is actually requested", () => {
     expect(postingRequestUrl("https://job-boards.greenhouse.io/acme/jobs/12").hostname).toBe("boards-api.greenhouse.io");
     expect(postingRequestUrl("https://jobs.lever.co/acme/abc").hostname).toBe("api.lever.co");
@@ -73,8 +105,10 @@ describe("command arguments and refusals", () => {
   const never = () => vi.fn(async (): Promise<pg.Client> => { throw new Error("must not connect"); });
 
   it("reads a chosen list from arguments, lines or a JSON array, and defaults to plan", () => {
-    expect(parseCheckArguments(["--job-ids=a, b"])).toEqual({ jobIds: ["a", "b"], apply: false, confirmWorkspace: null, intervalSeconds: 5 });
-    expect(parseCheckArguments(["--jobs=f"], () => "# chosen\r\na\r\n\r\nb\r\n").jobIds).toEqual(["a", "b"]);
+    expect(parseCheckArguments(["--job-ids=a, b"])).toEqual({
+      jobIds: ["a", "b"], lines: [1, 2], apply: false, confirmWorkspace: null, confirmPlan: null, intervalSeconds: 5,
+    });
+    expect(parseCheckArguments(["--jobs=f"], () => "# chosen\r\na\r\n\r\nb\r\n")).toMatchObject({ jobIds: ["a", "b"], lines: [2, 4] });
     expect(parseCheckArguments(["--jobs=f"], () => '\uFEFF["a","b"]').jobIds).toEqual(["a", "b"]);
     expect(() => parseCheckArguments([])).toThrow(/exactly one/);
     expect(() => parseCheckArguments(["--jobs=f"], () => " \n")).toThrow(/empty/);
@@ -82,12 +116,26 @@ describe("command arguments and refusals", () => {
     expect(() => parseCheckArguments(["--job-ids=a", "--min-interval-seconds=0"])).toThrow(/at least 2/);
   });
 
-  it("an apply needs the environment confirmation and the workspace id", () => {
-    const apply = parseCheckArguments(["--job-ids=a", "--apply", `--confirm-workspace=${WORKSPACE}`]);
-    expect(() => requireApplyConfirmation(apply, {})).toThrow(/AVAILABILITY_CHECK_APPLY_ALLOWED/);
-    expect(() => requireApplyConfirmation(parseCheckArguments(["--job-ids=a", "--apply"]), { AVAILABILITY_CHECK_APPLY_ALLOWED: "true" }))
-      .toThrow(/--confirm-workspace/);
-    expect(() => requireApplyConfirmation(apply, { AVAILABILITY_CHECK_APPLY_ALLOWED: "true" })).not.toThrow();
+  it("never echoes what a jobs file or argument holds", () => {
+    const secret = "SECRET_VALUE=hunter2";
+    for (const run of [
+      () => parseCheckArguments(["--jobs=f"], () => `["${secret}"`),
+      () => parseCheckArguments(["--jobs=f"], () => { throw new Error(secret); }),
+      () => parseCheckArguments([`--${secret}`]),
+    ]) {
+      expect(run).toThrow(AvailabilityCheckRefusal);
+      expect(run).not.toThrow(/hunter2/);
+    }
+  });
+
+  it("an apply needs the environment confirmation, the workspace id and the confirmed plan", () => {
+    const env = { AVAILABILITY_CHECK_APPLY_ALLOWED: "true" };
+    const base = ["--job-ids=a", "--apply"];
+    const full = parseCheckArguments([...base, `--confirm-workspace=${WORKSPACE}`, "--confirm-plan=abc"]);
+    expect(() => requireApplyConfirmation(full, {})).toThrow(/AVAILABILITY_CHECK_APPLY_ALLOWED/);
+    expect(() => requireApplyConfirmation(parseCheckArguments(base), env)).toThrow(/--confirm-workspace/);
+    expect(() => requireApplyConfirmation(parseCheckArguments([...base, `--confirm-workspace=${WORKSPACE}`]), env)).toThrow(/--confirm-plan/);
+    expect(() => requireApplyConfirmation(full, env)).not.toThrow();
   });
 
   it("never connects without REPLAY_DATABASE_URL, whatever DATABASE_URL says", async () => {
@@ -129,11 +177,13 @@ describe("command arguments and refusals", () => {
   it("counts the day in Asia/Singapore and prints sites, rate and exclusions", () => {
     expect(checkDate(new Date("2026-01-10T15:59:59Z"))).toBe("2026-01-10");
     expect(checkDate(new Date("2026-01-10T16:00:00Z"))).toBe("2026-01-11");
-    const read = { canonicalJobId: "a", jobVersionId: "v", site: "careers.example.test", intervalMs: 5000 };
-    const text = formatPlan({ listed: 3, reads: [read, { ...read, canonicalJobId: "b" }], excluded: [{ id: "c", reason: "LINKEDIN_LINK" }] });
+    const read = { line: 1, linkKey: "k", canonicalJobId: "a", jobVersionId: "v", site: "careers.example.test", intervalMs: 5000 };
+    const text = formatPlan({ listed: 3, reads: [read, { ...read, canonicalJobId: "b" }], excluded: [{ line: 3, reason: "LINKEDIN_LINK" }], checkDate: "2026-01-11", planId: "plan-1" });
+    expect(text).toContain("api.frankfurter.app");
+    expect(text).toContain("plan id: plan-1 (check date 2026-01-11)");
     expect(text).toContain("posting links to read: 2");
     expect(text).toContain("careers.example.test: 2 request(s), at most 1 every 5s");
     expect(text).toContain("pauses add at least 5s");
-    expect(text).toContain("LINKEDIN_LINK: 1 [c]");
+    expect(text).toContain("LINKEDIN_LINK: 1 (lines 3)");
   });
 });

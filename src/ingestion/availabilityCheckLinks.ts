@@ -18,7 +18,10 @@ export type BlockedLinkReason = "LINKEDIN_LINK" | "AGGREGATOR_LINK" | "JOB_BOARD
 const LINKEDIN_DOMAINS = ["linkedin.com", "lnkd.in", "licdn.com"];
 const JOB_BOARD_KINDS = new Set(["json_api", "rss"]);
 
-const bareHost = (hostname: string): string => hostname.toLowerCase().replace(/\.$/, "").replace(/^www\./, "");
+/** Listed aggregators that also run country domains (glassdoor.co.uk, indeed.fr, jobstreet.com.sg, monster.de). */
+const COUNTRY_VARIANT_AGGREGATOR = /(?:^|\.)(?:glassdoor|indeed|jobstreet|monster)\.(?:[a-z]{2}|(?:com?|net|org)\.[a-z]{2})$/;
+
+const bareHost = (hostname: string): string => hostname.toLowerCase().replace(/\.+$/, "").replace(/^www\./, "");
 const onDomain = (host: string, domain: string): boolean => host === domain || host.endsWith(`.${domain}`);
 
 /** Hosts of the job-board feed sources. A manifest that cannot be read fails the whole check. */
@@ -38,7 +41,7 @@ export async function loadJobBoardHosts(directory = path.resolve(process.cwd(), 
 function hostReason(hostname: string, jobBoardHosts: readonly string[]): BlockedLinkReason | null {
   const host = bareHost(hostname);
   if (LINKEDIN_DOMAINS.some((domain) => onDomain(host, domain))) return "LINKEDIN_LINK";
-  if (aggregatorHostOf(host) !== null) return "AGGREGATOR_LINK";
+  if (aggregatorHostOf(host) !== null || COUNTRY_VARIANT_AGGREGATOR.test(host)) return "AGGREGATOR_LINK";
   return jobBoardHosts.some((board) => onDomain(host, board)) ? "JOB_BOARD_LINK" : null;
 }
 
@@ -53,7 +56,7 @@ function percentDecoded(value: string): string {
 }
 
 /** URLs carried inside a link: a full URL, or "host/path" written as a path segment or parameter value. */
-const CARRIED_URL = /(?:https?:\/\/|[=/?&#])((?:[a-z0-9-]+\.)+[a-z]{2,})\.?(?::\d+)?\//gi;
+const CARRIED_URL = /(?:https?:\/\/|[=/?&#])((?:[a-z0-9-]+\.)+[a-z]{2,})\.*(?::\d+)?\//gi;
 
 export function blockedLinkReason(link: string, jobBoardHosts: readonly string[]): BlockedLinkReason | null {
   const candidates = [link, unwrapForClassification(link)];

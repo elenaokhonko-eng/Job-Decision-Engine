@@ -8,12 +8,21 @@ import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pg
 import { assessAvailability } from "../../decision/availability.js";
 import type { PostingFetcherDependencies, SafeHttpResponse } from "../../ingestion/jobContentFetcher.js";
 import { generateContentHash } from "../../services/criteria.js";
-import { archiveHealthGate, HostThrottle, runAvailabilityRecheck, type AvailabilityRecheckDependencies } from "../../tasks/availabilityRecheck.js";
+import {
+  archiveHealthGate,
+  HostThrottle,
+  runAvailabilityRecheck,
+  seedAvailabilityRechecks,
+  type AvailabilityRecheckDependencies,
+} from "../../tasks/availabilityRecheck.js";
+import { runRecommendationDecider } from "../../pipeline/recommendationDecider.js";
 import {
   applyAvailabilityCheck,
   checkDate,
+  formatPlan,
   planAvailabilityCheck,
   runAvailabilityCheckCommand,
+  verdictVisible,
 } from "../../tasks/manualAvailabilityCheck.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
@@ -195,11 +204,12 @@ describe.skipIf(skipReal)("manual same-day availability check (PostgreSQL)", () 
     await db().query("ROLLBACK");
 
     expect(result.reads.map((read) => read.canonicalJobId).sort()).toEqual([never.id, expired.id].sort());
-    expect(Object.fromEntries(result.excluded.map((e) => [e.id === never.id ? "again" : e.id, e.reason]))).toEqual({
-      again: "LISTED_TWICE", [linkedIn.id]: "LINKEDIN_LINK", [wrapped.id]: "LINKEDIN_LINK", [aggregator.id]: "AGGREGATOR_LINK",
-      [board.id]: "JOB_BOARD_LINK", [noLink.id]: "NO_POSTING_LINK", [sameLink.id]: "SAME_LINK_AS_ANOTHER_JOB",
-      [removed.id]: "MANUALLY_REMOVED", [missing]: "JOB_NOT_FOUND", "not-an-id": "NOT_A_JOB_ID",
-    });
+    // Exclusions name the position in the list, never the entry.
+    expect(result.excluded.map((e) => [e.line, e.reason])).toEqual([
+      [3, "LISTED_TWICE"], [4, "LINKEDIN_LINK"], [5, "LINKEDIN_LINK"], [6, "AGGREGATOR_LINK"], [7, "JOB_BOARD_LINK"],
+      [8, "NO_POSTING_LINK"], [9, "SAME_LINK_AS_ANOTHER_JOB"], [10, "MANUALLY_REMOVED"], [11, "JOB_NOT_FOUND"], [12, "NOT_A_JOB_ID"],
+    ]);
+    expect(formatPlan(result)).not.toContain("not-an-id");
     expect(await writeCounts()).toEqual(before);
   });
 
@@ -222,11 +232,22 @@ describe.skipIf(skipReal)("manual same-day availability check (PostgreSQL)", () 
     expect(await writeCounts()).toEqual(before);
 
     await expect(runAvailabilityCheckCommand(
-      [`--job-ids=${job.id}`, "--apply", `--confirm-workspace=${randomUUID()}`],
+      [`--job-ids=${job.id}`, "--apply", `--confirm-workspace=${randomUUID()}`, "--confirm-plan=x"],
       { REPLAY_DATABASE_URL: databaseUrl, AVAILABILITY_CHECK_APPLY_ALLOWED: "true" }, { connect, apply, log: () => undefined },
     )).rejects.toThrow(/does not equal/);
     expect(apply).not.toHaveBeenCalled();
-    expect(await writeCounts()).toEqual(before);
+
+    const planId = /plan id: ([0-9a-f]{16})/.exec(lines.join("\n"))![1]!;
+    const env = { REPLAY_DATABASE_URL: databaseUrl, AVAILABILITY_CHECK_APPLY_ALLOWED: "true" };
+    const confirm = [`--confirm-workspace=${ctx().workspaceId}`, `--confirm-plan=${planId}`, "--apply"];
+    // Another job list than the confirmed one: refused, nothing requested.
+    const other = await createJob();
+    await expect(runAvailabilityCheckCommand([`--job-ids=${job.id},${other.id}`, ...confirm], env, { connect, apply, log: () => undefined }))
+      .rejects.toThrow(/differ from the confirmed plan/);
+    expect(apply).not.toHaveBeenCalled();
+    apply.mockResolvedValue([]);
+    expect(await runAvailabilityCheckCommand([`--job-ids=${job.id}`, ...confirm], env, { connect, apply, log: () => undefined })).toBe(0);
+    expect(apply).toHaveBeenCalledTimes(1);
   });
 
   it("confirms a never-checked job open today with one request, as availability evidence only", async () => {
@@ -252,7 +273,7 @@ describe.skipIf(skipReal)("manual same-day availability check (PostgreSQL)", () 
 
     const again = await plan([job.id], now);
     expect(again.reads).toEqual([]);
-    expect(again.excluded).toEqual([{ id: job.id, reason: "ALREADY_CONFIRMED_OPEN_TODAY" }]);
+    expect(again.excluded).toEqual([{ line: 1, reason: "ALREADY_CONFIRMED_OPEN_TODAY" }]);
   });
 
   it("cannot tell changes nothing, is not repeated the same day and never archives", async () => {
@@ -261,7 +282,7 @@ describe.skipIf(skipReal)("manual same-day availability check (PostgreSQL)", () 
     for (let day = 0; day < 6; day += 1) {
       const now = new Date(Date.now() + day * DAY);
       expect(await check(job, (url) => page(url, 503), now)).toMatchObject([{ result: "CANNOT_TELL", visible: null }]);
-      expect((await plan([job.id], now)).excluded).toEqual([{ id: job.id, reason: "ALREADY_CHECKED_TODAY" }]);
+      expect((await plan([job.id], now)).excluded).toEqual([{ line: 1, reason: "ALREADY_CHECKED_TODAY" }]);
     }
     expect(await availability(job)).toEqual(before);
     expect((await jobRow(job)).archived_at).toBeNull();
@@ -336,6 +357,159 @@ describe.skipIf(skipReal)("manual same-day availability check (PostgreSQL)", () 
     expect(results).toMatchObject([{ result: "CANNOT_TELL" }]);
     expect(requested).toEqual([job.url]);
     expect((await availability(job)).availability_state).toBe("UNKNOWN");
+  });
+
+  it("binds a plan to its job list, links and Singapore date", async () => {
+    const job = await createJob();
+    const other = await createJob();
+    const morning = new Date("2026-01-10T01:00:00Z");
+    const first = await plan([job.id, other.id], morning);
+    expect((await plan([other.id, job.id], new Date("2026-01-10T15:59:00Z"))).planId).toBe(first.planId);
+    expect((await plan([job.id, other.id], new Date("2026-01-10T16:00:00Z"))).planId).not.toBe(first.planId);
+    expect((await plan([job.id, other.id, "x"], morning)).planId).not.toBe(first.planId);
+    await db().query(`UPDATE raw_job_observations SET source_url = source_url || '?v=2', canonical_apply_url = NULL WHERE job_version_id = $1`, [job.versionId]);
+    expect((await plan([job.id, other.id], morning)).planId).not.toBe(first.planId);
+
+    // Past midnight in Singapore nothing more is requested.
+    const planned = await plan([other.id], new Date("2026-01-10T15:00:00Z"));
+    const requested: string[] = [];
+    const results = await applyAvailabilityCheck(db(), ctx(), planned, {
+      throttle: noWait(), fetcher: fetcher((url) => page(url, 503), requested), now: () => new Date("2026-01-10T16:00:01Z"),
+    });
+    expect(results).toMatchObject([{ result: "SKIPPED", detail: "CHECK_DATE_CHANGED" }]);
+    expect(requested).toEqual([]);
+  });
+
+  it("never requests a link shared by two jobs again in a later run", async () => {
+    const first = await createJob();
+    const second = await createJob({ url: first.url });
+    await check(first, (url) => page(url, 503));
+    expect((await plan([second.id])).excluded).toEqual([{ line: 1, reason: "SAME_LINK_AS_ANOTHER_JOB" }]);
+    expect((await plan([first.id, second.id])).reads).toEqual([]);
+  });
+
+  it.each([429, 403])("stops reading a site after a %i, in the run and for the rest of the day", async (status) => {
+    const host = `stop-${randomUUID().slice(0, 8)}.example.com`;
+    const a = await createJob({ url: `https://${host}/jobs/1` });
+    const b = await createJob({ url: `https://${host}/jobs/2` });
+    const requested: string[] = [];
+    const results = await applyAvailabilityCheck(db(), ctx(), await plan([a.id, b.id]), {
+      throttle: noWait(), fetcher: fetcher((url) => page(url, status), requested),
+    });
+    expect(results).toMatchObject([{ result: "CANNOT_TELL" }, { result: "SKIPPED", detail: "SITE_STOPPED_AFTER_429_OR_BLOCK" }]);
+    expect(requested).toEqual([a.url]);
+    expect(await events(b)).toEqual([]);
+    expect((await plan([b.id])).excluded).toEqual([{ line: 1, reason: "SITE_STOPPED_TODAY" }]);
+  });
+
+  it("paces a redirect hop by the same interval as the next job", async () => {
+    const job = await createJob({ url: `https://hop-${randomUUID().slice(0, 8)}.example.com/jobs/1` });
+    const log: string[] = [];
+    let clock = 0;
+    const throttle = new HostThrottle(() => clock, async (ms) => { log.push(`pause ${ms}`); clock += ms; });
+    await applyAvailabilityCheck(db(), ctx(), await plan([job.id]), {
+      throttle,
+      fetcher: fetcher((url) => {
+        log.push(url.pathname);
+        return url.pathname === "/jobs/1" ? page(url, 302, "", { location: "/jobs/moved" }) : page(url, 503);
+      }),
+    });
+    expect(log).toEqual(["/jobs/1", "pause 5000", "/jobs/moved"]);
+  });
+
+  it("leaves out hard-rejected jobs and test fixtures", async () => {
+    const rejected = await createJob();
+    const gateRejected = await createJob();
+    const fixture = await createJob();
+    await db().query(`UPDATE canonical_jobs SET processing_state = 'HARD_REJECTED', processing_status = 'HARD_REJECTED' WHERE id = $1`, [rejected.id]);
+    await db().query(`UPDATE canonical_jobs SET gate_decision = 'HARD_REJECT' WHERE id = $1`, [gateRejected.id]);
+    await db().query(`UPDATE canonical_jobs SET is_test_fixture = TRUE WHERE id = $1`, [fixture.id]);
+    const result = await plan([rejected.id, gateRejected.id, fixture.id]);
+    expect(result.reads).toEqual([]);
+    expect(result.excluded.map((e) => e.reason)).toEqual(["HARD_REJECTED", "HARD_REJECTED", "TEST_FIXTURE"]);
+  });
+
+  it("reports a verdict the read model does not hold as not visible", async () => {
+    expect(await verdictVisible(db(), ctx().workspaceId, randomUUID(), true, new Date())).toBe(false);
+    expect(await verdictVisible(db(), ctx().workspaceId, randomUUID(), false, new Date())).toBe(false);
+  });
+
+  it("does not let the recompute remove the stored score of a job whose match is not current", async () => {
+    const withScore = async () => {
+      const job = await createJob();
+      await db().query(
+        `UPDATE canonical_jobs SET gate_decision = 'PASS', processing_state = 'MATCHED', processing_status = 'MATCHED',
+                recommendation_requirement_score = 0.75, recommendation_outcome = 'REVIEW', recommendation_eligibility = 'ELIGIBLE'
+          WHERE id = $1`, [job.id]);
+      return job;
+    };
+    const stored = async (job: Fixture) => (await db().query(
+      `SELECT recommendation_requirement_score::float AS score, recommendation_outcome AS outcome, latest_deterministic_decision_id AS decision
+         FROM canonical_jobs WHERE id = $1`, [job.id])).rows[0];
+
+    // The risk is real: the same recompute without the guard writes no score.
+    const unguarded = await withScore();
+    const summary = await runRecommendationDecider(db(), { context: ctx(), canonicalJobIds: [unguarded.id], jobVersionIds: [unguarded.versionId] });
+    expect(summary.errors).toBe(0);
+    expect((await stored(unguarded)).score).toBeNull();
+
+    for (const respond of [(job: Fixture) => (url: URL) => openPage(url, job.board), () => (url: URL) => page(url, 404)]) {
+      const job = await withScore();
+      const results = await check(job, respond(job));
+      expect(results).toMatchObject([{ visible: true, scoreKept: true }]);
+      expect(await stored(job)).toEqual({ score: 0.75, outcome: "REVIEW", decision: null });
+    }
+  });
+
+  it("a manual cannot-tell between automatic reads neither forks the retry chain nor brings the archive closer", async () => {
+    const job = await createJob({ availability: "OPEN_EXPIRED" });
+    const scope = { jobVersionIds: [job.versionId] };
+    const start = Date.now();
+    const hours = (n: number) => new Date(start + n * 3_600_000);
+    const deps = (now: Date): AvailabilityRecheckDependencies => ({
+      fetchJobContent: async () => ({ kind: "RETRYABLE_FAILURE", reason: "Posting provider returned HTTP 503." }),
+      refreshSourceEvidence: async () => { throw new Error("no feed in this test"); },
+      createFeedAdapter: () => null,
+      requestsPerMinute: async () => null,
+      throttle: noWait(),
+      now: () => now,
+    });
+    const pending = async () => (await db().query<{ task_key: string; payload: Record<string, unknown> }>(
+      `SELECT task_key, payload FROM pipeline_tasks
+        WHERE task_type = 'RECHECK_AVAILABILITY' AND payload->>'canonical_job_id' = $1 AND status = 'PENDING'`, [job.id])).rows;
+    const runQueued = async (now: Date) => {
+      const [task, ...others] = await pending();
+      expect(others).toEqual([]);
+      const result = await runAvailabilityRecheck(db(), ctx(), task!.payload, null, deps(now));
+      await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE task_key = $1`, [task!.task_key]);
+      return result;
+    };
+
+    expect(await seedAvailabilityRechecks(db(), ctx(), scope)).toMatchObject({ inserted: 1 });
+    expect(await runQueued(hours(0))).toMatchObject({ action: "RETRY_LATER" });
+    const chain = await pending();
+    await check(job, (url) => page(url, 503), hours(6));
+    expect(await seedAvailabilityRechecks(db(), ctx(), scope)).toMatchObject({ inserted: 0, existing: 1 });
+    expect(await pending()).toEqual(chain);
+    expect(await state(job)).toMatchObject({ cannot_tell_attempts: 1 });
+    // The chain goes on one retry at a time: attempts 2 and 3 are retries, as without the manual check.
+    expect(await runQueued(hours(24))).toMatchObject({ action: "RETRY_LATER" });
+    expect(await seedAvailabilityRechecks(db(), ctx(), scope)).toMatchObject({ inserted: 0 });
+    expect(await runQueued(hours(48))).toMatchObject({ action: "RETRY_LATER" });
+    expect(await state(job)).toMatchObject({ cannot_tell_attempts: 3 });
+    expect((await jobRow(job)).archived_at).toBeNull();
+  });
+
+  it("a manual cannot-tell today does not hide today's automatic failure from the archive gate", async () => {
+    const job = await createJob({ availability: "OPEN_EXPIRED" });
+    const now = new Date("2026-03-10T08:00:00Z");
+    await db().query(
+      `INSERT INTO job_availability_recheck_events (workspace_id, canonical_job_id, job_version_id, read_kind, outcome, decision,
+         reason_code, consecutive_absent_reads_after, cannot_tell_attempts_after, occurred_at)
+       VALUES ($1, $2, $3, 'PAGE', 'CANNOT_TELL', 'RETRY_LATER', 'FIXTURE', 0, 1, $4)`,
+      [ctx().workspaceId, job.id, job.versionId, new Date("2026-03-09T08:00:00Z")]);
+    await check(job, (url) => page(url, 503), now);
+    expect((await archiveHealthGate(db(), ctx().workspaceId, job.id, "host.example.com", now)).failedDays).toBe(2);
   });
 
   it("reads serially, one site after another, pausing between reads of the same site", async () => {

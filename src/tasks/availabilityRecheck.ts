@@ -15,7 +15,8 @@
  *
  * A MANUAL check (src/tasks/manualAvailabilityCheck.ts) reads the posting page once and stores availability
  * evidence only. It never queues a retry or a re-gate, changes no job fact, never archives, adds nothing to the
- * cannot-tell or absence counters, and its events are ignored by the archive gate.
+ * cannot-tell or absence counters, and its events are ignored by the archive gate and by the task-key sequence.
+ * It never lets the decision recompute replace a stored requirement score with none.
  *
  * Reads are rate-limited per host, using the source plugin manifest's requests_per_minute when the
  * source has one. A job whose work mode or territory changed is queued for a forced re-gate through
@@ -298,6 +299,7 @@ interface RecheckTarget extends pg.QueryResultRow {
   canonical_url: string | null;
   workplace_type: string | null;
   location: string | null;
+  gate_decision: string | null;
   availability_recheck_at: Date | null;
 }
 
@@ -325,6 +327,7 @@ async function loadTarget(client: Queryable, workspaceId: string, canonicalJobId
             canonical.canonical_url,
             canonical.workplace_type,
             canonical.location,
+            canonical.gate_decision,
             version.availability_recheck_at
        FROM canonical_jobs canonical
        LEFT JOIN job_versions version
@@ -377,10 +380,12 @@ async function loadCounters(client: Queryable, workspaceId: string, canonicalJob
     : EMPTY_RECHECK_COUNTERS;
 }
 
+/** Automatic reads only: a manual check never changes the sequence the task keys are built from. */
 async function countEvents(client: Queryable, workspaceId: string, canonicalJobId: string): Promise<number> {
   const { rows } = await client.query<{ count: number }>(
     `SELECT COUNT(*)::int AS count FROM job_availability_recheck_events
-      WHERE workspace_id = $1::uuid AND canonical_job_id = $2::uuid`,
+      WHERE workspace_id = $1::uuid AND canonical_job_id = $2::uuid
+        AND COALESCE(details->>'trigger', '') <> 'MANUAL'`,
     [workspaceId, canonicalJobId],
   );
   return rows[0]?.count ?? 0;
@@ -456,7 +461,8 @@ async function storeVerdict(
   target: { canonicalJobId: string; jobVersionId: string; observation: RecheckObservation },
   verdict: { status: "OPEN" | "CLOSED"; reasonCode: string; method: z.infer<typeof AvailabilityEvidenceSchema>["verification_method"] },
   now: Date,
-): Promise<{ readinessRecomputed: boolean; readinessError: string | null }> {
+  options: { readonly keepStoredScore?: boolean } = {},
+): Promise<{ readinessRecomputed: boolean; readinessError: string | null; scoreKept: boolean }> {
   const availability = evidenceNow(verdict.status, now, verdict.reasonCode, verdict.method);
   const current = await client.query<{ job_source_evidence: unknown }>(
     `SELECT job_source_evidence
@@ -524,14 +530,17 @@ async function storeVerdict(
       context,
       canonicalJobIds: [target.canonicalJobId],
       jobVersionIds: [target.jobVersionId],
+      keepStoredScore: options.keepStoredScore,
     });
+    const scoreKept = (readiness.scoresKept ?? 0) > 0;
     return {
-      readinessRecomputed: readiness.errors === 0,
+      readinessRecomputed: readiness.errors === 0 && !scoreKept,
       readinessError: readiness.errors === 0 ? null : `The recommendation decider reported ${readiness.errors} error(s).`,
+      scoreKept,
     };
   } catch (error) {
     // Not swallowed: the public error summary goes on the event, and the stale readiness is visible as such.
-    return { readinessRecomputed: false, readinessError: publicErrorSummary(error, "pipeline") };
+    return { readinessRecomputed: false, readinessError: publicErrorSummary(error, "pipeline"), scoreKept: false };
   }
 }
 
@@ -823,7 +832,7 @@ async function todayHasNoFailure(db: Queryable, workspaceId: string, canonicalJo
 }
 
 export type RecheckCandidate =
-  | { readonly skip: "JOB_NOT_FOUND" | "JOB_ARCHIVED" | "TEST_FIXTURE" | "MANUALLY_REMOVED" | "NO_CURRENT_VERSION" | "NO_OBSERVATION" }
+  | { readonly skip: "JOB_NOT_FOUND" | "JOB_ARCHIVED" | "TEST_FIXTURE" | "MANUALLY_REMOVED" | "HARD_REJECTED" | "NO_CURRENT_VERSION" | "NO_OBSERVATION" }
   | { readonly skip: null; readonly jobVersionId: string; readonly link: string | null; readonly sourcePluginKey: string | null };
 
 /** What a re-check of this job would read: the same job, observation and link as runAvailabilityRecheck. Read only. */
@@ -833,6 +842,7 @@ export async function findRecheckCandidate(client: Queryable, workspaceId: strin
   if (target.archived_at !== null) return { skip: "JOB_ARCHIVED" };
   if (target.is_test_fixture) return { skip: "TEST_FIXTURE" };
   if (target.processing_state === "MANUALLY_REMOVED") return { skip: "MANUALLY_REMOVED" };
+  if (target.processing_state === "HARD_REJECTED" || target.gate_decision === "HARD_REJECT") return { skip: "HARD_REJECTED" };
   if (target.latest_job_version_id === null) return { skip: "NO_CURRENT_VERSION" };
   const observation = await loadObservation(client, workspaceId, target.latest_job_version_id);
   if (!observation) return { skip: "NO_OBSERVATION" };
@@ -859,7 +869,11 @@ export async function runAvailabilityRecheck(
   rawPayload: unknown,
   taskId: string | null,
   deps: AvailabilityRecheckDependencies = defaultAvailabilityRecheckDependencies(),
-  options: { readonly manual?: boolean } = {},
+  options: {
+    readonly manual?: boolean;
+    /** Extra event details of a manual check, asked for after the read. */
+    readonly manualDetails?: () => Record<string, unknown>;
+  } = {},
 ): Promise<AvailabilityRecheckResult> {
   const manual = options.manual === true;
   const payload = RecheckTaskPayloadSchema.parse(rawPayload);
@@ -907,7 +921,7 @@ export async function runAvailabilityRecheck(
   const readHost = hostOf(observation.source_url ?? observation.canonical_apply_url ?? target.canonical_url) ?? "unknown-host";
 
   const details: Record<string, unknown> = { source_name: observation.source_name, host: readHost };
-  if (manual) details.trigger = "MANUAL";
+  if (manual) Object.assign(details, options.manualDetails?.() ?? {}, { trigger: "MANUAL" });
   if (decision.action === "ARCHIVE_NOT_CONFIRMABLE") {
     // Failed reads archive a job only when they are not just an outage: another host must have been read
     // successfully in the last 24 hours (a health signal), and the failures must span two calendar days.
@@ -936,8 +950,9 @@ export async function runAvailabilityRecheck(
     // Availability evidence only: no job fact is filled and no re-gate follows from a manual check.
     const stored = await storeVerdict(client, context, identity, {
       status: "OPEN", reasonCode: decision.reasonCode, method: "VERIFIED_POSTING_RETRIEVAL",
-    }, now);
+    }, now, { keepStoredScore: true });
     details.readiness_recomputed = stored.readinessRecomputed;
+    if (stored.scoreKept) details.readiness_recompute_skipped = "WOULD_LOSE_STORED_SCORE";
     if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
   } else if (decision.action === "MARK_OPEN") {
     if (read.page !== null) {
@@ -1035,8 +1050,9 @@ export async function runAvailabilityRecheck(
       status: "CLOSED",
       reasonCode: decision.reasonCode,
       method: outcome.kind === "CLOSED_BY_PAGE" ? "EXPLICIT_SOURCE_STATUS" : "EMPLOYER_ATS_LISTING",
-    }, now);
+    }, now, { keepStoredScore: manual });
     details.readiness_recomputed = stored.readinessRecomputed;
+    if (stored.scoreKept) details.readiness_recompute_skipped = "WOULD_LOSE_STORED_SCORE";
       if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
   } else if (decision.action === "ARCHIVE_NOT_CONFIRMABLE") {
     // Protection is read INSIDE the write transaction with the job row locked, so a save, application or hold

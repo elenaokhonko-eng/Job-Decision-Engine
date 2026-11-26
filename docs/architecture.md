@@ -338,7 +338,7 @@ Whether a posting is currently open is decided in one place: `assessAvailability
 | Re-check gets a clear closure: the page says not found or no longer accepting, or the feed was read successfully and the job is absent twice in a row | Archived the same day as closed |
 | Re-check cannot tell: timeout, server error, paywall, login | Retried up to 3 times over 3 days, then archived as not confirmable |
 
-A manual same-day check of a chosen job list (`scripts/check_availability_now.ts`, replay copies only; plan mode unless `--apply`) reads each posting link once, never a LinkedIn, aggregator or job-board link, and stores availability evidence through the same re-check. It queues nothing, changes no job fact, never archives, and its reads count for neither the retries nor the archive health check.
+A manual same-day check of a chosen job list (`scripts/check_availability_now.ts`, replay copies only; plan mode unless `--apply`) reads each posting link once, never a LinkedIn, aggregator or job-board link, and stores availability evidence through the same re-check. It queues nothing, changes no job fact, never archives, and its reads count for neither the retries nor the archive health check. An apply is bound to the confirmed plan, and its recompute never removes a stored requirement score.
 
 An expired window is "unknown", never "closed". Saved, applied and held jobs are never archived automatically, and an archived job that reappears is restored. The rule and the list filtering are built; the automatic re-check and archive are in progress.
 
