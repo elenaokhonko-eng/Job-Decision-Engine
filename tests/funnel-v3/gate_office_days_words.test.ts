@@ -115,10 +115,10 @@ describe("office-day counts in words", () => {
   });
 
   // Not read in either spelling: the office comes before the count. Changing that would change digit behaviour.
-  it.each(["come into the office four days per week", "come into the office 4 days per week"])(
+  it.each(["gather in the office four days a week", "gather in the office 4 days a week"])(
     "leaves the office-first order unread: %s",
     (phrase) => {
-      expect(officeReject(gate(`Our teams ${phrase}.`))).toBe(false);
+      expect(officeReject(gate(`Staff ${phrase}.`))).toBe(false);
     },
   );
 
