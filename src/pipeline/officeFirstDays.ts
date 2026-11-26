@@ -9,11 +9,16 @@
  *   month or quarter and counts without a period are not read;
  * - the words before the office say that people attend it (or it opens a
  *   sentence or bullet), so "lunch in the office five days a week" is not;
- * - nothing in its sentence negates, hedges or limits it in time.
+ * - nothing in its sentence negates, hedges or limits it in time;
+ * - for the "on-site" and "in-office" wording, which has its own subject rule
+ *   (onsiteStatements.ts): it opens a sentence or bullet, or its subject is the
+ *   role or the applicant, so "our team works on-site ..." stays unread.
  *
  * Digit counts written before the office ("4 days in the office") are read by
  * the older patterns and are not touched here. All quantifiers are bounded.
  */
+
+import { ROLE_OR_APPLICANT } from "./onsiteStatements.js";
 
 export interface OfficeFirstDays {
   readonly min: number;
@@ -57,6 +62,11 @@ const NEGATION_AFTER = /^\s{0,3}[,:(–-]?\s{0,3}(?:(?:is|are)\s{1,3})?(?:not\b|
 /** "... during your first month", "... for one week each quarter". */
 const TIME_LIMITED_AFTER = /^\s{0,3}[,(]?\s{0,3}(?:(?:for|during|in|while|until)\b[^.;!?\n]{0,40}?\b(?:weeks?|months?|quarters?|onboarding|induction|training|probation|period)|(?:once|twice|one\s{1,3}week)\s{1,3}(?:a|per|each|every)\s{1,3}(?:month|quarter|year))\b/i;
 
+/** The "on-site" / "in-office" wording, as opposed to a named office. */
+const PRESENCE_PLACE = /^(?:on[- ]?site|in[- ]office)(?![a-z])/i;
+/** Only an instruction before the on-site wording: "Work on-site ...", "Expected to be on-site ...". */
+const INSTRUCTION_ONLY = /^\s{0,3}(?:(?:please|must|expected\s{1,3}to|required\s{1,3}to)\s{1,3}){0,2}(?:(?:work|be|working)\s{0,3})?$/i;
+
 const SENTENCE_BREAK = /[.!?;\n>•]/g;
 
 function countValue(value: string): number {
@@ -79,6 +89,7 @@ export function findOfficeFirstDays(text: string): OfficeFirstDays | null {
     if (!ATTENDANCE_BEFORE.test(preceding) && !OPENS_BEFORE.test(preceding)) continue;
     const sentence = sentenceBefore(text, start);
     if (NEGATED_OR_HEDGED.test(sentence) || PERK_SUBJECT.test(sentence)) continue;
+    if (PRESENCE_PLACE.test(match[0]) && !INSTRUCTION_ONLY.test(sentence) && !ROLE_OR_APPLICANT.test(sentence)) continue;
     const after = text.slice(end, end + 80);
     if (NEGATION_AFTER.test(after) || TIME_LIMITED_AFTER.test(after)) continue;
     const first = countValue(match[1] ?? "");
