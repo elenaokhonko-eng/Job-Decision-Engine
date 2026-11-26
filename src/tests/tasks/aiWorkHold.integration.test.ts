@@ -96,6 +96,10 @@ describe.skipIf(skipReal)("held AI work in the worker and the scoped pilot (Post
       PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT: "1",
       PIPELINE_TASK_WORKER_DEAD_LETTER_REPORT_FILE: path.join(reportDir, "dead-letter.json"),
       PIPELINE_TASK_WORKER_RECONCILIATION_REPORT_FILE: path.join(reportDir, "reconciliation.json"),
+      // A deliberate local run with a restricted type list: under GitHub Actions the command refuses that list
+      // (src/tasks/workerTaskTypeGuard.ts), and CI's run id would make the two runs share one progress snapshot.
+      GITHUB_ACTIONS: "",
+      GITHUB_RUN_ID: "",
       GITHUB_OUTPUT: "",
       ...env,
     };
