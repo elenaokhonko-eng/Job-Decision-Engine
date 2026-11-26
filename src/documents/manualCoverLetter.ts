@@ -561,7 +561,7 @@ export function tenureEvidence(evidence: ManualEvidence[]): ManualEvidence[] {
 // Seniority words in a posting title; what is left ("Data Scientist", "Product Leader") is the role.
 const SENIORITY = /^(?:a?vp|svp|evp|vice president|senior|sr\.?|junior|associate|assistant|principal|head of|director|lead|staff|chief)\s+/i;
 
-/** The posting title's role phrases of two words or more: "AVP/VP, Data Scientist" gives "data scientist". */
+/** The posting title's role phrases of two words or more: "VP / Director, Data Scientist" gives "data scientist". */
 function targetTitlePhrases(jobTitle: string): string[] {
   return jobTitle.split(/[,/|()–—]|\s-\s/)
     .map((part) => { let phrase = part.trim(); while (SENIORITY.test(phrase)) phrase = phrase.replace(SENIORITY, ""); return comparableText(phrase); })

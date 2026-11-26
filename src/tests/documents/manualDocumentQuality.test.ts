@@ -346,7 +346,7 @@ describe("manual document quality (baseline regression)", () => {
     for (const line of EXCHANGE_REQUIREMENTS.filter((line) => importance(line) === "MUST")) expect(texts).toContain(line);
     expect(requirements.filter((row) => row.importance !== "MUST").length).toBeLessThanOrEqual(MAX_OPTIONAL_THEMES);
     // Sub-headings, the opening paragraphs and the closing "Why this role matters" section are not requirements.
-    expect(texts.some((text) => /Stakeholder Management|Why this role|critical market infrastructure|WE RUN MARKETS|partnership role/.test(text))).toBe(false);
+    expect(texts.some((text) => /Stakeholder Management|Why this role|harbour operations|WE MOVE CARGO|joint role/.test(text))).toBe(false);
   });
 
   it("falls back to requirement and duty sentences when a posting has no headings", () => {

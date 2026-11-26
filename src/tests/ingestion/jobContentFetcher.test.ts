@@ -6,42 +6,42 @@ import {
   type SafeHttpResponse,
 } from "../../ingestion/jobContentFetcher.js";
 
-const smbcDescription = [
-  "The Director leads enterprise AI solution architecture for SMBC Asia Pacific.",
+const sampleDescription = [
+  "The Head of AI Engineering sets technical direction for applied AI at NLTB Asia Pacific.",
   "Responsibilities",
-  "Define end-to-end architectures, establish secure delivery standards, and lead architecture reviews across business and technology teams.",
+  "Set reference designs, agree safe release practices, and chair design reviews for product and platform groups.",
   "Requirements",
-  "12+ years of experience in technology or solution architecture.",
-  "5+ years architecting and delivering enterprise solutions with Microsoft Power Platform.",
-  "2–4 years delivering AI and Generative AI solutions using Azure OpenAI, Microsoft Foundry, or equivalent platforms.",
-  "The role also requires stakeholder influence, responsible AI controls, and production engineering experience.",
+  "11+ years of experience building and running software platforms.",
+  "6+ years leading platform delivery on a major public cloud.",
+  "3–5 years shipping machine learning or language-model services to production.",
+  "The post also calls for clear influence with senior colleagues, model risk controls, and hands-on engineering depth.",
 ].join(" ");
 
-const smbcHtml = [
+const sampleHtml = [
   "<html><head>",
   '<script type="application/ld+json">',
   JSON.stringify({
     "@context": "https://schema.org",
     "@type": "JobPosting",
-    title: "Director, AI Solution Architect",
-    identifier: { propertyID: "SMBC", value: "1441267233" },
-    hiringOrganization: { "@type": "Organization", name: "Sumitomo Mitsui Banking Corporation" },
-    description: "<h2>Responsibilities</h2><p>Define end-to-end architectures, establish secure delivery standards, and lead architecture reviews across business and technology teams.</p><h2>Requirements</h2><ul><li>12+ years of experience in technology or solution architecture.</li><li>5+ years architecting and delivering enterprise solutions with Microsoft Power Platform.</li><li>2–4 years delivering AI and Generative AI solutions using Azure OpenAI, Microsoft Foundry, or equivalent platforms.</li></ul><p>The role also requires stakeholder influence, responsible AI controls, and production engineering experience.</p>",
+    title: "Head of AI Engineering",
+    identifier: { propertyID: "NLTB", value: "7000000001" },
+    hiringOrganization: { "@type": "Organization", name: "Northern Ledger Trading Bank" },
+    description: "<h2>Responsibilities</h2><p>Set reference designs, agree safe release practices, and chair design reviews for product and platform groups.</p><h2>Requirements</h2><ul><li>11+ years of experience building and running software platforms.</li><li>6+ years leading platform delivery on a major public cloud.</li><li>3–5 years shipping machine learning or language-model services to production.</li></ul><p>The post also calls for clear influence with senior colleagues, model risk controls, and hands-on engineering depth.</p>",
     datePosted: "2026-10-24",
     jobLocation: { "@type": "Place", address: { addressLocality: "Singapore", addressCountry: "SG" } },
-    url: "https://careerasia.smbc.co.jp/SMBC/job/Director%2C-AI-Solution-Architect/1441267233/",
+    url: "https://careers.nltb.example/NLTB/job/Head-of-AI-Engineering/7000000001/",
   }),
   "</script></head><body>",
   "<nav>Careers search navigation</nav>",
   "<div class=\"cookie-banner\">Accept cookies</div>",
   "<main>",
-  "<h1>Director, AI Solution Architect</h1>",
+  "<h1>Head of AI Engineering</h1>",
   "<p>Location: Singapore</p>",
-  "<h2>Responsibilities</h2>",
+  "<p>Set reference designs, agree safe release practices, and chair design reviews for product and platform groups.</p>",
   "<p>Define end-to-end architectures, establish secure delivery standards, and lead architecture reviews across business and technology teams.</p>",
-  "<h2>Requirements</h2>",
+  "<p>11+ years building and running software platforms; 6+ years on a major public cloud; 3–5 years shipping machine learning services.</p>",
   "<p>12+ years of experience in technology or solution architecture; 5+ years with Microsoft Power Platform; 2–4 years delivering AI and Generative AI solutions.</p>",
-  '<a href="/talentcommunity/apply/1441267233/?locale=en_US">Apply now »</a>',
+  '<a href="/talentcommunity/apply/7000000001/?locale=en_US">Apply now »</a>',
   "</main><footer>Careers homepage</footer></body></html>",
 ].join("");
 
@@ -68,24 +68,24 @@ function htmlDependencies(html: string): PostingFetcherDependencies {
 }
 
 describe("fetchJobContent", () => {
-  it("extracts a job-specific SMBC posting and its explicit evidence", async () => {
+  it("extracts a job-specific NLTB posting and its explicit evidence", async () => {
     const result = await fetchJobContent(
-      "https://careerasia.smbc.co.jp/SMBC/job/Director%2C-AI-Solution-Architect/1441267233/",
-      { title: "Director, AI Solution Architect", companyName: "SMBC", requisitionId: "1441267233" },
-      htmlDependencies(smbcHtml),
+      "https://careers.nltb.example/NLTB/job/Head-of-AI-Engineering/7000000001/",
+      { title: "Head of AI Engineering", companyName: "NLTB", requisitionId: "7000000001" },
+      htmlDependencies(sampleHtml),
     );
 
     expect(result.kind).toBe("COMPLETE");
     if (result.kind !== "COMPLETE") return;
-    expect(result.posting.description).toContain("12+ years of experience");
-    expect(result.posting.description).toContain("5+ years architecting");
-    expect(result.posting.description).toContain("2–4 years delivering AI");
+    expect(result.posting.description).toContain("11+ years of experience");
+    expect(result.posting.description).toContain("6+ years leading");
+    expect(result.posting.description).toContain("3–5 years shipping");
     expect(result.posting.location).toContain("Singapore");
-    expect(result.posting.applyUrl).toContain("/talentcommunity/apply/1441267233/");
+    expect(result.posting.applyUrl).toContain("/talentcommunity/apply/7000000001/");
     expect(result.posting.publishedAt).toBe("2026-10-24T00:00:00.000Z");
     expect(result.posting.availability).toBe("UNKNOWN");
     expect(result.provider.key).toBe("EMPLOYER_WEBSITE");
-    expect(result.provider.requisitionId).toBe("1441267233");
+    expect(result.provider.requisitionId).toBe("7000000001");
     expect(result.contentHash).toMatch(/^[a-f0-9]{64}$/);
   });
 
@@ -116,24 +116,24 @@ describe("fetchJobContent", () => {
 
   it("uses the direct Lever record and preserves commercial and stakeholder evidence", async () => {
     const apiBody = JSON.stringify({
-      id: "c3c8f47e-0c30-458b-a74f-53cd6dc09137",
-      text: "Data & AI — Technical Project Manager",
-      hostedUrl: "https://jobs.lever.co/cfgi/c3c8f47e-0c30-458b-a74f-53cd6dc09137",
-      applyUrl: "https://jobs.lever.co/cfgi/c3c8f47e-0c30-458b-a74f-53cd6dc09137/apply",
+      id: "0f1e2d3c-4b5a-4968-8776-655443322110",
+      text: "Analytics Delivery Lead — Client Programmes",
+      hostedUrl: "https://jobs.lever.co/quillmark/0f1e2d3c-4b5a-4968-8776-655443322110",
+      applyUrl: "https://jobs.lever.co/quillmark/0f1e2d3c-4b5a-4968-8776-655443322110/apply",
       categories: { location: "United States", commitment: "Full-time" },
       workplaceType: "remote",
       createdAt: Date.parse("2025-08-01T12:00:00Z"),
-      salaryRange: { currency: "USD", interval: "per-year-salary", min: 150000, max: 200000 },
-      descriptionPlain: "Lead data and AI consulting delivery for clients while managing scope, teams, and outcomes.",
+      salaryRange: { currency: "USD", interval: "per-year-salary", min: 120000, max: 160000 },
+      descriptionPlain: "Run analytics engagements for client organisations, keeping scope, staffing and results on track.",
       lists: [
-        { text: "Responsibilities", content: "<ul><li>Present to client steering committees and guide executive stakeholders.</li><li>Manage a commercial mandate, delivery economics, and client outcomes.</li></ul>" },
-        { text: "Requirements", content: "<ul><li>Experience delivering data and AI projects with consulting clients.</li><li>Strong project management and communication skills.</li></ul>" },
+        { text: "Responsibilities", content: "<ul><li>Report progress to client review boards and brief their senior sponsors.</li><li>Hold the fee budget, delivery margin, and agreed results.</li></ul>" },
+        { text: "Requirements", content: "<ul><li>Background running analytics work for advisory clients.</li><li>Sound planning and writing skills.</li></ul>" },
       ],
     });
     const requests: string[] = [];
     const result = await fetchJobContent(
-      "https://jobs.lever.co/cfgi/c3c8f47e-0c30-458b-a74f-53cd6dc09137",
-      { title: "Data & AI — Technical Project Manager", companyName: "CFGI", requisitionId: "c3c8f47e-0c30-458b-a74f-53cd6dc09137" },
+      "https://jobs.lever.co/quillmark/0f1e2d3c-4b5a-4968-8776-655443322110",
+      { title: "Analytics Delivery Lead — Client Programmes", companyName: "Quillmark", requisitionId: "0f1e2d3c-4b5a-4968-8776-655443322110" },
       {
         resolveAddresses: async () => [{ address: "93.184.216.34", family: 4 }],
         fetchOnce: async (url) => {
@@ -144,19 +144,19 @@ describe("fetchJobContent", () => {
     );
 
     expect(requests).toHaveLength(1);
-    expect(requests[0]).toContain("/v0/postings/cfgi/c3c8f47e-0c30-458b-a74f-53cd6dc09137");
+    expect(requests[0]).toContain("/v0/postings/quillmark/0f1e2d3c-4b5a-4968-8776-655443322110");
     expect(result.kind).toBe("COMPLETE");
     if (result.kind !== "COMPLETE") return;
-    expect(result.posting.description).toContain("client steering committees");
-    expect(result.posting.description).toContain("commercial mandate");
+    expect(result.posting.description).toContain("client review boards");
+    expect(result.posting.description).toContain("fee budget");
     expect(result.provider.key).toBe("LEVER");
     expect(result.posting.publishedAt).toBe("2025-08-01T12:00:00.000Z");
     expect(result.posting.workplaceType).toBe("REMOTE");
-    expect(result.posting.compensationRaw).toBe("USD 150000-200000 per year");
+    expect(result.posting.compensationRaw).toBe("USD 120000-160000 per year");
     expect(result.posting.availability).toBe("UNKNOWN");
     expect(result.posting.publishedAt).toBe("2025-08-01T12:00:00.000Z");
     expect(result.posting.workplaceType).toBe("REMOTE");
-    expect(result.posting.compensationRaw).toBe("USD 150000-200000 per year");
+    expect(result.posting.compensationRaw).toBe("USD 120000-160000 per year");
     expect(result.posting.availability).toBe("UNKNOWN");
   });
 
@@ -165,14 +165,14 @@ describe("fetchJobContent", () => {
     const payload = {
       id: 12345,
       title: "Senior Data Architect",
-      absolute_url: "https://boards.greenhouse.io/cfgi/jobs/12345",
+      absolute_url: "https://boards.greenhouse.io/quillmark/jobs/12345",
       location: { name: "Singapore" },
       content: "<h2>Responsibilities</h2><p>Design and govern data platforms for regulated financial services teams.</p><h2>Qualifications</h2><p>Lead architecture reviews, document decisions, and work with engineers and business stakeholders.</p>",
       first_published: "2026-10-20T10:00:00Z",
     };
     const result = await fetchJobContent(
-      "https://boards.greenhouse.io/cfgi/jobs/12345?gh_jid=12345",
-      { title: "Senior Data Architect", companyName: "CFGI", requisitionId: "12345" },
+      "https://boards.greenhouse.io/quillmark/jobs/12345?gh_jid=12345",
+      { title: "Senior Data Architect", companyName: "Quillmark", requisitionId: "12345" },
       {
         resolveAddresses: async () => [{ address: "93.184.216.34", family: 4 }],
         fetchOnce: async (url) => {
@@ -183,11 +183,11 @@ describe("fetchJobContent", () => {
     );
 
     expect(requests).toEqual([
-      "https://boards-api.greenhouse.io/v1/boards/cfgi/jobs/12345?content=true",
+      "https://boards-api.greenhouse.io/v1/boards/quillmark/jobs/12345?content=true",
     ]);
     expect(result.kind).toBe("COMPLETE");
     if (result.kind !== "COMPLETE") return;
-    expect(result.provider).toMatchObject({ key: "GREENHOUSE", providerKey: "cfgi", requisitionId: "12345" });
+    expect(result.provider).toMatchObject({ key: "GREENHOUSE", providerKey: "quillmark", requisitionId: "12345" });
     expect(result.posting.location).toBe("Singapore");
     expect(result.posting.publishedAt).toBe("2026-10-20T10:00:00.000Z");
     expect(result.posting.availability).toBe("UNKNOWN");
@@ -272,27 +272,27 @@ describe("fetchJobContent", () => {
     }
   });
 
-  it("extracts a Singtel SuccessFactors style JobPosting without navigation or footer text", async () => {
+  it("extracts a SuccessFactors style JobPosting without navigation or footer text", async () => {
     const jsonLd = {
       "@context": "https://schema.org",
       "@type": "JobPosting",
-      title: "Senior AI Solution Architect",
-      identifier: { value: "1332279066" },
-      hiringOrganization: { name: "Singtel" },
-      description: "<h2>Responsibilities</h2><p>Lead AI solution design and delivery across enterprise transformation programmes.</p><h2>Qualifications</h2><p>Architect secure cloud platforms, guide technical teams, and communicate with senior stakeholders.</p>",
+      title: "Cloud Integration Architect",
+      identifier: { value: "7000000002" },
+      hiringOrganization: { name: "Example Telecom" },
+      description: "<h2>Responsibilities</h2><p>Plan how internal systems connect and see integration work through to release.</p><h2>Qualifications</h2><p>Design resilient integration layers, coach delivery squads, and explain trade-offs to non-specialists.</p>",
       datePosted: "2026-10-21",
-      url: "https://groupcareers.singtel.com/job/Senior-AI-Solution-Architect-Sing/1332279066/",
+      url: "https://careers.exampletelecom.example/job/Cloud-Integration-Architect-Sing/7000000002/",
     };
-    const html = `<nav>Unrelated careers navigation</nav><script type="application/ld+json">${JSON.stringify(jsonLd)}</script><main><h1>Senior AI Solution Architect</h1><p>Responsibilities and qualifications are available in the role details.</p></main><footer>Other vacancies</footer>`;
+    const html = `<nav>Unrelated careers navigation</nav><script type="application/ld+json">${JSON.stringify(jsonLd)}</script><main><h1>Cloud Integration Architect</h1><p>Responsibilities and qualifications are available in the role details.</p></main><footer>Other vacancies</footer>`;
     const result = await fetchJobContent(
-      "https://groupcareers.singtel.com/job/Senior-AI-Solution-Architect-Sing/1332279066/",
-      { title: "Senior AI Solution Architect", companyName: "Singtel", requisitionId: "1332279066" },
+      "https://careers.exampletelecom.example/job/Cloud-Integration-Architect-Sing/7000000002/",
+      { title: "Cloud Integration Architect", companyName: "Example Telecom", requisitionId: "7000000002" },
       htmlDependencies(html),
     );
 
     expect(result.kind).toBe("COMPLETE");
     if (result.kind !== "COMPLETE") return;
-    expect(result.posting.description).toContain("Architect secure cloud platforms");
+    expect(result.posting.description).toContain("Design resilient integration layers");
     expect(result.posting.description).not.toContain("Unrelated careers navigation");
     expect(result.posting.publishedAt).toBe("2026-10-21T00:00:00.000Z");
   });
@@ -306,7 +306,7 @@ describe("fetchJobContent", () => {
         resolveAddresses: async () => [{ address: "127.0.0.1", family: 4 }],
         fetchOnce: async (url) => {
           called.push(url.toString());
-          return response(url.toString(), 200, smbcHtml);
+          return response(url.toString(), 200, sampleHtml);
         },
       },
     );
@@ -316,7 +316,7 @@ describe("fetchJobContent", () => {
     const redirectCalls: string[] = [];
     const redirected = await fetchJobContent(
       "https://public.example/jobs/1",
-      { title: "Director, AI Solution Architect", companyName: "SMBC" },
+      { title: "Head of AI Engineering", companyName: "NLTB" },
       {
         resolveAddresses: async (host) => publicAddress(host),
         fetchOnce: async (url) => {
@@ -337,7 +337,7 @@ describe("fetchJobContent", () => {
     const result = await fetchJobContent(
       "https://localhost/jobs/1",
       { title: "Internal Job", companyName: "Internal" },
-      { fetchOnce: async (url) => { called.push(url.toString()); return response(url.toString(), 200, smbcHtml); } },
+      { fetchOnce: async (url) => { called.push(url.toString()); return response(url.toString(), 200, sampleHtml); } },
     );
     expect(result).toMatchObject({ kind: "BLOCKED", reason: "UNSAFE_REDIRECT" });
     expect(called).toHaveLength(0);

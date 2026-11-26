@@ -51,11 +51,11 @@ describe("career track classification", () => {
     ["Software Engineer II", "GENERIC_SOFTWARE"],
     ["Front-End Software Engineer", "GENERIC_SOFTWARE"],
     ["Senior Commercial Counsel", "UNCLASSIFIED"],
-    ["Remote AI Trainers (Python Coding Experts)", "UNCLASSIFIED"],
+    ["Freelance AI Annotators (SQL Specialists)", "UNCLASSIFIED"],
     ["Sr. Data Analytics Engineer", "HANDS_ON_AI_DATA"],
     ["Senior Data Platform Architect", "ARCHITECTURE"],
     ["Head of Data Architecture", "ARCHITECTURE"],
-    ["Accelerator Program - Applied AI Application Engineer", "HANDS_ON_AI_DATA"],
+    ["Accelerator Programme - Machine Learning Tooling Engineer", "HANDS_ON_AI_DATA"],
     ["AI Programme Manager", "AI_BRIDGE"],
   ])("classifies %s as %s", (title, track) => {
     expect(classifyCareerTrack(title).track).toBe(track);
@@ -74,7 +74,7 @@ describe("career track classification", () => {
 describe("job level", () => {
   it.each([
     ["Software Engineer II", "MID"],
-    ["Technical Implementation Specialist II", "MID"],
+    ["Systems Onboarding Specialist II", "MID"],
     ["IAM Engineer 1", "ENTRY"],
     ["Junior Data Scientist", "ENTRY"],
     ["Associate Product Manager", "ENTRY"],
@@ -83,10 +83,10 @@ describe("job level", () => {
     ["Senior / Software Engineer", "SENIOR"],
     ["Staff Software Engineer", "SENIOR"],
     ["Head of Data Architecture", "LEADERSHIP"],
-    ["Vice President, Agentic AI Platform Lead", "LEADERSHIP"],
+    ["Vice President, Generative AI Tooling Lead", "LEADERSHIP"],
     ["Machine Learning Engineer", "MID"],
     ["Partner Solutions Architect", "MID"],
-    ["Accelerator Program - Applied AI Application Engineer", "ENTRY"],
+    ["Accelerator Programme - Machine Learning Tooling Engineer", "ENTRY"],
   ])("reads %s as %s", (title, level) => {
     expect(classifyJobLevel(title, null).level).toBe(level);
   });

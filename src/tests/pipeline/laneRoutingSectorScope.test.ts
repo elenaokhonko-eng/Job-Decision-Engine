@@ -26,7 +26,7 @@ function route(title: string, description: string, companyName: string, favoured
 }
 
 const BENEFITS_SENTENCE =
-  "We offer a competitive salary and comprehensive benefit offerings such as medical, dental, and flexible time off.";
+  "We offer benefit offerings such as medical, dental, and paid time off, reviewed every year.";
 
 const LOGISTICS_IDENTITY_ENGINEER = [
   "About Us",
@@ -36,7 +36,7 @@ const LOGISTICS_IDENTITY_ENGINEER = [
   "- Run our identity provider on cloud infrastructure with Terraform and AWS, and automate joiner-mover-leaver workflows.",
   "- Partner with security engineering on least-privilege access reviews.",
   BENEFITS_SENTENCE,
-  "Example Freight Co is an equal opportunity employer and does not discriminate on the basis of race, religion, health status or medical condition.",
+  "Example Freight Co is an equal opportunity employer. It does not discriminate on grounds of age, health status or medical condition.",
 ].join("\n");
 
 const RETAIL_BACKEND_ENGINEER = [
@@ -327,7 +327,7 @@ describe("Sector scope: evidence text", () => {
   });
 
   it("removes industry lists naming another industry but keeps health-only lists", () => {
-    expect(stripIndustryLists("industries like finance, manufacturing, defense, healthcare, and the public sector run"))
+    expect(stripIndustryLists("industries like insurance, mining, retail, healthcare, and the public sector run"))
       .not.toContain("healthcare");
     expect(stripIndustryLists("critical infrastructure including medical devices, power grids and telecommunication networks"))
       .not.toContain("medical devices");
@@ -353,7 +353,7 @@ describe("Sector scope: evidence text", () => {
   it("does not let an industry served by the employer make it a health employer", () => {
     const description = [
       "About Us",
-      "Example AI builds AI systems for customers in finance, manufacturing, defense, healthcare, and the public sector.",
+      "Example AI builds AI systems for customers in insurance, mining, retail, healthcare, and the public sector.",
       "The Role",
       "- Build backend services on a cloud platform with Kubernetes.",
     ].join("\n");

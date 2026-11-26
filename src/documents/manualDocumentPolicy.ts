@@ -24,7 +24,7 @@ export const MAX_POSTING_REQUIREMENT_LINES = 30;
 const MIN_POSTING_LINE_CHARS = 15;
 const MAX_POSTING_LINE_CHARS = 300;
 const MAX_HEADING_WORDS = 8;
-// Question headings run longer: "What qualifications or skills should you possess in this role?"
+// Question headings run longer: "What qualifications and strengths will help you succeed in this team?"
 const MAX_QUESTION_HEADING_WORDS = 14;
 
 const REQUIREMENT_HEADING = /^(requirements?|qualifications?|minimum qualifications|basic qualifications|preferred qualifications|what you(?:'|’)ll bring|what you will bring|what you bring|what (?:will|can|do|should) you bring|what we(?:'|’)re looking for|what we are looking for|what (?:are we|we are) looking for|what (?:qualifications|skills|experience)\b|what (?:do )?you need|what you(?:'|’)ll need|what you will need|who you are|about you|you have|you will have|(?:your )?background|your (?:experience|profile|skills)|(?:the )?ideal candidate|skills(?: and experience)?|experience|must[- ]haves?|nice[- ]to[- ]haves?)\b/i;

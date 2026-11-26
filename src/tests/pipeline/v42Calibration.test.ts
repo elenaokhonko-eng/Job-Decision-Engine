@@ -9,8 +9,8 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
   describe("Part B: Intern Token Matching Guard", () => {
     it("does not reject roles containing internal or international in title", () => {
       const allowedTitles = [
-        "Senior Full-Stack Engineer, Internal Applications",
-        "Staff Decision Scientist (International)",
+        "Principal Platform Developer, Internal Tooling",
+        "Lead Insights Scientist (International)",
         "Senior Internal Audit Analyst",
         "International Data Acquisition Manager",
         "Engineering Manager - Internal Tools",

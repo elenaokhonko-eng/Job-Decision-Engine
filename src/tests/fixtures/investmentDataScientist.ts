@@ -31,10 +31,10 @@ export const INVESTMENT_DATA_SCIENTIST_DESCRIPTION = [
   "- Turn alternative and market data into features that portfolio teams can use",
   "- Work with data engineers to put models into production and monitor them",
   "",
-  "What Qualifications or skills should you possess in this role?",
+  "What qualifications and strengths will help you succeed in this team?",
   ...INVESTMENT_DATA_SCIENTIST_QUALIFICATIONS.map((line) => `- ${line}`),
   "",
   "What can we offer?",
   "- Competitive pay and learning budget",
-  "- Come into the office four days per week, with flexibility on the fifth",
+  "- Come into the office three days per week, with the other two flexible",
 ].join("\n");

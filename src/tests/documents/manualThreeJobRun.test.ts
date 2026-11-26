@@ -50,7 +50,7 @@ describe("posting parser on a question-headed posting", () => {
     const rows = documentRequirements([
       quotedRow("Q-1", INVESTMENT_DATA_SCIENTIST_NARRATIVE[0]),
       quotedRow("Q-2", INVESTMENT_DATA_SCIENTIST_NARRATIVE[1]),
-      quotedRow("Q-3", "Come into the office four days per week"),
+      quotedRow("Q-3", "Come into the office three days per week"),
       quotedRow("Q-4", INVESTMENT_DATA_SCIENTIST_QUALIFICATIONS[1]),
     ], INVESTMENT_DATA_SCIENTIST_DESCRIPTION);
     const texts = rows.map((row) => row.requirement_text);
@@ -61,7 +61,7 @@ describe("posting parser on a question-headed posting", () => {
 
   it("treats office attendance, hybrid and on-site rules as workability, but not hybrid cloud", () => {
     for (const line of [
-      "Come into the office four days per week",
+      "Come into the office three days per week",
       "This is a hybrid role with 3 days a week in the office",
       "On-site presence at our Singapore campus is expected",
       "Days in office: Monday to Thursday",
@@ -136,7 +136,7 @@ describe("summary and letter grounding", () => {
       second,
       { text: "This record fits the role's integration architecture needs.", evidence_ids: ["fact-api"], requirement_keys: ["R-1"] },
     ],
-  }, pairs, allowed, { jobTitle: "AVP/VP, Data Scientist, Investment Insights Group" });
+  }, pairs, allowed, { jobTitle: "VP / Director, Data Scientist, Portfolio Research Unit" });
   const issuesOf = (result: ReturnType<typeof validateSummaryPayload>) => (result.valid ? [] : result.issues).join(" ");
 
   it("accepts a grounded summary", () => {

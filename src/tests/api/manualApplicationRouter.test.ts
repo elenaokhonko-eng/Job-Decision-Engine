@@ -32,24 +32,24 @@ const validPosting = {
 describe("manual application request and persistence contracts", () => {
   it("requires exact normalized fetched title/company and any supplied requisition ID", () => {
     const expected = {
-      title: "Director, AI Solution Architect",
-      company: "SMBC",
-      requisitionId: "1441267233",
+      title: "Head of AI Engineering",
+      company: "NLTB",
+      requisitionId: "7000000001",
     };
     expect(matchesExactFetchedPostingIdentity(expected, {
-      title: "director ai solution architect",
-      companyName: "smbc",
-      requisitionId: "1441267233",
+      title: "head of ai engineering",
+      companyName: "nltb",
+      requisitionId: "7000000001",
     })).toBe(true);
     expect(matchesExactFetchedPostingIdentity(expected, {
-      title: "Director, AI Solution Architect",
-      companyName: "SMBC Group",
-      requisitionId: "1441267233",
+      title: "Head of AI Engineering",
+      companyName: "NLTB Group",
+      requisitionId: "7000000001",
     })).toBe(false);
     expect(matchesExactFetchedPostingIdentity(expected, {
-      title: "Director, AI Solution Architect",
-      companyName: "SMBC",
-      requisitionId: "1441267234",
+      title: "Head of AI Engineering",
+      companyName: "NLTB",
+      requisitionId: "7000000009",
     })).toBe(false);
     expect(matchesExactFetchedPostingIdentity({ title: "Role", company: "Example" }, {
       title: "Role",

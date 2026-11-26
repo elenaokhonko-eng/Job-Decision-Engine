@@ -40,23 +40,23 @@ const BOILERPLATE = [
 ].join("");
 
 const CUSTOMER_SOLUTIONS_ARCHITECT = `
-<p>Quillbyte AI is hiring a Customer Solutions Architect in Singapore (hybrid).</p>
+<p>Quillbyte AI is hiring a Customer Platform Architect in Singapore (hybrid).</p>
 <h3>What you'll do</h3>
 <ul>
-<li>Be responsible for the entire customer journey, from technical discovery through production rollout.</li>
-<li>Hold regular customer engagements to unblock adoption of our agent platform.</li>
-<li>Set proof-of-value timelines and success criteria with prospective customers.</li>
-<li>Design retrieval and evaluation pipelines in Python for customer deployments.</li>
+<li>Be responsible for the entire customer journey, starting at scoping and ending at go-live.</li>
+<li>Run regular customer engagements so that teams keep using our tooling.</li>
+<li>Agree proof-of-value milestones and exit measures with prospective customers.</li>
+<li>Write Python services that score and serve language models for customer rollouts.</li>
 </ul>
 <h3>Customer Success</h3>
-<p>You will work hand in hand with our Customer Success team after go-live.</p>
+<p>After launch you pair closely with our Customer Success team.</p>
 ${BOILERPLATE}`;
 
-const LEGAL_ENGINEER_PRODUCT_SPECIALIST = `
-<p>Lexora Systems builds AI for in-house legal teams. We are hiring a Legal Engineer – Product Specialist in Singapore (hybrid).</p>
-<p>The Legal Engineer – Product Specialist serves as the face of Lexora in Korea, configuring our contract-review product for legal teams.</p>
-<p>This role sits within Lexora's post-sales organization and partners with Customer Success Managers and Account Executives to drive adoption, expansion and renewal.</p>
-<ul><li>Build workflow templates and prompt libraries for contract review.</li></ul>
+const LEGAL_ENGINEER_ADOPTION = `
+<p>Lexora Systems builds AI for in-house legal teams. We are hiring a Legal Engineer – Adoption Advisor in Singapore (hybrid).</p>
+<p>The Legal Engineer – Adoption Advisor serves as the face of Lexora in Vietnam, setting up our drafting tool for in-house lawyers.</p>
+<p>This role sits within Lexora's post-sales organization and teams up with Account Executives on adoption and renewal.</p>
+<ul><li>Maintain clause templates and reusable prompts.</li></ul>
 ${BOILERPLATE}`;
 
 describe("findCustomerFacingRoleDuty", () => {
@@ -66,7 +66,7 @@ describe("findCustomerFacingRoleDuty", () => {
     ["You will join the Customer Success team.", "customer success team"],
     ["• Responsible for the entire customer journey.", "entire customer journey"],
     ["Set proof-of-value timelines and success criteria with prospective customers.", "proof-of-value"],
-    ["Deliver the first working proof of concept to a customer within 60 days.", "to a customer"],
+    ["Deliver an early proof of concept to a customer before the quarter ends.", "to a customer"],
     ["Respond to RFPs from enterprise buyers.", "respond to rfps"],
     ["Reporting to the VP of Customer Success, you will lead the renewals organization.", "vp of customer success"],
     ["You will serve as the face of the company to customers.", "face of the company"],
@@ -77,7 +77,7 @@ describe("findCustomerFacingRoleDuty", () => {
     ["Responsibilities: Deliver product demos to prospects.", "demos to prospects"],
     ["Run proofs of concept with prospective customers.", "prospective customers"],
     ["Run PoCs with prospective customers.", "pocs"],
-    ["You will partner closely with account executives to drive adoption and workload expansion.", "account executives"],
+    ["You will partner closely with account executives to drive renewal planning.", "account executives"],
   ])("reads %s", (text, fragment) => {
     expect(findCustomerFacingRoleDuty(text.toLowerCase())).toContain(fragment);
   });
@@ -92,15 +92,15 @@ describe("findCustomerFacingRoleDuty", () => {
     "We offer benefits to every member of the customer success team.",
     "We are an equal opportunity employer; our post-sales organization welcomes all qualified applicants.",
     "Engineers who partner with sales to close deals use our platform.",
-    "PoC leadership: lead small-scale PoCs from idea to validation, defining scope and success criteria.",
-    "Customer advocacy: act as the voice of the customer within the organization.",
+    "PoC leadership: run short PoCs that test an idea, agreeing what good looks like first.",
+    "Customer champion duties: act as the voice of the customer when internal priorities are set.",
     "Act as a key representative for data governance initiatives across APAC.",
-    "You will be part of the capabilities solution engineering group that builds internal platforms.",
+    "You will be part of the platform solution engineering group that maintains shared tooling.",
     "Support RFP estimation and technical scoping for complex initiatives.",
     "Owns renewal rate reporting and variance analysis against plan.",
     "What you'll be doing: own customer lifecycle demand gen.",
-    "Scoping and building proof of concept products, sometimes directly with partner customers.",
-    "About the role: the deal desk team partners closely with our sales organisation to drive wins.",
+    "Prototype proof of concept tools, now and then alongside partner customers.",
+    "About the role: the deal desk team works closely with our sales organisation on large bids.",
   ])("ignores %s", (text) => {
     expect(findCustomerFacingRoleDuty(text.toLowerCase())).toBeNull();
   });
@@ -108,15 +108,15 @@ describe("findCustomerFacingRoleDuty", () => {
 
 describe("GATE_HIGH_INTERACTION for pre-sales and post-sales roles", () => {
   // gate-2026-11.7 (owner decision 2026-11-25): duty phrases alone no longer reject; they downrank (roleShape.ts).
-  it("does not reject a Customer Solutions Architect with customer-journey and proof-of-value duties", () => {
-    const result = fullGate("Customer Solutions Architect", "Quillbyte AI", CUSTOMER_SOLUTIONS_ARCHITECT);
+  it("does not reject a Customer Platform Architect with customer-journey and proof-of-value duties", () => {
+    const result = fullGate("Customer Platform Architect", "Quillbyte AI", CUSTOMER_SOLUTIONS_ARCHITECT);
     expect(result.status).toBe("PASS");
     expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
     expect(findCustomerFacingRoleDuty(CUSTOMER_SOLUTIONS_ARCHITECT.replace(/<[^>]+>/g, " . ").toLowerCase())).toContain("entire customer journey");
   });
 
-  it.each(["UNKNOWN", "ASSUMED_HYBRID", "HYBRID"])("does not reject a post-sales Legal Engineer – Product Specialist (stored %s)", (mode) => {
-    const result = fullGate("Legal Engineer – Product Specialist", "Lexora Systems", LEGAL_ENGINEER_PRODUCT_SPECIALIST, mode);
+  it.each(["UNKNOWN", "ASSUMED_HYBRID", "HYBRID"])("does not reject a post-sales Legal Engineer – Adoption Advisor (stored %s)", (mode) => {
+    const result = fullGate("Legal Engineer – Adoption Advisor", "Lexora Systems", LEGAL_ENGINEER_ADOPTION, mode);
     expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
     expect(result.status).not.toBe("HARD_REJECT");
   });

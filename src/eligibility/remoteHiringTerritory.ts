@@ -167,7 +167,7 @@ function sentenceAround(text: string, index: number, length: number): string {
 }
 
 /**
- * "Remote - US, Canada, UK, Southeast Asia, and broader APAC" is one list. The label
+ * "Remote - US, Japan, UK, Southeast Asia, and wider APAC" is one list. The label
  * pattern stops at the first comma, so read the rest of the line and treat an
  * in-scope region anywhere in that list as an authorized hiring territory.
  */

@@ -36,7 +36,7 @@ export const sampleAtsObservation: JobObservation = {
   observed_at: "2026-08-28T12:05:00.000Z",
   retrieved_at: "2026-08-28T12:05:00.000Z",
   company_name_raw: "Databricks",
-  title_raw: "Staff Solutions Architect - GenAI",
+  title_raw: "Principal Retrieval Systems Engineer",
   location_raw: "Singapore",
   workplace_type_raw: "HYBRID",
   employment_type_raw: "FULL_TIME",

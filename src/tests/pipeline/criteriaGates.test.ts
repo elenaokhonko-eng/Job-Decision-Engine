@@ -184,12 +184,12 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       expect(result.rejection_codes).toContain("UNWORKABLE_LOCATION_MODEL");
     });
 
-    it("allows a direct-employer fixed-term contract such as the MAS data architect role", () => {
+    it("allows a direct-employer fixed-term contract such as a treasury data modelling role", () => {
       const job = {
-        id: "mas-investment-data-architect-contract",
-        title: "Lead Data Architect (Investment Management) (Contract)",
+        id: "treasury-data-modeller-contract",
+        title: "Principal Data Modeller (Treasury Reporting) (Contract)",
         company_name: "Monetary Authority of Singapore",
-        raw_description: "The Monetary Authority of Singapore is hiring directly for a fixed-term staff appointment. Lead data architecture for investment management, including data models, governance, lineage, and platforms.",
+        raw_description: "The Monetary Authority of Singapore is hiring directly for a fixed-term staff appointment. Own data modelling for treasury reporting, covering lineage, quality controls, and platforms.",
         location: "Singapore",
         workplace_type: "REMOTE",
         employment_type: "CONTRACT"

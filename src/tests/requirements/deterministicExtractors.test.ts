@@ -61,9 +61,9 @@ describe('extractDeterministicRequirements', () => {
       });
 
       it('keeps a parenthetical and the subject whole', () => {
-        const ref = reference('You hold a PhD (or expect to complete one shortly) in Computer Science or a closely related discipline.');
-        expect(ref).toContain('(or expect to complete one shortly)');
-        expect(ref).toContain('Computer Science');
+        const ref = reference('You hold a PhD (or will have submitted your thesis) in Statistics or a neighbouring quantitative field.');
+        expect(ref).toContain('(or will have submitted your thesis)');
+        expect(ref).toContain('Statistics');
       });
 
       it('never ends the subject in the middle of a word', () => {
@@ -74,7 +74,7 @@ describe('extractDeterministicRequirements', () => {
       });
 
       it('does not treat an audience description as a degree requirement', () => {
-        expect(degreeOf('Whether you are a PhD researcher, engineer or scientist, your knowledge will shape the product.')).toBeUndefined();
+        expect(degreeOf('Whether you are a PhD candidate, developer or analyst, your skills will matter here.')).toBeUndefined();
         expect(degreeOf("Whether you're a PhD researcher or an engineer, you will fit in.")).toBeUndefined();
       });
     });
@@ -299,16 +299,16 @@ describe('extractDeterministicRequirements', () => {
     const result = extractDeterministicRequirements({
       ...IDS,
       description_text:
-        'You will lead the development of innovation programmes across the bank. ' +
-        'Experience with financial regulation or supervision is valued. ' +
-        'You will find a place where you can be yourself and prioritise your wellbeing. ' +
+        'You will lead the rollout of experiment tooling across the group. ' +
+        'Experience with payments oversight or audit is valued. ' +
+        'You will find a team where you can grow at your own pace and look after your wellbeing. ' +
         'Strong stakeholder management and communication skills.',
     });
     const items = result.requirements.filter((r) => r.requirement_type === 'CUSTOM');
     const byPrefix = (prefix: string) => items.find((r) => r.requirement_text.startsWith(prefix));
 
     expect(byPrefix('You will lead')?.structured_value).toMatchObject({ item_class: 'RESPONSIBILITY' });
-    expect(byPrefix('Experience with financial regulation')?.importance).toBe('PREFERRED');
+    expect(byPrefix('Experience with payments oversight')?.importance).toBe('PREFERRED');
     // No headings: nothing says this is required, so it is not mandatory (deterministic_v6).
     expect(byPrefix('Strong stakeholder')?.importance).toBe('PREFERRED');
     expect(byPrefix('You will lead')?.importance).toBe('PREFERRED');
