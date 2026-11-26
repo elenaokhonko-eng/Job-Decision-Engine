@@ -286,7 +286,7 @@ describe("a title family rejects only as the main role", () => {
     "Data Centre Engineer (Network Security)",
     "Data Center Manager, Network Engineer",
     // Physical engineering names the domain of the work, wherever it appears.
-    "AI Scientist - Domain Expert, Crashworthiness",
+    "Data Scientist - Quarry Bridge Studies, Civil Engineering",
   ])("still rejects %j", (title) => {
     expect(nonTechnicalFunctionTitle(title)).not.toBeNull();
     const result = gate("Build data pipelines in Python.", "Singapore", title);
