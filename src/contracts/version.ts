@@ -29,6 +29,9 @@ export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
 // role-shape downrank (role_shape_v2).
 // 2026-11.8: commission, OTE, quota and cold calling reject only as this role's main variable pay or explicit sales duty (customerFacingDuties.ts);
 // generic option lists, commission opportunities, commission paid to others and other roles' commission no longer reject.
-export const GATE_VERSION = "gate-2026-11.8" as const;
+// 2026-11.9: the pronoun "us", export-control licence boilerplate, fair-chance hiring notices and an employer's own
+// licence ("authorized by ...") no longer state a worker-territory restriction; a title family (DevOps, QA, ...) rejects
+// only as the title's main role, not as a qualifier after a distinct role.
+export const GATE_VERSION = "gate-2026-11.9" as const;
 export const PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;
 

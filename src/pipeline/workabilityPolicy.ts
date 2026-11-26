@@ -623,24 +623,61 @@ export interface WorkerTerritoryContext {
   readonly jobLocation?: string | null;
   /** Regions the user may work in; an applicant-addressed opening to one cancels a US placement. */
   readonly authorizedRegions?: readonly string[];
+  /**
+   * Split sentences as if the text were lower case (the global gate's reading), while the
+   * capitals still tell the country "US" from the pronoun "us".
+   */
+  readonly splitIgnoringCase?: boolean;
+}
+
+// ── "us" the pronoun is not the United States (gate-2026-11.9) ──
+// "Join our teams ... help us become the leading investor" was stored as a United States restriction.
+/** Text before a lower-case "us" that makes it the country: "in the us", "(us", "remote - us". */
+const US_COUNTRY_BEFORE = /(?:^|[(\/|:,[]|\s[-–—]|\b(?:the|continental|contiguous|eastern|western|central|non|in|within|outside|across|throughout))[\s-]*$/i;
+/** "the trust clients place in us" keeps the pronoun although "in" precedes it. */
+const US_PRONOUN_BEFORE = /\b(?:trust|believe[sd]?|belief|confidence|invest(?:ed|ing|ment)?|interest(?:ed)?|place[sd]?|join(?:ing)?)\s+in\s*$/i;
+/** Text after a lower-case "us" that makes it the country: "us citizens", "us-based", "us or canada". */
+const US_COUNTRY_AFTER = /^(?:[\s-]+(?:based|only|citizens?|citizenship|nationals?|persons?|residents?|residency|government|federal|work\s+(?:authori[sz]ation|permit|visa|eligibility|rights)|employment\s+(?:authori[sz]ation|eligibility)|authori[sz]ation|visa|time\s*zones?|applicants?|candidates?|locations?|remote|(?:security\s+)?clearance|(?:or|and|&)\s+canada)\b|\s*[\/)])/i;
+/** An upper-case "US" in a heading ("JOIN US", "ABOUT US") is still the pronoun. */
+const UPPERCASE_PRONOUN_BEFORE = /\b(?:JOIN|ABOUT|CONTACT|HELP|WITH|FOLLOW|CHOOSE|Join|About|Contact)\s+$/;
+
+/**
+ * Replace the pronoun "us" with "we" so territory matching does not read it as the United States.
+ * "US" written in capitals inside ordinary prose is the country; otherwise the words around it must
+ * make it one. "U.S.", "USA" and "United States" are never touched.
+ */
+function neutralizePronounUs(sentence: string): string {
+  const mixedCase = /[a-z]/.test(sentence);
+  return sentence.replace(/(?<![\w.])us(?![\w$]|\.\w)/gi, (match: string, offset: number, source: string) => {
+    const before = source.slice(0, offset);
+    const after = source.slice(offset + match.length);
+    if (match === "US" && mixedCase && !UPPERCASE_PRONOUN_BEFORE.test(before)) return match;
+    const country = US_COUNTRY_AFTER.test(after) || (US_COUNTRY_BEFORE.test(before) && !US_PRONOUN_BEFORE.test(before));
+    return country ? match : "we";
+  });
 }
 
 export function extractExplicitWorkerTerritoryRequirements(value: unknown, context?: WorkerTerritoryContext): ExplicitWorkerTerritoryRequirement[] {
-  const protectedText = protectTerritoryAbbreviationPeriods(String(value ?? ""));
+  const text = String(value ?? "");
+  const lowered = text.toLowerCase();
+  const splitSource = context?.splitIgnoringCase ? lowered : text;
+  // Same length as the text, so sentence offsets apply to the text as written.
+  const written = splitSource.length === text.length ? text : splitSource;
   const requirements: ExplicitWorkerTerritoryRequirement[] = [];
-  for (const part of protectedText.split(/[.!?;\n]+/)) {
-    const sentence = part.replaceAll(PROTECTED_ABBREVIATION_PERIOD, ".").trim();
+  for (const part of protectTerritoryAbbreviationPeriods(splitSource).matchAll(/[^.!?;\n]+/g)) {
+    const sentence = written.slice(part.index, part.index + part[0].length).trim();
     if (!sentence) continue;
-    const territories = extractTerritories(sentence).filter((territory) => hasExplicitTerritoryRestriction(sentence, territory));
+    const matchText = neutralizePronounUs(sentence);
+    const territories = extractTerritories(matchText).filter((territory) => hasExplicitTerritoryRestriction(matchText, territory));
     if (territories.length === 0) continue;
     requirements.push({
       territories: [...new Set(territories)],
-      operator: inferTerritoryOperator(sentence),
+      operator: inferTerritoryOperator(matchText),
       evidenceText: sentence,
     });
   }
   const seen = new Set(requirements.map((requirement) => requirement.evidenceText.toLowerCase()));
-  for (const requirement of extractGovernmentEligibilityRequirements(String(value ?? ""), context)) {
+  for (const requirement of extractGovernmentEligibilityRequirements(splitSource, context)) {
     if (seen.has(requirement.evidenceText.toLowerCase())) continue;
     seen.add(requirement.evidenceText.toLowerCase());
     requirements.push(requirement);
@@ -953,7 +990,7 @@ export function hasExplicitTerritoryRestriction(value: unknown, territory: strin
   if (!canonical) return false;
   const aliases = (TERRITORY_ALIASES.find(([key]) => key === canonical)?.[1] ?? [canonical.toLowerCase()])
     .map(normalizeTerritorySearchText);
-  const sentences = normalizeTerritorySearchText(value)
+  const sentences = normalizeTerritorySearchText(neutralizePronounUs(String(value ?? "")))
     .split(/[.!?;\n]+/)
     .map((sentence) => sentence.trim())
     .filter(Boolean);
@@ -970,12 +1007,19 @@ export function hasExplicitTerritoryRestriction(value: unknown, territory: strin
     // may live or work. Only an explicit residence, citizenship, permit or
     // work-location condition in the same sentence keeps it a restriction.
     const namesWorkerLocation = /\b(?:citizen(?:s|ship)?|national(?:ity|s)?\s+only|work\s+permit|visa|right\s+to\s+work|eligible\s+to\s+work|authori[sz]ed\s+to\s+work|authori[sz]ation\s+to\s+work|work\s+authori[sz]ation|reside|residing|residen(?:cy|ts?)|(?:must|need\s+to|required\s+to)\s+(?:be\s+)?(?:based|located|living|relocate))\b/i.test(sentence);
-    const isLanguageRequirement = /\b(?:fluen(?:t|cy)|proficien(?:t|cy)|speak(?:er|ers|ing)?|spoken|written|language|bilingual|native|mandarin|cantonese|putonghua)\b/i.test(sentence);
-    const isExportControlCondition = /\bexport\s+(?:control|controls|laws?|regulations?|licen[cs]e|administration)\b/i.test(sentence)
-      && !/\bcitizen(?:s|ship)?\b|\bpermanent\s+resident\b/i.test(sentence);
-    if ((isLanguageRequirement && !namesWorkerLocation) || isExportControlCondition) return false;
+    const isLanguageRequirement = /\b(?:fluen(?:t|cy)|proficien(?:t|cy)|speak(?:er|ers|ing)?|spoken|written|language|bilingual|native|mandarin|cantonese|putonghua|learn(?:ing)?\s+(?:french|german|spanish|italian|dutch|japanese|chinese|korean))\b/i.test(sentence);
+    const isExportControlCondition = /\bexport[\s-]+(?:controls?|controlled|laws?|regulations?|licen[cs]e|administration)\b/i.test(sentence)
+      && !/\bcitizen(?:s|ship)?\b|\bpermanent\s+resident|\bgreen\s+card\b|\bus\s+persons?\b/i.test(sentence);
+    // A fair-chance hiring notice ("... County residents: applicants with arrest or conviction
+    // records will be considered") says who is protected, not who may apply.
+    const isFairHiringNotice = /\b(?:fair\s+chance|(?:arrest|conviction)\s+(?:and\/or\s+|and\s+|or\s+)?(?:conviction\s+)?records?|criminal\s+(?:histor(?:y|ies)|records?))\b/i.test(sentence)
+      && !/\b(?:citizen(?:s|ship)?|work\s+(?:permit|authori[sz]ation)|visa|right\s+to\s+work|(?:eligible|authori[sz]ed)\s+to\s+work|green\s+card|permanent\s+resident|must\s+(?:\w+\s+){0,2}?(?:reside|live|be\s+(?:based|located|a\s+resident)))\b/i.test(sentence);
+    if ((isLanguageRequirement && !namesWorkerLocation) || isExportControlCondition || isFairHiringNotice) return false;
 
-    const hasExplicitWorkerConstraint = /\b(authorization|authorised|authorized|work\s+permit|visa|citizen(?:ship)?|residen(?:cy|tial|ts?)|right\s+to\s+work|eligible\s+to\s+work)\b/i.test(sentence)
+    // "within the scope authorized by the central bank", "authorised and regulated by ..." describe the
+    // employer's licence, not the worker's authorization.
+    const workerText = sentence.replace(/\bauthori[sz]ed(?:\s+and\s+(?:regulated|licen[cs]ed|supervised))?\s+by\b/gi, " ");
+    const hasExplicitWorkerConstraint = /\b(authorization|authorised|authorized|work\s+permit|visa|citizen(?:ship)?|residen(?:cy|tial|ts?)|right\s+to\s+work|eligible\s+to\s+work)\b/i.test(workerText)
       || /\b(?:must\s+(?:be\s+)?(?:residing|living|based|located|authorized)|must\s+reside|must\s+live)\b/i.test(sentence)
       || /\b(?:only\s+(?:open\s+to|applicants?|candidates?|engineers?|developers?|people|individuals)\s+(?:in|from|based|located|residing))\b/i.test(sentence)
       || /\b(?:remote\s+(?:only\s+in|only\s+from|eligible\s+only\s+in))\b/i.test(sentence)
