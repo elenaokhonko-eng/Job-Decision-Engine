@@ -92,31 +92,43 @@ export const detectCustomerFacingDelivery: RoleShapeDetector = ({ title, descrip
 
 const PEOPLE_MANAGEMENT_TITLE =
   /\b(?:head of|director|vp|vice president|chief|engineering manager|team lead|people manager|group manager|manager of)\b/i;
-const PEOPLE_MANAGEMENT_CUES: RegExp[] = [
+/** Cues that say the job is to run people. */
+const STRONG_PEOPLE_CUES: RegExp[] = [
   /\bdirect reports?\b/i,
   /\bline[- ]manag(?:e|er|ement|ing)\b/i,
   /\bpeople[- ]manag(?:e|er|ement|ing)\b/i,
-  /\b(?:manage|lead|build|grow) (?:and (?:lead|develop|grow) )?a (?:global |distributed )?team of\b/i,
+  /\b(?:(?:manage|lead|build|grow) (?:and (?:lead|develop|grow) )?a|(?:manage|lead) (?:our|the)) (?:global |distributed )?team of\b/i,
+  /\b(?:manage|lead)(?: and develop)? engineering managers\b/i,
+];
+/** "performance reviews", "hire and develop" and the like also appear in individual-contributor postings. */
+const WEAK_PEOPLE_CUES: RegExp[] = [
   /\b(?:hire|hiring) and (?:develop|mentor|coach|retain)\b/i,
   /\bperformance reviews?\b/i,
-  /\bcareer (?:development|growth) of (?:your|the) (?:team|reports)\b/i,
+  /\bcareer (?:development|growth) (?:of|for) (?:your|the) (?:team|reports|engineers)\b/i,
+  /\b(?:lead|manage) the team\b/i,
 ];
+// A cue the posting denies ("no direct reports") or only advises others about is not this role's duty. Both patterns must end
+// where the cue starts, so any other word or punctuation in between leaves the cue counted.
+const PEOPLE_CUE_DENIED_BEFORE = /\b(?:no|without|not have(?: any)?)\s+$/i;
+const PEOPLE_CUE_ADVISED_BEFORE = /\badvis(?:e|es|ing)(?: [\w-]+)? on (?:(?:line|people)[- ]management(?: and|,) )?$/i;
 
-/** Cues that say the job is to run people. "performance reviews" and "hire and develop" also appear in individual-contributor postings. */
-const DIRECT_REPORTS_CUE = /\bdirect reports?\b/i;
-const LINE_MANAGEMENT_CUE = /\bline[- ]manag(?:e|er|ement|ing)\b/i;
-const PEOPLE_MANAGEMENT_PHRASE_CUE = /\bpeople[- ]manag(?:e|er|ement|ing)\b/i;
-const TEAM_OF_CUE = /\b(?:manage|lead|build|grow) (?:and (?:lead|develop|grow) )?a (?:global |distributed )?team of\b/i;
-const STRONG_PEOPLE_CUES: RegExp[] = [DIRECT_REPORTS_CUE, LINE_MANAGEMENT_CUE, PEOPLE_MANAGEMENT_PHRASE_CUE, TEAM_OF_CUE];
+/** The first mention of the cue that is this role's own duty. */
+function ownCueMatch(description: string, cue: RegExp): RegExpMatchArray | null {
+  for (const match of description.matchAll(new RegExp(cue.source, "gi"))) {
+    const before = description.slice(Math.max(0, (match.index ?? 0) - 60), match.index ?? 0);
+    if (!PEOPLE_CUE_DENIED_BEFORE.test(before) && !PEOPLE_CUE_ADVISED_BEFORE.test(before)) return match;
+  }
+  return null;
+}
 
 export const detectPeopleManagementCore: RoleShapeDetector = ({ title, description }) => {
   // Managing a team is the core of the role only when the description says so: two separate cues, or a management title plus
   // one STRONG cue. A senior or director title with a single weak mention ("performance reviews") is an individual role.
-  const hits = PEOPLE_MANAGEMENT_CUES.map((cue) => description.match(cue)).filter((match): match is RegExpMatchArray => match !== null);
-  const strongHits = STRONG_PEOPLE_CUES.map((cue) => description.match(cue)).filter((match): match is RegExpMatchArray => match !== null);
-  const titleHit = title.match(PEOPLE_MANAGEMENT_TITLE);
-  if (hits.length >= 2 || (titleHit && strongHits.length >= 1)) {
-    const first = (strongHits[0] ?? hits[0])!;
+  const own = (cues: RegExp[]) => cues.map((cue) => ownCueMatch(description, cue)).filter((match): match is RegExpMatchArray => match !== null);
+  const strongHits = own(STRONG_PEOPLE_CUES);
+  const hits = [...strongHits, ...own(WEAK_PEOPLE_CUES)];
+  if (hits.length >= 2 || (PEOPLE_MANAGEMENT_TITLE.test(title) && strongHits.length >= 1)) {
+    const first = hits[0]!; // a strong cue when there is one
     return { code: "PEOPLE_MANAGEMENT_CORE", penalty: 0.08, source: "DESCRIPTION", quote: excerpt(description, first.index ?? 0, first[0].length) };
   }
   return null;
@@ -130,39 +142,53 @@ export const detectPeopleManagementCore: RoleShapeDetector = ({ title, descripti
 const CONTRACT_DESCRIPTION =
   /\b(?:(?:\d{1,2}|six|twelve|twelve|nine|three)[- ]months?(?: fixed[- ]term)? contract|fixed[- ]term contract|contract (?:role|position|basis|opportunity)|freelance(?:r)?|independent contractor|contractor position)\b/i;
 
-// A negation counts only when it governs the contract phrase: the negation word, then nothing but the linking words below. Any other
-// word, punctuation, dash, bracket or line break ends its reach, so "We offer no relocation, 12-month contract" and "Relocation is
-// not offered for this 12-month contract" are still contracts. "non" is not a negation word here ("non-permanent" negates permanent).
-const NEGATION_WORD = String.raw`(?:\b(?:not|no|never|without|cannot)|n['’]t)`;
-const NEGATION_LINK = String.raw`(?:a|an|the|any|be|being|been|going to be|offer|offered|offering|hire|hired|hiring|engage|engaged|engaging|employ|employed|considered|looking for|on|as|via|through|or|rolling|temporary|(?:short|long|fixed)[- ]term)`;
-const WORD_GAP = String.raw`[^\S\r\n]+`;
-const CONTRACT_NOT_CONTRACT_BEFORE = new RegExp(`${NEGATION_WORD}${WORD_GAP}(?:${NEGATION_LINK}${WORD_GAP}){0,6}$`, "i");
-/** "non-permanent", "not permanent", "not a permanent": a negated "permanent", which says nothing against the contract. */
-const NEGATED_PERMANENT = /\b(?:non[- ]?|not (?:an? )?)(?:permanent|open[- ]ended|indefinite)\b/gi;
+// A contract mention is ignored only for these fixed forms of "this job is not a contract", each ending where the contract phrase
+// starts. Anything else ("not offered on a 12-month contract", "Relocation: No 6-month contract", "Why not be a freelancer") stays
+// a contract: posting text is often whitespace-collapsed, and a missed contract is worse than a 5% downrank too many.
+const CONTRACT_NOT_CONTRACT_BEFORE = new RegExp(
+  "(?:" +
+    [
+      String.raw`(?:(?<!\bor )\b(?:not|never)|n['’]t)\s+an?(?:\s+short[- ]term or)?`, // "is not a ...", "isn't a ..."
+      String.raw`\bthere (?:is|are) no`,
+      String.raw`(?:^|[.!]\s+)no`, // "No 6-month contract here", at the start of a sentence only
+      String.raw`\bnot be (?:hired|employed|engaged) (?:on|as) an?`,
+      String.raw`\bcannot engage an?`,
+      String.raw`\bdo not offer`,
+    ].join("|") +
+    String.raw`)\s+$`,
+  "i",
+);
 /** Unicode dashes (hyphen, non-breaking hyphen, en and em dash, minus) become "-", one character for one character so indexes hold. */
 const normaliseDashes = (text: string): string => text.replace(/[‐-―−]/g, "-");
-// "permanent" only counts when it is not negated ("non-permanent", "not a permanent"): the lookbehinds keep those a contract.
-const PERMANENT_WORD = String.raw`(?<!non[- ]?)(?<!not (?:an? )?)(?<!un)\b(?:permanent|open[- ]ended|indefinite)\b`;
-/** Permanent wording that modifies the contract itself ("permanent contract basis"): directly before the contract phrase. */
-const PERMANENT_BEFORE_CONTRACT = new RegExp(`${PERMANENT_WORD}[\\s,-]*$`, "i");
-const PERMANENT_IN_TYPE = new RegExp(PERMANENT_WORD, "i");
+/** Permanent wording directly before the contract phrase ("permanent contract basis"). */
+const PERMANENT_BEFORE_CONTRACT = /\b(?:permanent|open[- ]ended|indefinite)[\s,-]*$/i;
+/** What stands before that permanent word when it is negated or only a prospect ("isn't a permanent", "temp-to-permanent"). */
+const PERMANENT_DENIED_BEFORE = /(?:(?:\b(?:not|no|never|instead of|rather than)|n['’]t)(?:\s+(?:a|an|the|strictly))*\s+|\bnon-|\bto[\s-]+)$/i;
+/** An employment type is permanent only when it holds nothing but these words: "Contract to permanent" or "no permanent headcount" is not. */
+const PERMANENT_TYPE_WORDS = /\b(?:permanent|open[- ]ended|indefinite|contract|employment|full[- ]time)\b/gi;
+
+function isPermanentType(employmentType: string): boolean {
+  return /\b(?:permanent|open[- ]ended|indefinite)\b/i.test(employmentType) && !/[a-z]/i.test(employmentType.replace(PERMANENT_TYPE_WORDS, ""));
+}
+
+function saysPermanentContract(before: string): boolean {
+  const permanent = PERMANENT_BEFORE_CONTRACT.exec(before);
+  return permanent !== null && !PERMANENT_DENIED_BEFORE.test(before.slice(0, permanent.index));
+}
 
 export const detectContractEmployment: RoleShapeDetector = ({ description: rawDescription, employmentType: rawEmploymentType }) => {
   const description = normaliseDashes(rawDescription);
   const employmentType = normaliseDashes(rawEmploymentType);
-  // "Permanent contract" is a permanent job: an employment type that says permanent is not a contract.
-  if (/\b(?:CONTRACT|CONTRACTOR|FIXED[_ -]?TERM|FREELANCE)\b/i.test(employmentType) && !PERMANENT_IN_TYPE.test(employmentType)) {
+  // "Permanent contract" is a permanent job.
+  if (/\b(?:CONTRACT|CONTRACTOR|FIXED[_ -]?TERM|FREELANCE)\b/i.test(employmentType) && !isPermanentType(employmentType)) {
     return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "EMPLOYMENT_TYPE", quote: employmentType.slice(0, EVIDENCE_QUOTE_MAX) };
   }
   for (const hit of description.matchAll(new RegExp(CONTRACT_DESCRIPTION.source, "gi"))) {
     const index = hit.index ?? 0;
-    const before = description.slice(Math.max(0, index - 40), index);
-    // "not a fixed-term contract" is not a contract; "non-permanent" / "not permanent" is a negated permanent, not a negated contract.
-    // It is replaced by a full stop so that removing it never joins an earlier negation to the contract phrase.
-    const beforeWithoutNegatedPermanent = before.replace(NEGATED_PERMANENT, ".");
-    if (CONTRACT_NOT_CONTRACT_BEFORE.test(beforeWithoutNegatedPermanent)) continue;
-    // "permanent contract basis" is a permanent job. "contract role, may convert to permanent" is still a contract.
-    if (PERMANENT_BEFORE_CONTRACT.test(before)) continue;
+    const start = Math.max(0, index - 60);
+    // The "_" keeps a cut-off window from looking like the start of the text.
+    const before = (start > 0 ? "_" : "") + description.slice(start, index);
+    if (CONTRACT_NOT_CONTRACT_BEFORE.test(before) || saysPermanentContract(before)) continue;
     return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "DESCRIPTION", quote: excerpt(description, index, hit[0].length) };
   }
   return null;
