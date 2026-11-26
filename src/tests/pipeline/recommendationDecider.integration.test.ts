@@ -5,6 +5,7 @@
  * crashing the deterministic decider. Unknown values must be treated as
  * "unknown gate decision" so the policy defaults to VERIFY/TRACK.
  */
+import { DECIDER_VERSION } from "../../pipeline/deciderVersion.js";
 import { ROLE_SHAPE_POLICY_VERSION } from "../../pipeline/roleShape.js";
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import pg from "pg";
@@ -403,7 +404,7 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
 
     // decider_version is written in the INSERT of the decision (rows are immutable), outside decision_hash.
     const stamped = await q(`SELECT decider_version FROM deterministic_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [JOB_ID]);
-    expect(stamped.rows[0].decider_version).toBe("recommendation_decider_v2");
+    expect(stamped.rows[0].decider_version).toBe(DECIDER_VERSION);
     const check = readiness.checks.find((entry: { key: string }) => entry.key === "MANDATORY_QUALIFICATIONS");
     expect(check.status).toBe("MET");
     expect(check.reason_code).not.toBe("DEGREE_GAP_FLAGGED");
