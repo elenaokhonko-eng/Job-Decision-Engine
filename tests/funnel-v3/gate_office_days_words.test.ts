@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { applyGlobalGates, extractHybridAttendance } from "../../src/services/criteria.js";
 import { applyPersistedRequirementGates } from "../../src/pipeline/hardGate.js";
 import { readOfficeDayWords } from "../../src/pipeline/officeDayWords.js";
+import { findOfficeFirstDays } from "../../src/pipeline/officeFirstDays.js";
 import { loadWorkabilityPolicy } from "../../src/pipeline/workabilityPolicy.js";
 import { GATE_VERSION } from "../../src/contracts/version.js";
 
@@ -114,14 +115,6 @@ describe("office-day counts in words", () => {
       .toBe(gate("There are 4 office days each week.", "UNKNOWN").status);
   });
 
-  // Not read in either spelling: the office comes before the count. Changing that would change digit behaviour.
-  it.each(["gather in the office four days a week", "gather in the office 4 days a week"])(
-    "leaves the office-first order unread: %s",
-    (phrase) => {
-      expect(officeReject(gate(`Staff ${phrase}.`))).toBe(false);
-    },
-  );
-
   it("judges a persisted office-days requirement whose quote spells the count", () => {
     const requirement = (quote: string) => [{
       requirement_key: "office", requirement_type: "OFFICE_DAYS", importance: "MUST",
@@ -154,5 +147,99 @@ describe("office-day counts in words", () => {
     const started = performance.now();
     for (const text of hostile) readOfficeDayWords(text);
     expect(performance.now() - started).toBeLessThan(1_000);
+  });
+});
+
+describe("office-first order (owner decision 2026-11-26)", () => {
+  const REJECTS = [
+    "Our crew sits in the office four days a week.",
+    "Our crew sits in the office 4 days a week.",
+    "Staff are in our office four days per week.",
+    "You will be in the Harbour Road office for at least four days each week.",
+    "Please work from office 5 days a week.",
+    "Please work from the office five days a week.",
+    "This is a work-from-office, 5 days weekly arrangement. Work from office five days weekly.",
+    "On-site four days a week.",
+    "Onsite 4 days/week.",
+    "In-office: 4 days per week.",
+    "Staff come to our office four to five days a week.",
+    "We're in the office two to four days a week.",
+    "Be in the office, minimum 4 days a week.",
+    "Attendance at our office four (4) days a week is expected.",
+    "You are expected in the office 4+ days a week.",
+    "Everyone is in the office 4 out of 5 days a week.",
+    "The role is office-based five days a week.",
+    "Be in the office up to four days a week.",
+    "<li>In the office five days a week</li>",
+  ];
+
+  it.each(REJECTS)("rejects: %s", (sentence) => {
+    for (const workplaceType of ["HYBRID", "UNKNOWN", "ASSUMED_HYBRID"]) {
+      expect(officeReject(gate(sentence, workplaceType)), `${workplaceType}: ${sentence}`).toBe(true);
+    }
+  });
+
+  it.each([
+    "Staff are in the office two days a week.",
+    "Staff are in the office 3 days a week.",
+    "Staff are in the office up to three days a week.",
+    "Staff are in the office up to 2 days per week.",
+    "Staff are in the office three out of five days a week.",
+    "Staff are in the office four days a month.",
+    "Staff are in the office 4 days per month.",
+    "Staff are in the office five days each quarter.",
+    "Staff are in the office four days.",
+    "Staff are in the office five days a week during your first month.",
+    "Staff are in the office five days a week for one week each quarter.",
+    "Staff are in the office five days a week once a quarter.",
+    "You are not expected in the office five days a week.",
+    "You don't need to be in the office five days a week.",
+    "Instead of being in the office five days a week, we meet when it helps.",
+    "You may work in the office five days a week if you prefer.",
+    "Being in the office five days a week is optional.",
+    "Free lunch is served in the office five days a week.",
+    "A physiotherapist is on-site four days a week.",
+    "Our help desk answers calls from the office within five working days.",
+    "We offer on-site training four days a year.",
+    "The kiosk in our office lobby opens five days a week.",
+    "In the office we run a four-day work week.",
+    "Staff in the office receive five days of annual leave per year.",
+  ])("does not reject: %s", (sentence) => {
+    expect(officeReject(gate(sentence)), sentence).toBe(false);
+  });
+
+  it("quotes the statement and stores the stated range", () => {
+    const result = gate("Our crew sits in the office four to five days a week.");
+    expect(result.rejection_codes).toEqual(["GATE_HIGH_OFFICE_DAYS"]);
+    expect(result.evidence_quotes).toEqual(["in the office four to five days a week"]);
+    expect(result.workability_facts).toMatchObject({ office_days_min: 4, office_days_max: 5 });
+  });
+
+  it("takes the highest weekly statement", () => {
+    expect(findOfficeFirstDays("staff are in the office two days a week. leads are in the office five days a week."))
+      .toMatchObject({ min: 5, max: 5 });
+  });
+
+  it("uses the policy thresholds", () => {
+    const wider = { ...policy, maxOfficeDaysPerWeek: 4, hardFailOfficeDaysPerWeek: 5 };
+    const narrower = { ...policy, maxOfficeDaysPerWeek: 2 };
+    expect(officeReject(gate("Staff are in the office four days a week.", "HYBRID", wider))).toBe(false);
+    expect(officeReject(gate("Staff are in the office three days a week.", "HYBRID", narrower))).toBe(true);
+  });
+
+  it("stays fast on long untrusted text", () => {
+    const hostile = [
+      "in the office ".repeat(10_000),
+      "in the office four ".repeat(8_000),
+      "in the office four days ".repeat(6_000),
+      `in the office${" ".repeat(100_000)}four days a week`,
+      `in the office four days${" ".repeat(100_000)}a week`,
+      "at our big old office four to five days a week ".repeat(3_000),
+      `on-site ${"(".repeat(50_000)}`,
+      "office ".repeat(20_000),
+    ];
+    const started = performance.now();
+    for (const text of hostile) findOfficeFirstDays(text);
+    expect(performance.now() - started).toBeLessThan(2_000);
   });
 });

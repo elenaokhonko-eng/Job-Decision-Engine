@@ -30,7 +30,9 @@ export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
 // 2026-11.8: commission, OTE, quota and cold calling reject only as this role's main variable pay or explicit sales duty (customerFacingDuties.ts);
 // generic option lists, commission opportunities, commission paid to others and other roles' commission no longer reject.
 // 2026-11.10: office-day counts of four or more spelled in words ("four days in the office", "four to five days on-site")
-// are judged by the same office-days rule and thresholds as digits (officeDayWords.ts). 11.9 is a separate change (PR #297).
+// are judged by the same office-days rule and thresholds as digits (officeDayWords.ts); a weekly count that follows the office
+// ("in the office four days a week", "work from office 5 days a week"), in digits or words, is judged by them too
+// (officeFirstDays.ts, owner decision 2026-11-26). 11.9 is a separate change (PR #297).
 export const GATE_VERSION = "gate-2026-11.10" as const;
 export const PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;
 

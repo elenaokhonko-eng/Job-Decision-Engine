@@ -3,6 +3,7 @@ import { RawJob } from "../db/db.ts";
 import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
 import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
 import { readOfficeDayWords } from "../pipeline/officeDayWords.js";
+import { findOfficeFirstDays } from "../pipeline/officeFirstDays.js";
 import { findExplicitOnsiteStatement, isSingaporeLocatedJob, withoutNonOfferedWorkModes } from "../pipeline/onsiteStatements.js";
 import { findPostingLocationLine, isUnknownJobLocation } from "../pipeline/postingLocationLine.js";
 import { findExplicitSalesDuty } from "../pipeline/customerFacingDuties.js";
@@ -1309,6 +1310,15 @@ function evaluateGlobalGates(
         office_days_max: Number(configuredOfficeDaysMatch[1]),
       }
     );
+  }
+  // The count after the office ("in the office four days a week"), judged by the same thresholds.
+  const officeFirst = findOfficeFirstDays(workModeText);
+  const officeFirstConflict = officeFirst !== null && (officeFirst.max >= effectivePolicy.hardFailOfficeDaysPerWeek
+    || officeFirst.max > effectivePolicy.maxOfficeDaysPerWeek);
+  if (officeFirst && officeFirstConflict && onsiteException) {
+    recordOnsiteException(`"${officeFirst.quote}"`);
+  } else if (officeFirst && officeFirstConflict) {
+    return makeReject(["GATE_HIGH_OFFICE_DAYS"], [officeFirst.quote], { office_days_min: officeFirst.min, office_days_max: officeFirst.max });
   }
   const hardOnsiteKeyword = hardOnsiteKw.find((kw) => workModeText.includes(kw));
   const hardOnsiteMatch = officeDayText.match(hardOnsiteRegex);
