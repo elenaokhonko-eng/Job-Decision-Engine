@@ -19,6 +19,7 @@ import {
 } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
+import { openAiWorkForSuite, TEST_SCORE_POLICY } from "../fixtures/aiWorkSwitch.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -173,6 +174,8 @@ async function makeDecidable(versions: { canonicalJobId: string; latestVersionId
   });
 }
 
+openAiWorkForSuite();
+
 describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () => {
   beforeAll(async () => {
     pool = new pg.Pool(pgConnectionConfig(databaseUrl));
@@ -293,7 +296,9 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
            processing_status = 'NEEDS_VERIFICATION',
            gate_decision = 'PASS',
            recommendation_eligibility = 'ELIGIBLE',
-           recommendation_outcome = 'REVIEW'
+           recommendation_outcome = 'REVIEW',
+           recommendation_requirement_score = 0.8,
+           recommendation_score_policy = '${TEST_SCORE_POLICY}'
        WHERE workspace_id = $1 AND id = $2`,
       [getContext().workspaceId, versions.canonicalJobId],
     );
@@ -1091,20 +1096,20 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       [recommendationJob.latestVersionId],
     );
     decisionPayload.content_hash = versionContent.rows[0]?.content_hash ?? "";
-    const decisionTaskKey = `DECIDE_RECOMMENDATION:${recommendationJob.latestVersionId}:recommendation_decider_v2:repair`;
+    const decisionTaskKey = `DECIDE_RECOMMENDATION:${recommendationJob.latestVersionId}:${DECIDER_VERSION}:repair`;
     const staleDecisionTaskId = await insertPendingTask({
       taskType: "DECIDE_RECOMMENDATION",
       taskKey: decisionTaskKey,
       payload: { ...decisionPayload, profile_version_id: oldProfileVersionId },
       fingerprintTaskType: "DECIDE_RECOMMENDATION",
-      fingerprintTaskVersion: "recommendation_decider_v2",
+      fingerprintTaskVersion: DECIDER_VERSION,
     });
     const currentDecisionTaskId = await insertPendingTask({
       taskType: "DECIDE_RECOMMENDATION",
       taskKey: decisionTaskKey,
       payload: decisionPayload,
       fingerprintTaskType: "DECIDE_RECOMMENDATION",
-      fingerprintTaskVersion: "recommendation_decider_v2",
+      fingerprintTaskVersion: DECIDER_VERSION,
     });
 
     let normalizationCalls = 0;

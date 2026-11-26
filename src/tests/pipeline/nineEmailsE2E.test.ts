@@ -20,6 +20,7 @@ import { SourceBroker } from "../../ingestion/sourceBroker.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../../contracts/jobSourceEvidence.js";
 import { saveWorkspacePreferenceRevision } from "../../policy/workspacePreferenceRegistry.js";
 import { batchEmbeddingFromPerInput } from "../fixtures/embeddingBatchMock.js";
+import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -270,6 +271,8 @@ async function seedFixtureProfile(context: WorkspaceContext): Promise<void> {
   }
 
 }
+
+openAiWorkForSuite();
 
 describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
   beforeAll(async () => {

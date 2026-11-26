@@ -9,7 +9,10 @@ import { createHash } from "node:crypto";
 
 import { findCustomerFacingRoleDuty } from "./customerFacingDuties.js";
 
-export const ROLE_SHAPE_POLICY_VERSION = "role_shape_v2";
+export const ROLE_SHAPE_POLICY_VERSION = "role_shape_v3";
+// v2 (shipped with gate-2026-11.7): one customer-engagement duty phrase is a downrank.
+// v3: contract detection ignores permanent / negated wording; people management needs a strong cue (direct reports, a team
+// of N, people or line management) with a management title, so one weak mention ("performance reviews") never flags.
 /** The combined downrank never exceeds this share of the score, so a job can lose rank but is never erased by it. */
 export const ROLE_SHAPE_MAX_TOTAL_PENALTY = 0.15;
 const EVIDENCE_QUOTE_MAX = 160;
@@ -89,23 +92,46 @@ export const detectCustomerFacingDelivery: RoleShapeDetector = ({ title, descrip
 
 const PEOPLE_MANAGEMENT_TITLE =
   /\b(?:head of|director|vp|vice president|chief|engineering manager|team lead|people manager|group manager|manager of)\b/i;
-const PEOPLE_MANAGEMENT_CUES: RegExp[] = [
+/** Cues that say the job is to run people. */
+const STRONG_PEOPLE_CUES: RegExp[] = [
   /\bdirect reports?\b/i,
   /\bline[- ]manag(?:e|er|ement|ing)\b/i,
-  /\bpeople[- ]manag(?:e|er|ement|ing)\b/i,
-  /\b(?:manage|lead|build|grow) (?:and (?:lead|develop|grow) )?a (?:global |distributed )?team of\b/i,
+  /\bpeople[- ](?:manag(?:e|er|ement|ing)|leadership)\b/i,
+  /\b(?:(?:manage|lead|build|grow) (?:and (?:lead|develop|grow) )?a|(?:manage|lead) (?:our|the)) (?:[\w-]+,? ){0,2}team of\b/i,
+  /\b(?:manage|lead)(?: and develop)? engineering managers\b/i,
+];
+/** "performance reviews", "hire and develop" and the like also appear in individual-contributor postings. */
+const WEAK_PEOPLE_CUES: RegExp[] = [
   /\b(?:hire|hiring) and (?:develop|mentor|coach|retain)\b/i,
   /\bperformance reviews?\b/i,
-  /\bcareer (?:development|growth) of (?:your|the) (?:team|reports)\b/i,
+  /\bcareer (?:development|growth) (?:of|for) (?:your|the) (?:team|reports|engineers)\b/i,
+  /\b(?:lead|manage) the team\b(?! of\b)/i, // "the team of ..." is the strong team-of cue, counted once
 ];
+/** Developing engineers counts only under a management title: individual contributors mentor engineers too. */
+const TITLED_PEOPLE_CUES: RegExp[] = [/\b(?:coach|coaching|mentor|mentoring|manage|managing) (?:[\w-]+ )?engineers\b/i];
+// A cue the posting denies ("no direct reports") or only advises others about is not this role's duty. Both patterns must end
+// where the cue starts, so any other word or punctuation in between leaves the cue counted.
+const PEOPLE_CUE_DENIED_BEFORE = /\b(?:no|without|not have(?: any)?)\s+$/i;
+const PEOPLE_CUE_ADVISED_BEFORE = /\badvis(?:e|es|ing)(?: [\w-]+)? on (?:(?:line|people)[- ]management(?: and|,) )?$/i;
+
+/** The first mention of the cue that is this role's own duty. */
+function ownCueMatch(description: string, cue: RegExp): RegExpMatchArray | null {
+  for (const match of description.matchAll(new RegExp(cue.source, "gi"))) {
+    const before = description.slice(Math.max(0, (match.index ?? 0) - 60), match.index ?? 0);
+    if (!PEOPLE_CUE_DENIED_BEFORE.test(before) && !PEOPLE_CUE_ADVISED_BEFORE.test(before)) return match;
+  }
+  return null;
+}
 
 export const detectPeopleManagementCore: RoleShapeDetector = ({ title, description }) => {
-  // A management-sounding title alone is not evidence: "Lead" and "Manager" are often individual roles. Managing a team
-  // is the core of the role only when the description says so: two separate cues, or a management title plus one cue.
-  const hits = PEOPLE_MANAGEMENT_CUES.map((cue) => description.match(cue)).filter((match): match is RegExpMatchArray => match !== null);
-  const titleHit = title.match(PEOPLE_MANAGEMENT_TITLE);
-  if (hits.length >= 2 || (titleHit && hits.length >= 1)) {
-    const first = hits[0]!;
+  // Managing a team is the core of the role only when the description says so: two separate cues, or a management title plus
+  // one STRONG cue. A senior or director title with a single weak mention ("performance reviews") is an individual role.
+  const own = (cues: RegExp[]) => cues.map((cue) => ownCueMatch(description, cue)).filter((match): match is RegExpMatchArray => match !== null);
+  const titled = PEOPLE_MANAGEMENT_TITLE.test(title);
+  const strongHits = own(STRONG_PEOPLE_CUES);
+  const hits = [...strongHits, ...own(WEAK_PEOPLE_CUES), ...(titled ? own(TITLED_PEOPLE_CUES) : [])];
+  if (hits.length >= 2 || (titled && strongHits.length >= 1)) {
+    const first = hits[0]!; // a strong cue when there is one
     return { code: "PEOPLE_MANAGEMENT_CORE", penalty: 0.08, source: "DESCRIPTION", quote: excerpt(description, first.index ?? 0, first[0].length) };
   }
   return null;
@@ -119,12 +145,56 @@ export const detectPeopleManagementCore: RoleShapeDetector = ({ title, descripti
 const CONTRACT_DESCRIPTION =
   /\b(?:(?:\d{1,2}|six|twelve|twelve|nine|three)[- ]months?(?: fixed[- ]term)? contract|fixed[- ]term contract|contract (?:role|position|basis|opportunity)|freelance(?:r)?|independent contractor|contractor position)\b/i;
 
-export const detectContractEmployment: RoleShapeDetector = ({ description, employmentType }) => {
-  if (/\b(?:CONTRACT|CONTRACTOR|FIXED[_ -]?TERM|FREELANCE)\b/i.test(employmentType)) {
+// A contract mention is ignored only for these fixed forms of "this job is not a contract", each ending where the contract phrase
+// starts. Anything else ("not offered on a 12-month contract", "Relocation: No 6-month contract", "Why not be a freelancer") stays
+// a contract: posting text is often whitespace-collapsed, and a missed contract is worse than a 5% downrank too many.
+const CONTRACT_NOT_CONTRACT_BEFORE = new RegExp(
+  "(?:" +
+    [
+      String.raw`(?:(?<!\bor )\b(?:not|never)|n['’]t)\s+an?(?:\s+short[- ]term or)?`, // "is not a ...", "isn't a ..."
+      String.raw`\bthere (?:is|are) no`,
+      String.raw`(?:^|[.!]\s+)no`, // "No 6-month contract here", at the start of a sentence only
+      String.raw`\bnot be (?:hired|employed|engaged) (?:on|as) an?`,
+      String.raw`\bcannot engage an?`,
+      String.raw`\bdo not offer`,
+    ].join("|") +
+    String.raw`)\s+$`,
+  "i",
+);
+/** Soft hyphens are dropped; Unicode dashes (hyphen, non-breaking hyphen, en and em dash, minus) become "-". Matching and quotes use this text. */
+const normaliseDashes = (text: string): string => text.replace(/\u00AD/g, "").replace(/[‐-―−]/g, "-");
+/** Permanent wording directly before the contract phrase ("permanent contract basis"). */
+const PERMANENT_BEFORE_CONTRACT = /\b(?:permanent|open[- ]ended|indefinite)[\s,-]*$/i;
+/** What stands before that permanent word when it is negated or only a prospect ("isn't a permanent", "temp-to-permanent"). */
+const PERMANENT_DENIED_BEFORE =
+  /(?:(?:\b(?:not|no|never|instead of|rather than)|n['’]t)(?:\s+(?:a|an|the|strictly|currently|yet|necessarily|fully|offered|as))*\s+|\bnon[\s-]*|\b(?:in)?to(?:\s+an?)?[\s-]+|\bbecome(?:\s+an?)?\s+)$/i;
+/** An employment type is permanent only when it holds nothing but these words: "Contract to permanent" or "no permanent headcount" is not. */
+const PERMANENT_TYPE_WORDS = /\b(?:permanent|open[- ]ended|indefinite|contract|employment|full[- ]time)\b/gi;
+
+function isPermanentType(employmentType: string): boolean {
+  return /\b(?:permanent|open[- ]ended|indefinite)\b/i.test(employmentType) && !/[a-z]/i.test(employmentType.replace(PERMANENT_TYPE_WORDS, ""));
+}
+
+function saysPermanentContract(before: string): boolean {
+  const permanent = PERMANENT_BEFORE_CONTRACT.exec(before);
+  return permanent !== null && !PERMANENT_DENIED_BEFORE.test(before.slice(0, permanent.index));
+}
+
+export const detectContractEmployment: RoleShapeDetector = ({ description: rawDescription, employmentType: rawEmploymentType }) => {
+  const description = normaliseDashes(rawDescription);
+  const employmentType = normaliseDashes(rawEmploymentType);
+  // "Permanent contract" is a permanent job.
+  if (/\b(?:CONTRACT|CONTRACTOR|FIXED[_ -]?TERM|FREELANCE)\b/i.test(employmentType) && !isPermanentType(employmentType)) {
     return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "EMPLOYMENT_TYPE", quote: employmentType.slice(0, EVIDENCE_QUOTE_MAX) };
   }
-  const hit = description.match(CONTRACT_DESCRIPTION);
-  if (hit) return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "DESCRIPTION", quote: excerpt(description, hit.index ?? 0, hit[0].length) };
+  for (const hit of description.matchAll(new RegExp(CONTRACT_DESCRIPTION.source, "gi"))) {
+    const index = hit.index ?? 0;
+    const start = Math.max(0, index - 60);
+    // The "_" keeps a cut-off window from looking like the start of the text.
+    const before = (start > 0 ? "_" : "") + description.slice(start, index);
+    if (CONTRACT_NOT_CONTRACT_BEFORE.test(before) || saysPermanentContract(before)) continue;
+    return { code: "CONTRACT_EMPLOYMENT", penalty: 0.05, source: "DESCRIPTION", quote: excerpt(description, index, hit[0].length) };
+  }
   return null;
 };
 
