@@ -355,6 +355,11 @@ describe.skipIf(skipReal)("seeding reaches every stage when the database is far 
       [workspaceId, crypto.createHash("sha256").update("zebra-share-pending").digest("hex")],
     );
 
+    // The timing below is about round trips. A schema created seconds ago has statistics only if autovacuum happened to
+    // run, and without them one existing selection (missing requirement vectors) was seen to take over 10 s.
+    const tables = await db().query<{ tablename: string }>(`SELECT tablename FROM pg_tables WHERE schemaname = $1`, [schemaName]);
+    for (const { tablename } of tables.rows) await db().query(`ANALYZE ${schemaName}.${tablename}`);
+
     const expectedTypes = PIPELINE_STAGE_TASK_TYPES.filter((type) => type !== "FETCH_JOB_CONTENT");
     for (const budgetMs of [15_000, 60_000]) {
       await clearTasks();
