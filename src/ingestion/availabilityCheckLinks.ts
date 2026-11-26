@@ -15,11 +15,11 @@ import { postingRequestUrl } from "./jobContentFetcher.js";
 export type BlockedLinkReason = "LINKEDIN_LINK" | "AGGREGATOR_LINK" | "JOB_BOARD_LINK";
 
 /** LinkedIn's own domains: the site (also in AGGREGATOR_HOSTS), its short links and its media CDN. */
-const LINKEDIN_DOMAINS = ["linkedin.com", "lnkd.in", "licdn.com"];
+const LINKEDIN_DOMAINS = ["linkedin.com", "linkedin.cn", "lnkd.in", "licdn.com"];
 const JOB_BOARD_KINDS = new Set(["json_api", "rss"]);
 
 /** Listed aggregators that also run country domains (glassdoor.co.uk, indeed.fr, jobstreet.com.sg, monster.de). */
-const COUNTRY_VARIANT_AGGREGATOR = /(?:^|\.)(?:glassdoor|indeed|jobstreet|monster)\.(?:[a-z]{2}|(?:com?|net|org)\.[a-z]{2})$/;
+const COUNTRY_VARIANT_AGGREGATOR = /(?:^|\.)(?:glassdoor|indeed|jobstreet|monster|efinancialcareers|ziprecruiter|simplyhired|jobsdb)\.(?:[a-z]{2}|(?:com?|net|org)\.[a-z]{2})$/;
 
 const bareHost = (hostname: string): string => hostname.toLowerCase().replace(/\.+$/, "").replace(/^www\./, "");
 const onDomain = (host: string, domain: string): boolean => host === domain || host.endsWith(`.${domain}`);

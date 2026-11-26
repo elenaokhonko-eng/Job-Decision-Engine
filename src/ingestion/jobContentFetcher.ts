@@ -153,8 +153,8 @@ export interface PostingFetcherDependencies {
   readonly refuseRequest?: (url: URL) => boolean;
   /** Awaited before every request, redirect hops included (pacing); the time spent does not count against the read's limit. */
   readonly beforeRequest?: (url: URL) => Promise<void>;
-  /** Told the status of every response, redirects included. */
-  readonly onResponse?: (url: URL, status: number) => void;
+  /** Told of every response, redirects included. */
+  readonly onResponse?: (url: URL, response: SafeHttpResponse) => void;
   readonly fetchOnce?: (
     url: URL,
     timeoutMs: number,
@@ -534,7 +534,7 @@ export async function fetchSafe(
         fetchOnce(current, requestRemainingMs, addresses, controller.signal, maxBytes),
         controller.signal,
       );
-      dependencies.onResponse?.(current, response.status);
+      dependencies.onResponse?.(current, response);
       if (response.body.byteLength > maxBytes) throw new Error(bodyLimitMessage(maxBytes));
       if (![301, 302, 303, 307, 308].includes(response.status)) {
         return { response, redirects };
@@ -1256,25 +1256,7 @@ function documentTitleEmployer(html: string): string | null {
 }
 
 /** Page copy stating that the posting is closed or no longer available. */
-// "Not available at this time" counts only in a sentence about the job itself: sites say the same about maintenance.
-const POSTING_UNAVAILABLE_TEXT = /\b(?:(?:job|position|posting|vacancy)\b(?!\s+(?:search|site|board|portal|system))[^.!?\n]{0,80}\bnot available at this time|no longer (?:available|accepting applications|open)|(?:job|position|posting|vacancy) (?:has been filled|has expired|has closed|is closed|is no longer)|this (?:job|position|posting) (?:has )?(?:expired|closed))\b/i;
-
-/** An explicit statement that THIS posting is over, on a page that still shows it. Conditional wording does not count. */
-const THIS_POSTING_CLOSED_TEXT = /(?<!\b(?:if|once|when|until|after|unless|before|whether|case) )\bthis (?:job|position|posting|vacancy|role|opportunity|requisition)(?: posting| listing| advert(?:isement)?)? (?:is no longer (?:accepting (?:new )?(?:applications|applicants)(?! from\b)|available|open)\b|has (?:been filled|expired|closed)\b|is (?:now )?closed\b)|\bno longer accepting (?:new )?applications for this (?:job|position|posting|vacancy|role)\b/i;
-
-/** The page text a reader sees: without scripts, no-script fallbacks, templates, navigation, footers and side lists. */
-function visiblePageText(html: string): string {
-  return htmlToPlainText(html.replace(/<(script|style|noscript|template|nav|footer|aside)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " "))
-    .replace(/\s+/g, " ");
-}
-
-/** A validThrough that has passed at the time of the read. A date without a time lasts to the end of that day (UTC). */
-function validThroughPassed(value: unknown, retrievedAt: string): boolean {
-  const iso = isoDate(value);
-  if (iso === null) return false;
-  const dateOnly = typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
-  return new Date(iso).getTime() + (dateOnly ? 24 * 3_600_000 : 0) <= new Date(retrievedAt).getTime();
-}
+const POSTING_UNAVAILABLE_TEXT = /\b(?:not available at this time|no longer (?:available|accepting applications|open)|(?:job|position|posting|vacancy) (?:has been filled|has expired|has closed|is closed|is no longer)|this (?:job|position|posting) (?:has )?(?:expired|closed))\b/i;
 
 function findMatchingJsonLd(
   html: string,
@@ -1326,7 +1308,7 @@ function parseEmployerHtml(
   const title = matchedJsonLd?.title ?? h1;
   if (!matchedJsonLd && !normalizeIdentity(title)) {
     // No posting markup and no heading: a closed posting or a page this fetcher cannot read.
-    if (POSTING_UNAVAILABLE_TEXT.test(htmlToPlainText(html.replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript\s*>/gi, " ")))) {
+    if (POSTING_UNAVAILABLE_TEXT.test(htmlToPlainText(html))) {
       return { kind: "UNAVAILABLE", reason: "Employer page shows no posting and states the job is not available.", evidence };
     }
     return { kind: "BLOCKED", reason: "UNSUPPORTED_SOURCE" };
@@ -1417,10 +1399,7 @@ function parseEmployerHtml(
     publishedAt: matchedJsonLd ? isoDate(matchedJsonLd.posting.datePosted) : null,
     updatedAt: matchedJsonLd ? isoDate(matchedJsonLd.posting.dateModified) : null,
     expiresAt: matchedJsonLd ? isoDate(matchedJsonLd.posting.validThrough) : null,
-    availability: THIS_POSTING_CLOSED_TEXT.test(visiblePageText(html))
-      || validThroughPassed(matchedJsonLd?.posting.validThrough, evidence.retrievedAt)
-      ? "CLOSED"
-      : "UNKNOWN",
+    availability: "UNKNOWN",
     rawPayload: {
       title,
       companyName: employer,

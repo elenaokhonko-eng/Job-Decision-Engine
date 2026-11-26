@@ -67,7 +67,7 @@ describe("links a manual check never requests", () => {
     const log: string[] = [];
     await fetchJobContent("https://careers.example.test/jobs/1", { title: "Engineer", companyName: "Acme" }, {
       beforeRequest: async (url) => { log.push(`wait ${url.pathname}`); },
-      onResponse: (_url, status) => { log.push(`status ${status}`); },
+      onResponse: (_url, response) => { log.push(`status ${response.status}`); },
       resolveAddresses: async () => [{ address: "93.184.216.34", family: 4 }],
       fetchOnce: async (url) => {
         log.push(`get ${url.pathname}`);
@@ -77,6 +77,24 @@ describe("links a manual check never requests", () => {
       },
     });
     expect(log).toEqual(["wait /jobs/1", "get /jobs/1", "status 301", "wait /jobs/2", "get /jobs/2", "status 429"]);
+  });
+
+  it("leaves out the other listed aggregators' country domains and linkedin.cn", () => {
+    for (const url of ["https://www.efinancialcareers.sg/jobs/1", "https://efinancialcareers.co.uk/x", "https://ziprecruiter.co.uk/x",
+      "https://www.simplyhired.ca/x", "https://hk.jobsdb.com/x", "https://jobsdb.com.hk/x"]) {
+      expect(blockedLinkReason(url, BOARDS), url).toBe("AGGREGATOR_LINK");
+    }
+    expect(blockedLinkReason("https://www.linkedin.cn/jobs/view/1", BOARDS)).toBe("LINKEDIN_LINK");
+  });
+
+  it("does not count a pacing pause against the read's time limit", async () => {
+    const result = await fetchJobContent("https://careers.example.test/jobs/1", { title: "Engineer", companyName: "Acme" }, {
+      totalTimeoutMs: 250,
+      beforeRequest: () => new Promise((resolve) => setTimeout(resolve, 600)),
+      resolveAddresses: async () => [{ address: "93.184.216.34", family: 4 }],
+      fetchOnce: async (url) => ({ status: 404, headers: {}, body: Buffer.alloc(0), url: url.toString() }),
+    });
+    expect(result.kind).toBe("UNAVAILABLE");
   });
 
   it("names the host that is actually requested", () => {
@@ -178,7 +196,7 @@ describe("command arguments and refusals", () => {
     expect(checkDate(new Date("2026-01-10T15:59:59Z"))).toBe("2026-01-10");
     expect(checkDate(new Date("2026-01-10T16:00:00Z"))).toBe("2026-01-11");
     const read = { line: 1, linkKey: "k", canonicalJobId: "a", jobVersionId: "v", site: "careers.example.test", intervalMs: 5000 };
-    const text = formatPlan({ listed: 3, reads: [read, { ...read, canonicalJobId: "b" }], excluded: [{ line: 3, reason: "LINKEDIN_LINK" }], checkDate: "2026-01-11", planId: "plan-1" });
+    const text = formatPlan({ listed: 3, reads: [read, { ...read, canonicalJobId: "b" }], excluded: [{ line: 3, reason: "LINKEDIN_LINK" }], checkDate: "2026-01-11", stoppedSites: [], planId: "plan-1" });
     expect(text).toContain("api.frankfurter.app");
     expect(text).toContain("plan id: plan-1 (check date 2026-01-11)");
     expect(text).toContain("posting links to read: 2");

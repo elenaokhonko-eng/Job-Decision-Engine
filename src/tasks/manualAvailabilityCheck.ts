@@ -2,7 +2,8 @@
  * Same-day availability check of a chosen list of jobs (scripts/check_availability_now.ts).
  *
  * Each posting link is read once a day, serially, with a pause between requests of one site (redirect hops too).
- * A site that answers 429 or blocks the reader is not read again that day. An apply is bound to the confirmed plan:
+ * A site that answers 429 or 403, or shows a challenge page, is not read again that day. A page the shared reader
+ * calls open or closed can still be taken back to cannot-tell (src/ingestion/manualCheckDowngrade.ts). An apply is bound to the confirmed plan:
  * job list, links and Singapore date. Nothing from the jobs file is printed: only line numbers and counts. What a read means and how
  * it is stored is the existing re-check (runAvailabilityRecheck, manual mode): this module only chooses which
  * links may be read, paces them and reports. A job never checked before is included. It writes nothing itself.
@@ -16,6 +17,7 @@ import pg from "pg";
 import { pgConnectionConfig } from "../db/pgSsl.js";
 import { blockedLinkReason, loadJobBoardHosts, type BlockedLinkReason } from "../ingestion/availabilityCheckLinks.js";
 import { fetchJobContent, postingRequestUrl, type PostingFetcherDependencies } from "../ingestion/jobContentFetcher.js";
+import { downgradeForManualCheck, isChallengePage, type ManualPage } from "../ingestion/manualCheckDowngrade.js";
 import { requireApprovedReplayTarget } from "../reporting/replayGuard.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
@@ -67,7 +69,9 @@ export interface AvailabilityCheckPlan {
   readonly reads: readonly PlannedRead[];
   readonly excluded: ReadonlyArray<{ readonly line: number; readonly reason: ExclusionReason }>;
   readonly checkDate: string;
-  /** Hash of the job list, the links to be read and the Singapore date: what an apply must confirm. */
+  /** Sites that stopped answering earlier today: never requested, also not through a redirect. */
+  readonly stoppedSites: readonly string[];
+  /** Hash of the job list, the links, their pace and the Singapore date: what an apply must confirm. */
   readonly planId: string;
 }
 
@@ -176,10 +180,11 @@ export async function planAvailabilityCheck(
   const date = checkDate(options.now);
   const planId = sha256(JSON.stringify({
     date,
+    minIntervalMs: minMs,
     jobs: jobIds.map((id) => id.trim().toLowerCase()).sort(),
-    reads: reads.map((read) => `${read.canonicalJobId} ${read.linkKey}`).sort(),
+    reads: reads.map((read) => `${read.canonicalJobId} ${read.linkKey} ${read.intervalMs}`).sort(),
   })).slice(0, 16);
-  return { listed: jobIds.length, reads, excluded, checkDate: date, planId };
+  return { listed: jobIds.length, reads, excluded, checkDate: date, stoppedSites: [...today.stopped].sort(), planId };
 }
 
 export function formatPlan(plan: AvailabilityCheckPlan): string {
@@ -197,7 +202,8 @@ export function formatPlan(plan: AvailabilityCheckPlan): string {
     `other requests: up to ${plan.reads.length} to api.frankfurter.app (exchange rate to SGD), only when the decision recompute after an open or closed read meets a non-SGD salary with no recent stored rate`,
     `sites: ${sites.size}, one at a time, serial; pauses add at least ${seconds}s`,
     ...[...sites].map(([host, s]) => `  ${host}: ${s.requests} request(s), at most 1 every ${s.intervalMs / 1000}s`),
-    "a site that answers 429 or 403, or shows a bot block, is not read again today",
+    "a site that answers 429 or 403, or shows a challenge page, is not read again today",
+    `sites already stopped today: ${plan.stoppedSites.join(", ") || "none"}`,
     `excluded: ${plan.excluded.length}`,
     ...[...reasons].sort(([a], [b]) => a.localeCompare(b)).map(([reason, lines]) => `  ${reason}: ${lines.length} (lines ${lines.join(",")})`),
     `plan id: ${plan.planId} (check date ${plan.checkDate})`,
@@ -213,6 +219,10 @@ export interface CheckedJob {
   readonly visible: boolean | null;
   /** The decision was not recomputed because that would have removed the stored requirement score. */
   readonly scoreKept?: boolean;
+  /** CLOSED from page wording alone: the owner should open the posting. */
+  readonly checkByHand?: boolean;
+  /** Position of the job in the chosen list. */
+  readonly line?: number;
 }
 
 export interface ApplyOptions {
@@ -247,13 +257,13 @@ export async function applyAvailabilityCheck(
   const jobBoardHosts = options.jobBoardHosts ?? await loadJobBoardHosts();
   const intervals = new Map<string, number>();
   for (const read of plan.reads) intervals.set(read.site, Math.max(read.intervalMs, intervals.get(read.site) ?? 0));
-  const stopped = new Set<string>();
+  const stopped = new Set<string>(plan.stoppedSites);
   const results: CheckedJob[] = [];
   for (const read of plan.reads) {
     const startedAt = now();
     const report = (checked: CheckedJob) => {
-      options.log?.(`line ${read.line} ${read.site} ${checked.result} ${checked.detail}${checked.visible === false ? " NOT_VISIBLE_IN_READ_MODEL" : ""}${checked.scoreKept ? " DECISION_NOT_RECOMPUTED" : ""}`);
-      results.push(checked);
+      options.log?.(`line ${read.line} ${read.site} ${checked.result} ${checked.detail}${checked.visible === false ? " NOT_VISIBLE_IN_READ_MODEL" : ""}${checked.scoreKept ? " DECISION_NOT_RECOMPUTED" : ""}${checked.checkByHand ? " CHECK_BY_HAND" : ""}`);
+      results.push({ ...checked, line: read.line });
     };
     const skip = (detail: string) => report({ canonicalJobId: read.canonicalJobId, result: "SKIPPED", detail, visible: null });
     // The plan was confirmed for one Singapore date: past midnight nothing more is requested.
@@ -262,6 +272,7 @@ export async function applyAvailabilityCheck(
     const interval = intervals.get(read.site)!;
     const stoppedByThisRead = new Set<string>();
     const stop = (host: string) => { stoppedByThisRead.add(host); stoppedByThisRead.add(read.site); };
+    let last: { host: string; page: ManualPage } | null = null as { host: string; page: ManualPage } | null;
     const fetcher: PostingFetcherDependencies = {
       ...options.fetcher,
       refuseRequest: (url) => stopped.has(url.hostname.toLowerCase()) || blockedLinkReason(url.toString(), jobBoardHosts) !== null,
@@ -271,8 +282,16 @@ export async function applyAvailabilityCheck(
         await throttle.acquire(read.site, interval);
         if (host !== read.site) await throttle.acquire(host, interval);
       },
-      onResponse: (url, status) => { if (SITE_STOP_STATUSES.has(status)) stop(url.hostname.toLowerCase()); },
+      onResponse: (url, response) => {
+        const host = url.hostname.toLowerCase();
+        if (SITE_STOP_STATUSES.has(response.status)) stop(host);
+        if (response.status >= 300 && response.status < 400) return;
+        const html = (response.headers["content-type"] ?? "").toLowerCase().includes("html") ? response.body.toString("utf8") : null;
+        last = { host, page: { status: response.status, html } };
+      },
     };
+    let downgradeReason: string | null = null;
+    let checkByHand = false;
     let checked: CheckedJob;
     try {
       const outcome = await runAvailabilityRecheck(
@@ -283,7 +302,14 @@ export async function applyAvailabilityCheck(
         {
           ...defaultAvailabilityRecheckDependencies(),
           fetchJobContent: async (url, expected, dependencies) => {
-            const result = await fetchJobContent(url, expected, dependencies);
+            const page = await fetchJobContent(url, expected, dependencies);
+            // A challenge stops the site that served it.
+            if (last && page.kind !== "COMPLETE" && isChallengePage(last.page)) stop(last.host);
+            // The shared reader's verdict can only be taken back here, never raised or lowered to a verdict.
+            const downgrade = downgradeForManualCheck(page, last?.page ?? null, startedAt);
+            downgradeReason = downgrade.reason;
+            checkByHand = downgrade.checkByHand;
+            const result = downgrade.result;
             if ((result.kind === "BLOCKED" && result.reason === "BOT_BLOCKED") ||
                 (result.kind === "RETRYABLE_FAILURE" && /rate limit/i.test(result.reason))) stop(read.site);
             return result;
@@ -295,7 +321,15 @@ export async function applyAvailabilityCheck(
           createFeedAdapter: () => null,
           now: () => startedAt,
         },
-        { manual: true, manualDetails: () => ({ link_key: read.linkKey, stopped_sites: [...stoppedByThisRead] }) },
+        {
+          manual: true,
+          manualDetails: () => ({
+            link_key: read.linkKey,
+            stopped_sites: [...stoppedByThisRead],
+            ...(downgradeReason ? { manual_downgrade: downgradeReason } : {}),
+            ...(checkByHand ? { check_by_hand: true } : {}),
+          }),
+        },
       );
       if (outcome.status === "SKIPPED") {
         checked = { canonicalJobId: read.canonicalJobId, result: "SKIPPED", detail: outcome.reason, visible: null };
@@ -309,7 +343,8 @@ export async function applyAvailabilityCheck(
         checked = {
           canonicalJobId: read.canonicalJobId,
           result,
-          detail: outcome.reasonCode,
+          detail: downgradeReason ? `${outcome.reasonCode} ${downgradeReason}` : outcome.reasonCode,
+          checkByHand: checkByHand && result === "CLOSED",
           visible: result === "CANNOT_TELL" ? null : await verdictVisible(client, context.workspaceId, read.canonicalJobId, result === "OPEN", startedAt),
           scoreKept: rows[0]?.kept === true,
         };
@@ -465,6 +500,8 @@ export async function runAvailabilityCheckCommand(
     const results = await (dependencies.apply ?? applyAvailabilityCheck)(db, context, plan, { log });
     const tally = (result: CheckedJob["result"]) => results.filter((r) => r.result === result).length;
     log(`APPLIED: ${results.length} read(s): open=${tally("OPEN")} closed=${tally("CLOSED")} cannot_tell=${tally("CANNOT_TELL")} skipped=${tally("SKIPPED")} error=${tally("ERROR")} not_visible=${results.filter((r) => r.visible === false).length} decision_not_recomputed=${results.filter((r) => r.scoreKept).length}`);
+    const byHand = results.filter((r) => r.checkByHand).map((r) => r.line);
+    log(`check by hand (CLOSED from page wording alone): ${byHand.length}${byHand.length ? ` (lines ${byHand.join(",")})` : ""}`);
     return availabilityCheckExitCode(results);
   } finally {
     await client.end();

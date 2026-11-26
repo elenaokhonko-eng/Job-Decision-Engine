@@ -15,6 +15,7 @@ import {
   seedAvailabilityRechecks,
   type AvailabilityRecheckDependencies,
 } from "../../tasks/availabilityRecheck.js";
+import { fetchJobContent } from "../../ingestion/jobContentFetcher.js";
 import { runRecommendationDecider } from "../../pipeline/recommendationDecider.js";
 import {
   applyAvailabilityCheck,
@@ -415,6 +416,91 @@ describe.skipIf(skipReal)("manual same-day availability check (PostgreSQL)", () 
       }),
     });
     expect(log).toEqual(["/jobs/1", "pause 5000", "/jobs/moved"]);
+  });
+
+  it("puts the minimum interval into the plan id", async () => {
+    const job = await createJob();
+    const now = new Date();
+    const at = (intervalSeconds: number) => planAvailabilityCheck(db(), ctx(), [job.id], { now, intervalSeconds, requestsPerMinute: async () => 2 });
+    // The manifest's slower pace hides the difference in the reads themselves; the plan id still differs.
+    const [five, ten] = [await at(5), await at(10)];
+    expect(five.reads).toEqual(ten.reads);
+    expect(five.planId).not.toBe(ten.planId);
+  });
+
+  it("never requests a site stopped earlier today, also not through a redirect", async () => {
+    const stoppedHost = `halt-${randomUUID().slice(0, 8)}.example.com`;
+    const first = await createJob({ url: `https://${stoppedHost}/jobs/1` });
+    await check(first, (url) => page(url, 429));
+    const second = await createJob();
+    const planned = await plan([second.id]);
+    expect(planned.stoppedSites).toContain(stoppedHost);
+    const requested: string[] = [];
+    const results = await applyAvailabilityCheck(db(), ctx(), planned, {
+      throttle: noWait(), fetcher: fetcher((url) => page(url, 302, "", { location: `https://${stoppedHost}/jobs/9` }), requested),
+    });
+    expect(results).toMatchObject([{ result: "CANNOT_TELL" }]);
+    expect(requested).toEqual([second.url]);
+  });
+
+  it.each([200, 503])("treats a challenge page answering %i as a site stop", async (status) => {
+    const host = `wall-${randomUUID().slice(0, 8)}.example.com`;
+    const a = await createJob({ url: `https://${host}/jobs/1` });
+    const b = await createJob({ url: `https://${host}/jobs/2` });
+    const requested: string[] = [];
+    const results = await applyAvailabilityCheck(db(), ctx(), await plan([a.id, b.id]), {
+      throttle: noWait(),
+      fetcher: fetcher((url) => page(url, status, "<html><head><title>Just a moment...</title></head><body></body></html>"), requested),
+    });
+    expect(results).toMatchObject([{ result: "CANNOT_TELL" }, { result: "SKIPPED", detail: "SITE_STOPPED_AFTER_429_OR_BLOCK" }]);
+    expect(requested).toEqual([a.url]);
+    expect((await plan([b.id])).excluded).toEqual([{ line: 1, reason: "SITE_STOPPED_TODAY" }]);
+  });
+
+  it("stops the host that served a challenge after a redirect, as well as the site being read", async () => {
+    const wall = `wall-${randomUUID().slice(0, 8)}.example.com`;
+    const job = await createJob();
+    const behindWall = await createJob({ url: `https://${wall}/jobs/1` });
+    await check(job, (url) => url.hostname === wall
+      ? page(url, 200, "<html><head><title>Just a moment...</title></head></html>")
+      : page(url, 302, "", { location: `https://${wall}/challenge` }));
+    expect((await plan([behindWall.id])).excluded).toEqual([{ line: 1, reason: "SITE_STOPPED_TODAY" }]);
+  });
+
+  it("takes an open page with closure wording back to cannot-tell and leaves the automatic re-check as it was", async () => {
+    const job = await createJob();
+    const closing = (url: URL) => {
+      const body = openPage(url, job.board).body.toString("utf8").replace("</h1>", "</h1><p>Applications are now closed.</p>");
+      return page(url, 200, body);
+    };
+    const results = await check(job, closing);
+    expect(results).toMatchObject([{ result: "CANNOT_TELL", visible: null }]);
+    expect(results[0]!.detail).toContain("CLOSURE_WORDING");
+    expect((await availability(job)).availability_state).toBe("UNKNOWN");
+
+    // The same page read by the automatic re-check is open, as on main.
+    const other = await createJob({ availability: "OPEN_EXPIRED" });
+    const automatic = await runAvailabilityRecheck(db(), ctx(),
+      { canonical_job_id: other.id, job_version_id: other.versionId, cycle_started_at: new Date().toISOString() }, null, {
+        fetchJobContent: (url, expected) => fetchJobContent(url, expected, fetcher((target) => {
+          const body = openPage(target, other.board).body.toString("utf8").replace("</h1>", "</h1><p>Applications are now closed.</p>");
+          return page(target, 200, body);
+        })),
+        refreshSourceEvidence: async () => { throw new Error("no feed in this test"); },
+        createFeedAdapter: () => null,
+        requestsPerMinute: async () => null,
+        throttle: noWait(),
+        now: () => new Date(),
+      });
+    expect(automatic).toMatchObject({ outcome: "OPEN" });
+  });
+
+  it("flags a closed verdict taken from page wording for a check by hand", async () => {
+    const job = await createJob();
+    const results = await check(job, (url) => page(url, 200, "<html><body><p>This position has been filled.</p></body></html>"));
+    expect(results).toMatchObject([{ result: "CLOSED", checkByHand: true, line: 1 }]);
+    const gone = await createJob();
+    expect(await check(gone, (url) => page(url, 404))).toMatchObject([{ result: "CLOSED", checkByHand: false }]);
   });
 
   it("leaves out hard-rejected jobs and test fixtures", async () => {
