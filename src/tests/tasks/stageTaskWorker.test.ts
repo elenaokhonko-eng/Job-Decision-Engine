@@ -407,8 +407,8 @@ describe("stageTaskWorker", () => {
     expect(buildPipelineTaskKey("ROUTE_LANE", "version-1", "lane_router_v1", undefined, "repair")).toBe(
       "ROUTE_LANE:version-1:lane_router_v1:repair"
     );
-    expect(buildPipelineTaskKey("DECIDE_RECOMMENDATION", "version-1", "recommendation_decider_v2", undefined, "repair")).toBe(
-      "DECIDE_RECOMMENDATION:version-1:recommendation_decider_v2:repair"
+    expect(buildPipelineTaskKey("DECIDE_RECOMMENDATION", "version-1", "recommendation_decider_v3", undefined, "repair")).toBe(
+      "DECIDE_RECOMMENDATION:version-1:recommendation_decider_v3:repair"
     );
   });
 
@@ -1438,7 +1438,7 @@ describe("stageTaskWorker", () => {
             id: "task-stale-decision",
             workspace_id: ctx.workspaceId,
             task_type: "DECIDE_RECOMMENDATION",
-            task_key: "DECIDE_RECOMMENDATION:version-prelane:recommendation_decider_v2",
+            task_key: "DECIDE_RECOMMENDATION:version-prelane:recommendation_decider_v3",
             payload: { canonical_job_id: "job-prelane", job_version_id: "version-prelane" },
             status: "RUNNING",
             available_at: new Date().toISOString(),
