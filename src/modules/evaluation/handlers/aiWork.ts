@@ -2,6 +2,7 @@ import type { AiWorkSettings } from "../../../platform/config/index.js";
 import {
   selectHeldAiWorkCounts,
   selectJobVersionQualifies,
+  selectQualifyingJobVersions,
   type EvaluationQueryable,
   type HeldAiWorkCounts,
 } from "../../../platform/persistence/evaluation/index.js";
@@ -18,6 +19,17 @@ export async function jobVersionMayReceiveAiWork(
 ): Promise<boolean> {
   if (settings.mode === "HELD") return false;
   return selectJobVersionQualifies(db, workspaceId, jobVersionId, settings);
+}
+
+/** `jobVersionMayReceiveAiWork` for a list, in one query. */
+export async function jobVersionsThatMayReceiveAiWork(
+  db: EvaluationQueryable,
+  workspaceId: string,
+  jobVersionIds: readonly string[],
+  settings: AiWorkSettings,
+): Promise<ReadonlySet<string>> {
+  if (settings.mode === "HELD") return new Set();
+  return new Set(await selectQualifyingJobVersions(db, workspaceId, jobVersionIds, settings));
 }
 
 export type AiWorkReport = AiWorkSettings & HeldAiWorkCounts;

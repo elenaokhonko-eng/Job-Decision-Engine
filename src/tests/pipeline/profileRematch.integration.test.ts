@@ -554,7 +554,9 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
       includeTestFixtures: true,
       maxSeedPerType: 1,
     });
-    expect(bounded.supersededProfileMatch).toBe(1);
+    // The queued re-match takes no slot of the cap of 1: the seed looks past it and meets all three.
+    expect(bounded.supersededProfileMatch).toBe(3);
+    expect(bounded.byType.MATCH_PROFILE_EVIDENCE).toEqual({ inserted: 0, existing: 3 });
     expect((await profileMatchReport()).ALL).toMatchObject({ needs_rematch: 3, rematch_task_queued: 3 });
 
     // A re-match blocked on its job content cannot progress by re-seeding, so it must not take
