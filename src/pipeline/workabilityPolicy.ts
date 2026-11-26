@@ -631,7 +631,7 @@ export interface WorkerTerritoryContext {
 }
 
 // ── "us" the pronoun is not the United States (gate-2026-11.9) ──
-// "Join our teams ... help us become the leading investor" was stored as a United States restriction.
+// "must have ... help us grow" was stored as a United States restriction.
 /** Text before a lower-case "us" that makes it the country: "in the us", "(us", "remote - us". */
 const US_COUNTRY_BEFORE = /(?:^|[(\/|:,[]|\s[-–—]|\b(?:the|continental|contiguous|eastern|western|central|non|in|within|outside|across|throughout))[\s-]*$/i;
 /** "the trust clients place in us" keeps the pronoun although "in" precedes it. */
@@ -1016,7 +1016,7 @@ export function hasExplicitTerritoryRestriction(value: unknown, territory: strin
       && !/\b(?:citizen(?:s|ship)?|work\s+(?:permit|authori[sz]ation)|visa|right\s+to\s+work|(?:eligible|authori[sz]ed)\s+to\s+work|green\s+card|permanent\s+resident|must\s+(?:\w+\s+){0,2}?(?:reside|live|be\s+(?:based|located|a\s+resident)))\b/i.test(sentence);
     if ((isLanguageRequirement && !namesWorkerLocation) || isExportControlCondition || isFairHiringNotice) return false;
 
-    // "within the scope authorized by the central bank", "authorised and regulated by ..." describe the
+    // "limits authorized by a regulator", "authorised and regulated by ..." describe the
     // employer's licence, not the worker's authorization.
     const workerText = sentence.replace(/\bauthori[sz]ed(?:\s+and\s+(?:regulated|licen[cs]ed|supervised))?\s+by\b/gi, " ");
     const hasExplicitWorkerConstraint = /\b(authorization|authorised|authorized|work\s+permit|visa|citizen(?:ship)?|residen(?:cy|tial|ts?)|right\s+to\s+work|eligible\s+to\s+work)\b/i.test(workerText)
