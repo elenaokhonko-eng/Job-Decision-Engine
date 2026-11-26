@@ -8,6 +8,7 @@ import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { DEFAULT_GEMINI_EVALUATION_MODEL } from "../src/services/modelDefaults.js";
 import { isProfileFactModelShareable } from "../src/profile/privacy.js";
 import { checkPrimaryAnswered } from "../src/platform/llm/index.js";
+import { assertAiWorkSettingsValid, readAiWorkSettings } from "../src/platform/config/index.js";
 import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
@@ -24,6 +25,10 @@ dotenv.config({ path: ".env.local" });
  *     [--no-flex]                                                 # Gemini on standard PayGo only
  *
  * `--model-a X --model-b Y` is still accepted and means `--models X,Y`.
+ *
+ * `--run` calls models, so it is behind the owner's AI switch (src/platform/config/aiWorkConfig.ts): it refuses
+ * while the switch is closed and, while open, samples only jobs above the approved cut-off under the approved score
+ * policy. A dry run calls no model.
  *
  * Reads the database inside a READ ONLY transaction and writes nothing: no ai_evaluations rows,
  * no queue changes, no model-route invocation records. Every model is called through the normal
@@ -383,11 +388,18 @@ SELECT DISTINCT ON (cj.id)
    JOIN canonical_jobs cj ON cj.id = ae.canonical_job_id AND cj.workspace_id = $1
    JOIN job_versions jv ON jv.id = cj.latest_job_version_id AND jv.id::text = ae.job_version_id::text
    WHERE cj.archived_at IS NULL AND COALESCE(cj.is_test_fixture, FALSE) = FALSE
+     AND ($3::numeric IS NULL
+          OR (cj.recommendation_requirement_score > $3::numeric AND cj.recommendation_score_policy = $4::text))
    ORDER BY cj.id, ae.evaluated_at DESC
    LIMIT $2`;
 
-async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  const args = parseArgs([...argv]);
+  const aiWork = readAiWorkSettings();
+  assertAiWorkSettingsValid(aiWork);
+  if (args.run && aiWork.mode === "HELD") {
+    throw new Error(`AI evaluation is held (${aiWork.reason}); --run calls no model until the owner's switch is open.`);
+  }
   const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
   // The model calls below take minutes; a server-side close of an idle pooled connection must not
   // crash the process with an unhandled 'error' event.
@@ -405,7 +417,11 @@ async function main(): Promise<void> {
   try {
     await client.query("BEGIN READ ONLY");
     const ctx = await resolveWorkspaceContext(client as any);
-    const sample = await client.query<SampleRow>(EVALUATION_SAMPLE_SQL, [ctx.workspaceId, args.limit]);
+    const sample = await client.query<SampleRow>(EVALUATION_SAMPLE_SQL, [
+      ctx.workspaceId,
+      args.limit,
+      ...(aiWork.mode === "OPEN" ? [aiWork.scoreCutoff, aiWork.scorePolicy] : [null, null]),
+    ]);
     console.log(JSON.stringify({
       mode: args.run ? "run" : "dry-run",
       models: args.models.map((model) => ({ model, provider: providerForModel(model), priced: args.prices[model] !== undefined })),
