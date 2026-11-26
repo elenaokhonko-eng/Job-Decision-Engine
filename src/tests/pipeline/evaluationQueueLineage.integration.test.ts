@@ -11,6 +11,7 @@ import {
   supersedeStaleEvaluationQueueRows,
 } from "../../pipeline/evaluationQueueLineage.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
+import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -168,7 +169,8 @@ async function createFixture(
     `UPDATE canonical_jobs
      SET latest_job_version_id = $1,
          latest_match_run_id = $2,
-         latest_deterministic_decision_id = $3
+         latest_deterministic_decision_id = $3,
+         recommendation_requirement_score = 0.8
      WHERE workspace_id = $4 AND id = $5`,
     [jobVersionId, currentMatchRunId, currentDecisionId, workspaceId, canonicalJobId],
   );
@@ -227,6 +229,8 @@ async function insertGateDecisionHistory(
   }
   return latestId;
 }
+
+openAiWorkForSuite();
 
 describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)", () => {
   let profileVersionId = "";
@@ -313,6 +317,15 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
     expect(eligible[0]?.id).toBe(validFixture.queueId);
     expect(eligible[0]?.context_fingerprint).toBe(validFixture.queueFingerprint);
     expect(eligible[0]?.resolved_gate_decision_id).toBe(latestGateDecisionId);
+  });
+
+  it("selects only queue rows whose job is strictly above the approved cut-off", async () => {
+    const database = getClient();
+    const workspaceId = getContext().workspaceId;
+    const all = await selectEligibleEvaluationQueueRows(database, { workspaceId });
+    expect(all.length).toBeGreaterThan(0);
+    expect(await selectEligibleEvaluationQueueRows(database, { workspaceId, scoreAbove: 0.79 })).toHaveLength(all.length);
+    expect(await selectEligibleEvaluationQueueRows(database, { workspaceId, scoreAbove: 0.8 })).toEqual([]);
   });
 
   it("supersedes stale queue rows without deleting them or creating manual-review debt", async () => {

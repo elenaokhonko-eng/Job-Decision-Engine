@@ -14,6 +14,9 @@ import {
   type PipelineStageWorkerOptions,
 } from "../../tasks/stageTaskWorker.js";
 import { classifyDescriptionQuality } from "../../pipeline/descriptionQuality.js";
+import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
+
+openAiWorkForSuite();
 
 describe("stageTaskWorker", () => {
   it("parses a validated task allowlist for deterministic recovery", () => {
@@ -1527,6 +1530,7 @@ describe("stageTaskWorker", () => {
         now += 60_000;
         return { rows: [], rowCount: 0 };
       }
+      if (sql.includes("c.recommendation_requirement_score > $3::numeric")) return { rows: [{}], rowCount: 1 };
       if (sql.includes("INSERT INTO pipeline_tasks")) {
         now += 60_000;
         return { rows: [{ id: "task-enqueue" }], rowCount: 1 };
@@ -2948,6 +2952,7 @@ describe("stageTaskWorker", () => {
       if (sql.includes("UPDATE pipeline_tasks")) {
         return { rows: [{ id: "task-explanation" }], rowCount: 1 };
       }
+      if (sql.includes("c.recommendation_requirement_score > $3::numeric")) return { rows: [{}], rowCount: 1 };
       return { rows: [], rowCount: 1 };
     });
     const fakeClient = { query } as any;
@@ -3017,6 +3022,7 @@ describe("stageTaskWorker", () => {
       if (sql.includes("SELECT EXISTS")) return { rows: [{ exists: false }], rowCount: 1 };
       if (sql.includes("INSERT INTO pipeline_task_attempts")) return { rows: [], rowCount: 1 };
       if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "task-slow" }], rowCount: 1 };
+      if (sql.includes("c.recommendation_requirement_score > $3::numeric")) return { rows: [{}], rowCount: 1 };
       return { rows: [], rowCount: 0 };
     });
 

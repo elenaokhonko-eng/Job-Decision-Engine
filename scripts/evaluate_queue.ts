@@ -10,6 +10,8 @@ import { isProfileFactModelShareable } from "../src/profile/privacy.js";
 import { ExperienceByTrackSchema } from "../src/profile/contracts.js";
 import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 import type { EvaluationQueueStats } from "../src/pipeline/evaluationQueuePolicy.js";
+import { readAiWorkSettings } from "../src/platform/config/index.js";
+import { describeAiWork } from "../src/modules/evaluation/index.js";
 import { runEvaluationQueueWithExitPolicy } from "../src/pipeline/evaluationQueueExitPolicy.js";
 import {
   diffProviderCalls,
@@ -91,6 +93,14 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
   let notStartedCount = 0;
 
   try {
+    // Fail closed, before any model preflight or queue write: queued rows stay exactly as they are.
+    const aiWork = readAiWorkSettings();
+    if (aiWork.mode === "HELD") {
+      const heldContext = options.context ?? await resolveWorkspaceContext(client as any);
+      const held = await describeAiWork(client, heldContext.workspaceId, ["PRIORITY", "REVIEW"], aiWork);
+      console.warn(`AI evaluation is held (${aiWork.reason}); no queue item was read or changed: ${JSON.stringify(held)}`);
+      return { processed: 0, failed: 0, manualReview: 0, eligible: 0, rateLimited: 0, notStarted: 0, heldReason: aiWork.reason };
+    }
     const preflight = checkModelRegistryPreflight();
     if (!preflight.ok) {
       throw new Error(`Model registry preflight failed: ${preflight.warnings.join(" | ")}`);
@@ -121,6 +131,7 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
         ...(options.profileVersionId ? { profileVersionId: options.profileVersionId } : {}),
         ...(jobVersionIds.length > 0 ? { jobVersionIds } : {}),
         ...(options.limit !== undefined ? { limit: options.limit } : {}),
+        scoreAbove: aiWork.scoreCutoff,
       });
       await client.query("COMMIT");
     } catch (error) {

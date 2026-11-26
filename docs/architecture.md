@@ -243,7 +243,22 @@ Order of work:
 - A job that passes the gates continues to 6, 7, 8 and 9. So does a job whose only open items are workability facts that can be checked later, such as an unknown work mode (`src/pipeline/verificationRouting.ts`). It is matched and triaged while the question is open.
 - A hard-rejected job, and any other job that needs verification, goes straight to stage 9, so its decision is recorded.
 - If lane routing finds no lane, the job becomes `UNMATCHED` and stops. If routing could not run for a technical reason, the job becomes `ROUTING_DEFERRED` and goes to stage 9.
-- Stage 10 follows stage 9 only when eligibility is `ELIGIBLE` and the outcome is `PRIORITY` or `REVIEW`.
+- Stage 10 follows stage 9 only when eligibility is `ELIGIBLE` and the outcome is `PRIORITY` or `REVIEW`, and only when the owner's AI switch allows it (below).
+
+### The owner's AI switch
+
+Explanation and evaluation work fails closed. It is queued and run only when `AI_EVALUATION_ENABLED` is exactly `true` and `AI_EVALUATION_SCORE_CUTOFF` holds the cut-off the owner approved (`src/platform/config/aiWorkConfig.ts`). There is no default cut-off. A job qualifies when its stored ranking score (`canonical_jobs.recommendation_requirement_score`, 0 to 1) is strictly above it; a job with no score does not qualify. The rule is in `src/modules/evaluation/`.
+
+| Path | Switch closed | Switch open, job not above the cut-off |
+|---|---|---|
+| Creating an `ENQUEUE_EXPLANATION` task (successor of stage 9, successor of a lane re-route, recoverable seed) | Not created | Not created |
+| An `ENQUEUE_EXPLANATION` task already waiting | Not claimed and not reconciled; stays `PENDING` or `RETRY_WAIT`, unchanged | `BLOCKED_DEPENDENCY` on `AI_SCORE_CUTOFF:<job version>` when claimed |
+| `runExplanationQueueEnqueuer` (any caller, including the re-match script) | Reads and writes nothing | No queue row, no deferral, no state change |
+| `scripts/evaluate_queue.ts` | Reads and changes no queue item, makes no model call | The queue row stays as it is |
+
+Holding is not a rejection: no job state, decision or deferral row changes. When the switch opens, the waiting tasks are claimed and the recoverable seed creates the missing ones. The worker summary and the evaluation worker report the switch and the waiting work (`aiWork`: waiting tasks, waiting queue rows, jobs without an evaluation). While the switch is closed, the worker's pending and retry SLOs leave the held tasks out; queue health still counts them. While it is closed, a waiting task also does not run its lane, profile or decision currency repairs; the lane re-route and profile re-match seeds still run.
+
+`scripts/compare_evaluation_models.ts` is a measurement tool the owner starts by hand. It calls the evaluator without the queue and is not covered by the switch.
 
 Task seeds (`seedRecoverablePipelineTasks`, `src/tasks/stageTaskWorker.ts`):
 
@@ -260,7 +275,7 @@ After the stages:
 
 | Step | Code today | Target module |
 |---|---|---|
-| Advisory evaluation of queued jobs | `scripts/evaluate_queue.ts` | `evaluation` |
+| Advisory evaluation of queued jobs, behind the owner's AI switch | `scripts/evaluate_queue.ts` | `evaluation` |
 | Ranking of Apply Now jobs into Top 10 Ready | `scripts/materialize_application_rankings.ts`, `src/services/applicationRankingMaterializer.ts` | `decision` |
 | Archiving of rejected and aged jobs | `scripts/archive_jobs.ts`, `src/services/jobArchive.ts` | `catalog` |
 
@@ -403,7 +418,7 @@ All four stop when the repository variable `WORKFLOW_KILL_SWITCH` is `true`.
 
 ## 14. As built
 
-The code predates the target layout. No file lives under `src/modules/`, `src/platform/`, `src/interfaces/` or `src/app/` yet.
+Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `evaluation` repository; `src/modules/evaluation/` holds the owner's AI switch, the first domain module. Nothing lives under `src/interfaces/` or `src/app/` yet.
 
 | Area today | Holds | Goes to |
 |---|---|---|

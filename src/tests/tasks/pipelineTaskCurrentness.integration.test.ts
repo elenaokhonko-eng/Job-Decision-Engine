@@ -19,6 +19,7 @@ import {
 } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
+import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -173,6 +174,8 @@ async function makeDecidable(versions: { canonicalJobId: string; latestVersionId
   });
 }
 
+openAiWorkForSuite();
+
 describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () => {
   beforeAll(async () => {
     pool = new pg.Pool(pgConnectionConfig(databaseUrl));
@@ -293,7 +296,8 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
            processing_status = 'NEEDS_VERIFICATION',
            gate_decision = 'PASS',
            recommendation_eligibility = 'ELIGIBLE',
-           recommendation_outcome = 'REVIEW'
+           recommendation_outcome = 'REVIEW',
+           recommendation_requirement_score = 0.8
        WHERE workspace_id = $1 AND id = $2`,
       [getContext().workspaceId, versions.canonicalJobId],
     );

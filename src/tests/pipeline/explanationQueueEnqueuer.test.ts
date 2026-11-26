@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
 import { loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
 import pg from "pg";
+import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
 import type { WorkspaceContext } from "../../workspace/context.js";
 
 vi.mock("../../pipeline/laneConfigLoader.js", () => ({
@@ -27,6 +28,8 @@ vi.mock("pg", () => {
 });
 
 const mPool = new pg.Pool();
+
+openAiWorkForSuite();
 
 describe("Pipeline Stage: Explanation Queue Enqueuer (P1)", () => {
   beforeEach(() => {
@@ -135,7 +138,9 @@ describe("Pipeline Stage: Explanation Queue Enqueuer (P1)", () => {
     });
     expect(mainQuery?.[0]).toContain("WHEN lb.lane IS NULL THEN COALESCE(");
     expect(mainQuery?.[0]).toContain("lane_revision_matches IS NOT TRUE");
-    expect(mainQuery?.[1]).toHaveLength(6);
+    expect(mainQuery?.[1]).toHaveLength(7);
+    expect(mainQuery?.[0]).toContain("c.recommendation_requirement_score > $7::numeric");
+    expect(mainQuery?.[1]?.[6]).toBe(0);
     expect(mainQuery?.[1]?.[4]).toBe("FILES");
     expect(mainQuery?.[1]?.[5]).toBe("fixture-lanes-v1");
     const beginCallIndex = calls.findIndex(([sql]) => sql.startsWith("BEGIN ISOLATION LEVEL REPEATABLE READ"));

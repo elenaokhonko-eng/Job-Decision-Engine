@@ -3,6 +3,8 @@ import { appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import dotenv from "dotenv";
+import { readAiWorkSettings } from "../src/platform/config/index.js";
+import { claimableTaskTypes, withoutHeldQueueRows } from "../src/modules/evaluation/index.js";
 import { isPooledPostgresConnectionString, pgConnectionConfig } from "../src/db/pgSsl.js";
 import {
   PipelineWorkerCancelledError,
@@ -617,9 +619,12 @@ export async function processPipelineTasks(): Promise<void> {
       console.log("Stale historical embedding dead letters reconciled:", staleHistoricalDeadLettersReconciled);
     }
 
+    // Held AI tasks cannot be claimed, so they are not backlog for the SLOs below; they stay in the health output.
+    const aiWork = readAiWorkSettings();
+    const claimableTypes = claimableTaskTypes(activeTaskTypes, aiWork);
     const queueHealthBefore = await readQueueHealth(pool, context.workspaceId, queueHealthScope);
     const activeQueueRowsBefore = queueHealthBefore.byType.filter(
-      (row) => activeTaskTypes.includes(row.task_type as typeof activeTaskTypes[number]),
+      (row) => claimableTypes.includes(row.task_type as typeof activeTaskTypes[number]),
     );
     const activePendingBefore = pendingCount(activeQueueRowsBefore);
     const oldestActivePendingAgeBefore = oldestDuePendingAgeSeconds(activeQueueRowsBefore);
@@ -677,7 +682,11 @@ export async function processPipelineTasks(): Promise<void> {
     deadLetterReport.newlyDeadLetteredThisRun = summary.deadLettered;
     deadLetterReport.staleHistoricalDeadLettersReconciled = staleHistoricalDeadLettersReconciled;
     deadLetterReport.staleHistoricalDeadLettersRemaining = queueHealth.staleHistoricalDeadLetter;
-    const activeQueueRows = queueHealth.byType.filter((row) => activeTaskTypes.includes(row.task_type as typeof activeTaskTypes[number]));
+    const activeQueueRows = queueHealth.byType.filter((row) => claimableTypes.includes(row.task_type as typeof activeTaskTypes[number]));
+    const sloRows = withoutHeldQueueRows(queueHealth.byType, aiWork);
+    const sloRetryWaitCount = sloRows
+      .filter((row) => row.status === "RETRY_WAIT")
+      .reduce((total, row) => total + Number(row.task_count), 0);
     const activePending = pendingCount(activeQueueRows);
     // Only due work could have been claimed; scheduled work is reported separately, not counted as a stall.
     const activeDuePending = duePendingCount(activeQueueRows);
@@ -685,14 +694,14 @@ export async function processPipelineTasks(): Promise<void> {
     const latestScheduledAvailableAt = await readLatestScheduledPendingAvailableAt(
       pool,
       context.workspaceId,
-      activeTaskTypes,
+      claimableTypes,
       queueHealthScope,
     );
     const oldestActivePendingAgeSeconds = oldestDuePendingAgeSeconds(activeQueueRows);
     const oldestPendingTask = await readOldestPendingTask(
       pool,
       context.workspaceId,
-      activeTaskTypes,
+      claimableTypes,
       queueHealthScope,
     );
     console.log("Oldest active pending stage:", JSON.stringify(oldestPendingTask
@@ -828,8 +837,8 @@ export async function processPipelineTasks(): Promise<void> {
       deadLetteredThisRun: summary.deadLettered,
       actionableCurrentDeadLetterCount: queueHealth.actionableCurrentDeadLetter,
       staleHistoricalDeadLetterCount: queueHealth.staleHistoricalDeadLetter,
-      retryWaitCount: queueHealth.retryWait,
-      oldestRetryWaitAgeSeconds: queueHealth.oldestRetryWaitAgeSeconds,
+      retryWaitCount: sloRetryWaitCount,
+      oldestRetryWaitAgeSeconds: oldestStatusAgeSeconds(sloRows, "RETRY_WAIT"),
       activePendingCountBefore: activePendingBefore,
       activePendingCount: activePending,
       activeDuePendingCount: activeDuePending,

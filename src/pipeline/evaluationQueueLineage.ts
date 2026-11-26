@@ -31,6 +31,8 @@ export interface EvaluationQueueSelection {
   readonly jobVersionIds?: readonly string[];
   readonly enqueuedAtOrAfter?: Date | string;
   readonly limit?: number;
+  /** Select only jobs whose stored ranking score is strictly above this (the owner's approved AI cut-off). */
+  readonly scoreAbove?: number;
 }
 
 export interface EvaluationQueueReconciliation {
@@ -56,6 +58,9 @@ export async function selectEligibleEvaluationQueueRows(
     : "";
   const enqueuedAfterFilter = selection.enqueuedAtOrAfter !== undefined
     ? `AND eq.enqueued_at >= $${params.push(selection.enqueuedAtOrAfter)}`
+    : "";
+  const scoreFilter = selection.scoreAbove !== undefined
+    ? `AND c.recommendation_requirement_score > $${params.push(selection.scoreAbove)}::numeric`
     : "";
   const limitClause = selection.limit !== undefined
     ? `LIMIT $${params.push(selection.limit)}`
@@ -94,6 +99,7 @@ export async function selectEligibleEvaluationQueueRows(
        ${profileFilter}
        ${jobVersionFilter}
        ${enqueuedAfterFilter}
+       ${scoreFilter}
        AND (
          eq.status = 'PENDING'
          OR (eq.status = 'RETRY_WAIT' AND (eq.available_at IS NULL OR eq.available_at <= NOW()))
