@@ -48,6 +48,10 @@ const NO_RESTRICTION: Array<[string, string, string]> = [
   ["an authorised-and-regulated statement", "Singapore",
     "Example Company is authorised and regulated by the financial regulator in the United Kingdom."],
   ["a commitment to learning a language", "Singapore", "English required, plus a commitment to learning French."],
+  ["an export licence note", "Singapore",
+    "A US export licence may be required for some tasks under export control rules."],
+  ["an export licence application note", "Singapore",
+    "Export laws may require us to obtain a US government licence before sharing technology."],
 ];
 
 describe("sentences that state no worker-territory restriction", () => {
@@ -92,6 +96,13 @@ describe("boilerplate beside a real condition, and unrecognised wording, still r
     "Export control duties mean a US green card is mandatory",
     "Export control duties mean you must be a US national",
     "This export control role requires US work authorization",
+    // Who may be hired, beside export wording or alone.
+    "Export control duties: this post is open only to US persons",
+    "Under export laws we can only take on US nationals",
+    "Given export controls, hiring is limited to US persons",
+    "Given export controls, the post is restricted to U.S. nationals",
+    "This post is open to US persons because of export-controlled hardware",
+    "Hiring for this post is limited to United States nationals",
     // Fair-chance and criminal-record wording beside a condition.
     "We hire under fair chance rules: US residents only",
     "Applicants must be US residents and clear a criminal record screen",
@@ -171,6 +182,10 @@ describe("stated restrictions still reject", () => {
     const result = persisted("Candidates must reside in the US.");
     expect(result.status).toBe("HARD_REJECT");
     expect(result.workability_facts.location_restriction).toBe("UNITED_STATES");
+  });
+
+  it("does not read a negated limit as a restriction", () => {
+    expect(territories("Hiring is not limited to US persons")).toEqual([]);
   });
 
   it("keeps the pronoun from joining a second country to a stated one", () => {

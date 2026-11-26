@@ -1053,7 +1053,9 @@ export function hasExplicitTerritoryRestriction(value: unknown, territory: strin
       || /\b(?:must\s+(?:be\s+)?(?:residing|living|based|located|authorized)|must\s+reside|must\s+live)\b/i.test(sentence)
       || /\b(?:only\s+(?:open\s+to|applicants?|candidates?|engineers?|developers?|people|individuals)\s+(?:in|from|based|located|residing))\b/i.test(sentence)
       || /\b(?:remote\s+(?:only\s+in|only\s+from|eligible\s+only\s+in))\b/i.test(sentence)
-      || /\b(?:open\s+only\s+to|eligible\s+only\s+in|based\s+in\s+[\w\s]+\s+only)\b/i.test(sentence);
+      || /\b(?:open\s+only\s+to|eligible\s+only\s+in|based\s+in\s+[\w\s]+\s+only)\b/i.test(sentence)
+      // "limited to US persons" states who may be hired without "only" or "must".
+      || /(?<!\bnot\s)\b(?:limited|restricted|open)\s+to\s+(?:the\s+)?(?:us|usa|united\s+states)\s+(?:persons?|nationals?)\b/i.test(sentence);
 
     if (isEmployerOrContext) {
       return hasExplicitWorkerConstraint;
