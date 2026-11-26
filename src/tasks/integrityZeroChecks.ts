@@ -7,6 +7,7 @@ import type pg from "pg";
 
 import { OWNER_SAVED_SOURCE_NAMES } from "../services/jobArchiveHardRejectedPolicy.js";
 import { GATE_VERSION } from "../contracts/version.js";
+import { leadReadModelAvailable } from "../modules/catalog/index.js";
 import { DECIDER_VERSION, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
 import { LANE_ROUTER_RULE_VERSION } from "../pipeline/laneRouter.js";
@@ -313,6 +314,43 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
   return result("stage_result_older_than_rule_version", ids, detail);
 }
 
+/** Every list and queue a job can be ranked, shortlisted or evaluated from. A lead must be in none of them. */
+export const LEAD_FREE_MEMBERSHIPS: Readonly<Record<string, string>> = {
+  shortlist: "SELECT canonical_job_id FROM v_canonical_shortlist_scoped WHERE workspace_id = $1::uuid",
+  apply_now: "SELECT canonical_job_id FROM v_apply_now_jobs_stage3_scoped WHERE workspace_id = $1::uuid",
+  top_10: "SELECT canonical_job_id FROM v_top_ten_ready_jobs_stage3_scoped WHERE workspace_id = $1::uuid",
+  track: "SELECT canonical_job_id FROM v_track_jobs_scoped WHERE workspace_id = $1::uuid",
+  // The REJECTED and REMOVED buckets are the audit list, not a ranking: a rejected lead stays there.
+  status_buckets: `SELECT canonical_job_id FROM v_job_status_buckets_scoped
+                    WHERE workspace_id = $1::uuid AND status_bucket NOT IN ('REJECTED', 'REMOVED')`,
+  evaluation_queue: `SELECT canonical_job_id FROM evaluation_queue
+                      WHERE workspace_id = $1::uuid AND status IN ('PENDING', 'RETRY_WAIT', 'EVALUATING')`,
+};
+
+/**
+ * A job-board or aggregator lead (v_job_lead_state) that is in a list or the AI queue. Without migration 123 there
+ * is no definition to check: the result says it was not evaluated instead of reading as a clean pass.
+ */
+export async function leadsInListsOrQueue(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  const name = "lead_in_list_or_queue";
+  if (!(await leadReadModelAvailable(db))) return result(name, [], { not_evaluated_migration_123_missing: 1 });
+  const ids = new Set<string>();
+  const detail: Record<string, number> = {};
+  for (const [label, members] of Object.entries(LEAD_FREE_MEMBERSHIPS)) {
+    const { rows } = await db.query<{ id: string }>(
+      `SELECT lead.canonical_job_id::text AS id
+         FROM v_job_lead_state lead
+        WHERE lead.workspace_id = $1::uuid AND lead.is_lead
+          AND lead.canonical_job_id IN (${members})
+        ORDER BY 1`,
+      [workspaceId],
+    );
+    detail[label] = rows.length;
+    for (const row of rows) ids.add(row.id);
+  }
+  return result(name, [...ids], detail);
+}
+
 /**
  * `phase` "pre" is for a run BEFORE a drain: it leaves out the stale-stage check, which is non-zero by design
  * right after a rule-version change until the reopen seeds have drained. The default, "post", is strict
@@ -325,7 +363,11 @@ export async function runZeroChecks(
 ): Promise<ZeroCheckResult[]> {
   // Post phase only, like the stale-stage check: a job-local policy disagreement that processing cannot fix must stay visible and
   // failing, but must not stop the drain that runs after the pre-drain reconcile.
-  const postOnly = options.phase === "pre" ? [] : [await terminalOutcomeConflicts(db, workspaceId), await staleStageResults(db, workspaceId)];
+  const postOnly = options.phase === "pre" ? [] : [
+    await terminalOutcomeConflicts(db, workspaceId),
+    await staleStageResults(db, workspaceId),
+    await leadsInListsOrQueue(db, workspaceId),
+  ];
   return [
     await rejectedJobsWithRecommendation(db, workspaceId),
     await listedJobsNotCurrentlyOpen(db, workspaceId),

@@ -16,6 +16,7 @@ import { pgConnectionConfig } from '../../src/db/pgSsl.js';
 import { requireApprovedReplayTarget } from '../../src/reporting/replayGuard.js';
 import { LINKEDIN_SAVED_SOURCE_NAME } from '../../src/ingestion/linkedInSavedExport.js';
 import { resolveWorkspaceContext } from '../../src/workspace/context.js';
+import { listLeadJobIds } from '../../src/modules/catalog/index.js';
 
 dotenv.config({ path: '.env.local' });
 
@@ -73,8 +74,12 @@ try {
   console.log(`dropped (matched, gate-passed, no adjusted score yet - re-decide first): ${notYetDecided[0]?.n ?? 0}`);
   // A posting is drawn only if the read model says it is currently open (v_job_availability_current,
   // migration 114). This script does not decide that itself; it only counts what was left out.
-  const rows = allRows.filter((r) => r.availability_current === true);
-  console.log(`eligible jobs ${allRows.length}; currently open ${rows.length}; held back as not confirmed open ${allRows.length - rows.length}`);
+  // Job-board and aggregator leads are never drawn (v_job_lead_state). The count left out is printed.
+  const leadIds = new Set(await listLeadJobIds(client, ws.workspaceId));
+  const notLeads = allRows.filter((r) => !leadIds.has(r.id));
+  console.log(`left out as job-board or aggregator leads: ${allRows.length - notLeads.length}`);
+  const rows = notLeads.filter((r) => r.availability_current === true);
+  console.log(`eligible jobs ${notLeads.length}; currently open ${rows.length}; held back as not confirmed open ${notLeads.length - rows.length}`);
   // Defence in depth: nothing the filters above should have removed may be in the pool.
   const bad = rows.filter((r) => !/^https?:\/\//i.test(String(r.canonical_url ?? '')) || EXCLUDED_IDS.includes(r.id));
   if (bad.length > 0) throw new Error(`${bad.length} ineligible job(s) in the pool`);

@@ -353,6 +353,25 @@ A job with an unknown workability fact (work mode, hiring territory, office days
 
 A live job that is not hard-rejected and whose posting text has not reached the completeness rule (`description_quality_status` is not `COMPLETE`, or the only evidence is a bare Gmail alert) has no gate result, lane or recommendation in any list. It waits as "awaiting content" until its posting is fetched. The view `v_job_content_state` states the rule once; `v_canonical_shortlist_scoped` and everything built on it exclude waiting jobs, and `v_job_awaiting_content_scoped` lists them with the state of their fetch task. Stored decisions are kept, so a job returns to the lists when its content is complete. `scripts/check_integrity.ts` fails when a waiting job still carries a gate decision, lane or recommendation.
 
+### Leads
+
+A job known only from job boards or aggregators is a **lead**. It stays stored with its observations, decisions and history, is never rejected or deleted for being a lead, and is left out of every ranked list, the shortlist, Review, Track, Apply Now, Top 10, the AI queue and the review draw.
+
+The view `v_job_lead_state` (migration 123) is the one definition; no list, script or module keeps its own. `is_lead` is true when all of these hold:
+
+1. Some sighting of the job is on a job-board or aggregator host, or comes from a job-board source. A sighting is the job's link, or the source link, apply link or source name of any observation of any version (and of the observation it was derived from).
+2. No observation is the employer's own posting: an employer source (Greenhouse, Lever, Ashby, Workable, SmartRecruiters, Workday, employer website) whose source link is not on a job board or aggregator.
+3. No observation was provided by the owner: LinkedIn or MyCareersFuture saved export, manual import, pasted description.
+4. No sighting is on a host or source marked `NOT_LEAD`: LinkedIn (owner decision) and, while the owner has not decided, MyCareersFuture.
+
+Every host and source entry is a row of `v_job_lead_rules`; changing the MyCareersFuture row from `NOT_LEAD` to `AGGREGATOR` makes those jobs leads. A job stops being a lead as soon as the employer's or the owner's posting is observed, and returns to the lists with its stored artifacts.
+
+`v_canonical_shortlist_scoped` excludes leads, so every view built on it does. The AI enqueue, the evaluation queue selection and the review draw ask the `catalog` module (`listLeadJobIds`, `isLeadJobVersion`); unstarted queue rows of a lead are marked `SUPERSEDED`. Hard gates, lanes, matching, decisions and content fetches run for leads as for any job. The must-be-zero check `lead_in_list_or_queue` fails a post-drain reconcile when a lead is in a list or the AI queue.
+
+A live job is therefore in exactly one of: a status bucket, awaiting content, or `v_job_leads_scoped` (live, content-complete, not hard-rejected or removed leads). A hard-rejected or removed lead stays in its audit bucket. A lead the owner saved to the application tracker stays there, marked as a lead.
+
+Until migration 123 is applied the code treats no job as a lead, says so in the log, and the check reports that it was not evaluated.
+
 ### What blocks a job
 
 A mandatory requirement blocks a job only when it is a degree or credential that the matcher compared with the profile and found short, and the posting does not accept an equivalent. A free-text requirement with no supporting evidence does not block: it lowers coverage. Job duties, and skills in a posting with no section headings, are not mandatory unless the item itself says so.
@@ -403,7 +422,7 @@ All four stop when the repository variable `WORKFLOW_KILL_SWITCH` is `true`.
 
 ## 14. As built
 
-The code predates the target layout. No file lives under `src/modules/`, `src/platform/`, `src/interfaces/` or `src/app/` yet.
+The code predates the target layout. Only the first parts have moved: `src/modules/catalog/` (the lead questions), its repository `src/platform/persistence/catalog/`, `src/platform/config/` and `src/platform/llm/`. Nothing lives under `src/interfaces/` or `src/app/` yet.
 
 | Area today | Holds | Goes to |
 |---|---|---|

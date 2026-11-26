@@ -6,6 +6,8 @@ import dotenv from "dotenv";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
+import { selectEligibleEvaluationQueueRows, supersedeStaleEvaluationQueueRows } from "../../pipeline/evaluationQueueLineage.js";
+import { seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
 import { loadGlobalLanesConfig, loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
 import { upsertLaneRevision } from "../../lanes/registry.js";
 import { withMaximumAiInterpretationsPerRun } from "../../lanes/evaluationBudgetConfig.js";
@@ -727,5 +729,88 @@ describe.skipIf(skipReal)("Explanation queue budget integration", () => {
       ],
     );
     expect(duplicateGroups.rows).toHaveLength(0);
+  }, 60_000);
+});
+
+// Job-board and aggregator leads (v_job_lead_state, migration 123) never reach the AI queue. Same budget fixture;
+// a job is made a lead by pointing its canonical link at a job board, and unmade by pointing it back.
+describe.skipIf(skipReal)("AI queue: leads are left out", () => {
+  let leadId = "";
+  let ownIds: string[] = [];
+
+  async function setLink(canonicalJobId: string, url: string): Promise<void> {
+    await getClient().query(`UPDATE canonical_jobs SET canonical_url = $2 WHERE id = $1`, [canonicalJobId, url]);
+  }
+
+  beforeAll(async () => {
+    pool = new pg.Pool(pgConnectionConfig(databaseUrl));
+    client = await pool.connect();
+    schemaName = `lead_enqueue_${Date.now()}_${crypto.randomInt(100000, 999999)}`;
+    await client.query(`CREATE SCHEMA ${schemaName}`);
+    await client.query(`SET search_path TO ${schemaName}, public`);
+    await runMigrations(client);
+    context = await resolveWorkspaceContext(client);
+    await seedBudgetFixture();
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT id FROM canonical_jobs WHERE workspace_id = $1 AND primary_lane = 'CORE_AI_DATA' ORDER BY canonical_url`,
+      [context.workspaceId],
+    );
+    ownIds = rows.map((row) => row.id);
+    leadId = ownIds[0]!;
+    await setLink(leadId, "https://himalayas.app/companies/x/jobs/lead-1");
+  }, 120_000);
+
+  afterAll(async () => {
+    if (client) {
+      await client.query("RESET search_path").catch(() => undefined);
+      await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+      client.release();
+      client = undefined;
+    }
+    if (pool) {
+      await pool.end();
+      pool = undefined;
+    }
+  });
+
+  it("seeds no enqueue task for a lead", async () => {
+    await seedRecoverablePipelineTasks(getClient(), { context: getContext(), taskTypes: ["ENQUEUE_EXPLANATION"] });
+    const { rows } = await getClient().query<{ id: string }>(
+      `SELECT payload->>'canonical_job_id' AS id FROM pipeline_tasks WHERE task_type = 'ENQUEUE_EXPLANATION'`,
+    );
+    expect(rows.length).toBe(5);
+    expect(rows.map((row) => row.id)).not.toContain(leadId);
+  }, 60_000);
+
+  it("enqueues the others and writes no queue row, deferral or state change for the lead", async () => {
+    const result = await runExplanationQueueEnqueuer(getClient(), { context: getContext() });
+    // CORE_AI_DATA holds 3 per run: its three remaining jobs fit, so none is deferred; the other lane defers one.
+    expect(result).toEqual({ enqueued: 4, updated: 4, deferred: 1 });
+    const { rows } = await getClient().query(
+      `SELECT c.processing_state, c.recommendation_outcome, c.rejection_reason,
+              (SELECT COUNT(*)::int FROM evaluation_queue q WHERE q.canonical_job_id = c.id) AS queued,
+              (SELECT COUNT(*)::int FROM evaluation_budget_deferrals d WHERE d.canonical_job_id = c.id) AS deferrals
+         FROM canonical_jobs c WHERE c.id = $1`,
+      [leadId],
+    );
+    expect(rows[0]).toEqual({
+      processing_state: "MATCHED", recommendation_outcome: "PRIORITY", rejection_reason: null, queued: 0, deferrals: 0,
+    });
+  }, 60_000);
+
+  it("takes an already queued lead out of the queue and keeps the row as history", async () => {
+    const queued = ownIds[1]!;
+    await setLink(queued, "https://jobicy.com/jobs/lead-2");
+    const selected = await selectEligibleEvaluationQueueRows(getClient(), { workspaceId: getContext().workspaceId });
+    expect(selected.map((row) => row.canonical_job_id)).not.toContain(queued);
+    expect(await supersedeStaleEvaluationQueueRows(getClient(), { workspaceId: getContext().workspaceId })).toBe(1);
+    const { rows } = await getClient().query<{ status: string; last_error: string }>(
+      `SELECT status, last_error FROM evaluation_queue WHERE canonical_job_id = $1`, [queued]);
+    expect(rows).toEqual([{ status: "SUPERSEDED", last_error: expect.stringContaining("lead") }]);
+
+    // The job stops being a lead: it is queued again.
+    await setLink(queued, "https://careers.example.com/jobs/lead-2");
+    const again = await runExplanationQueueEnqueuer(getClient(), { context: getContext(), canonicalJobIds: [queued] });
+    expect(again.enqueued).toBe(1);
   }, 60_000);
 });

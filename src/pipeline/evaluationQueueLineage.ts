@@ -1,4 +1,5 @@
 import pg from "pg";
+import { listLeadJobIds } from "../modules/catalog/index.js";
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 
 export interface EvaluationQueueCandidate extends pg.QueryResultRow {
@@ -39,6 +40,8 @@ export interface EvaluationQueueReconciliation {
   readonly jobVersionIds?: readonly string[];
 }
 
+export const LEAD_QUEUE_NOTE = "SUPERSEDED: job-board or aggregator lead; leads are not evaluated.";
+
 export async function selectEligibleEvaluationQueueRows(
   client: pg.Pool | pg.PoolClient,
   selection: EvaluationQueueSelection,
@@ -56,6 +59,11 @@ export async function selectEligibleEvaluationQueueRows(
     : "";
   const enqueuedAfterFilter = selection.enqueuedAtOrAfter !== undefined
     ? `AND eq.enqueued_at >= $${params.push(selection.enqueuedAtOrAfter)}`
+    : "";
+  // A lead (v_job_lead_state) is never evaluated, even when a row was queued before it was one.
+  const leadIds = await listLeadJobIds(client, selection.workspaceId);
+  const leadFilter = leadIds.length > 0
+    ? `AND NOT (c.id = ANY($${params.push(leadIds)}::uuid[]))`
     : "";
   const limitClause = selection.limit !== undefined
     ? `LIMIT $${params.push(selection.limit)}`
@@ -94,6 +102,7 @@ export async function selectEligibleEvaluationQueueRows(
        ${profileFilter}
        ${jobVersionFilter}
        ${enqueuedAfterFilter}
+       ${leadFilter}
        AND (
          eq.status = 'PENDING'
          OR (eq.status = 'RETRY_WAIT' AND (eq.available_at IS NULL OR eq.available_at <= NOW()))
@@ -140,6 +149,7 @@ export async function supersedeStaleEvaluationQueueRows(
   client: pg.Pool | pg.PoolClient,
   reconciliation: EvaluationQueueReconciliation,
 ): Promise<number> {
+  const supersededLeadRows = await supersedeLeadEvaluationQueueRows(client, reconciliation);
   const params: unknown[] = [reconciliation.workspaceId];
   const profileFilter = reconciliation.profileVersionId
     ? `AND eq.profile_version_id = $${params.push(reconciliation.profileVersionId)}::uuid`
@@ -237,5 +247,43 @@ export async function supersedeStaleEvaluationQueueRows(
     params,
   );
 
+  return (rowCount ?? 0) + supersededLeadRows;
+}
+
+/**
+ * Takes the unstarted queue rows of leads out of the queue. The row stays as history, the job keeps its state
+ * (a lead is not rejected), and a job that stops being a lead is queued again like any other.
+ */
+async function supersedeLeadEvaluationQueueRows(
+  client: pg.Pool | pg.PoolClient,
+  reconciliation: EvaluationQueueReconciliation,
+): Promise<number> {
+  const leadIds = await listLeadJobIds(client, reconciliation.workspaceId);
+  if (leadIds.length === 0) return 0;
+  const params: unknown[] = [reconciliation.workspaceId, leadIds, LEAD_QUEUE_NOTE];
+  const profileFilter = reconciliation.profileVersionId
+    ? `AND eq.profile_version_id = $${params.push(reconciliation.profileVersionId)}::uuid`
+    : "";
+  const jobVersionFilter = reconciliation.jobVersionIds && reconciliation.jobVersionIds.length > 0
+    ? `AND eq.job_version_id = ANY($${params.push([...reconciliation.jobVersionIds])}::uuid[])`
+    : "";
+  const { rowCount } = await client.query(
+    `UPDATE evaluation_queue eq
+     SET status = 'SUPERSEDED',
+         available_at = NULL,
+         lease_id = NULL,
+         lease_expires_at = NULL,
+         last_error = CONCAT_WS(' | ', NULLIF(BTRIM(eq.last_error), ''), $3::text),
+         updated_at = NOW()
+     WHERE eq.workspace_id = $1
+       AND eq.canonical_job_id = ANY($2::uuid[])
+       ${profileFilter}
+       ${jobVersionFilter}
+       AND (
+         eq.status IN ('PENDING', 'RETRY_WAIT')
+         OR (eq.status = 'EVALUATING' AND eq.lease_expires_at < NOW())
+       )`,
+    params,
+  );
   return rowCount ?? 0;
 }

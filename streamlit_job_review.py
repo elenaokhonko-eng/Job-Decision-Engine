@@ -389,3 +389,39 @@ def low_confidence_label(job: Mapping[str, object]) -> str | None:
     if job.get("evidence_confidence") == "LOW":
         return "LOW CONFIDENCE: thin posting evidence"
     return None
+
+
+# Saved jobs that are leads (job board or aggregator only; v_job_lead_state, migration 123). They leave every ranked
+# list and stay in the application tracker, marked with this label.
+LEAD_LABEL = "Lead: job board or aggregator only, not ranked"
+
+LEAD_READ_MODEL_AVAILABLE_QUERY = (
+    "SELECT to_regclass('v_job_lead_state') IS NOT NULL AS available"
+)
+
+LEAD_JOBS_READ_MODEL_QUERY = """
+    SELECT canonical_job_id::text AS canonical_job_id
+    FROM v_job_lead_state
+    WHERE workspace_id = %s AND is_lead AND canonical_job_id = ANY(%s::uuid[])
+"""
+
+
+def lead_job_ids(read_query, workspace_id, canonical_job_ids) -> set[str]:
+    """Return which of the given jobs are leads.
+
+    Args:
+        read_query: Runs one read-only query: ``read_query(sql, params)`` to rows.
+        workspace_id: The workspace of the jobs.
+        canonical_job_ids: The jobs to look up.
+
+    Returns:
+        The ids that are leads. Empty before migration 123, which defines a lead.
+    """
+    ids = [str(job_id) for job_id in canonical_job_ids]
+    if not ids:
+        return set()
+    available = read_query(LEAD_READ_MODEL_AVAILABLE_QUERY, ())
+    if not available or not available[0].get("available"):
+        return set()
+    rows = read_query(LEAD_JOBS_READ_MODEL_QUERY, (workspace_id, ids))
+    return {str(row["canonical_job_id"]) for row in rows}

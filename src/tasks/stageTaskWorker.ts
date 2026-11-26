@@ -20,6 +20,7 @@ import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicEx
 import { LANE_ROUTER_RULE_VERSION, runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/laneRoutingCurrency.js";
+import { isLeadJobVersion, listLeadJobIds } from "../modules/catalog/index.js";
 import {
   AI_EVALUATION_OUTCOMES_SQL,
   PROFILE_REMATCH_OUTCOMES,
@@ -353,8 +354,10 @@ function incrementSeed(
   summary: SeedPipelineTasksSummary,
   taskType: PipelineStageTaskType,
   inserted: boolean,
-  skippedReason?: "JOB_ARCHIVED",
+  skippedReason?: "JOB_ARCHIVED" | "JOB_IS_LEAD",
 ): void {
+  // A lead's AI enqueue task is not created: neither inserted nor existing.
+  if (skippedReason === "JOB_IS_LEAD") return;
   summary.byType[taskType] ??= { inserted: 0, existing: 0 };
   if (skippedReason === "JOB_ARCHIVED") {
     summary.skippedArchived += 1;
@@ -625,6 +628,11 @@ async function enqueueStageTaskResult(
     mode?: "ENSURE_CURRENT" | "FORCE_RECOMPUTE";
   },
 ) {
+  // A lead never reaches the AI queue. No task is created, so none is left completed to suppress the enqueue once
+  // the job has the employer's or the owner's posting and stops being a lead.
+  if (taskType === "ENQUEUE_EXPLANATION" && (await isLeadJobVersion(clientOrPool, context.workspaceId, id))) {
+    return { taskId: "", inserted: false, reactivated: false, skippedReason: "JOB_IS_LEAD" as const };
+  }
   const maxAttempts = MODEL_BACKED_STAGE_TASK_TYPES.has(taskType) ? 3 : 8;
   let taskPayload = payload;
   let profileVersionId: string | undefined;
@@ -956,6 +964,9 @@ export async function seedRecoverablePipelineTasks(
         )`
       : "FALSE";
 
+    // Leads are filtered before the cap, so they take no seed slot.
+    const leadIds = await listLeadJobIds(client as any, ctx.workspaceId);
+
     // Seed AI enqueue first. Jobs matched and decided outside the task chain (rematch and replay
     // scripts) reach the AI queue only through this seed, and it is the last stage before Apply Now.
     // Seeding stops at a shared time budget, so this seed must not wait behind the upstream seeds.
@@ -989,6 +1000,7 @@ export async function seedRecoverablePipelineTasks(
          AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
          -- AI evaluation is for Apply Now outcomes only; TRACK is excluded by design.
          AND c.recommendation_outcome IN (${AI_EVALUATION_OUTCOMES_SQL})
+         AND NOT (c.id = ANY($3::uuid[]))
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
          AND EXISTS (
            SELECT 1
@@ -1037,7 +1049,7 @@ export async function seedRecoverablePipelineTasks(
          )
        ORDER BY c.updated_at ASC
        LIMIT $2`,
-      [ctx.workspaceId, maxPerType],
+      [ctx.workspaceId, maxPerType, leadIds],
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
         payload: {

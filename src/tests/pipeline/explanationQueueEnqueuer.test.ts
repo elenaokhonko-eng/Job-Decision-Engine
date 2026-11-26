@@ -8,6 +8,11 @@ vi.mock("../../pipeline/laneConfigLoader.js", () => ({
   loadWorkspaceLanesConfig: vi.fn(),
 }));
 
+// The lead lookup (v_job_lead_state) is covered against PostgreSQL; here no job is a lead.
+vi.mock("../../modules/catalog/index.js", () => ({
+  listLeadJobIds: vi.fn(async () => []),
+}));
+
 vi.mock("pg", () => {
   const mPool: any = {
     query: vi.fn(),

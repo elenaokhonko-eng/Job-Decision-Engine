@@ -9,6 +9,7 @@ import { PersistedEvaluationQueueItemSchema } from "../contracts/index.js";
 import { supersedeStaleEvaluationQueueRows } from "./evaluationQueueLineage.js";
 import { laneRoutingCurrentSql } from "../lanes/laneRoutingCurrency.js";
 import { AI_EVALUATION_OUTCOMES_SQL } from "./profileMatchCurrency.js";
+import { listLeadJobIds } from "../modules/catalog/index.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -214,6 +215,11 @@ export async function runExplanationQueueEnqueuer(
         runSnapshot.source,
         runSnapshot.version,
       ];
+      // Leads (v_job_lead_state) never enter the AI queue: no queue row, no deferral, no state change.
+      const leadIds = await listLeadJobIds(client, ctx.workspaceId);
+      const leadFilter = leadIds.length > 0
+        ? `AND NOT (c.id = ANY($${params.push(leadIds)}::uuid[]))`
+        : "";
       const jobVersionFilter = jobVersionIds.length > 0
         ? `AND COALESCE(c.latest_job_version_id, lv.id) = ANY($${params.push(jobVersionIds)}::uuid[])`
         : "";
@@ -395,6 +401,7 @@ export async function runExplanationQueueEnqueuer(
                 AND eq.context_fingerprint = dd.context_fingerprint
                 AND eq.status IN ('PENDING', 'EVALUATING', 'RETRY_WAIT')
             )
+            ${leadFilter}
             ${jobVersionFilter}
             ${canonicalJobFilter}
         ),
