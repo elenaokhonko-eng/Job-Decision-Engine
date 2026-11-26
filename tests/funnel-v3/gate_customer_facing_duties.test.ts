@@ -77,7 +77,7 @@ describe("findCustomerFacingRoleDuty", () => {
     ["Responsibilities: Deliver product demos to prospects.", "demos to prospects"],
     ["Run proofs of concept with prospective customers.", "prospective customers"],
     ["Run PoCs with prospective customers.", "pocs"],
-    ["You will partner closely with account executives to drive renewal planning.", "account executives"],
+    ["In this role you partner with our account executives on onboarding plans and renewals.", "account executives"],
   ])("reads %s", (text, fragment) => {
     expect(findCustomerFacingRoleDuty(text.toLowerCase())).toContain(fragment);
   });
