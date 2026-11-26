@@ -83,7 +83,7 @@ const isSavedSource = (name: string | null) =>
   (OWNER_SAVED_SOURCE_NAMES as readonly string[]).includes((name ?? "").trim().toUpperCase());
 
 /** Every place a job was seen: observations of any of its versions, their discovery parents, and source dispositions. */
-async function loadSightings(client: Queryable, workspaceId: string): Promise<Sighting[]> {
+export async function loadSightings(client: Queryable, workspaceId: string): Promise<Sighting[]> {
   const { rows } = await client.query<Sighting>(
     `WITH RECURSIVE linked(job_id, observation_id) AS (
        (SELECT v.canonical_job_id, o.id

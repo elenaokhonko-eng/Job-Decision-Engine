@@ -313,6 +313,21 @@ describe.skipIf(skipReal)("blind review pool (PostgreSQL)", () => {
     expect(result.labelledNotFound).toBe(0);
   });
 
+  it("treats a legal suffix or another way of writing Singapore as the same posting, and no other employer or city", async () => {
+    const good = await seedJob({ company: "Zed", title: "other role" });
+    const rated = await seedJob({ company: "Acme Pte. Ltd.", title: "data lead", location: "Singapore, SG" });
+    await seedJob({ company: "Acme", title: "data lead", location: "Singapore" }); // second copy of a rated job
+    await observe(null, { source: "MCF_SAVED", url: "https://www.mycareersfuture.gov.sg/job/x/z", company: "Beta Private Limited" });
+    await seedJob({ company: "Beta", title: "fixture role", location: "Singapore, Singapore" }); // second copy of a saved posting
+    const twin = await seedJob({ company: "Gamma Inc", title: "analyst", location: "Singapore", score: 0.9 });
+    await seedJob({ company: "Gamma", title: "analyst", location: "Singapore, SG", score: 0.8 });
+    const otherCity = await seedJob({ company: "Acme", title: "data lead", location: "Kuala Lumpur" });
+    const otherEmployer = await seedJob({ company: "Acme Labs Pte Ltd", title: "data lead", location: "Singapore" });
+    const result = await load([rated.jobId]);
+    expect(result.rows.map((row) => row.id).sort()).toEqual([good.jobId, twin.jobId, otherCity.jobId, otherEmployer.jobId].sort());
+    expect(result.excluded).toEqual(counts({ ALREADY_LABELLED: 1, SAME_POSTING_AS_SAVED_APPLIED_OR_LABELLED: 2, DUPLICATE_POSTING: 1 }));
+  });
+
   it.each(["LINKEDIN_SAVED", "MCF_SAVED"])("leaves out a job the owner saved (%s)", async (source) => {
     const good = await seedJob();
     const saved = await seedJob();

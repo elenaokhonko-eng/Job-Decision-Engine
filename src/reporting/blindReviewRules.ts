@@ -2,6 +2,7 @@
  * Pure rules of the blind review set: no database, no clock, no environment. The draw date comes from the caller's clock.
  */
 import { isUnknownEmployerName, normalizePostingUrl } from "../ingestion/postingIdentity.js";
+import { normalizeJobIdentity } from "../modules/catalog/index.js";
 
 /** "The same day" is the calendar day in this timezone. */
 export const BLIND_REVIEW_TIME_ZONE = "Asia/Singapore";
@@ -156,15 +157,17 @@ export interface PostingRecord {
 const words = (value: string | null | undefined) => (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
 /**
- * The keys under which two canonical records are one posting. They restate the identity rules src/pipeline/normalize.ts
- * already uses (source posting identity + company; URL + company + location, or + title; company + title + location).
- * Every key needs a known company name.
+ * The keys under which two canonical records are one posting. They follow the identity rules of src/pipeline/normalize.ts
+ * (source posting identity + company; URL + company + location, or + title; company + title + location), comparing employer
+ * and location through normalizeJobIdentity, so legal suffixes and the ways of writing Singapore do not matter. Every key
+ * needs a known company name. Used to compare only; no stored key changes.
  */
 export function postingKeys(record: PostingRecord): string[] {
-  const company = isUnknownEmployerName(record.company) ? "" : words(record.company);
+  const names = normalizeJobIdentity(record);
+  const company = isUnknownEmployerName(record.company) ? "" : names.employer;
   if (!company) return [];
   const title = words(record.title);
-  const location = words(record.location) || "unknown";
+  const location = names.location;
   const keys: string[] = [];
   for (const hash of record.identityHashes) if (hash?.trim()) keys.push(JSON.stringify(["id", company, hash.trim()]));
   for (const value of record.urls) {
