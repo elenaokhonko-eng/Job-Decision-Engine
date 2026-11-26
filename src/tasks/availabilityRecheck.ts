@@ -13,6 +13,10 @@
  *               cycle, the job is archived as POSTING_NOT_CONFIRMABLE through the archive service.
  *               A job the owner saved or applied to, or that a hold covers, is never auto-archived.
  *
+ * A MANUAL check (src/tasks/manualAvailabilityCheck.ts) reads the posting page once and stores availability
+ * evidence only. It never queues a retry or a re-gate, changes no job fact, never archives, adds nothing to the
+ * cannot-tell or absence counters, and its events are ignored by the archive gate.
+ *
  * Reads are rate-limited per host, using the source plugin manifest's requests_per_minute when the
  * source has one. A job whose work mode or territory changed is queued for a forced re-gate through
  * the hook the stage worker supplies, so the normal tasks carry it on.
@@ -546,6 +550,8 @@ async function recordEvent(
     nextCheckAt: Date | null;
     details: Record<string, unknown>;
     now: Date;
+    /** False leaves the per-job counters row untouched. */
+    updateState?: boolean;
   },
 ): Promise<void> {
   await client.query(
@@ -557,6 +563,7 @@ async function recordEvent(
       input.outcome, input.decision, input.reasonCode, input.counters.consecutiveAbsentReads,
       input.counters.cannotTellAttempts, JSON.stringify(input.details)],
   );
+  if (input.updateState === false) return;
   await client.query(
     `INSERT INTO job_availability_recheck_state (
        workspace_id, canonical_job_id, job_version_id, consecutive_absent_reads, cannot_tell_attempts,
@@ -710,7 +717,7 @@ async function readOnce(
   feedFactsAfter: { workplaceTypeRaw: string | null; locationRaw: string | null } | null;
 }> {
   const observation = target.observation;
-  const sourceUrl = observation.source_url ?? observation.canonical_apply_url ?? target.fallbackUrl;
+  const sourceUrl = postingLinkOf(observation, target.fallbackUrl);
   const rpm = await deps.requestsPerMinute(observation.source_plugin_key);
   const interval = rpm ? Math.ceil(60_000 / rpm) : DEFAULT_PAGE_INTERVAL_MS;
   const host = hostOf(sourceUrl) ?? "unknown-host";
@@ -768,7 +775,7 @@ export interface ArchiveHealthGate {
  * Whether failed reads may archive the job. (1) Health signal: a read of ANOTHER host succeeded (open, absent
  * from a complete feed, or the page said closed) within the last 24 hours; without it the failure may be an
  * outage or a login wall of this host, so the job is read again later instead. (2) The failed reads of this job
- * must fall on at least two different calendar days (UTC), counting this one.
+ * must fall on at least two different calendar days (UTC), counting this one. Manual checks count for neither.
  */
 export async function archiveHealthGate(
   db: Queryable,
@@ -784,13 +791,15 @@ export async function archiveHealthGate(
           AND event.occurred_at > $2::timestamptz - make_interval(secs => $3::int) AND event.occurred_at <= $2::timestamptz
           AND COALESCE(event.details->>'host', '') <> $4
           AND COALESCE(event.details->>'host', '') <> ''
+          AND COALESCE(event.details->>'trigger', '') <> 'MANUAL'
      ) AS ok`,
     [workspaceId, now, Math.floor(HEALTH_WINDOW_MS / 1000), host],
   );
   const days = await db.query<{ n: number }>(
     `SELECT COUNT(DISTINCT (event.occurred_at AT TIME ZONE 'UTC')::date)::int AS n
        FROM job_availability_recheck_events event
-      WHERE event.workspace_id = $1::uuid AND event.canonical_job_id = $2::uuid AND event.outcome = 'CANNOT_TELL'`,
+      WHERE event.workspace_id = $1::uuid AND event.canonical_job_id = $2::uuid AND event.outcome = 'CANNOT_TELL'
+        AND COALESCE(event.details->>'trigger', '') <> 'MANUAL'`,
     [workspaceId, canonicalJobId],
   );
   const failedDays = (days.rows[0]?.n ?? 0) + ((await todayHasNoFailure(db, workspaceId, canonicalJobId, now)) ? 1 : 0);
@@ -806,10 +815,37 @@ async function todayHasNoFailure(db: Queryable, workspaceId: string, canonicalJo
     `SELECT EXISTS (
        SELECT 1 FROM job_availability_recheck_events event
         WHERE event.workspace_id = $1::uuid AND event.canonical_job_id = $2::uuid AND event.outcome = 'CANNOT_TELL'
+          AND COALESCE(event.details->>'trigger', '') <> 'MANUAL'
           AND (event.occurred_at AT TIME ZONE 'UTC')::date = ($3::timestamptz AT TIME ZONE 'UTC')::date) AS present`,
     [workspaceId, canonicalJobId, now],
   );
   return rows[0]?.present !== true;
+}
+
+export type RecheckCandidate =
+  | { readonly skip: "JOB_NOT_FOUND" | "JOB_ARCHIVED" | "TEST_FIXTURE" | "MANUALLY_REMOVED" | "NO_CURRENT_VERSION" | "NO_OBSERVATION" }
+  | { readonly skip: null; readonly jobVersionId: string; readonly link: string | null; readonly sourcePluginKey: string | null };
+
+/** What a re-check of this job would read: the same job, observation and link as runAvailabilityRecheck. Read only. */
+export async function findRecheckCandidate(client: Queryable, workspaceId: string, canonicalJobId: string): Promise<RecheckCandidate> {
+  const target = await loadTarget(client, workspaceId, canonicalJobId);
+  if (!target) return { skip: "JOB_NOT_FOUND" };
+  if (target.archived_at !== null) return { skip: "JOB_ARCHIVED" };
+  if (target.is_test_fixture) return { skip: "TEST_FIXTURE" };
+  if (target.processing_state === "MANUALLY_REMOVED") return { skip: "MANUALLY_REMOVED" };
+  if (target.latest_job_version_id === null) return { skip: "NO_CURRENT_VERSION" };
+  const observation = await loadObservation(client, workspaceId, target.latest_job_version_id);
+  if (!observation) return { skip: "NO_OBSERVATION" };
+  return {
+    skip: null,
+    jobVersionId: target.latest_job_version_id,
+    link: postingLinkOf(observation, target.canonical_url),
+    sourcePluginKey: observation.source_plugin_key,
+  };
+}
+
+function postingLinkOf(observation: RecheckObservation, fallbackUrl: string | null): string | null {
+  return observation.source_url ?? observation.canonical_apply_url ?? fallbackUrl;
 }
 
 /**
@@ -823,7 +859,9 @@ export async function runAvailabilityRecheck(
   rawPayload: unknown,
   taskId: string | null,
   deps: AvailabilityRecheckDependencies = defaultAvailabilityRecheckDependencies(),
+  options: { readonly manual?: boolean } = {},
 ): Promise<AvailabilityRecheckResult> {
+  const manual = options.manual === true;
   const payload = RecheckTaskPayloadSchema.parse(rawPayload);
   const now = deps.now();
   const target = await loadTarget(client, context.workspaceId, payload.canonical_job_id);
@@ -848,13 +886,28 @@ export async function runAvailabilityRecheck(
   };
   const beforeFacts = { workplaceTypeRaw: observation.workplace_type_raw, locationRaw: observation.location_raw };
 
-  const read = await readOnce(client, context, identity, deps);
+  // A manual check reads the posting link itself, never a source feed: one link, one read.
+  const read = await readOnce(client, context, identity, manual ? { ...deps, createFeedAdapter: () => null } : deps);
   if (read.outcome === "STALE") return { status: "SKIPPED", reason: "STALE_VERSION" };
   const outcome = read.outcome;
   let decision: RecheckDecision = decideRecheck(counters, outcome, now, cycleStartedAt);
+  // A manual check is outside the retry cycle: it queues nothing, and only a confirmed-open read moves the counters
+  // (back to zero). A cannot-tell or closed read leaves them as the automatic reads left them. RETRY_LATER is stored
+  // for cannot-tell because it is the stored decision that changes nothing; no retry is queued.
+  if (manual && decision.action !== "MARK_OPEN") {
+    decision = decision.action === "MARK_CLOSED"
+      ? { ...decision, counters }
+      : {
+          action: "RETRY_LATER",
+          reasonCode: `MANUAL_CHECK:CANNOT_TELL${outcome.kind === "CANNOT_TELL" ? `:${outcome.reason}` : ""}`,
+          nextCheckAt: null,
+          counters,
+        };
+  }
   const readHost = hostOf(observation.source_url ?? observation.canonical_apply_url ?? target.canonical_url) ?? "unknown-host";
 
   const details: Record<string, unknown> = { source_name: observation.source_name, host: readHost };
+  if (manual) details.trigger = "MANUAL";
   if (decision.action === "ARCHIVE_NOT_CONFIRMABLE") {
     // Failed reads archive a job only when they are not just an outage: another host must have been read
     // successfully in the last 24 hours (a health signal), and the failures must span two calendar days.
@@ -879,7 +932,14 @@ export async function runAvailabilityRecheck(
   // Fact and archive writes are collected and run together with the event, counters, next read and
   // re-gate in ONE transaction below: a crash never leaves a changed fact without its event and re-gate.
   const writes: Array<() => Promise<void>> = [];
-  if (decision.action === "MARK_OPEN") {
+  if (manual && decision.action === "MARK_OPEN") {
+    // Availability evidence only: no job fact is filled and no re-gate follows from a manual check.
+    const stored = await storeVerdict(client, context, identity, {
+      status: "OPEN", reasonCode: decision.reasonCode, method: "VERIFIED_POSTING_RETRIEVAL",
+    }, now);
+    details.readiness_recomputed = stored.readinessRecomputed;
+    if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
+  } else if (decision.action === "MARK_OPEN") {
     if (read.page !== null) {
       const stored = await storeVerdict(client, context, identity, {
         status: "OPEN", reasonCode: decision.reasonCode, method: "VERIFIED_POSTING_RETRIEVAL",
@@ -1028,6 +1088,7 @@ export async function runAvailabilityRecheck(
       nextCheckAt,
       details,
       now,
+      updateState: !manual || decision.action === "MARK_OPEN",
     });
 
     if (nextCheckAt !== null && (action === "WAIT_NEXT_READ" || action === "RETRY_LATER" || action === "KEPT_PROTECTED")) {

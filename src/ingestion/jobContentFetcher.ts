@@ -149,6 +149,8 @@ export interface PublicAddress {
 }
 
 export interface PostingFetcherDependencies {
+  /** Asked before every request, redirect hops included; true means the URL is never requested. */
+  readonly refuseRequest?: (url: URL) => boolean;
   readonly fetchOnce?: (
     url: URL,
     timeoutMs: number,
@@ -500,6 +502,9 @@ export async function fetchSafe(
 
   try {
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+      if (dependencies.refuseRequest?.(current)) {
+        throw new UnsafePostingUrlError("Posting URL or redirect is on a site this read must not request.");
+      }
       const remainingMs = Math.min(DEFAULT_REQUEST_TIMEOUT_MS, deadline - Date.now());
       if (remainingMs <= 0) throw new Error("Posting fetch exceeded its total request time limit.");
       if (!dependencies.fetchOnce) {
@@ -930,6 +935,16 @@ function atsPostingAddress(url: URL): AtsPostingAddress | null {
     };
   }
   return null;
+}
+
+/** The URL the reader requests first for a posting link (an ATS link is read from the board's public API). */
+export function postingRequestUrl(link: string): URL {
+  const source = parseHttpUrl(decodeTrackingWrapper(link));
+  if (/(?:^|\.)jobs\.lever\.co$/i.test(source.hostname)) {
+    return new URL("https://api.lever.co/v0/postings/" + source.pathname.split("/").filter(Boolean).slice(0, 2).join("/"));
+  }
+  const address = atsPostingAddress(source);
+  return address ? new URL(address.apiUrl) : source;
 }
 
 const fetchIdentityIds = new WeakMap<Function, number>();
