@@ -280,7 +280,7 @@ export function parseCheckArguments(argv: readonly string[], readFile = (file: s
   if (inline !== undefined) {
     jobIds = inline.split(",");
   } else {
-    const text = readFile(file!).replace(/^﻿/, "").trim();
+    const text = readFile(file!).replace(/^\uFEFF/, "").trim();
     if (text.startsWith("[")) {
       const parsed: unknown = JSON.parse(text);
       if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) {

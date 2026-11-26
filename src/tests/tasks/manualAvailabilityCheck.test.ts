@@ -75,7 +75,7 @@ describe("command arguments and refusals", () => {
   it("reads a chosen list from arguments, lines or a JSON array, and defaults to plan", () => {
     expect(parseCheckArguments(["--job-ids=a, b"])).toEqual({ jobIds: ["a", "b"], apply: false, confirmWorkspace: null, intervalSeconds: 5 });
     expect(parseCheckArguments(["--jobs=f"], () => "# chosen\r\na\r\n\r\nb\r\n").jobIds).toEqual(["a", "b"]);
-    expect(parseCheckArguments(["--jobs=f"], () => '﻿["a","b"]').jobIds).toEqual(["a", "b"]);
+    expect(parseCheckArguments(["--jobs=f"], () => '\uFEFF["a","b"]').jobIds).toEqual(["a", "b"]);
     expect(() => parseCheckArguments([])).toThrow(/exactly one/);
     expect(() => parseCheckArguments(["--jobs=f"], () => " \n")).toThrow(/empty/);
     expect(() => parseCheckArguments(["--job-ids=a", "--target=production"])).toThrow(/Unknown argument/);
