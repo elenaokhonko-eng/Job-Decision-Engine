@@ -262,8 +262,9 @@ export async function supersedeStaleEvaluationQueueRows(
 }
 
 /**
- * Takes the unstarted queue rows of leads out of the queue. The row stays as history, the job keeps its state
- * (a lead is not rejected), and a job that stops being a lead is queued again like any other.
+ * Takes the unstarted queue rows of leads out of the queue. The row stays as history and the job keeps its state,
+ * normally QUEUED_FOR_AI (a lead is not rejected). When it stops being a lead, the recoverable seed reads this row
+ * (LEAD_QUEUE_NOTE) and creates a new enqueue task; findStrandedNonterminalJobs counts the parked job accordingly.
  */
 export async function supersedeLeadEvaluationQueueRows(
   client: pg.Pool | pg.PoolClient,

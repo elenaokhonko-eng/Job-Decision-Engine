@@ -398,6 +398,8 @@ Every host and source entry is a row of `v_job_lead_rules`; changing the MyCaree
 
 The superseding does not wait for the owner's AI switch: the pipeline worker (any run that includes `ENQUEUE_EXPLANATION`) and `scripts/evaluate_queue.ts` do it while the switch is closed too, so a held queue never keeps a lead. The `aiWork` counts leave leads out. A waiting enqueue task of a lead completes without queueing and is never blocked on the cut-off. An application handoff, a document draft preflight, a document currentness check and the scoped pilot's `aiHold` name a lead as `JOB_IS_LEAD`.
 
+A job already queued when it becomes a lead keeps its state, normally `QUEUED_FOR_AI`; no job status is rewritten and its superseded row stays as history. When it stops being a lead, the recoverable seed reads that row and creates a new enqueue task (`lead_superseded_queue_id` in the task context), so the completed earlier task does not hold it back; the switch, cut-off and lane budget apply as for any job. The integrity check for nonterminal jobs without work does not count such a job while it is a lead, while the switch or cut-off admits no AI work for it, or after the AI budget deferred it; otherwise it counts it until the seed has queued it.
+
 A live job is therefore in exactly one of: a status bucket, awaiting content, or `v_job_leads_scoped` (live, content-complete, not hard-rejected or removed leads). A hard-rejected or removed lead stays in its audit bucket. A lead the owner saved to the application tracker stays there, marked as a lead.
 
 Until migration 123 is applied the code treats no job as a lead, says so in the log, and the check reports that it was not evaluated (`scripts/check_integrity.ts` prints `NOT EVALUATED`, not `OK`).

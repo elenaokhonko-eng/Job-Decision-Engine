@@ -7,7 +7,8 @@ import { z } from "zod";
  *   hard-rejected or removed job, exactly one status bucket. A live job without complete content that carries no
  *   hard rejection is "awaiting content" (migration 120) and is read from `v_job_awaiting_content_scoped`.
  * - `v_job_status_bucket_counts_scoped` counts the buckets per workspace (they sum to total_jobs);
- *   `v_job_awaiting_content_counts_scoped` counts the awaiting jobs. total_jobs + awaiting_count = live jobs.
+ *   `v_job_awaiting_content_counts_scoped` counts the awaiting jobs. Live job-board and aggregator leads are in
+ *   `v_job_leads_scoped` (migration 123): total_jobs + awaiting_count + the leads listed there = live jobs.
  * - `v_application_workspace_summary_scoped` keeps `rejected_unmatched_count` and adds
  *   `rejected_count`, `unmatched_count` and `removed_count`, which sum to it.
  * - `v_job_support_issues_scoped` lists technical-error jobs per issue class with the actions the

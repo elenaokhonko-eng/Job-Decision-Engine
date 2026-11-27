@@ -10,12 +10,15 @@ import { selectEligibleEvaluationQueueRows, supersedeStaleEvaluationQueueRows } 
 import { runPipelineStageTaskWorker, seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
 import { describeAiWork } from "../../modules/evaluation/index.js";
 import { leadsInListsOrQueue } from "../../tasks/integrityZeroChecks.js";
+import { findStrandedNonterminalJobs } from "../../ingestion/nonterminalRecovery.js";
 import { readScopedAiHold } from "../../../scripts/run_scoped_pilot.js";
 import { loadGlobalLanesConfig, loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
 import { upsertLaneRevision } from "../../lanes/registry.js";
 import { withMaximumAiInterpretationsPerRun } from "../../lanes/evaluationBudgetConfig.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { openAiWorkForSuite, TEST_SCORE_POLICY } from "../fixtures/aiWorkSwitch.js";
+import { DETERMINISTIC_MATCHER_POLICY_VERSION } from "../../pipeline/profileMatchCurrency.js";
+import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -866,3 +869,136 @@ describe.skipIf(skipReal)("AI queue: leads are left out", () => {
     expect(rows).toEqual([{ status: "SUPERSEDED" }]);
   }, 60_000);
 });
+
+// A job that becomes a lead while queued keeps its state (a lead is never rejected and no job status is rewritten).
+// Everything here goes through the real seed and worker, so the task identity of the earlier enqueue is in play.
+describe.skipIf(skipReal)("AI queue: a queued job that becomes a lead, and stops being one", () => {
+  let jobs: string[] = [];
+
+  beforeAll(async () => {
+    pool = new pg.Pool(pgConnectionConfig(databaseUrl));
+    client = await pool.connect();
+    schemaName = `lead_return_${Date.now()}_${crypto.randomInt(100000, 999999)}`;
+    await client.query(`CREATE SCHEMA ${schemaName}`);
+    await client.query(`SET search_path TO ${schemaName}, public`);
+    await runMigrations(client);
+    context = await resolveWorkspaceContext(client);
+    await seedBudgetFixture();
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT id FROM canonical_jobs WHERE workspace_id = $1 AND primary_lane = 'CORE_AI_DATA' ORDER BY canonical_url`,
+      [context.workspaceId],
+    );
+    jobs = rows.map((row) => row.id);
+    // The handler also re-matches a job whose match is not from the current matcher rules.
+    await client.query(`UPDATE match_runs SET policy_version = $1`, [DETERMINISTIC_MATCHER_POLICY_VERSION]);
+    // The enqueue task handler (unlike the enqueuer alone) needs a complete posting. The sightings are employer pages.
+    for (const id of jobs) {
+      const version = (await client.query<{ id: string }>(
+        `UPDATE job_versions SET description_text = $2 WHERE canonical_job_id = $1 RETURNING id`,
+        [id, COMPLETE_TEST_POSTING_DESCRIPTION])).rows[0]!.id;
+      await insertCompletePostingEvidence(client, {
+        workspaceId: context.workspaceId, jobVersionId: version, companyName: "Invented Return Co", title: "Invented role",
+        sourceUrl: `https://careers.example.com/jobs/${id}`, description: COMPLETE_TEST_POSTING_DESCRIPTION,
+      });
+    }
+    await seedAndRun();
+  }, 120_000);
+
+  afterAll(async () => {
+    if (client) {
+      await client.query("RESET search_path").catch(() => undefined);
+      await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+      client.release();
+      client = undefined;
+    }
+    if (pool) {
+      await pool.end();
+      pool = undefined;
+    }
+  });
+
+  const seed = () => seedRecoverablePipelineTasks(getClient(), { context: getContext(), taskTypes: ["ENQUEUE_EXPLANATION"] });
+  const runWorker = () => runPipelineStageTaskWorker(getClient(), {
+    context: getContext(), taskTypes: ["ENQUEUE_EXPLANATION"], seed: false, maxTasks: 20, heartbeatSeconds: 0,
+  });
+  async function seedAndRun(): Promise<void> {
+    await seed();
+    expect(await runWorker()).toMatchObject({ failed: 0 });
+  }
+  // The posting link and the one sighting move together, so a board link makes the job a lead.
+  async function setLink(id: string, url: string): Promise<void> {
+    await getClient().query(`UPDATE canonical_jobs SET canonical_url = $2 WHERE id = $1`, [id, url]);
+    await getClient().query(
+      `UPDATE raw_job_observations o SET source_url = $2 FROM job_versions v
+        WHERE v.id = o.job_version_id AND v.canonical_job_id = $1`, [id, url]);
+  }
+  const stranded = async () => (await findStrandedNonterminalJobs(getClient(), getContext().workspaceId)).sample;
+  async function observed(id: string) {
+    const database = getClient();
+    const job = (await database.query(
+      `SELECT processing_state, rejection_reason, recommendation_outcome FROM canonical_jobs WHERE id = $1`, [id])).rows[0];
+    const queue = (await database.query<{ status: string }>(
+      `SELECT status FROM evaluation_queue WHERE canonical_job_id = $1 ORDER BY enqueued_at, id`, [id])).rows.map((r) => r.status);
+    const openTasks = (await database.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM pipeline_tasks
+        WHERE task_type = 'ENQUEUE_EXPLANATION' AND status <> 'COMPLETED' AND payload->>'canonical_job_id' = $1`, [id])).rows[0]!.n;
+    return { ...job, queue, openTasks };
+  }
+  const queuedState = { processing_state: "QUEUED_FOR_AI", rejection_reason: null, recommendation_outcome: "PRIORITY" };
+
+  it.each([
+    ["waiting", 0, `status = 'PENDING'`],
+    ["left in EVALUATING by an expired lease", 1, `status = 'EVALUATING', lease_id = gen_random_uuid(), lease_expires_at = NOW() - INTERVAL '1 minute'`],
+  ])("a queued row %s: parked while a lead, queued again by the seed after, twice over", async (_name, index, rowState) => {
+    const id = jobs[index as number]!;
+    expect(await observed(id)).toEqual({ ...queuedState, queue: ["PENDING"], openTasks: 0 });
+    const history: string[] = [];
+    for (const round of [1, 2]) {
+      await getClient().query(
+        `UPDATE evaluation_queue SET ${rowState} WHERE canonical_job_id = $1 AND status = 'PENDING'`, [id]);
+      await setLink(id, `https://jobicy.com/jobs/invented-return-${index}-${round}`);
+      await seedAndRun();
+      history.push("SUPERSEDED");
+      // While a lead: kept as it was, no task or active row, and not counted as stranded.
+      expect(await observed(id)).toEqual({ ...queuedState, queue: history, openTasks: 0 });
+      expect(await stranded()).not.toContain(id);
+
+      await setLink(id, `https://careers.example.com/jobs/invented-return-${index}-${round}`);
+      await seedAndRun();
+      expect(await observed(id)).toEqual({ ...queuedState, queue: [...history, "PENDING"], openTasks: 0 });
+      expect(await stranded()).not.toContain(id);
+      // A further seed adds nothing.
+      await seed();
+      expect(await observed(id)).toEqual({ ...queuedState, queue: [...history, "PENDING"], openTasks: 0 });
+    }
+  }, 120_000);
+
+  it("a job that stops being a lead while AI work is held waits for the switch, and is reported only if work could be queued", async () => {
+    const id = jobs[2]!;
+    await setLink(id, "https://remotive.com/remote-jobs/invented-held-return");
+    await seedAndRun();
+    await setLink(id, "https://careers.example.com/jobs/invented-held-return");
+
+    vi.stubEnv("AI_EVALUATION_ENABLED", "false");
+    try {
+      await seedAndRun();
+      expect(await observed(id)).toEqual({ ...queuedState, queue: ["SUPERSEDED"], openTasks: 0 });
+      expect(await stranded()).not.toContain(id);
+    } finally {
+      vi.stubEnv("AI_EVALUATION_ENABLED", "true");
+    }
+    // The switch is open and nothing has queued it yet: that is stranded work until the seed runs.
+    expect(await stranded()).toContain(id);
+    await seedAndRun();
+    expect(await observed(id)).toEqual({ ...queuedState, queue: ["SUPERSEDED", "PENDING"], openTasks: 0 });
+    expect(await stranded()).not.toContain(id);
+  }, 120_000);
+
+  it("a queued job with no active row for any other reason is still reported", async () => {
+    const id = jobs[3]!;
+    await getClient().query(`UPDATE evaluation_queue SET status = 'SUPERSEDED' WHERE canonical_job_id = $1`, [id]);
+    expect((await observed(id)).processing_state).toBe("QUEUED_FOR_AI");
+    expect(await stranded()).toContain(id);
+  }, 60_000);
+});
+
