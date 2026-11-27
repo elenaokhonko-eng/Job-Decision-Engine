@@ -99,12 +99,20 @@ const IN_HOUSE =
   /\bin[- ]house\b|\binternal (?:stakeholders|teams|platforms?|users|customers|systems)\b|\bour (?:own )?(?:internal )?(?:platforms?|systems|technology estate|infrastructure|architecture|products?)\b/i;
 export const saysInHouse = (description: string): boolean => IN_HOUSE.test(description);
 
+// A percentage is travel only when it is written with the travel itself. Anything looser reads a figure about something
+// else as travel, and an unstated fact must never count against a job.
+/** "30% travel", "30% of your time travelling", "30% international travel". */
+const PERCENT_THEN_TRAVEL =
+  /(\d{1,3})\s*%\s*(?:of (?:the |your )?(?:working )?time )?(?:(?:business|international|domestic|regional|overseas|global) )?travel(?:l?ing|l?ed)?\b(?!-|\s*(?:allowance|reimburse|insurance|cover|expense|cost|benefit|perk|compan|industry|sector))/gi;
+/** "Travel of up to 30%", "travel: 20-30%": only linking words between, and nothing after that changes the subject. */
+const TRAVEL_THEN_PERCENT =
+  /\btravel(?:l?ing)?(?: (?:requirements?|expectations?|time|commitment))?(?:\s*[:–-]\s*|\s+)(?:(?:is|of|up|to|upto|about|around|approximately|approx\.?|at|least|most|required|expected|estimated)(?:\s*:)?\s+)*(?:\d{1,3}\s*(?:%\s*)?(?:-|–|to)\s*)?(\d{1,3})\s*%(?=\s*(?:$|[.,;:)(!\n]|(?:of (?:the |your )?(?:working )?time|travel|required|expected|domestically|internationally|regionally|globally|annually|per|across|to|and|or|for|within|in)\b))/gi;
+
 /** The largest stated travel percentage, or null when the posting states none. */
 export function statedTravelPercent(description: string): number | null {
-  const found = [
-    ...description.matchAll(/(\d{1,3})\s*%\s*(?:of (?:the |your )?(?:time )?)?(?:[\w-]+ )?travel/gi),
-    ...description.matchAll(/\btravel(?:l?ing)?\b[^.%\n]{0,40}?(\d{1,3})\s*%/gi),
-  ].map((match) => Number(match[1])).filter((value) => value <= 100);
+  const found = [...description.matchAll(PERCENT_THEN_TRAVEL), ...description.matchAll(TRAVEL_THEN_PERCENT)]
+    .map((match) => Number(match[1]))
+    .filter((value) => value <= 100);
   return found.length ? Math.max(...found) : null;
 }
 

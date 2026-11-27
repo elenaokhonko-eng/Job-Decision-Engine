@@ -1,13 +1,16 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { loadLeadDefinitionSql, REVIEW_LIST_RULES } from "../../../app/reviewLists.js";
+import { loadLeadDefinitionSql, REVIEW_LIST_RULES, runReviewListsCommand } from "../../../app/reviewLists.js";
 import { runMigrations } from "../../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../../db/pgSsl.js";
 import { buildReviewListsFromStore, parseRankingDesign, type ReviewListResult } from "../../../modules/decision/index.js";
-import { withReadOnlySession } from "../../../platform/persistence/index.js";
+import { selectReviewJobs } from "../../../platform/persistence/decision/index.js";
+import { withReadOnlySession, type SessionIdentity } from "../../../platform/persistence/index.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../../workspace/context.js";
 import { createProfile, createReadyJob } from "../../fixtures/readyJobFixture.js";
 
@@ -169,6 +172,8 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
     await archive("longGone");
     await observe("oldSaved", "LINKEDIN_SAVED", "https://www.linkedin.com/jobs/view/4900000003");
     await archive("oldSaved");
+    await seed("placeholder", { company: "Unknown Company", title: "glimmet data scientist" });
+    await seed("unlisted", { company: "Example Unlisted Co", title: "brumble data scientist" });
   }, 240_000);
 
   afterAll(async () => {
@@ -197,7 +202,8 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
 
     expect(result.excluded).toMatchObject({ LEAD: 1, KNOWN_CLOSED: 2, NOT_GATE_PASSED: 1, AWAITING_CONTENT: 1 });
     expect(result.dropped).toMatchObject({ rated: 2, neverSector: 1 });
-    expect(result.lists.byType.find((list) => list.type.key === "BETA")!.jobs).toEqual([]);
+    expect(result.lists.byType.find((list) => list.type.key === "BETA")!.jobs.map((job) => job.id).sort())
+      .toEqual([ids.placeholder, ids.unlisted].sort());
   });
 
   it("does not bring a removed or known-closed posting back through its other record", async () => {
@@ -215,8 +221,74 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
 
   it("collapses the two records of one posting when neither was rated", async () => {
     const result = await run();
-    expect(result.lists.byType.find((list) => list.type.key === "BETA")!.jobs).toHaveLength(1);
+    expect(result.lists.byType.find((list) => list.type.key === "BETA")!.jobs.map((job) => job.id))
+      .toEqual(expect.arrayContaining([ids.placeholder, ids.unlisted]));
+    expect(result.lists.byType.find((list) => list.type.key === "BETA")!.jobs).toHaveLength(3);
     expect(result.dropped.duplicate).toBe(1);
+  });
+
+  it("refuses a database that is not the approved replay branch, and writes nothing", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "jde-review-guard-"));
+    try {
+      const privateDir = path.join(root, "private");
+      const designFile = path.join(privateDir, "ranking_design.json");
+      fs.mkdirSync(privateDir, { recursive: true });
+      fs.writeFileSync(designFile, JSON.stringify(raw));
+      // The test database reports no branch and is not the approved database: only the guard stops the read.
+      await expect(runReviewListsCommand(
+        [`--private-dir=${privateDir}`, `--design=${designFile}`],
+        { REPLAY_DATABASE_URL: databaseUrl, REPLAY_BRANCH_ID: "br-invented-branch" },
+        { log: () => undefined },
+      )).rejects.toThrow("Refusing to run: REPLAY_DATABASE_URL is not the approved replay branch.");
+      expect(fs.existsSync(path.join(privateDir, "review"))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("asks for approval of the connected database before any work, and does none when refused", async () => {
+    const seenIdentities: SessionIdentity[] = [];
+    let worked = false;
+    await expect(withReadOnlySession(
+      pgConnectionConfig(databaseUrl),
+      (identity) => {
+        seenIdentities.push(identity);
+        throw new Error("not this database");
+      },
+      async () => {
+        worked = true;
+      },
+    )).rejects.toThrow("not this database");
+    expect(worked).toBe(false);
+    const { rows } = await admin!.query<{ name: string }>("SELECT current_database() AS name");
+    expect(seenIdentities).toEqual([{ databaseName: rows[0]!.name, branchId: null }]);
+  });
+
+  it("reads archived records without their description and does not count them as excluded", async () => {
+    const records = await selectReviewJobs(pool, workspace.workspaceId, []);
+    const byId = new Map(records.map((record) => [record.id, record]));
+    expect(byId.get(ids.oldSaved!)).toMatchObject({ archived: true, description: null });
+    expect(byId.get(ids.oldSavedTwin!)!.description).toBeTruthy();
+    expect((await run()).excluded.ARCHIVED_OR_FIXTURE).toBe(0);
+    // A rated record is still counted.
+    expect((await run([ids.oldSaved!])).excluded.ARCHIVED_OR_FIXTURE).toBe(1);
+  });
+
+  it("tells the classifier that a placeholder employer is unknown", async () => {
+    const demanding = structuredClone(raw);
+    demanding.role_types[1].requires = { top_technology_employer: true };
+    const result = await withReadOnlySession(
+      { ...pgConnectionConfig(databaseUrl), options: `-c search_path=${schema},public` },
+      () => undefined,
+      (db) => buildReviewListsFromStore(db, {
+        workspaceId: workspace.workspaceId, design: parseRankingDesign(JSON.stringify(demanding)), companyTags: [],
+        ratedIds: [], rules: REVIEW_LIST_RULES, leadDefinitionSql: loadLeadDefinitionSql(),
+      }),
+    );
+    const status = (name: string) => result.postings.find((job) => job.id === ids[name])?.classification.status;
+    expect(status("placeholder")).toBe("TARGET");
+    // A known employer that is not on the list is still left out.
+    expect(status("unlisted")).toBe("NEVER");
   });
 
   it("changes nothing: the session is read only", async () => {

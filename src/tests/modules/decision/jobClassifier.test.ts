@@ -8,6 +8,7 @@ import {
   parseRankingDesign,
   requireApprovedDesign,
   roleKindOfTitle,
+  statedTravelPercent,
   type CompanyIndustryTags,
 } from "../../../modules/decision/index.js";
 
@@ -176,6 +177,31 @@ describe("classification", () => {
     expect(field({ description: "Expect 80% travel." })).toBe("NEVER");
     expect(field({ description: "Travel of up to 5%." })).toBe("TRANSITION");
     expect(field({ company: "Example Orchard" })).toBe("NEVER");
+  });
+
+  it.each([
+    "Hardly any travel, 100% quindle based",
+    "Travel stipend and 100% snorple cover",
+    "Zero travel needed, 100% from your burrow",
+    "Travel: 100% quindle funded",
+    "100% travel insurance for every zorblat",
+    "100% travel-free",
+    "We travel light. 100% of zorblats agree.",
+  ])("reads no travel figure in %j", (description) => {
+    expect(statedTravelPercent(description)).toBeNull();
+    expect(field({ description })).toBe("TRANSITION");
+  });
+
+  it.each([
+    ["Expect 80% travel.", 80],
+    ["80% of your time travelling between burrows", 80],
+    ["70% international travel", 70],
+    ["Travel of up to 65%.", 65],
+    ["Travel: 60%", 60],
+    ["Travel required: 20-75% of the time", 75],
+    ["travel approximately 5% and some quindles", 5],
+  ])("reads the travel figure in %j", (description, percent) => {
+    expect(statedTravelPercent(description)).toBe(percent);
   });
 
   it("never turns an unknown employer into never", () => {

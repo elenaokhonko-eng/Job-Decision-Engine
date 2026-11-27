@@ -94,6 +94,53 @@ describe("lists", () => {
       .toEqual(lists.comparison.map((entry) => entry.id));
   });
 
+  const seeded = (seed: string, lists: Partial<typeof design.lists> = {}) =>
+    ({ ...design, lists: { ...design.lists, ...lists, seed } });
+  const ids = (jobs: readonly PoolJob[]) => jobs.map((entry) => entry.id);
+  /** Unlisted jobs (no role type) with distinct scores, 100 downwards. */
+  const spread = many("n", 40, "NONE").map((entry, index) => ({ ...entry, topK: 100 - index }));
+
+  it("leaves listed and saved jobs that fall inside the band out of the comparison jobs", () => {
+    // Forty ranked places; the listed and the saved jobs sit in the middle of them.
+    const inside = (id: string, topK: number, overrides: Partial<PoolJob> = {}) =>
+      job(id, { topK, ...overrides }, { roleType: "NONE" });
+    const pool = [
+      ...spread.filter((_, index) => ![18, 19, 20, 21].includes(index)),
+      job("listed-1", { topK: 82 }, { roleType: "BETA" }),
+      job("listed-2", { topK: 81 }, { roleType: "BETA" }),
+      inside("saved-1", 80, { saved: true }),
+      inside("saved-2", 79, { saved: true }),
+    ];
+    const lists = buildReviewLists(seeded("s", { comparison_size: 100, comparison_band: [0.25, 0.75] }), pool);
+    expect(listOf(lists, "BETA")).toEqual(["listed-1", "listed-2"]);
+    const band = spread.slice(10, 30).filter((_, index) => ![8, 9, 10, 11].includes(index));
+    expect(ids(lists.comparison).sort()).toEqual(ids(band).sort());
+  });
+
+  it("draws the comparison jobs by seeded hash, not by rank", () => {
+    const draw = (seed: string) => ids(buildReviewLists(seeded(seed), spread).comparison);
+    expect(draw("first")).toEqual(draw("first"));
+    expect(draw("first")).not.toEqual(draw("second"));
+    expect([draw("first"), draw("second"), draw("third")].some((drawn) => drawn.join() !== [...drawn].sort().join())).toBe(true);
+  });
+
+  it("breaks ties by seeded hash, whatever order the pool arrives in", () => {
+    const tied = many("t", 12, "BETA").map((entry) => ({ ...entry, topK: 50 }));
+    const order = (seed: string, pool: PoolJob[]) => listOf(buildReviewLists(seeded(seed, { size: 12 }), pool), "BETA");
+    expect(order("first", [...tied].reverse())).toEqual(order("first", tied));
+    expect(order("first", tied)).not.toEqual(order("second", tied));
+  });
+
+  it("shuffles the sheet by seed, away from list and rank order", () => {
+    const lists = buildReviewLists(seeded("s", { size: 12, overall_size: 12, comparison_size: 6 }), POOL);
+    const listOrder = [...new Set(ids([...lists.byType.flatMap((list) => list.jobs), ...lists.overall, ...lists.comparison]))];
+    const first = ids(sheetJobs(lists, "first"));
+    expect([...first].sort()).toEqual([...listOrder].sort());
+    expect(first).not.toEqual(listOrder);
+    expect(first).not.toEqual(ids(sheetJobs(lists, "second")));
+    expect(first).toEqual(ids(sheetJobs(lists, "first")));
+  });
+
   it("collapses records of one posting, drops rated postings and leaves never out of the lists", () => {
     const record = (id: string, keys: string[], options: { rated?: boolean; dismissed?: boolean; saved?: boolean; candidate?: PoolJob | null } = {}) => ({
       id, keys, rated: options.rated ?? false, dismissed: options.dismissed ?? false, saved: options.saved ?? false,

@@ -1,5 +1,5 @@
 /** Public file of the decision module: the only file other code may import. */
-export { classifyJob, classifySector, roleKindOfTitle, type CompanyIndustryTags, type JobClassification } from "./domain/jobClassifier.js";
+export { classifyJob, classifySector, roleKindOfTitle, statedTravelPercent, type CompanyIndustryTags, type JobClassification } from "./domain/jobClassifier.js";
 export {
   FUNCTION_TAGS,
   parseRankingDesign,
