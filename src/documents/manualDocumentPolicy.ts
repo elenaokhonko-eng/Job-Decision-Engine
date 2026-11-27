@@ -24,7 +24,7 @@ export const MAX_POSTING_REQUIREMENT_LINES = 30;
 const MIN_POSTING_LINE_CHARS = 15;
 const MAX_POSTING_LINE_CHARS = 300;
 const MAX_HEADING_WORDS = 8;
-// Question headings run longer: "What qualifications or skills should you possess in this role?"
+// Question headings run longer: "What qualifications would a good applicant bring to this survey work?"
 const MAX_QUESTION_HEADING_WORDS = 14;
 
 const REQUIREMENT_HEADING = /^(requirements?|qualifications?|minimum qualifications|basic qualifications|preferred qualifications|what you(?:'|’)ll bring|what you will bring|what you bring|what (?:will|can|do|should) you bring|what we(?:'|’)re looking for|what we are looking for|what (?:are we|we are) looking for|what (?:qualifications|skills|experience)\b|what (?:do )?you need|what you(?:'|’)ll need|what you will need|who you are|about you|you have|you will have|(?:your )?background|your (?:experience|profile|skills)|(?:the )?ideal candidate|skills(?: and experience)?|experience|must[- ]haves?|nice[- ]to[- ]haves?)\b/i;
@@ -32,7 +32,7 @@ const RESPONSIBILITY_HEADING = /^(responsibilities|key responsibilities|your res
 // Checked after the requirement heading, so "About you" still opens requirements.
 const OTHER_HEADING = /^(about|why|benefits|what we offer|what (?:can|do) we offer|our offer|perks|package|compensation|salary|location|how to apply|equal opportunity|our (?:culture|values|team)|the opportunity|life at|who we are|who are we|diversity)\b/i;
 // Lines that describe the team or the employer rather than ask anything of the candidate:
-// "You will be part of a team of data scientists ...", "As the Center of Excellence for ...".
+// "You will be part of a field science unit ...", "As the charity's evidence desk, ...".
 const NARRATIVE_LINE = /^(?:you(?:'|’)?ll be (?:part of|joining)|you will be (?:part of|joining)|you will join\b|as (?:the|part of|a member of)\b|we are\b|we(?:'|’)re\b|our (?:team|group|department|mission)\b|the (?:team|group|department)\b|join (?:us|our|a)\b|this (?:role|position) (?:is|sits|reports|will report)\b|reporting (?:to|into)\b)/i;
 const PREFERRED_CUE = /\b(preferred|nice[- ]to[- ]have|a (?:strong |big |definite |real |significant )?(?:plus|bonus)|desirable|advantageous|ideally|preferably)\b/i;
 // "..., ideally Unity Catalog" or "(preferably Python)": the qualifier softens only its own clause.
@@ -92,7 +92,7 @@ export function namesCertification(text: string): boolean {
   return NAMED_CERTIFICATION.test(text);
 }
 
-/** A line describing the team or employer ("You will be part of a team ...") rather than asking anything. */
+/** A line describing the team or employer rather than asking anything of the candidate. */
 export function isNarrativeLine(text: string): boolean {
   return NARRATIVE_LINE.test(text.trim());
 }

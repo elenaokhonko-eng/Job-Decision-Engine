@@ -1170,7 +1170,7 @@ export function assessLaneIntentPreference(
 }
 
 // "finance" is a role family ("Finance Manager", "Head of Finance") but not when it names the
-// product's domain ("Technical Product Lead - AI Finance App"), so the domain forms are skipped.
+// product's domain ("Engineering Product Owner - AI Finance App"), so the domain forms are skipped.
 const NON_TECHNICAL_ROLE_FAMILY = /\b(?:sales|business\s+development|account\s+(?:executive|manager|cto)|customer\s+success|counselor|social\s+worker|people\s+(?:partner|business)|human\s+resources|hr\b|brand(?:s)?|marketing|(?<!\b(?:ai|digital|decentralised|decentralized|embedded|open)\s)finance(?!\s+(?:app|apps|application|applications|platform|platforms|technology|tech|data|product|products|engineering)\b)|fp\s*&\s*a|accounting|tax|designer|design\s+director|art\s+director|leather|investigator|recruiter|talent|operations?)\b/i;
 
 /** Investigator titles are the approved function of INVESTIGATIONS_ENFORCEMENT and nowhere else. */
@@ -1242,7 +1242,7 @@ export function hasNonTechnicalProjectSubject(title: string, scopeText: string):
  *  - the title names a security function and no AI/ML work ("Security Engineer", "AppSec Lead");
  *  - the scope describes security work: at least CYBERSECURITY_CONTENT_MIN_SIGNALS distinct security
  *    phrases and more of them than distinct AI/ML engineering phrases. This catches a title like
- *    "Staff Software Engineer (AI Engineer)" whose duties are threat detection and vulnerability work,
+ *    "Principal Platform Developer (AI Engineer)" whose duties are threat detection and vulnerability work,
  *    while an ML role that merely mentions security keeps its lane.
  * Never invents a verdict from missing text: an empty scope with a non-security title is not cybersecurity.
  */
@@ -1637,7 +1637,7 @@ export const LANE_SCOPE_TEXT_MAX_CHARS = 12000;
 const EMPLOYER_BOILERPLATE_PHRASES = /\b(?<!\b(?:a|an|the|leading|digital|online|global|regional|national|largest)\s)(?:(?:comprehensive|private|family|group)\s+)?(?:health(?:care)?|medical|dental|vision|life)\s+(?:insurance|coverage|cover|benefits?|plans?|care\s+(?:benefits?|plans?|coverage))\b(?!\s+(?:company|companies|provider|providers|products?|platform|platforms|carrier|carriers|business|businesses|market|markets|industry|sector|claims?|policies|policy|members?|customers|payers?|products))|\bmental\s+health\b|\bhealth\s+(?:and|&)\s+(?:well-?being|wellness|safety)\b|\b(?:occupational|employee)\s+health\b|\b(?:wellness|well-?being)\s+(?:programs?|programmes?|benefits?|allowance|stipend|days?)\b|\b(?:group|staff|employee)\s+insurance\b|\b(?:recruitment|recruiting|hiring|job|employment)\s+(?:fraud|scams?)\b|\b(?:medical|health)\s+(?:condition|conditions|status|leave|history)\b|\bgenetic\s+information\b|\bwork[- ]life\b|\bcustomer\s+care\b/gi;
 
 /**
- * A benefits enumeration ("benefit offerings such as medical, dental, and flexible time off",
+ * A benefits enumeration ("benefit offerings such as medical, dental and leave",
  * "healthcare, 401(k) and paid time off") names perks, not the role's sector, even when no
  * "insurance" or "coverage" follows the health word. The clause around a perk marker is
  * removed, bounded to 160 characters either side so a list without punctuation cannot erase
@@ -1669,8 +1669,8 @@ const OTHER_INDUSTRY = /\b(?:finance|financial\s+services|banking|insurance|paym
 
 /**
  * Removes lists of industries ("serves the defense, space, healthcare, and energy sectors";
- * "critical infrastructure including medical devices, power grids and telecommunication
- * networks"). A health word in such a list says whom the employer serves, not that the work
+ * "equipment sold into mining, medical devices
+ * and aerospace"). A health word in such a list says whom the employer serves, not that the work
  * is about a healthcare system. A list of health terms alone ("clinicians, nurses and
  * patients") is kept.
  */

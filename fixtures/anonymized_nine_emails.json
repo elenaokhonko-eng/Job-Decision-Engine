@@ -93,9 +93,9 @@
   },
   {
     "id": "fixture-email-007",
-    "subject": "Job Alert: Director, AI Solution Architect at Stealth AI Labs",
+    "subject": "Job Alert: Principal Machine Learning Architect at Stealth AI Labs",
     "received_at": "2026-08-28T08:30:00.000Z",
-    "raw_html": "<div><h1>Stealth AI Labs</h1><h2>Director, AI Solution Architect</h2><p>Location: Singapore</p><p>Own production AI and machine-learning platform architecture. Design Python services, retrieval-augmented generation systems, data pipelines, APIs, data models, and model deployment workflows.</p><p>The posting does not state its workplace arrangement.</p><a href='https://stealthai.example.com/jobs/se-707'>Apply Here</a></div>",
+    "raw_html": "<div><h1>Stealth AI Labs</h1><h2>Principal Machine Learning Architect</h2><p>Location: Singapore</p><p>Own production AI and machine-learning platform architecture. Design Python services, retrieval-augmented generation systems, data pipelines, APIs, data models, and model deployment workflows.</p><p>The posting does not state its workplace arrangement.</p><a href='https://stealthai.example.com/jobs/se-707'>Apply Here</a></div>",
     "location_raw": "Singapore",
     "workplace_type_raw": "UNKNOWN",
     "employment_type_raw": "PERMANENT",
