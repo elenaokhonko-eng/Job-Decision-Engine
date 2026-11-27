@@ -402,6 +402,8 @@ Lanes are defined in `config/lanes/registry.yml`, one file per lane in `config/l
 
 Every observation keeps source identity and raw payload evidence. Canonical jobs may have multiple immutable `job_versions`. Gates, queue rows, evaluations, shortlist rows, and documents are pinned to `job_version_id`.
 
+To ask whether two records are the same posting, compare employer and location through `normalizeJobIdentity` (`src/modules/catalog/`): legal suffixes and the ways of writing Singapore do not matter. It changes no stored key and merges no record. The blind review draw uses it; the stored dedupe keys and the lists do not yet.
+
 Public connectors are described by versioned source plugin manifests under `config/source-plugins/`. Each raw observation can link to the active immutable source plugin revision, enabling later compliance and audit reporting. See [`docs/source-adapters.md`](source-adapters.md).
 
 ## 13. Entry points
@@ -429,7 +431,7 @@ All four stop when the repository variable `WORKFLOW_KILL_SWITCH` is `true`.
 
 ## 14. As built
 
-Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `evaluation` repository; `src/modules/evaluation/` holds the owner's AI switch, the first domain module. Nothing lives under `src/interfaces/` or `src/app/` yet.
+Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `evaluation` repository; `src/modules/evaluation/` holds the owner's AI switch, the first domain module, and `src/modules/catalog/` holds the employer and location comparison used to recognise one posting under two records. Nothing lives under `src/interfaces/` or `src/app/` yet.
 
 | Area today | Holds | Goes to |
 |---|---|---|
