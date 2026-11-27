@@ -100,7 +100,7 @@ describe("owner-rejected role families (2026-11-22)", () => {
     "Quality Assurance Analyst",
     "Ubuntu Linux Kernel Test Engineer",
     "Software Development Engineer in Test",
-    "AI Scientist - Domain Expert, Crashworthiness",
+    "Applied Modelling Fellow for Rail Crashworthiness",
     "Mechanical Design Engineer",
     "Senior Electrical Engineer",
   ])("rejects %j as NON_TARGET_ROLE_FAMILY", (title) => {

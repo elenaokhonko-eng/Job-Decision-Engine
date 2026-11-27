@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import crypto from "node:crypto";
 import pg from "pg";
 import dotenv from "dotenv";
@@ -12,6 +12,7 @@ import {
   billableOutputTokens,
   classifyRunFailure,
   EVALUATION_SAMPLE_SQL,
+  main as compareEvaluationModels,
   parseArgs,
   parsePrices,
   perJobReport,
@@ -52,6 +53,21 @@ function sampleRow(index: number): SampleRow {
 function evaluation(model: string, nextAction: string, lane: string, usage: EvaluationExecutionLike["usage"], servedPath: string): EvaluationExecutionLike {
   return { model, servedPath, usage, evaluatedJob: { next_action: nextAction, primary_lane: lane, nd_score: 70 } };
 }
+
+describe("compare_evaluation_models behind the owner's AI switch", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("refuses --run while the switch is closed or a setting is unreadable, before any database or model call", async () => {
+    vi.stubEnv("AI_EVALUATION_ENABLED", "");
+    await expect(compareEvaluationModels(["--run"])).rejects.toThrow(/held \(AI_EVALUATION_NOT_ENABLED\)/);
+    vi.stubEnv("AI_EVALUATION_ENABLED", "true");
+    vi.stubEnv("AI_EVALUATION_SCORE_CUTOFF", "0.5");
+    vi.stubEnv("AI_EVALUATION_SCORE_POLICY", "");
+    await expect(compareEvaluationModels(["--run"])).rejects.toThrow(/held \(AI_SCORE_POLICY_NOT_APPROVED\)/);
+    vi.stubEnv("AI_EVALUATION_SCORE_POLICY", "one-part");
+    await expect(compareEvaluationModels(["--run"])).rejects.toThrow(/AI_SCORE_POLICY_INVALID/);
+  });
+});
 
 describe("compare_embedding_backends", () => {
   it("computes cosine similarity and flags anything under 0.999", () => {
@@ -213,7 +229,8 @@ describe.skipIf(skipReal)("comparison scripts read the current schema (PostgreSQ
     await database.query("BEGIN READ ONLY");
     try {
       const embeddings = await database.query(EMBEDDING_SAMPLE_SQL, [context.workspaceId, "gemini-embedding-001", 768, 20]);
-      const evaluations = await database.query(EVALUATION_SAMPLE_SQL, [context.workspaceId, 20]);
+      const evaluations = await database.query(EVALUATION_SAMPLE_SQL, [context.workspaceId, 20, null, null]);
+      await database.query(EVALUATION_SAMPLE_SQL, [context.workspaceId, 20, 0.5, "m|r"]);
       expect(Array.isArray(embeddings.rows)).toBe(true);
       expect(Array.isArray(evaluations.rows)).toBe(true);
     } finally {
