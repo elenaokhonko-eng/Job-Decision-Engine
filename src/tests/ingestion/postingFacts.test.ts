@@ -581,7 +581,7 @@ describe("approximate dates downstream", () => {
     expect(result.evidence).not.toMatch(/Authoritative/);
   });
 
-  it("does not hard-reject on month or year precision, whose rounding is unconfirmed", () => {
+  it("marks month and week ranges past the limit STALE", () => {
     expect(freshness("2 months ago", 45).result).toMatchObject({ status: "STALE" });
     expect(freshness("9 weeks ago", 60).result).toMatchObject({ status: "STALE" });
   });
