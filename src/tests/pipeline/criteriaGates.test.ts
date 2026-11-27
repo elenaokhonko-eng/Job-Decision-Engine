@@ -122,7 +122,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
     it("does not hard-reject investment management context without technical evidence (Axis 1 is not a gate)", () => {
       const result = applyGlobalGates({
         id: "investment-interconnection-manager",
-        title: "Interconnection Execution Manager",
+        title: "Allotment Waiting List Manager",
         company_name: "Investment Systems Co",
         raw_description: "Manage interconnection execution and coordinate handoffs for investment management clients.",
         location: "Singapore",
@@ -184,12 +184,12 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       expect(result.rejection_codes).toContain("UNWORKABLE_LOCATION_MODEL");
     });
 
-    it("allows a direct-employer fixed-term contract such as the MAS data architect role", () => {
+    it("allows a direct-employer fixed-term contract such as a treasury data modelling role", () => {
       const job = {
-        id: "mas-investment-data-architect-contract",
-        title: "Lead Data Architect (Investment Management) (Contract)",
+        id: "treasury-data-modeller-contract",
+        title: "Principal Data Modeller (Treasury Reporting) (Contract)",
         company_name: "Monetary Authority of Singapore",
-        raw_description: "The Monetary Authority of Singapore is hiring directly for a fixed-term staff appointment. Lead data architecture for investment management, including data models, governance, lineage, and platforms.",
+        raw_description: "The Monetary Authority of Singapore is hiring directly for a fixed-term staff appointment. Own data modelling for treasury reporting, covering lineage, quality controls, and platforms.",
         location: "Singapore",
         workplace_type: "REMOTE",
         employment_type: "CONTRACT"
@@ -409,7 +409,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       ["Master Data Architect", "Own the master data platform architecture and data-model lifecycle."],
       ["Knowledge Graph Specialist", "Design and implement knowledge graph schemas and ontologies for market data."],
       ["Data Product Owner", "Own the data product roadmap, data contracts, platform architecture, and quality controls."],
-      ["SVP - Lead Technical Product Owner (Corporate/Data Domain)", "Own data contracts, data models, and data quality controls for investment products."],
+      ["Tide Gauge Technical Product Owner (Data Domain)", "Own data contracts, data models, and data quality controls for investment products."],
     ] as const;
 
     it.each(cases)("accepts technical ownership evidence for %s", (title, description) => {
@@ -481,7 +481,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
     it("passes GenAI and generic product-manager roles to lane routing instead of hard-rejecting", () => {
       const genAiRole = applyGlobalGates({
         id: "genai-product-manager",
-        title: "Senior Product Manager - GenAI",
+        title: "Product Manager - Generative Speech",
         company_name: "AI Systems Co",
         raw_description: "Experiment with emerging models and APIs, prototype GenAI workflows, and partner with Engineering on model performance, reliability, scale, and cost.",
         location: "Singapore",
@@ -490,7 +490,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       } as any);
       const strategyOnlyGenAiRole = applyGlobalGates({
         id: "genai-product-manager-strategy-only",
-        title: "Senior Product Manager - GenAI",
+        title: "Product Manager - Generative Speech",
         company_name: "AI Systems Co",
         raw_description: "Lead product management for generative AI systems and LLM workflows. Own customer research, roadmap prioritization, launch plans, and stakeholder updates.",
         location: "Singapore",
@@ -499,7 +499,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       } as any);
       const adoptionOnlyGenAiRole = applyGlobalGates({
         id: "genai-product-manager-adoption-only",
-        title: "Senior Product Manager - GenAI",
+        title: "Product Manager - Generative Speech",
         company_name: "AI Systems Co",
         raw_description: "Partner with stakeholders to scale generative AI adoption. Own customer research, roadmap prioritization, and launch plans.",
         location: "Singapore",
@@ -508,7 +508,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       } as any);
       const negatedTechnicalGenAiRole = applyGlobalGates({
         id: "genai-product-manager-negated-technical-duties",
-        title: "Senior Product Manager - GenAI",
+        title: "Product Manager - Generative Speech",
         company_name: "AI Systems Co",
         raw_description: "You will not build models or deploy APIs; instead, own roadmap, customer research, and launch strategy.",
         location: "Singapore",
@@ -540,7 +540,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       "Assess customer demand for generative AI, market positioning, and launch strategy.",
       "Research the market for machine learning products and define the product roadmap.",
     ])("classifies strategy-only product work as non-technical without hard-rejecting: %s", (description) => {
-      const title = "Senior Product Manager - GenAI";
+      const title = "Product Manager - Generative Speech";
       const result = applyGlobalGates({
         id: "genai-product-manager-market-research-only",
         title,
@@ -574,14 +574,14 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
     });
 
     it("requires technical ownership evidence for a product owner in a data domain", () => {
-      const title = "SVP - Lead Technical Product Owner (Corporate/Data Domain)";
+      const title = "Tide Gauge Technical Product Owner (Data Domain)";
       const description = "Coordinate stakeholder priorities and release schedules across the corporate product portfolio.";
       expect(isTechnicalRole(title, description).isTechnical).toBe(false);
     });
 
     it("does not use data-asset ownership wording alone to make an unrelated manager a technical role", () => {
       expect(isTechnicalRole(
-        "Interconnection Execution Manager",
+        "Allotment Waiting List Manager",
         "Manage and govern market data quality controls for investment management clients.",
       ).isTechnical).toBe(false);
     });
@@ -589,7 +589,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
     it("does not reject a technical target role only because the employer is a consulting firm", () => {
       const result = applyGlobalGates({
         id: "consulting-data-architect",
-        title: "BCG Platinion Lead/Principal Architect - Data & AI",
+        title: "Visiting Lead/Principal Architect, Data and AI",
         company_name: "Boston Consulting Group",
         raw_description: "Design and deliver data platforms and AI architectures for investment management clients.",
         location: "Singapore",

@@ -18,10 +18,10 @@ describe("repair job content command arguments", () => {
   it("defaults to dry-run and requires one explicitly scoped target", () => {
     expect(parseRepairJobContentArguments([
       "--workspace-key", "jobs",
-      "--canonical-job-id", "6ebe6407-09ef-46c7-b547-72cb23450ba0",
+      "--canonical-job-id", "11111111-2222-4333-8444-555555555555",
     ])).toEqual({
       workspaceKey: "jobs",
-      canonicalJobId: "6ebe6407-09ef-46c7-b547-72cb23450ba0",
+      canonicalJobId: "11111111-2222-4333-8444-555555555555",
       apply: false,
       forceRefetch: false,
     });
@@ -43,12 +43,12 @@ describe("repair job content command arguments", () => {
 
   it("rejects a missing workspace, an ambiguous target, and malformed IDs", () => {
     expect(() => parseRepairJobContentArguments([
-      "--canonical-job-id", "6ebe6407-09ef-46c7-b547-72cb23450ba0",
+      "--canonical-job-id", "11111111-2222-4333-8444-555555555555",
     ])).toThrow("--workspace-key is required");
     expect(() => parseRepairJobContentArguments([
       "--workspace-key", "jobs",
       "--observation-id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-      "--canonical-job-id", "6ebe6407-09ef-46c7-b547-72cb23450ba0",
+      "--canonical-job-id", "11111111-2222-4333-8444-555555555555",
     ])).toThrow("exactly one");
     expect(() => parseRepairJobContentArguments([
       "--workspace-key", "jobs",
