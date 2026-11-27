@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import pg from "pg";
 import { selectEligibleEvaluationQueueRows, supersedeStaleEvaluationQueueRows } from "../../pipeline/evaluationQueueLineage.js";
 
+// The lead lookup (v_job_lead_state) is covered against PostgreSQL; here no job is a lead.
+vi.mock("../../modules/catalog/index.js", () => ({
+  listLeadJobIds: vi.fn(async () => []),
+}));
+
 describe("supersedeStaleEvaluationQueueRows scope", () => {
   it("limits stale evaluation reconciliation to the selected job versions", async () => {
     const workspaceId = "10000000-0000-4000-8000-000000000001";

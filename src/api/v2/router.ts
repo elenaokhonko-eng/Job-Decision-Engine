@@ -1,3 +1,4 @@
+import { isLeadJobVersion, JOB_IS_LEAD_MESSAGE, JOB_IS_LEAD_REASON } from "../../modules/catalog/index.js";
 import crypto from "crypto";
 import express from "express";
 import pg from "pg";
@@ -1009,6 +1010,10 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             error: "Archived jobs cannot receive new application handoffs. Restore the posting and complete fresh readiness checks first.",
             reason: "JOB_ARCHIVED",
           };
+        }
+        // A lead is left out of the shortlist, so without this it would read as a stale artifact.
+        if (await isLeadJobVersion(client, ctx.workspaceId, job.job_version_id)) {
+          return { handoffBlocked: true, error: JOB_IS_LEAD_MESSAGE, reason: JOB_IS_LEAD_REASON };
         }
         if (![
           "CURRENT_OR_NOT_APPLICABLE",

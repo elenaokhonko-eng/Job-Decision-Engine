@@ -68,6 +68,7 @@ const CONTEXT_PAYLOAD_KEYS = [
   "carried_result_hash",
   "verification_answer_revision_id",
   "queue_budget_run_id",
+  "lead_superseded_queue_id",
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {

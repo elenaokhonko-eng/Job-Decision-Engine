@@ -20,6 +20,8 @@ import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicEx
 import { LANE_ROUTER_RULE_VERSION, runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/laneRoutingCurrency.js";
+import { isLeadJobVersion, listLeadJobIds } from "../modules/catalog/index.js";
+import { LEAD_QUEUE_NOTE, supersedeLeadEvaluationQueueRows } from "../pipeline/evaluationQueueLineage.js";
 import {
   AI_EVALUATION_OUTCOMES,
   AI_EVALUATION_OUTCOMES_SQL,
@@ -43,6 +45,7 @@ import {
   claimableTaskTypes,
   describeAiWork,
   jobVersionMayReceiveAiWork,
+  jobVersionsThatMayReceiveAiWork,
   type AiWorkReport,
 } from "../modules/evaluation/index.js";
 import { classifyDescriptionQuality, completeRetrievedPostingPredicate, sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
@@ -61,7 +64,7 @@ import {
   pipelineTaskTargetKey,
 } from "./pipelineWorkerLanes.js";
 import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
-import { OUTCOME_CONFLICT_REPAIR_ACTION, applyLiveJobScope, deciderSeedableSql, scopeSeedQuery } from "./seedQueryScope.js";
+import { OUTCOME_CONFLICT_REPAIR_ACTION, applyLiveJobScope, deciderSeedableSql, scopeSeedQuery, seedPastQueuedWork, withSeedLimit } from "./seedQueryScope.js";
 import { decidableJobVersionSql } from "./completedWithoutResult.js";
 import { syncRematchWaits } from "../modules/decision/index.js";
 import { decisionNotStampable, matchNotApplicable } from "./designedNoOps.js";
@@ -76,12 +79,15 @@ import {
   claimPipelineTasks,
   completePipelineTaskAndRun,
   enqueuePipelineTask,
+  enqueuePipelineTasks,
   failPipelineTask,
   deferPipelineTaskForRateLimit,
   rateLimitedRetryAt,
   heartbeatPipelineTask,
   releasePipelineTaskForRetry,
   type ClaimedPipelineTask,
+  type EnqueuePipelineTaskInput,
+  JOB_IS_LEAD_NO_OP_REPAIR_ACTION,
 } from "./pipelineTasks.js";
 import {
   diffProviderCalls,
@@ -366,8 +372,10 @@ function incrementSeed(
   summary: SeedPipelineTasksSummary,
   taskType: PipelineStageTaskType,
   inserted: boolean,
-  skippedReason?: "JOB_ARCHIVED" | "AI_WORK_HELD",
+  skippedReason?: "JOB_ARCHIVED" | "JOB_IS_LEAD" | "AI_WORK_HELD",
 ): void {
+  // A lead's AI enqueue task is not created: neither inserted nor existing.
+  if (skippedReason === "JOB_IS_LEAD") return;
   // Held AI work is neither inserted nor existing; the worker summary's aiWork counts it.
   if (skippedReason === "AI_WORK_HELD") return;
   summary.byType[taskType] ??= { inserted: 0, existing: 0 };
@@ -640,13 +648,17 @@ async function enqueueStageTaskResult(
     mode?: "ENSURE_CURRENT" | "FORCE_RECOMPUTE";
   },
 ) {
+  // A lead never reaches the AI queue. No task is created, so none is left completed to suppress the enqueue once
+  // the job has the employer's or the owner's posting and stops being a lead.
+  if (taskType === AI_WORK_TASK_TYPE && (await isLeadJobVersion(clientOrPool, context.workspaceId, id))) {
+    return { taskId: "", inserted: false, reactivated: false, skippedReason: "JOB_IS_LEAD" as const };
+  }
   // The one place every AI enqueue task is created (successors, re-route and seed): nothing is created while the
   // owner's switch is closed or for a job not above the cut-off. The job keeps its state; the seed finds it later.
   if (taskType === AI_WORK_TASK_TYPE &&
     !(await jobVersionMayReceiveAiWork(clientOrPool, context.workspaceId, id, readAiWorkSettings()))) {
     return { taskId: "", inserted: false, reactivated: false, skippedReason: "AI_WORK_HELD" as const };
   }
-  const maxAttempts = MODEL_BACKED_STAGE_TASK_TYPES.has(taskType) ? 3 : 8;
   let taskPayload = payload;
   let profileVersionId: string | undefined;
   if (taskType === "MATCH_PROFILE_EVIDENCE") {
@@ -676,17 +688,8 @@ async function enqueueStageTaskResult(
   const jobVersionId = typeof taskPayload.job_version_id === "string"
     ? taskPayload.job_version_id
     : null;
-  if (jobVersionId && [
-    "MATCH_PROFILE_EVIDENCE",
-    "DECIDE_RECOMMENDATION",
-    "ENQUEUE_EXPLANATION",
-  ].includes(taskType)) {
-    const currentContext = await clientOrPool.query<{
-      active_requirement_set_id: string | null;
-      content_hash: string | null;
-      latest_match_run_id: string | null;
-      latest_deterministic_decision_id: string | null;
-    }>(
+  if (jobVersionId && ARTIFACT_CONTEXT_TASK_TYPES.has(taskType)) {
+    const currentContext = await clientOrPool.query<StageArtifactContext>(
       `SELECT jv.active_requirement_set_id,
               jv.content_hash,
               c.latest_match_run_id,
@@ -700,21 +703,61 @@ async function enqueueStageTaskResult(
        LIMIT 1`,
       [context.workspaceId, jobVersionId]
     );
-    const row = currentContext.rows[0];
-    if (row) {
-      taskPayload = {
-        ...taskPayload,
-        content_hash: row.content_hash,
-        active_requirement_set_id: row.active_requirement_set_id,
-        ...(taskType === "DECIDE_RECOMMENDATION" || taskType === "ENQUEUE_EXPLANATION"
-          ? {
-              match_run_id: row.latest_match_run_id,
-              deterministic_decision_id: row.latest_deterministic_decision_id,
-            }
-          : {}),
-      };
-    }
+    taskPayload = withArtifactContext(taskType, taskPayload, currentContext.rows[0]);
   }
+  return enqueuePipelineTask(
+    buildStageTaskInput(taskType, id, taskPayload, context, profileVersionId, intentOptions),
+    clientOrPool,
+    { context }
+  );
+}
+
+const ARTIFACT_CONTEXT_TASK_TYPES = new Set<PipelineStageTaskType>([
+  "MATCH_PROFILE_EVIDENCE",
+  "DECIDE_RECOMMENDATION",
+  "ENQUEUE_EXPLANATION",
+]);
+
+type StageArtifactContext = {
+  active_requirement_set_id: string | null;
+  content_hash: string | null;
+  latest_match_run_id: string | null;
+  latest_deterministic_decision_id: string | null;
+};
+
+function withArtifactContext(
+  taskType: PipelineStageTaskType,
+  payload: Record<string, unknown>,
+  row: StageArtifactContext | undefined,
+): Record<string, unknown> {
+  if (!row || !ARTIFACT_CONTEXT_TASK_TYPES.has(taskType)) return payload;
+  return {
+    ...payload,
+    content_hash: row.content_hash,
+    active_requirement_set_id: row.active_requirement_set_id,
+    ...(taskType === "DECIDE_RECOMMENDATION" || taskType === "ENQUEUE_EXPLANATION"
+      ? {
+          match_run_id: row.latest_match_run_id,
+          deterministic_decision_id: row.latest_deterministic_decision_id,
+        }
+      : {}),
+  };
+}
+
+/** The stored identity of a stage task (key, payload, intent), from a payload that already carries its context. */
+function buildStageTaskInput(
+  taskType: PipelineStageTaskType,
+  id: string,
+  taskPayload: Record<string, unknown>,
+  context: WorkspaceContext,
+  profileVersionId: string | undefined,
+  intentOptions?: {
+    producer?: string;
+    requestId?: string;
+    triggerRevisionId?: string | null;
+    mode?: "ENSURE_CURRENT" | "FORCE_RECOMPUTE";
+  },
+): EnqueuePipelineTaskInput {
   const routingReplayVersion =
     taskType === "ROUTE_LANE" &&
     typeof taskPayload.routing_deferred_replay_version === "string" &&
@@ -756,8 +799,8 @@ async function enqueueStageTaskResult(
       : null;
   // Each requirement-embedding repair round is its own task: a repeat repair of the same job version is not a no-op.
   const embeddingRepairSequence =
-    taskType === "PUBLISH_EMBEDDING" && Number.isInteger(payload.embedding_repair_seq) && Number(payload.embedding_repair_seq) > 0
-      ? Number(payload.embedding_repair_seq)
+    taskType === "PUBLISH_EMBEDDING" && Number.isInteger(taskPayload.embedding_repair_seq) && Number(taskPayload.embedding_repair_seq) > 0
+      ? Number(taskPayload.embedding_repair_seq)
       : null;
   // A gate rule change is a new task: the key carries the gate version the job was last gated under.
   const gateRuleVersion =
@@ -791,18 +834,102 @@ async function enqueueStageTaskResult(
     mode: intentOptions?.mode,
     payload: taskPayload,
   });
-  const result = await enqueuePipelineTask(
-    {
-      taskType,
-      taskKey,
-      payload: taskPayload,
-      maxAttempts,
-      intent,
-    },
-    clientOrPool,
-    { context }
-  );
-  return result;
+  const maxAttempts = MODEL_BACKED_STAGE_TASK_TYPES.has(taskType) ? 3 : 8;
+  return { taskType, taskKey, payload: taskPayload, maxAttempts, intent };
+}
+
+/**
+ * The seed's form of `enqueueStageTaskResult`: the same AI hold, archive guard, task identity and reopen paths, read
+ * and written for the whole candidate list in a fixed number of round trips (the database is far from the worker).
+ */
+async function enqueueSeedCandidates(
+  taskType: PipelineStageTaskType,
+  candidates: ReadonlyArray<{ id: string; payload: Record<string, unknown> }>,
+  client: QueryClient,
+  context: WorkspaceContext,
+  limit: number,
+  includeTestFixtures: boolean,
+): Promise<{ inserted: number; reopened: number; existing: number; skippedArchived: number }> {
+  let eligible = candidates;
+  // The job-lead rule of `enqueueStageTaskResult` for the whole list: a lead never reaches the AI queue and no task
+  // is created for it. The seed query already filters leads before its cap; this holds even if it did not.
+  if (taskType === AI_WORK_TASK_TYPE && eligible.length > 0) {
+    const leads = new Set(await listLeadJobIds(client as any, context.workspaceId));
+    eligible = eligible.filter((candidate) => !leads.has(String(candidate.payload.canonical_job_id)));
+  }
+  if (taskType === AI_WORK_TASK_TYPE && eligible.length > 0) {
+    const allowed = await jobVersionsThatMayReceiveAiWork(
+      client as any, context.workspaceId, eligible.map((candidate) => candidate.id), readAiWorkSettings());
+    eligible = eligible.filter((candidate) => allowed.has(candidate.id));
+  }
+
+  const jobVersionIdOf = (payload: Record<string, unknown>) =>
+    typeof payload.job_version_id === "string" ? payload.job_version_id : null;
+  const jobVersionIds = [...new Set(eligible.map((candidate) => jobVersionIdOf(candidate.payload))
+    .filter((value): value is string => value !== null))];
+  type SeedTarget = StageArtifactContext & { job_version_id: string; archived_at: Date | string | null; is_test_fixture: boolean | null };
+  const contexts = new Map<string, SeedTarget>();
+  if (jobVersionIds.length > 0) {
+    const { rows } = await client.query<SeedTarget>(
+      `SELECT jv.id::text AS job_version_id,
+              jv.active_requirement_set_id,
+              jv.content_hash,
+              c.latest_match_run_id,
+              c.latest_deterministic_decision_id,
+              c.archived_at,
+              c.is_test_fixture
+       FROM job_versions jv
+       JOIN canonical_jobs c
+         ON c.workspace_id = jv.workspace_id
+        AND c.id = jv.canonical_job_id
+       WHERE jv.workspace_id = $1
+         AND jv.id = ANY($2::uuid[])`,
+      [context.workspaceId, jobVersionIds],
+    );
+    for (const row of rows) contexts.set(row.job_version_id, row);
+  }
+  const archived = (payload: Record<string, unknown>) =>
+    Boolean(contexts.get(jobVersionIdOf(payload) ?? "")?.archived_at);
+  const notArchived = eligible.filter((candidate) => !archived(candidate.payload));
+  const skippedArchived = eligible.length - notArchived.length;
+  // The seed query already excludes fixtures; this holds even if one of them forgot to.
+  const live = includeTestFixtures
+    ? notArchived
+    : notArchived.filter((candidate) => contexts.get(jobVersionIdOf(candidate.payload) ?? "")?.is_test_fixture !== true);
+  if (live.length === 0) return { inserted: 0, reopened: 0, existing: 0, skippedArchived };
+
+  let activeProfileId: string | undefined;
+  if (taskType === "MATCH_PROFILE_EVIDENCE" &&
+      live.some((candidate) => !optionalSeedString(candidate.payload.profile_version_id))) {
+    activeProfileId = await resolveActiveProfileVersionId(client as any, context);
+  } else if (taskType === "DECIDE_RECOMMENDATION") {
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT pv.id FROM profile_versions pv
+        WHERE pv.workspace_id = $1 AND pv.status = 'ACTIVE'
+        ORDER BY pv.created_at DESC LIMIT 1`,
+      [context.workspaceId],
+    );
+    activeProfileId = rows[0]?.id;
+  }
+
+  const inputs = live.map((candidate) => {
+    let payload = candidate.payload;
+    let profileVersionId: string | undefined;
+    if (taskType === "MATCH_PROFILE_EVIDENCE") {
+      profileVersionId = optionalSeedString(payload.profile_version_id) ?? activeProfileId;
+      payload = { ...payload, profile_version_id: profileVersionId };
+    } else if (taskType === "DECIDE_RECOMMENDATION" && activeProfileId) {
+      profileVersionId = activeProfileId;
+      payload = { ...payload, profile_version_id: profileVersionId };
+    }
+    payload = withArtifactContext(taskType, payload, contexts.get(jobVersionIdOf(payload) ?? ""));
+    return buildStageTaskInput(taskType, candidate.id, payload, context, profileVersionId);
+  });
+  return { ...(await enqueuePipelineTasks(inputs, client as any, { context, limit })), skippedArchived };
+}
+
+function optionalSeedString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
 
 function stageVersion(taskType: PipelineStageTaskType): string {
@@ -836,6 +963,11 @@ function notBlockedOnJobContentSql(taskType: PipelineStageTaskType): string {
          )`;
 }
 
+/**
+ * One seed step. It always runs, whatever the time already spent: every stage's share of the seeding is guaranteed,
+ * and a step costs a fixed number of round trips. Work already stored under the same identity does not keep the
+ * candidates behind it from being seeded (`seedPastQueuedWork`).
+ */
 async function selectAndEnqueue(
   client: QueryClient,
   ctx: WorkspaceContext,
@@ -846,52 +978,30 @@ async function selectAndEnqueue(
   build: (row: Record<string, unknown>) => { id: string; payload: Record<string, unknown> },
   enabledTypes?: Set<PipelineStageTaskType>,
   includeTestFixtures = false,
-  deadlineAt?: number,
   seedScope: { jobVersionIds?: readonly string[]; observationIds?: readonly string[] } = {},
   maxSeedPerType = 200,
 ): Promise<void> {
   if (enabledTypes && !enabledTypes.has(taskType)) return;
-  if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
-    summary.timeBudgetExceeded = true;
-    return;
-  }
   // The live-job scope sits inside the query, before its LIMIT. Only the observation seed has no canonical job.
   const liveQuery = taskType === "NORMALIZE_OBSERVATION"
     ? { sql, params }
     : applyLiveJobScope(sql, params, { includeTestFixtures });
-  const scopedQuery = scopeSeedQuery(liveQuery.sql, liveQuery.params, seedScope, maxSeedPerType);
-  const { rows } = await client.query<Record<string, unknown>>(scopedQuery.sql, scopedQuery.params);
-  const candidates = rows.map(build);
-  const canonicalJobIds = [...new Set(candidates
-    .map((candidate) => candidate.payload.canonical_job_id)
-    .filter((id): id is string => typeof id === "string" && id.length > 0))];
-  const fixtureIds = new Set<string>();
-
-  if (!includeTestFixtures && canonicalJobIds.length > 0) {
-    const fixtures = await client.query<{ id: string }>(
-      `SELECT id
-       FROM canonical_jobs
-       WHERE workspace_id = $1
-         AND is_test_fixture = TRUE
-         AND id = ANY($2::uuid[])`,
-      [ctx.workspaceId, canonicalJobIds],
-    );
-    for (const fixture of fixtures.rows) fixtureIds.add(fixture.id);
-  }
-
-  for (let index = 0; index < candidates.length; index += 1) {
-    if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
-      summary.timeBudgetExceeded = true;
-      summary.deferredByBudget += candidates.length - index;
-      break;
-    }
-    const task = candidates[index];
-    if (!task) continue;
-    const canonicalJobId = task.payload.canonical_job_id;
-    if (!includeTestFixtures && typeof canonicalJobId === "string" && fixtureIds.has(canonicalJobId)) continue;
-    const enqueued = await enqueueStageTaskResult(taskType, task.id, task.payload, client as any, ctx);
-    incrementSeed(summary, taskType, enqueued.inserted, enqueued.skippedReason);
-  }
+  let skippedArchived = 0;
+  const result = await seedPastQueuedWork(maxSeedPerType, async (readLimit, slots) => {
+    const limited = withSeedLimit(liveQuery.sql, liveQuery.params, readLimit);
+    const scopedQuery = scopeSeedQuery(limited.sql, limited.params, seedScope, readLimit);
+    const { rows } = await client.query<Record<string, unknown>>(scopedQuery.sql, scopedQuery.params);
+    const look = await enqueueSeedCandidates(taskType, rows.map(build), client, ctx, slots, includeTestFixtures);
+    skippedArchived = look.skippedArchived;
+    return { ...look, read: rows.length };
+  });
+  if (result.inserted + result.existing + skippedArchived === 0) return;
+  summary.byType[taskType] ??= { inserted: 0, existing: 0 };
+  summary.byType[taskType].inserted += result.inserted;
+  summary.byType[taskType].existing += result.existing;
+  summary.inserted += result.inserted;
+  summary.existing += result.existing;
+  summary.skippedArchived += skippedArchived;
 }
 
 export async function seedRecoverablePipelineTasks(
@@ -977,10 +1087,13 @@ export async function seedRecoverablePipelineTasks(
         )`
       : "FALSE";
 
+    // Leads are filtered before the cap, so they take no seed slot.
+    const leadIds = await listLeadJobIds(client as any, ctx.workspaceId);
+
     const aiWork = readAiWorkSettings();
     // Seed AI enqueue first. Jobs matched and decided outside the task chain (rematch and replay
     // scripts) reach the AI queue only through this seed, and it is the last stage before Apply Now.
-    // Seeding stops at a shared time budget, so this seed must not wait behind the upstream seeds.
+    // Every step runs even after the time budget is spent; the order still decides which tasks are created first.
     // Nothing is seeded while AI work is held. The cut-off filters before the cap, so jobs below it take no slot.
     if (aiWork.mode === "OPEN") await selectAndEnqueue(
       client as any,
@@ -989,7 +1102,8 @@ export async function seedRecoverablePipelineTasks(
       "ENQUEUE_EXPLANATION",
       `SELECT c.id AS canonical_job_id,
               COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
-              last_deferral.budget_run_id::text AS deferred_budget_run_id
+              last_deferral.budget_run_id::text AS deferred_budget_run_id,
+              last_lead_row.id::text AS lead_superseded_queue_id
        FROM canonical_jobs c
        LEFT JOIN LATERAL (
          SELECT id
@@ -1007,6 +1121,17 @@ export async function seedRecoverablePipelineTasks(
          ORDER BY deferral.created_at DESC, deferral.id DESC
          LIMIT 1
        ) last_deferral ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT queue.id
+         FROM evaluation_queue queue
+         WHERE queue.workspace_id = c.workspace_id
+           AND queue.canonical_job_id = c.id
+           AND queue.job_version_id = COALESCE(c.latest_job_version_id, jv.id)
+           AND queue.status = 'SUPERSEDED'
+           AND strpos(queue.last_error, $6::text) > 0
+         ORDER BY queue.enqueued_at DESC, queue.id DESC
+         LIMIT 1
+       ) last_lead_row ON TRUE
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET')
          AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
@@ -1014,6 +1139,7 @@ export async function seedRecoverablePipelineTasks(
          AND c.recommendation_outcome IN (${AI_EVALUATION_OUTCOMES_SQL})
          AND c.recommendation_requirement_score > $3::numeric
          AND c.recommendation_score_policy = $4::text
+         AND NOT (c.id = ANY($5::uuid[]))
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
          AND EXISTS (
            SELECT 1
@@ -1066,6 +1192,8 @@ export async function seedRecoverablePipelineTasks(
         ctx.workspaceId,
         maxPerType,
         ...(aiWork.mode === "OPEN" ? [aiWork.scoreCutoff, aiWork.scorePolicy] : [null, null]),
+        leadIds,
+        LEAD_QUEUE_NOTE,
       ],
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
@@ -1082,11 +1210,14 @@ export async function seedRecoverablePipelineTasks(
           ...(typeof row.deferred_budget_run_id === "string" && row.deferred_budget_run_id !== ""
             ? { queue_budget_run_id: row.deferred_budget_run_id }
             : {}),
+          // A queue row superseded because the job was a lead: once it is not one, the same context must run again.
+          ...(typeof row.lead_superseded_queue_id === "string"
+            ? { lead_superseded_queue_id: row.lead_superseded_queue_id }
+            : {}),
         },
       }),
       enabledTypes,
       includeTestFixtures,
-      deadlineAt,
     seedScope,
     maxPerType,
     );
@@ -1111,7 +1242,6 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
-      deadlineAt,
     seedScope,
     maxPerType,
     );
@@ -1194,7 +1324,6 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
-      deadlineAt,
     seedScope,
     maxPerType,
     );
@@ -1246,7 +1375,6 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
-      deadlineAt,
     seedScope,
     maxPerType,
     );
@@ -1319,7 +1447,6 @@ export async function seedRecoverablePipelineTasks(
       }),
       gateVersionSeedTypes,
       includeTestFixtures,
-      deadlineAt,
       seedScope,
       maxPerType,
     );
@@ -1359,7 +1486,6 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
-      deadlineAt,
     seedScope,
     maxPerType,
     );
@@ -1419,7 +1545,6 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
-      deadlineAt,
       seedScope,
       maxPerType,
     );
@@ -1479,7 +1604,6 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
-      deadlineAt,
     seedScope,
     maxPerType,
     );
@@ -1552,7 +1676,6 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
-      deadlineAt,
     seedScope,
     maxPerType,
     );
@@ -1621,7 +1744,6 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
-      deadlineAt,
     seedScope,
     maxPerType,
     );
@@ -1663,7 +1785,6 @@ export async function seedRecoverablePipelineTasks(
         }),
         enabledTypes,
         includeTestFixtures,
-        deadlineAt,
         seedScope,
         maxPerType,
       );
@@ -1723,7 +1844,6 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
-      deadlineAt,
       seedScope,
       maxPerType,
     );
@@ -1829,7 +1949,6 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
-      deadlineAt,
     seedScope,
     maxPerType,
     );
@@ -1940,7 +2059,6 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
-      deadlineAt,
     seedScope,
     maxPerType,
     );
@@ -1957,6 +2075,8 @@ export async function seedRecoverablePipelineTasks(
       summary.existing += rechecks.existing;
     }
 
+    // Reported only: no step is skipped when the budget is spent.
+    summary.timeBudgetExceeded = Date.now() >= deadlineAt;
     return summary;
   } finally {
     if (ownsClient && typeof (client as any).release === "function") {
@@ -4102,6 +4222,11 @@ async function executeStageTask(
   if (taskType === "ENQUEUE_EXPLANATION") {
     await requireCurrentLaneRouting(jobVersionId, clientOrPool, ctx);
     await requireCurrentProfileMatchAndDecision(jobVersionId, clientOrPool, ctx);
+    // A task created before its job became a lead completes without queueing: a lead waits for no cut-off approval.
+    if (await isLeadJobVersion(clientOrPool, ctx.workspaceId, jobVersionId)) {
+      onDesignedNoOp(JOB_IS_LEAD_NO_OP_REPAIR_ACTION);
+      return;
+    }
     // A task created before the cut-off applied waits, visibly, instead of completing without queueing anything.
     if (!(await jobVersionMayReceiveAiWork(clientOrPool, ctx.workspaceId, jobVersionId, readAiWorkSettings()))) {
       throw new PipelineTaskDependencyBlockedError(
@@ -4721,6 +4846,14 @@ export async function runPipelineStageTaskWorker(
     const stageLimitsReached = claimTypes.length > 0 && claimTypes.every((taskType) =>
       (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks))
     );
+    // A lead's unstarted queue row is not waiting AI work: it is superseded here whether or not the owner's switch
+    // is open, because the enqueuer and the evaluation worker, which also do this, do not run while it is closed.
+    if (taskTypes.includes(AI_WORK_TASK_TYPE)) {
+      const supersededLeadRows = await supersedeLeadEvaluationQueueRows(client, { workspaceId: ctx.workspaceId });
+      if (supersededLeadRows > 0) {
+        console.log(`[pipeline-worker] superseded ${supersededLeadRows} evaluation queue row(s) of leads.`);
+      }
+    }
     summary.durationMs = durationMs;
     summary.providerCalls = summarizeProviderCalls(diffProviderCalls(providerCallsAtStart, snapshotProviderCalls()));
     if (summary.providerCalls.total_calls > 0) {

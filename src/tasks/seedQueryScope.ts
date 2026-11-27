@@ -11,6 +11,46 @@ export interface ScopedSeedQuery {
   readonly params: unknown[];
 }
 
+export interface SeedLook {
+  /** Candidate rows the read returned. */
+  readonly read: number;
+  readonly inserted: number;
+  /** Stored tasks put back to PENDING; they take a slot of the cap like new ones. */
+  readonly reopened: number;
+  /** Stored tasks met, the reopened ones included. */
+  readonly existing: number;
+}
+
+/**
+ * A capped seed that does not let queued work hide the work behind it. The first look reads `cap` rows. Only when that
+ * read was full and left slots free (some rows were already stored) does a second, wider look (8 x the cap, at most
+ * 2000 rows) fill them. `look` reads at most `readLimit` candidates and takes at most `slots` of them.
+ */
+export async function seedPastQueuedWork(
+  cap: number,
+  look: (readLimit: number, slots: number) => Promise<SeedLook>,
+): Promise<{ inserted: number; existing: number }> {
+  const first = await look(cap, cap);
+  const slots = cap - first.inserted - first.reopened;
+  const wide = Math.max(cap, Math.min(cap * 8, 2000));
+  if (first.read < cap || slots <= 0 || wide <= cap) return { inserted: first.inserted, existing: first.existing };
+  const second = await look(wide, slots);
+  return {
+    inserted: first.inserted + second.inserted,
+    // The second read meets the first look's rows again; the tasks the first look created are not "existing".
+    existing: Math.max(first.existing, second.existing - first.inserted),
+  };
+}
+
+/** The same query with its final parameterized LIMIT set to `limit`. */
+export function withSeedLimit(sql: string, params: readonly unknown[], limit: number): ScopedSeedQuery {
+  const limitMatch = /\s+LIMIT\s+\$(\d+)\s*$/i.exec(sql);
+  if (!limitMatch) throw new Error("Task seeding requires a query with a final parameterized LIMIT.");
+  const next = [...params];
+  next[Number(limitMatch[1]) - 1] = limit;
+  return { sql, params: next };
+}
+
 export function scopeSeedQuery(
   sql: string,
   params: readonly unknown[],

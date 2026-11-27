@@ -21,6 +21,8 @@ from streamlit_database import read_only_database_ssl_options
 from streamlit_formatters import as_number, format_percent, format_score, format_signal
 from streamlit_formatters import awaiting_rematch_label, format_career_track, safe_http_url
 from streamlit_job_review import (
+    LEAD_LABEL,
+    lead_job_ids,
     CATEGORY_OPTIONS,
     CLOSED_OUT_CATEGORY_BUCKETS,
     DEFAULT_CATEGORY_INDEX,
@@ -938,6 +940,16 @@ def fetch_applications_from_read_model(limit=250):
         connection.close()
     rows = _read_model_query(APPLICATIONS_READ_MODEL_QUERY, (workspace_id, user_id, limit))
     return _validate_workspace_rows(rows, workspace_id, validate_application_row, user_id)
+
+
+def fetch_lead_job_ids(canonical_job_ids):
+    """Return which of these jobs are leads (see ``streamlit_job_review.lead_job_ids``)."""
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    return lead_job_ids(_read_model_query, workspace_id, canonical_job_ids)
 
 
 def fetch_document_selection(application_record_id):
@@ -3055,6 +3067,11 @@ with tab_applications:
         st.info("No application records yet. Add a current Apply Now job to your tracker from the ranked list.")
     else:
         st.caption("Status changes are written through the managed API and recorded as append-only application events.")
+        try:
+            saved_lead_ids = fetch_lead_job_ids([record["canonical_job_id"] for record in application_records])
+        except Exception as exc:
+            saved_lead_ids = set()
+            st.warning(f"Lead labels are unavailable: {exc}")
         tracker_rows = [
             {
                 "Company": record.get("company"),
@@ -3063,6 +3080,7 @@ with tab_applications:
                 "Recommendation": " · ".join(
                     part for part in (record.get("recommendation_outcome"), awaiting_mark(record)) if part
                 ),
+                "Listing": LEAD_LABEL if str(record.get("canonical_job_id")) in saved_lead_ids else "",
                 "Rank context": "Current job version" if record.get("is_current_job_version") else "Historical job version",
                 "CV": record.get("cv_document_status") or "NOT_GENERATED",
                 "Cover letter": record.get("cover_letter_document_status") or "NOT_GENERATED",

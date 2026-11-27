@@ -1,4 +1,5 @@
 import pg from "pg";
+import { isLeadJobVersion, JOB_IS_LEAD_MESSAGE } from "../modules/catalog/index.js";
 import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
 
 import {
@@ -71,6 +72,9 @@ export async function preflightApplicationDocumentDraft(
   }
   if (application.description_quality_status !== "COMPLETE" || !application.has_source_content_evidence) {
     throw new Error("Document generation requires complete description quality and verified posting-source evidence.");
+  }
+  if (await isLeadJobVersion(client, context.workspaceId, input.jobVersionId)) {
+    throw new Error(JOB_IS_LEAD_MESSAGE);
   }
   if (application.gate_status !== "PASS" ||
       application.recommendation_eligibility !== "ELIGIBLE" ||

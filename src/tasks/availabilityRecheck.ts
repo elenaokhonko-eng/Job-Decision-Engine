@@ -69,7 +69,8 @@ import {
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import type { WorkspaceContext } from "../workspace/context.js";
 import { pipelineTaskStageVersion } from "./pipelineTaskCurrentness.js";
-import { enqueuePipelineTask } from "./pipelineTasks.js";
+import { enqueuePipelineTask, enqueuePipelineTasks, type EnqueuePipelineTaskInput } from "./pipelineTasks.js";
+import { seedPastQueuedWork } from "./seedQueryScope.js";
 import { createTaskIntentV2 } from "./taskIntent.js";
 
 export const RECHECK_AVAILABILITY_TASK_TYPE = "RECHECK_AVAILABILITY" as const;
@@ -392,6 +393,18 @@ async function countEvents(client: Queryable, workspaceId: string, canonicalJobI
   return rows[0]?.count ?? 0;
 }
 
+/** `countEvents` for a list of jobs, in one query. */
+async function countEventsByJob(client: Queryable, workspaceId: string, canonicalJobIds: readonly string[]): Promise<Map<string, number>> {
+  const { rows } = await client.query<{ id: string; count: number }>(
+    `SELECT canonical_job_id::text AS id, COUNT(*)::int AS count FROM job_availability_recheck_events
+      WHERE workspace_id = $1::uuid AND canonical_job_id = ANY($2::uuid[])
+        AND COALESCE(details->>'trigger', '') <> 'MANUAL'
+      GROUP BY canonical_job_id`,
+    [workspaceId, [...canonicalJobIds]],
+  );
+  return new Map(rows.map((row) => [row.id, row.count]));
+}
+
 function hostOf(url: string | null): string | null {
   if (!url) return null;
   try {
@@ -600,6 +613,16 @@ export async function enqueueAvailabilityRecheck(
   input: { canonicalJobId: string; jobVersionId: string; cycleStartedAt: Date; availableAt?: Date },
 ): Promise<boolean> {
   const sequence = await countEvents(client, context.workspaceId, input.canonicalJobId);
+  const result = await enqueuePipelineTask(availabilityRecheckTaskInput(context, sequence, input), client, { context });
+  return result.inserted;
+}
+
+/** `sequence` is the number of reads of the job so far. */
+function availabilityRecheckTaskInput(
+  context: WorkspaceContext,
+  sequence: number,
+  input: { canonicalJobId: string; jobVersionId: string; cycleStartedAt: Date; availableAt?: Date },
+): EnqueuePipelineTaskInput {
   const taskKey = `${RECHECK_AVAILABILITY_TASK_TYPE}:${input.jobVersionId}:${RECHECK_AVAILABILITY_STAGE_VERSION}:${sequence}`;
   const payload = {
     canonical_job_id: input.canonicalJobId,
@@ -614,15 +637,14 @@ export async function enqueueAvailabilityRecheck(
     requestId: taskKey,
     payload,
   });
-  const result = await enqueuePipelineTask({
+  return {
     taskType: RECHECK_AVAILABILITY_TASK_TYPE,
     taskKey,
     payload,
     maxAttempts: 8,
     availableAt: input.availableAt,
     intent,
-  }, client, { context });
-  return result.inserted;
+  };
 }
 
 /**
@@ -677,38 +699,43 @@ export async function seedAvailabilityRechecks(
 ): Promise<SeedAvailabilityRechecksSummary> {
   const limit = Math.max(1, Math.min(options.limit ?? 200, 2000));
   const scoped = options.jobVersionIds !== undefined;
-  const { rows } = await client.query<{ canonical_job_id: string; job_version_id: string; availability_recheck_at: Date }>(
-    `SELECT availability.canonical_job_id::text AS canonical_job_id,
-            availability.job_version_id::text AS job_version_id,
-            availability.availability_recheck_at
-       FROM v_job_availability_current availability
-       JOIN canonical_jobs canonical
-         ON canonical.workspace_id = availability.workspace_id AND canonical.id = availability.canonical_job_id
-      WHERE availability.workspace_id = $1::uuid
-        AND availability.availability_state = 'UNKNOWN'
-        AND availability.availability_status = 'OPEN'
-        AND availability.availability_recheck_at <= NOW()
-        AND canonical.archived_at IS NULL
-        AND ($3::boolean OR canonical.is_test_fixture = FALSE)
-        AND COALESCE(canonical.processing_state, canonical.processing_status)
-              NOT IN ('MANUALLY_REMOVED', 'HARD_REJECTED')
-        AND (NOT $4::boolean OR availability.job_version_id::text = ANY($5::text[]))
-      ORDER BY availability.availability_recheck_at ASC, availability.canonical_job_id ASC
-      LIMIT $2`,
-    [context.workspaceId, limit, options.includeTestFixtures === true, scoped, [...(options.jobVersionIds ?? [])]],
-  );
-  let inserted = 0;
-  let existing = 0;
-  for (const row of rows) {
-    const queued = await enqueueAvailabilityRecheck(client, context, {
-      canonicalJobId: row.canonical_job_id,
-      jobVersionId: row.job_version_id,
-      cycleStartedAt: new Date(row.availability_recheck_at),
-    });
-    if (queued) inserted += 1;
-    else existing += 1;
-  }
-  return { candidates: rows.length, inserted, existing };
+  let candidates = 0;
+  const result = await seedPastQueuedWork(limit, async (readLimit, slots) => {
+    const { rows } = await client.query<{ canonical_job_id: string; job_version_id: string; availability_recheck_at: Date }>(
+      `SELECT availability.canonical_job_id::text AS canonical_job_id,
+              availability.job_version_id::text AS job_version_id,
+              availability.availability_recheck_at
+         FROM v_job_availability_current availability
+         JOIN canonical_jobs canonical
+           ON canonical.workspace_id = availability.workspace_id AND canonical.id = availability.canonical_job_id
+        WHERE availability.workspace_id = $1::uuid
+          AND availability.availability_state = 'UNKNOWN'
+          AND availability.availability_status = 'OPEN'
+          AND availability.availability_recheck_at <= NOW()
+          AND canonical.archived_at IS NULL
+          AND ($3::boolean OR canonical.is_test_fixture = FALSE)
+          AND COALESCE(canonical.processing_state, canonical.processing_status)
+                NOT IN ('MANUALLY_REMOVED', 'HARD_REJECTED')
+          AND (NOT $4::boolean OR availability.job_version_id::text = ANY($5::text[]))
+        ORDER BY availability.availability_recheck_at ASC, availability.canonical_job_id ASC
+        LIMIT $2`,
+      [context.workspaceId, readLimit, options.includeTestFixtures === true, scoped, [...(options.jobVersionIds ?? [])]],
+    );
+    if (rows.length === 0) return { read: 0, inserted: 0, reopened: 0, existing: 0 };
+    const sequences = await countEventsByJob(client, context.workspaceId, rows.map((row) => row.canonical_job_id));
+    const look = await enqueuePipelineTasks(
+      rows.map((row) => availabilityRecheckTaskInput(context, sequences.get(row.canonical_job_id) ?? 0, {
+        canonicalJobId: row.canonical_job_id,
+        jobVersionId: row.job_version_id,
+        cycleStartedAt: new Date(row.availability_recheck_at),
+      })),
+      client,
+      { context, limit: slots },
+    );
+    candidates = rows.length;
+    return { ...look, read: rows.length };
+  });
+  return { candidates, ...result };
 }
 
 async function readOnce(

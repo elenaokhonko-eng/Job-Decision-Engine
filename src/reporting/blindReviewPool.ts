@@ -1,5 +1,6 @@
 import type pg from "pg";
 
+import { listLeadJobIds } from "../modules/catalog/index.js";
 import { OWNER_SAVED_SOURCE_NAMES } from "../services/jobArchiveHardRejectedPolicy.js";
 import {
   BLIND_REVIEW_EXCLUSIONS,
@@ -16,7 +17,8 @@ import {
 /**
  * The candidate pool for the blind review sheet (read only). The rules are in blindReviewRules.ts; this file reads the facts.
  * A job is drawn only if it is live, gate PASS, content complete, confirmed open on the draw date, not saved, not applied to,
- * not labelled before, not on LinkedIn and not a second record of a posting already in the pool. This is not the Streamlit Review list's filter: it does not look at the
+ * not labelled before, not on LinkedIn, not a job-board or aggregator lead (listLeadJobIds, the one definition) and not a
+ * second record of a posting already in the pool. This is not the Streamlit Review list's filter: it does not look at the
  * recommendation outcome, and it is stricter on availability, saved jobs and LinkedIn.
  * Every job with a stored adjusted score is either drawn from or counted under exactly one reason.
  */
@@ -116,6 +118,7 @@ export async function loadBlindReviewPool(
   input: { workspaceId: string; excludedIds: readonly string[]; now: Date },
 ): Promise<BlindReviewPool> {
   const labelled = new Set(input.excludedIds.map((id) => id.toLowerCase()));
+  const leads = new Set(await listLeadJobIds(client, input.workspaceId));
   const sightings = await loadSightings(client, input.workspaceId);
   const byJob = new Map<string, Sighting[]>();
   const saved = new Set<string>();
@@ -206,6 +209,7 @@ export async function loadBlindReviewPool(
       // LinkedIn is left out even when the job was also seen on an employer board.
       linkedIn: isLinkedInLink(job.canonical_url)
         || seen.some((s) => isLinkedInSource(s.source_name, s.source_plugin_key) || isLinkedInLink(s.source_url) || isLinkedInLink(s.canonical_apply_url)),
+      lead: leads.has(job.id),
       contentComplete: job.content_complete,
       hasPostingLink: link !== null,
       currentTopKMatch: job.current_topk_match,

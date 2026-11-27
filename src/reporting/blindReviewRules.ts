@@ -27,7 +27,8 @@ export function verifiedOnReviewDate(verifiedAt: Date | null, now: Date): boolea
  */
 export const BLIND_REVIEW_EXCLUSIONS = [
   "ARCHIVED", "TEST_FIXTURE", "NOT_GATE_PASSED", "MANUALLY_REMOVED", "SAVED_BY_USER", "HAS_APPLICATION", "ALREADY_LABELLED",
-  "SAME_POSTING_AS_SAVED_APPLIED_OR_LABELLED", "LINKEDIN", "AWAITING_CONTENT", "NO_POSTING_LINK", "NO_CURRENT_TOPK_MATCH",
+  "SAME_POSTING_AS_SAVED_APPLIED_OR_LABELLED", "LINKEDIN", "LEAD_JOB_BOARD_OR_AGGREGATOR", "AWAITING_CONTENT",
+  "NO_POSTING_LINK", "NO_CURRENT_TOPK_MATCH",
   "AWAITING_RECOMPUTE", "CONFIRMED_CLOSED", "NOT_VERIFIED_OPEN_ON_DRAW_DATE", "DUPLICATE_POSTING",
 ] as const;
 export type BlindReviewExclusion = (typeof BLIND_REVIEW_EXCLUSIONS)[number];
@@ -42,6 +43,8 @@ export interface BlindReviewFacts {
   labelled: boolean;
   samePostingAsTaken: boolean;
   linkedIn: boolean;
+  /** A job-board or aggregator lead, as the catalog module defines it. */
+  lead: boolean;
   contentComplete: boolean;
   hasPostingLink: boolean;
   currentTopKMatch: boolean;
@@ -61,6 +64,7 @@ export function blindReviewExclusion(facts: BlindReviewFacts, now: Date): BlindR
   if (facts.labelled) return "ALREADY_LABELLED";
   if (facts.samePostingAsTaken) return "SAME_POSTING_AS_SAVED_APPLIED_OR_LABELLED";
   if (facts.linkedIn) return "LINKEDIN";
+  if (facts.lead) return "LEAD_JOB_BOARD_OR_AGGREGATOR";
   if (!facts.contentComplete) return "AWAITING_CONTENT";
   if (!facts.hasPostingLink) return "NO_POSTING_LINK";
   if (!facts.currentTopKMatch) return "NO_CURRENT_TOPK_MATCH";

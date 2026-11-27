@@ -1,5 +1,6 @@
 import pg from "pg";
 
+import { isLeadJobVersion, JOB_IS_LEAD_REASON } from "../modules/catalog/index.js";
 import { loadCurrentApplicationReadiness, isCurrentReadyApplicationReadiness } from "../services/currentApplicationReadiness.js";
 import { validateDocumentCurrentContext } from "./currentContext.js";
 
@@ -86,6 +87,10 @@ export async function validatePersistedDocumentCurrentness(
   if (!current) return { current: false, reason: "JOB_NOT_AVAILABLE" };
   if (current.archived_at !== null && current.archived_at !== undefined) {
     return { current: false, reason: "JOB_ARCHIVED" };
+  }
+
+  if (await isLeadJobVersion(client, workspaceId, document.jobVersionId)) {
+    return { current: false, reason: JOB_IS_LEAD_REASON };
   }
 
   const readiness = await loadCurrentApplicationReadiness(

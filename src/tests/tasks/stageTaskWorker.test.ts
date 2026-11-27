@@ -1557,7 +1557,38 @@ describe("stageTaskWorker", () => {
     expect(decisionSeed?.sql).toContain("current_match.context_fingerprint IS NOT NULL");
   });
 
-  it("seeds AI enqueue before upstream seeds can exhaust the seed time budget", async () => {
+  it("refuses a job lead in the batched seed even when the seed query returns it", async () => {
+    const written: string[] = [];
+    const candidate = (name: string) => ({ canonical_job_id: `job-${name}`, job_version_id: `version-${name}`, deferred_budget_run_id: null });
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.includes("to_regclass('v_job_lead_state')")) return { rows: [{ available: true }] };
+      if (sql.includes("FROM v_job_lead_state lead")) return { rows: [{ id: "job-lead" }] };
+      // The query's own lead filter is not applied here: both candidates come back.
+      if (sql.includes("last_deferral.budget_run_id")) return { rows: [candidate("lead"), candidate("employer")] };
+      if (sql.includes("c.recommendation_requirement_score > $3::numeric")) {
+        return { rows: [{ id: "version-lead" }, { id: "version-employer" }] };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        written.push(String(params?.[1]));
+        return { rows: [{ id: "task-enqueue" }] };
+      }
+      return { rows: [] };
+    });
+
+    const summary = await seedRecoverablePipelineTasks({ query } as any, {
+      context: ctx,
+      taskTypes: ["ENQUEUE_EXPLANATION"],
+      routingDeferredReplayVersion: "test-lane-revision",
+      maxSeedPerType: 5,
+    });
+
+    expect(summary.byType.ENQUEUE_EXPLANATION).toEqual({ inserted: 1, existing: 0 });
+    expect(written).toHaveLength(1);
+    expect(written[0]).toContain("version-employer");
+    expect(written[0]).not.toContain("version-lead");
+  });
+
+  it("seeds AI enqueue first and still reaches every later stage after the seed time budget is spent", async () => {
     const seedTypesQueried: string[] = [];
     let now = 1_700_000_000_000;
     const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -1575,7 +1606,7 @@ describe("stageTaskWorker", () => {
         now += 60_000;
         return { rows: [], rowCount: 0 };
       }
-      if (sql.includes("c.recommendation_requirement_score > $3::numeric")) return { rows: [{}], rowCount: 1 };
+      if (sql.includes("c.recommendation_requirement_score > $3::numeric")) return { rows: [{ id: "version-review" }], rowCount: 1 };
       if (sql.includes("INSERT INTO pipeline_tasks")) {
         now += 60_000;
         return { rows: [{ id: "task-enqueue" }], rowCount: 1 };
@@ -1592,7 +1623,11 @@ describe("stageTaskWorker", () => {
 
       expect(summary.byType.ENQUEUE_EXPLANATION).toEqual({ inserted: 1, existing: 0 });
       expect(summary.timeBudgetExceeded).toBe(true);
-      expect(seedTypesQueried).toEqual(["ENQUEUE_EXPLANATION"]);
+      expect(seedTypesQueried).toEqual(["ENQUEUE_EXPLANATION", "NORMALIZE_OBSERVATION"]);
+      // The steps after the slow one still ran: extraction, matching, decision and the availability re-check.
+      for (const marker of ["extractor_version_stale", "superseded_match_run_id", "decider_reassessment_required", "v_job_availability_current availability"]) {
+        expect(query.mock.calls.some(([sql]) => String(sql).includes(marker)), marker).toBe(true);
+      }
     } finally {
       clock.mockRestore();
     }
@@ -2440,8 +2475,8 @@ describe("stageTaskWorker", () => {
 
   it("excludes marked release fixtures from operational task seeding", async () => {
     const query = vi.fn(async (sql: string) => {
-      if (sql.includes("FROM canonical_jobs") && sql.includes("is_test_fixture = TRUE")) {
-        return { rows: [{ id: "c0000000-0000-4000-8000-000000000001" }] };
+      if (sql.includes("c.is_test_fixture") && sql.includes("FROM job_versions jv")) {
+        return { rows: [{ job_version_id: "d0000000-0000-4000-8000-000000000001", archived_at: null, is_test_fixture: true }] };
       }
       if (sql.includes("FROM canonical_jobs c") && sql.includes("active_profile.id AS profile_version_id")) {
         return {
@@ -2468,7 +2503,7 @@ describe("stageTaskWorker", () => {
 
     expect(summary.inserted).toBe(0);
     expect(summary.existing).toBe(0);
-    expect(query.mock.calls.some(([sql]) => String(sql).includes("is_test_fixture = TRUE"))).toBe(true);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("c.is_test_fixture IS NOT TRUE"))).toBe(true);
   });
 
   it("completes queued release fixtures without executing or seeding pipeline work", async () => {
@@ -2997,7 +3032,7 @@ describe("stageTaskWorker", () => {
       if (sql.includes("UPDATE pipeline_tasks")) {
         return { rows: [{ id: "task-explanation" }], rowCount: 1 };
       }
-      if (sql.includes("c.recommendation_requirement_score > $3::numeric")) return { rows: [{}], rowCount: 1 };
+      if (sql.includes("c.recommendation_requirement_score > $3::numeric")) return { rows: [{ id: "version-review" }], rowCount: 1 };
       return { rows: [], rowCount: 1 };
     });
     const fakeClient = { query } as any;
@@ -3067,7 +3102,7 @@ describe("stageTaskWorker", () => {
       if (sql.includes("SELECT EXISTS")) return { rows: [{ exists: false }], rowCount: 1 };
       if (sql.includes("INSERT INTO pipeline_task_attempts")) return { rows: [], rowCount: 1 };
       if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "task-slow" }], rowCount: 1 };
-      if (sql.includes("c.recommendation_requirement_score > $3::numeric")) return { rows: [{}], rowCount: 1 };
+      if (sql.includes("c.recommendation_requirement_score > $3::numeric")) return { rows: [{ id: "version-review" }], rowCount: 1 };
       return { rows: [], rowCount: 0 };
     });
 
