@@ -102,6 +102,19 @@ function sentenceBefore(text: string, start: number, limit = 80): string {
   return window.split(SENTENCE_BREAK).pop() ?? "";
 }
 
+/**
+ * Whether the statement at `start`..`end` is limited to a starting period,
+ * dismissed ("gone are the days", "tired of") or asked as a question. Shared with
+ * the reader of counts spelled in words before the office (officeDayWords.ts).
+ */
+export function isTemporaryDismissedOrAsked(text: string, start: number, end: number): boolean {
+  // A starting period often opens a long sentence, so it is looked for further back.
+  const before = sentenceBefore(text, start, 160);
+  if (DISMISSED.test(before) || TIME_LIMITED_BEFORE.test(before)) return true;
+  const after = text.slice(end, end + 100);
+  return TIME_LIMITED_AFTER.test(after) || STARTING_PERIOD_AFTER.test(after) || QUESTION_AFTER.test(after);
+}
+
 /** The office-first statement with the highest weekly count, or null. */
 export function findOfficeFirstDays(text: string): OfficeFirstDays | null {
   let found: OfficeFirstDays | null = null;
@@ -113,12 +126,7 @@ export function findOfficeFirstDays(text: string): OfficeFirstDays | null {
     const sentence = sentenceBefore(text, start);
     if (NEGATED_OR_HEDGED.test(sentence) || PERK_SUBJECT.test(sentence)) continue;
     if (PRESENCE_PLACE.test(match[0]) && !INSTRUCTION_ONLY.test(sentence) && !ROLE_OR_APPLICANT.test(sentence)) continue;
-    // A starting period often opens a long sentence, so it is looked for further back.
-    const longSentence = sentenceBefore(text, start, 160);
-    if (DISMISSED.test(longSentence) || TIME_LIMITED_BEFORE.test(longSentence)) continue;
-    const after = text.slice(end, end + 100);
-    if (NEGATION_AFTER.test(after) || TIME_LIMITED_AFTER.test(after)) continue;
-    if (STARTING_PERIOD_AFTER.test(after) || QUESTION_AFTER.test(after)) continue;
+    if (NEGATION_AFTER.test(text.slice(end, end + 80)) || isTemporaryDismissedOrAsked(text, start, end)) continue;
     const first = countValue(match[1] ?? "");
     const second = match[2] === undefined ? first : countValue(match[2]);
     const max = Math.max(first, second);

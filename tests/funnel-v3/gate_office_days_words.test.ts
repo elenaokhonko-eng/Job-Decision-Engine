@@ -109,6 +109,46 @@ describe("office-day counts in words", () => {
     expect(readOfficeDayWords(sentence.toLowerCase()), sentence).toBe(sentence.toLowerCase());
   });
 
+  it.each([
+    "During onboarding, five days a week in the office, then two days a week.",
+    "For the first three months, five days a week in the office.",
+    "In your first month you spend five days in the office.",
+    "Initially, four days a week in the office.",
+    "Five days a week in the office for the first 90 days.",
+    "Four days on-site per week during probation.",
+    "Five days a week in the office initially, moving to two days.",
+    "Gone are the days of five days a week in the office.",
+    "Tired of five days a week in the office.",
+    "Five days a week in the office? Not here.",
+  ])("does not read a temporary, dismissed or asked word count: %s", (sentence) => {
+    for (const workplaceType of ["HYBRID", "UNKNOWN", "ASSUMED_HYBRID"]) {
+      expect(officeReject(gate(sentence, workplaceType)), `${workplaceType}: ${sentence}`).toBe(false);
+    }
+    expect(readOfficeDayWords(sentence.toLowerCase())).toBe(sentence.toLowerCase());
+  });
+
+  it.each([
+    "Five days a week in the office.",
+    "From your first day, five days a week in the office.",
+    "You spend four days on-site per week.",
+    "Onboarding is quick. Five days a week in the office.",
+    "Five days a week in the office. Questions? Ask us.",
+    "Five days a week in the office. The first month is busy.",
+  ])("still rejects a standing word count: %s", (sentence) => {
+    for (const workplaceType of ["HYBRID", "UNKNOWN", "ASSUMED_HYBRID"]) {
+      expect(officeReject(gate(sentence, workplaceType)), `${workplaceType}: ${sentence}`).toBe(true);
+    }
+  });
+
+  it("leaves digit counts as they were, with or without those words around them", () => {
+    for (const sentence of [
+      "During onboarding, 5 days a week in the office.",
+      "5 days a week in the office? Not here.",
+    ]) {
+      expect(officeReject(gate(sentence)), sentence).toBe(true);
+    }
+  });
+
   it("reads 'four office days' on a hybrid posting, as it reads '4 office days'", () => {
     expect(officeReject(gate("There are four office days each week."))).toBe(true);
     expect(gate("There are four office days each week.", "UNKNOWN").status)
@@ -143,6 +183,8 @@ describe("office-day counts in words", () => {
       `four days in the office${" ".repeat(100_000)}x`,
       "four days in the office per ".repeat(5_000),
       `${"of ".repeat(30_000)}four days in the office`,
+      "during the first four days in the office for the first ".repeat(3_000),
+      `four days in the office${" ".repeat(100_000)}?`,
     ];
     const started = performance.now();
     for (const text of hostile) readOfficeDayWords(text);

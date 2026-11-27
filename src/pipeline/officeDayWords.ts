@@ -13,10 +13,15 @@
  * - an office or on-site phrase follows it in a form the digit patterns read, so
  *   "four-day work week", "five days of annual leave", "within five working days"
  *   and "four days remote" are untouched;
- * - it is not a count per month, quarter or year, and not "N of five days".
+ * - it is not a count per month, quarter or year, and not "N of five days";
+ * - it is not limited to a starting period ("during onboarding"), dismissed
+ *   ("gone are the days", "tired of") or asked as a question, the same exceptions
+ *   as for counts after the office (officeFirstDays.ts).
  *
  * Counts written in digits are never changed. All quantifiers are bounded.
  */
+
+import { isTemporaryDismissedOrAsked } from "./officeFirstDays.js";
 
 const WORD_VALUES: Readonly<Record<string, number>> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7 };
 
@@ -35,6 +40,8 @@ const COUNT_BEFORE_OFFICE = new RegExp(
 const OFFICE_PHRASE_AT_START = new RegExp(`^${OFFICE_PHRASE}`, "i");
 /** "... in the office per month", "... on-site each quarter", "... in the office monthly". */
 const OTHER_PERIOD_AFTER = /^\s{0,3},?\s{0,3}(?:(?:(?:in|during)\s{1,3})?(?:per|a|an|each|every)\s{1,3}(?:calendar\s{1,3})?(?:month|quarter|year)\b|(?:monthly|quarterly|annually|yearly)\b)/i;
+/** The weekly marker may follow the phrase: "four days on-site per week". */
+const WEEKLY_AT_START = /^\s{0,3},?\s{0,3}(?:(?:per|a|each|every)\s{1,3}week\b|weekly\b|\/\s{0,3}week\b)/i;
 /** "per month, four days in the office". */
 const OTHER_PERIOD_BEFORE = /\b(?:per|each|every)\s{1,3}(?:calendar\s{1,3})?(?:month|quarter|year)\s{0,3}[,:]?\s{0,3}$/i;
 /** "two of the five days in the office" counts a part of the week, not the week. */
@@ -53,6 +60,8 @@ export function readOfficeDayWords(text: string): string {
     const rest = text.slice(offset + count.length, offset + count.length + 120);
     const phrase = OFFICE_PHRASE_AT_START.exec(rest)?.[0] ?? "";
     if (OTHER_PERIOD_AFTER.test(rest.slice(phrase.length)) || LONG_BLANK_RUN.test(rest)) return count;
+    const weekly = WEEKLY_AT_START.exec(rest.slice(phrase.length))?.[0] ?? "";
+    if (isTemporaryDismissedOrAsked(text, offset, offset + count.length + phrase.length + weekly.length)) return count;
     // "four (4)" is one count: the bracketed repeat is blanked.
     return count
       .replace(/\([ \t]?[1-7][ \t]?\)/g, (repeat) => " ".repeat(repeat.length))
