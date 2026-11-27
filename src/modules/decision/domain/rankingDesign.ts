@@ -112,7 +112,7 @@ export type RankingDesign = z.infer<typeof RankingDesignSchema>;
 export function parseRankingDesign(text: string): RankingDesign {
   let raw: unknown;
   try {
-    raw = JSON.parse(text.replace(/^﻿/, ""));
+    raw = JSON.parse(text.replace(/^\uFEFF/, ""));
   } catch {
     throw new Error("The ranking design is not valid JSON.");
   }
