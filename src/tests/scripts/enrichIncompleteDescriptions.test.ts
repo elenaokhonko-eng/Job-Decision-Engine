@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const repair = vi.hoisted(() => ({
   parseArguments: vi.fn((argv: readonly string[]) => ({
     workspaceKey: "jobs",
-    canonicalJobId: "6ebe6407-09ef-46c7-b547-72cb23450ba0",
+    canonicalJobId: "11111111-2222-4333-8444-555555555555",
     apply: false,
     forceRefetch: false,
     argv,
@@ -27,7 +27,7 @@ describe("legacy incomplete-description command", () => {
   it("delegates retrieval and persistence to the scoped repair implementation", async () => {
     const argv = [
       "--workspace-key", "jobs",
-      "--canonical-job-id", "6ebe6407-09ef-46c7-b547-72cb23450ba0",
+      "--canonical-job-id", "11111111-2222-4333-8444-555555555555",
     ];
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
@@ -36,7 +36,7 @@ describe("legacy incomplete-description command", () => {
     expect(repair.parseArguments).toHaveBeenCalledWith(argv);
     expect(repair.repairJobContent).toHaveBeenCalledWith(expect.objectContaining({
       workspaceKey: "jobs",
-      canonicalJobId: "6ebe6407-09ef-46c7-b547-72cb23450ba0",
+      canonicalJobId: "11111111-2222-4333-8444-555555555555",
       apply: false,
     }));
     expect(warn).toHaveBeenCalledOnce();

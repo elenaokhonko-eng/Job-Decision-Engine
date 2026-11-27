@@ -243,7 +243,33 @@ Order of work:
 - A job that passes the gates continues to 6, 7, 8 and 9. So does a job whose only open items are workability facts that can be checked later, such as an unknown work mode (`src/pipeline/verificationRouting.ts`). It is matched and triaged while the question is open.
 - A hard-rejected job, and any other job that needs verification, goes straight to stage 9, so its decision is recorded.
 - If lane routing finds no lane, the job becomes `UNMATCHED` and stops. If routing could not run for a technical reason, the job becomes `ROUTING_DEFERRED` and goes to stage 9.
-- Stage 10 follows stage 9 only when eligibility is `ELIGIBLE` and the outcome is `PRIORITY` or `REVIEW`.
+- Stage 10 follows stage 9 only when eligibility is `ELIGIBLE` and the outcome is `PRIORITY` or `REVIEW`, and only when the owner's AI switch allows it (below).
+
+### The owner's AI switch
+
+Explanation and evaluation work fails closed. It is queued and run only when all three are set (`src/platform/config/aiWorkConfig.ts`), with no defaults:
+
+| Setting | Value |
+|---|---|
+| `AI_EVALUATION_ENABLED` | exactly `true` |
+| `AI_EVALUATION_SCORE_CUTOFF` | the cut-off the owner approved, a decimal from 0 up to, not including, 1 |
+| `AI_EVALUATION_SCORE_POLICY` | the score scale it was approved on, as stored in `canonical_jobs.recommendation_score_policy` (`<match policy>\|<role-shape policy>`) |
+
+A job qualifies when its stored ranking score (`canonical_jobs.recommendation_requirement_score`) is strictly above the cut-off and its score policy equals the approved one. A job with no score, or scored under another policy, does not qualify. The rule is in `src/modules/evaluation/`.
+
+A value that is set but cannot be read holds the AI work and fails the run: the pipeline worker finishes its other stages and exits non-zero; the evaluation worker, the enqueuer, the scoped pilot and the model comparison stop at once.
+
+| Path | Switch closed | Switch open, job does not qualify |
+|---|---|---|
+| Creating an `ENQUEUE_EXPLANATION` task (successor of stage 9, successor of a lane re-route, recoverable seed) | Not created | Not created |
+| An `ENQUEUE_EXPLANATION` task already waiting | Not claimed and not reconciled; stays `PENDING`, `RETRY_WAIT`, or `RUNNING` with its expired lease, unchanged | `BLOCKED_DEPENDENCY` on `AI_SCORE_CUTOFF:<job version id>` when claimed |
+| `runExplanationQueueEnqueuer` (any caller, including the re-match script) | Reads and writes nothing | No queue row, no deferral, no state change |
+| `scripts/evaluate_queue.ts` | Reads and changes no queue item, makes no model call | Makes no model call for the row; the row stays queued |
+| `scripts/compare_evaluation_models.ts --run` | Refuses and exits non-zero | The job is left out of the sample |
+
+Holding is not a rejection: no job state, decision or deferral row changes. When the switch opens, waiting tasks are claimed and the recoverable seed creates the missing ones. A blocked task is reopened only when the same task identity is enqueued again; otherwise a new task is created and the blocked row stays, still counted.
+
+The worker summary and the evaluation worker report `aiWork`: the switch, waiting tasks (and how many of them have an expired lease), tasks blocked on the cut-off, unfinished queue rows (and, while open, how many do not qualify) and jobs without an evaluation. While the switch is closed, the pending and retry SLOs of the pipeline worker and of the scoped pilot leave held tasks out; queue health still counts them. The scoped pilot report names the hold in `aiHold`. While the switch is closed, a waiting task also does not run its lane, profile or decision currency repairs; the lane re-route and profile re-match seeds still run.
 
 Task seeds (`seedRecoverablePipelineTasks`, `src/tasks/stageTaskWorker.ts`):
 
@@ -261,7 +287,7 @@ After the stages:
 
 | Step | Code today | Target module |
 |---|---|---|
-| Advisory evaluation of queued jobs | `scripts/evaluate_queue.ts` | `evaluation` |
+| Advisory evaluation of queued jobs, behind the owner's AI switch | `scripts/evaluate_queue.ts` | `evaluation` |
 | Ranking of Apply Now jobs into Top 10 Ready | `scripts/materialize_application_rankings.ts`, `src/services/applicationRankingMaterializer.ts` | `decision` |
 | Archiving of rejected and aged jobs | `scripts/archive_jobs.ts`, `src/services/jobArchive.ts` | `catalog` |
 
@@ -379,6 +405,8 @@ Lanes are defined in `config/lanes/registry.yml`, one file per lane in `config/l
 
 Every observation keeps source identity and raw payload evidence. Canonical jobs may have multiple immutable `job_versions`. Gates, queue rows, evaluations, shortlist rows, and documents are pinned to `job_version_id`.
 
+To ask whether two records are the same posting, compare employer and location through `normalizeJobIdentity` (`src/modules/catalog/`): legal suffixes and the ways of writing Singapore do not matter. It changes no stored key and merges no record. The blind review draw uses it; the stored dedupe keys and the lists do not yet.
+
 Public connectors are described by versioned source plugin manifests under `config/source-plugins/`. Each raw observation can link to the active immutable source plugin revision, enabling later compliance and audit reporting. See [`docs/source-adapters.md`](source-adapters.md).
 
 ## 13. Entry points
@@ -406,7 +434,7 @@ All four stop when the repository variable `WORKFLOW_KILL_SWITCH` is `true`.
 
 ## 14. As built
 
-The code predates the target layout. No file lives under `src/modules/`, `src/platform/`, `src/interfaces/` or `src/app/` yet.
+Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `evaluation` repository; `src/modules/evaluation/` holds the owner's AI switch, the first domain module, and `src/modules/catalog/` holds the employer and location comparison used to recognise one posting under two records. Nothing lives under `src/interfaces/` or `src/app/` yet.
 
 | Area today | Holds | Goes to |
 |---|---|---|
