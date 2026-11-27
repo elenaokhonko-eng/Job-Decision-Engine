@@ -848,6 +848,12 @@ async function enqueueSeedCandidates(
   includeTestFixtures: boolean,
 ): Promise<{ inserted: number; reopened: number; existing: number; skippedArchived: number }> {
   let eligible = candidates;
+  // The job-lead rule of `enqueueStageTaskResult` for the whole list: a lead never reaches the AI queue and no task
+  // is created for it. The seed query already filters leads before its cap; this holds even if it did not.
+  if (taskType === AI_WORK_TASK_TYPE && eligible.length > 0) {
+    const leads = new Set(await listLeadJobIds(client as any, context.workspaceId));
+    eligible = eligible.filter((candidate) => !leads.has(String(candidate.payload.canonical_job_id)));
+  }
   if (taskType === AI_WORK_TASK_TYPE && eligible.length > 0) {
     const allowed = await jobVersionsThatMayReceiveAiWork(
       client as any, context.workspaceId, eligible.map((candidate) => candidate.id), readAiWorkSettings());

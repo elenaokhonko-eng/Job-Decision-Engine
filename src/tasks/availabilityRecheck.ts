@@ -397,6 +397,7 @@ async function countEventsByJob(client: Queryable, workspaceId: string, canonica
   const { rows } = await client.query<{ id: string; count: number }>(
     `SELECT canonical_job_id::text AS id, COUNT(*)::int AS count FROM job_availability_recheck_events
       WHERE workspace_id = $1::uuid AND canonical_job_id = ANY($2::uuid[])
+        AND COALESCE(details->>'trigger', '') <> 'MANUAL'
       GROUP BY canonical_job_id`,
     [workspaceId, [...canonicalJobIds]],
   );

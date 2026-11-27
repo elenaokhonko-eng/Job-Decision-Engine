@@ -411,5 +411,23 @@ describe.skipIf(skipReal)("seeding reaches every stage when the database is far 
     expect(reopened.byType.DECIDE_RECOMMENDATION?.inserted).toBe(0);
     await seed();
     expect((await decideTasks()).find((row) => row.id === four[2]!.id)?.status).toBe("PENDING");
+
+    // A dead-lettered task stays dead: it is not reopened, not duplicated and takes no slot of the cap.
+    await db().query(
+      `UPDATE pipeline_tasks SET status = 'DEAD_LETTER', dead_letter_reason = 'invented failure', attempt_count = max_attempts,
+              completed_at = NOW() WHERE id = $1`,
+      [four[3]!.id],
+    );
+    const dead = async () => (await db().query(
+      `SELECT id::text AS id, status, attempt_count FROM pipeline_tasks
+        WHERE workspace_id = $1 AND task_type = 'DECIDE_RECOMMENDATION' AND payload->>'job_version_id' = $2`,
+      [ctx().workspaceId, four[3]!.job],
+    )).rows;
+    const before = await dead();
+    expect(before).toEqual([expect.objectContaining({ id: four[3]!.id, status: "DEAD_LETTER" })]);
+    await db().query(`UPDATE pipeline_tasks SET status = 'PENDING' WHERE workspace_id = $1 AND status <> 'DEAD_LETTER'`, [ctx().workspaceId]);
+    const afterDeadLetter = await seed();
+    expect(afterDeadLetter.byType.DECIDE_RECOMMENDATION?.inserted).toBe(2);
+    expect(await dead()).toEqual(before);
   }, 180_000);
 });

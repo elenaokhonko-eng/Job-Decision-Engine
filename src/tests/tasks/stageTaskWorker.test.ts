@@ -1557,6 +1557,37 @@ describe("stageTaskWorker", () => {
     expect(decisionSeed?.sql).toContain("current_match.context_fingerprint IS NOT NULL");
   });
 
+  it("refuses a job lead in the batched seed even when the seed query returns it", async () => {
+    const written: string[] = [];
+    const candidate = (name: string) => ({ canonical_job_id: `job-${name}`, job_version_id: `version-${name}`, deferred_budget_run_id: null });
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.includes("to_regclass('v_job_lead_state')")) return { rows: [{ available: true }] };
+      if (sql.includes("FROM v_job_lead_state lead")) return { rows: [{ id: "job-lead" }] };
+      // The query's own lead filter is not applied here: both candidates come back.
+      if (sql.includes("last_deferral.budget_run_id")) return { rows: [candidate("lead"), candidate("employer")] };
+      if (sql.includes("c.recommendation_requirement_score > $3::numeric")) {
+        return { rows: [{ id: "version-lead" }, { id: "version-employer" }] };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        written.push(String(params?.[1]));
+        return { rows: [{ id: "task-enqueue" }] };
+      }
+      return { rows: [] };
+    });
+
+    const summary = await seedRecoverablePipelineTasks({ query } as any, {
+      context: ctx,
+      taskTypes: ["ENQUEUE_EXPLANATION"],
+      routingDeferredReplayVersion: "test-lane-revision",
+      maxSeedPerType: 5,
+    });
+
+    expect(summary.byType.ENQUEUE_EXPLANATION).toEqual({ inserted: 1, existing: 0 });
+    expect(written).toHaveLength(1);
+    expect(written[0]).toContain("version-employer");
+    expect(written[0]).not.toContain("version-lead");
+  });
+
   it("seeds AI enqueue first and still reaches every later stage after the seed time budget is spent", async () => {
     const seedTypesQueried: string[] = [];
     let now = 1_700_000_000_000;
