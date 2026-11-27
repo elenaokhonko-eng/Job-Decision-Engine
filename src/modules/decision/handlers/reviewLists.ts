@@ -2,6 +2,7 @@
  * Builds the review lists from the stored posting records. Reads only: no decision, state or table changes, and nothing
  * is rejected. A job is a candidate when it is live, passed the gates, has complete content and a link, is not a lead
  * (the catalog's lead definition, also before migration 123 is applied), is not known closed and was not rated before.
+ * A posting rated, removed or known closed under any of its records stays out; one saved under any record is saved.
  */
 import {
   selectJobSightings,
@@ -63,7 +64,7 @@ export interface ReviewListResult {
   readonly lists: ReviewLists;
   readonly eligible: number;
   readonly excluded: Record<ReviewExclusion, number>;
-  readonly dropped: { rated: number; duplicate: number; neverRole: number; neverSector: number };
+  readonly dropped: { rated: number; dismissed: number; duplicate: number; neverRole: number; neverSector: number };
   /** Rated ids this database does not hold, so their other records cannot be recognised. */
   readonly ratedNotFound: number;
   /** Candidate records with no stored similarity: ordered after the scored ones. */
@@ -177,6 +178,7 @@ export async function buildReviewListsFromStore(db: DecisionQueryable, input: Re
           urls: [sighting.source_url, sighting.canonical_apply_url], hashes: [],
         }, rules),
         rated: false,
+        dismissed: false,
         saved: true,
         candidate: null,
       });
@@ -189,7 +191,8 @@ export async function buildReviewListsFromStore(db: DecisionQueryable, input: Re
     const own = seen.get(job.id) ?? [];
     const urls = [job.canonical_url, ...own.flatMap((s) => [s.source_url, s.canonical_apply_url])];
     const exclusion = exclusionOf(job, leadIds);
-    if (exclusion) excluded[exclusion] += 1;
+    // Archived records are read to recognise their postings; only live and rated ones are counted.
+    if (exclusion && (!job.archived || rated.has(job.id))) excluded[exclusion] += 1;
     let candidate: Candidate | null = null;
     if (!exclusion) {
       const title = job.title ?? "";
@@ -205,6 +208,7 @@ export async function buildReviewListsFromStore(db: DecisionQueryable, input: Re
         classification: classifyJob(design, input.companyTags, {
           title,
           company: job.company_name,
+          employerUnknown: rules.isUnknownEmployer(job.company_name),
           description,
           workMode: knownWorkMode(job.workplace_type),
           externalClientFacing: rules.externalClientFacing(description),
@@ -221,6 +225,7 @@ export async function buildReviewListsFromStore(db: DecisionQueryable, input: Re
         ...postingKeys({ company: job.company_name, title: job.title, location: job.location, urls, hashes: job.identity_hashes ?? [] }, rules),
       ],
       rated: rated.has(job.id),
+      dismissed: job.processing_state === "MANUALLY_REMOVED" || job.availability_state === "CLOSED",
       saved: own.some((s) => isSaved(s.source_name)),
       candidate,
     });

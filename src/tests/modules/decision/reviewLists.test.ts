@@ -23,7 +23,7 @@ const EXAMPLE = fs.readFileSync("fixtures/ranking_design.example.json", "utf8");
 const design = parseRankingDesign(EXAMPLE);
 
 const classification = (overrides: Partial<JobClassification> = {}): JobClassification => ({
-  kind: "SOFTWARE", roleType: "SOFTWARE", status: "TARGET", sector: "NEUTRAL", industry: null, sectorSource: "UNKNOWN",
+  kind: "SOFTWARE", roleType: "ALPHA", status: "TARGET", sector: "NEUTRAL", industry: null, sectorSource: "UNKNOWN",
   handsOn: true, stakeholderHeavy: false, inHouse: false, remoteOrHybrid: false, reasons: [], ...overrides,
 });
 
@@ -36,62 +36,67 @@ const many = (prefix: string, count: number, roleType: string, saved: (index: nu
   Array.from({ length: count }, (_, index) =>
     job(`${prefix}${String(index).padStart(2, "0")}`, { topK: 90 - index, saved: saved(index) }, { roleType }));
 
-const POOL = [...many("s", 40, "SOFTWARE", (i) => i < 4), ...many("d", 20, "DATA"), ...many("u", 10, "NONE")];
+const POOL = [...many("a", 40, "ALPHA", (i) => i < 2), ...many("b", 20, "BETA"), ...many("u", 10, "NONE")];
+const unsavedOnly = { ...design, lists: { ...design.lists, overall_from_unsaved_only: true } };
 
 describe("lists", () => {
+  const fourOf = { ...design, lists: { ...design.lists, size: 6 } };
+  const listOf = (lists: ReturnType<typeof buildReviewLists>, key: string) =>
+    lists.byType.find((list) => list.type.key === key)!.jobs.map((entry) => entry.id);
+
   it("orders by status, then preferred sector, then top-K", () => {
-    const lists = buildReviewLists(design, [
-      job("neutral-high", { topK: 99 }, { status: "NEUTRAL", sector: "PREFERRED" }),
-      job("target-neutral", { topK: 80 }),
-      job("target-preferred", { topK: 40 }, { sector: "PREFERRED" }),
-      job("target-noscore", { topK: null }, { sector: "PREFERRED" }),
+    const standard = (id: string, overrides: Partial<PoolJob>, kind: Partial<JobClassification> = {}) =>
+      job(id, overrides, { roleType: "BETA", ...kind });
+    const lists = buildReviewLists(fourOf, [
+      standard("neutral-high", { topK: 99 }, { status: "NEUTRAL", sector: "PREFERRED" }),
+      standard("target-neutral", { topK: 80 }),
+      standard("target-preferred", { topK: 40 }, { sector: "PREFERRED" }),
+      standard("target-noscore", { topK: null }, { sector: "PREFERRED" }),
     ]);
-    expect(lists.byType.find((list) => list.type.key === "SOFTWARE")!.jobs.map((entry) => entry.id))
-      .toEqual(["target-preferred", "target-noscore", "target-neutral", "neutral-high"]);
+    expect(listOf(lists, "BETA")).toEqual(["target-preferred", "target-noscore", "target-neutral", "neutral-high"]);
   });
 
   it("orders the load-aware type by stakeholder load, hands-on work, then remote or hybrid in a preferred sector", () => {
-    const coordination = (id: string, topK: number, overrides: Partial<JobClassification>) =>
-      job(id, { topK }, { roleType: "COORDINATION", status: "TRANSITION", ...overrides });
-    const lists = buildReviewLists(design, [
-      coordination("heavy", 99, { stakeholderHeavy: true }),
-      coordination("no-hands", 98, { handsOn: false }),
-      coordination("preferred-onsite", 70, { sector: "PREFERRED" }),
-      coordination("preferred-remote", 40, { sector: "PREFERRED", remoteOrHybrid: true }),
-      coordination("neutral", 90, {}),
+    const loaded = (id: string, topK: number, overrides: Partial<JobClassification>) =>
+      job(id, { topK }, { roleType: "ALPHA", status: "TRANSITION", ...overrides });
+    const lists = buildReviewLists(fourOf, [
+      loaded("heavy", 99, { stakeholderHeavy: true }),
+      loaded("no-hands", 98, { handsOn: false }),
+      loaded("preferred-onsite", 70, { sector: "PREFERRED" }),
+      loaded("preferred-remote", 40, { sector: "PREFERRED", remoteOrHybrid: true }),
+      loaded("neutral", 90, {}),
     ]);
-    expect(lists.byType.find((list) => list.type.key === "COORDINATION")!.jobs.map((entry) => entry.id))
-      .toEqual(["preferred-remote", "preferred-onsite", "neutral", "no-hands", "heavy"]);
+    expect(listOf(lists, "ALPHA")).toEqual(["preferred-remote", "preferred-onsite", "neutral", "no-hands", "heavy"]);
   });
 
   it("draws the overall list round-robin from unsaved list members, or from all with the switch off", () => {
-    const lists = buildReviewLists(design, POOL);
-    // s00 to s03 are saved: they stay in the type list and leave the overall list.
-    expect(lists.byType[0]!.jobs.slice(0, 2).map((entry) => entry.id)).toEqual(["s00", "s01"]);
-    expect(lists.overall.map((entry) => entry.id)).toEqual(["s04", "d00", "s05", "d01", "s06", "d02", "s07", "d03", "s08", "d04"]);
-    const all = buildReviewLists({ ...design, lists: { ...design.lists, overall_from_unsaved_only: false } }, POOL);
-    expect(all.overall.map((entry) => entry.id).slice(0, 4)).toEqual(["s00", "d00", "s01", "d01"]);
+    // a00 and a01 are saved: they stay in the type list and leave the overall list.
+    const lists = buildReviewLists(unsavedOnly, POOL);
+    expect(listOf(lists, "ALPHA")).toEqual(["a00", "a01", "a02"]);
+    expect(lists.overall.map((entry) => entry.id)).toEqual(["a02", "b00", "b01", "b02"]);
+    expect(buildReviewLists(design, POOL).overall.map((entry) => entry.id)).toEqual(["a00", "b00", "a01", "b01", "a02", "b02"]);
   });
 
-  it("takes comparison jobs from the middle of the same pool, unsaved and unlisted, by seeded hash", () => {
+  it("takes comparison jobs from the band of the same pool, unsaved and unlisted, by seeded hash", () => {
     const lists = buildReviewLists(design, POOL);
     const listed = new Set(lists.byType.flatMap((list) => list.jobs.map((entry) => entry.id)));
-    expect(lists.comparison.length).toBeGreaterThan(0);
+    const [low, high] = design.lists.comparison_band;
+    expect(lists.comparison).toHaveLength(design.lists.comparison_size);
     const ranked = [...POOL].sort((a, b) => b.topK! - a.topK!);
     for (const entry of lists.comparison) {
       expect(listed.has(entry.id)).toBe(false);
       expect(entry.saved).toBe(false);
-      // Within the 40-60% band (ties by top-K allow the neighbouring places).
-      expect(ranked.filter((other) => other.topK! > entry.topK!).length).toBeLessThan(POOL.length * 0.6);
-      expect(ranked.filter((other) => other.topK! >= entry.topK!).length).toBeGreaterThan(POOL.length * 0.4);
+      // Within the design's band (ties by top-K allow the neighbouring places).
+      expect(ranked.filter((other) => other.topK! > entry.topK!).length).toBeLessThan(POOL.length * high);
+      expect(ranked.filter((other) => other.topK! >= entry.topK!).length).toBeGreaterThan(POOL.length * low);
     }
     expect(buildReviewLists(design, [...POOL].reverse()).comparison.map((entry) => entry.id))
       .toEqual(lists.comparison.map((entry) => entry.id));
   });
 
   it("collapses records of one posting, drops rated postings and leaves never out of the lists", () => {
-    const record = (id: string, keys: string[], options: { rated?: boolean; saved?: boolean; candidate?: PoolJob | null } = {}) => ({
-      id, keys, rated: options.rated ?? false, saved: options.saved ?? false,
+    const record = (id: string, keys: string[], options: { rated?: boolean; dismissed?: boolean; saved?: boolean; candidate?: PoolJob | null } = {}) => ({
+      id, keys, rated: options.rated ?? false, dismissed: options.dismissed ?? false, saved: options.saved ?? false,
       candidate: options.candidate === undefined ? job(id) : options.candidate,
     });
     const pool = collapsePool([
@@ -105,7 +110,16 @@ describe("lists", () => {
     ]);
     expect(pool.eligible).toHaveLength(1);
     expect(pool.eligible[0]).toMatchObject({ id: "b", saved: true, linkedInOnly: false });
-    expect(pool.dropped).toEqual({ rated: 1, duplicate: 1, neverRole: 1, neverSector: 1 });
+    expect(pool.dropped).toEqual({ rated: 1, dismissed: 0, duplicate: 1, neverRole: 1, neverSector: 1 });
+  });
+
+  it("keeps a removed or closed posting out under its other records", () => {
+    const record = (id: string, keys: string[], dismissed: boolean, candidate: PoolJob | null) =>
+      ({ id, keys, rated: false, dismissed, saved: false, candidate });
+    const pool = collapsePool([record("gone", ["k1"], true, null), record("again", ["k1"], false, job("again"))]);
+    expect(pool.eligible).toEqual([]);
+    expect(pool.postings).toEqual([]);
+    expect(pool.dropped.dismissed).toBe(1);
   });
 });
 
@@ -117,7 +131,7 @@ describe("sheet and key", () => {
     const jobs = sheetJobs(lists, "example-seed");
     expect(new Set(jobs.map((entry) => entry.id)).size).toBe(jobs.length);
     expect(sheet.split("\n").filter((line) => /^\| \d+ \|/.test(line))).toHaveLength(jobs.length);
-    expect(sheet).not.toMatch(/comparison|overall|rank|score|SOFTWARE|DATA|TARGET/i);
+    expect(sheet).not.toMatch(/comparison|overall|rank|score|ALPHA|BETA|TARGET/i);
     const key = buildReviewKey(lists, { name: "x", createdAt: "2026-01-01T00:00:00.000Z", seed: "example-seed", overallFromUnsavedOnly: true });
     expect(key.items.map((item) => item.id)).toEqual(jobs.map((entry) => entry.id));
     expect(idsFromKeyText(JSON.stringify(key), "key.json")).toEqual(jobs.map((entry) => entry.id));
@@ -158,13 +172,13 @@ describe("pass rule", () => {
     return scoreReviewSheet(sheet, { items });
   };
   const overall = (count: number, answer: string): Row[] =>
-    Array.from({ length: count }, () => ({ answer, overallRank: 1, roleList: { type: "SOFTWARE", rank: 1 } }));
+    Array.from({ length: count }, () => ({ answer, overallRank: 1, roleList: { type: "ALPHA", rank: 1 } }));
   const comparison = (count: number, answer: string): Row[] => Array.from({ length: count }, () => ({ answer, comparison: true }));
 
   it("passes with six overall yes and a lead of at least twenty points", () => {
     const result = score([...overall(6, "Y"), ...overall(4, "n"), ...comparison(2, "yes"), ...comparison(3, "N")]);
     expect(result).toMatchObject({ result: "PASS", overall: { yes: 6, counted: 10 }, comparison: { yes: 2, counted: 5 } });
-    expect(result.byRoleType).toEqual([{ type: "SOFTWARE", yes: 6, counted: 10 }]);
+    expect(result.byRoleType).toEqual([{ type: "ALPHA", yes: 6, counted: 10 }]);
   });
 
   it("fails on five yes, or on a smaller lead", () => {
@@ -177,9 +191,9 @@ describe("pass rule", () => {
     const result = score([
       ...overall(6, "Y"),
       { answer: "Y", overallRank: 7, saved: true },
-      { answer: "closed", roleList: { type: "SOFTWARE", rank: 2 }, linkedInOnly: true },
-      { answer: "closed", roleList: { type: "SOFTWARE", rank: 3 } },
-      { answer: "", roleList: { type: "SOFTWARE", rank: 4 }, saved: true },
+      { answer: "closed", roleList: { type: "ALPHA", rank: 2 }, linkedInOnly: true },
+      { answer: "closed", roleList: { type: "ALPHA", rank: 3 } },
+      { answer: "", roleList: { type: "ALPHA", rank: 4 }, saved: true },
       ...comparison(3, "N"),
     ]);
     expect(result).toMatchObject({
@@ -248,7 +262,7 @@ describe("command", () => {
         return {
           branch: "br-invented-branch",
           result: {
-            lists, eligible: POOL.length, dropped: { rated: 0, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0,
+            lists, eligible: POOL.length, dropped: { rated: 0, dismissed: 0, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0,
             withoutTopK: 0, postings: [], leads: { total: 0, source: "READ_MODEL" as const }, excluded: { ARCHIVED_OR_FIXTURE: 0, MANUALLY_REMOVED_OR_REJECTED: 0, NOT_GATE_PASSED: 0,
               AWAITING_CONTENT: 0, NO_LINK: 0, LEAD: 0, KNOWN_CLOSED: 0 },
           },
@@ -276,17 +290,17 @@ describe("command", () => {
     output.length = 0;
     await command(["--score", `--sheet=${sheetFile}`, `--key=${keyFile}`]);
     expect(output).toContain("result=FAIL");
-    expect(output).toContain("overall yes=10/10 (100.0%)");
+    expect(output).toContain("overall yes=4/4 (100.0%)");
   });
 
   it("prints counts without titles", () => {
     const lists = buildReviewLists(design, POOL);
     const text = formatReviewSummary({
-      lists, eligible: POOL.length, dropped: { rated: 0, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0, withoutTopK: 0, postings: [], leads: { total: 0, source: "READ_MODEL" as const },
+      lists, eligible: POOL.length, dropped: { rated: 0, dismissed: 0, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0, withoutTopK: 0, postings: [], leads: { total: 0, source: "READ_MODEL" as const },
       excluded: { ARCHIVED_OR_FIXTURE: 0, MANUALLY_REMOVED_OR_REJECTED: 0, NOT_GATE_PASSED: 0, AWAITING_CONTENT: 0, NO_LINK: 0, LEAD: 0, KNOWN_CLOSED: 0 },
     });
-    expect(text).toContain("list SOFTWARE: eligible=40 listed=10 unsaved=6");
-    expect(text).toContain("overall: listed=10 unsaved=10");
+    expect(text).toContain("list ALPHA: eligible=40 listed=3 unsaved=1");
+    expect(text).toContain("overall: listed=6 unsaved=4");
     expect(text).not.toContain("invented role");
   });
 });

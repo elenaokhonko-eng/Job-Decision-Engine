@@ -6,7 +6,7 @@
     "never": ["FIREWORKS"]
   },
   "company_tag_industries": {
-    "HEALTH_BIO_PHARMA": "ORCHARDS"
+    "SOCIAL_IMPACT_MULTILATERAL": "ORCHARDS"
   },
   "employers": [
     { "industry": "ORCHARDS", "names": ["Example Orchard", "ExampleOrchard"] },
@@ -28,33 +28,31 @@
   },
   "top_technology_employers": ["Example Robotics"],
   "never_role_title_phrases": ["night watch", "door to door"],
-  "management_without_hands_on": "NEVER",
+  "management_without_hands_on": "KEEP",
   "role_types": [
-    { "key": "SOFTWARE", "label": "Software", "priority": 1, "status": "TARGET", "kinds": ["SOFTWARE"], "ordering": "STANDARD" },
+    { "key": "ALPHA", "label": "Alpha", "priority": 1, "status": "NEUTRAL", "kinds": ["SOFTWARE", "AI_STRATEGY_LEADERSHIP"], "ordering": "LOAD_AWARE" },
     {
-      "key": "ARCHITECTURE", "label": "Architecture", "priority": 2, "status": "TRANSITION", "kinds": ["ARCHITECTURE"], "ordering": "STANDARD",
-      "status_when": { "external_client_facing": "NEUTRAL", "consulting_employer": "NEVER", "in_house": "TARGET" }
+      "key": "BETA", "label": "Beta", "priority": 2, "status": "TARGET", "kinds": ["DATA_ML"], "ordering": "STANDARD",
+      "requires": { "work_modes": ["ONSITE"] }
     },
-    { "key": "DATA", "label": "Data", "priority": 3, "status": "TARGET", "kinds": ["DATA_ML", "RESEARCH_ENGINEERING"], "ordering": "STANDARD" },
-    { "key": "AI", "label": "AI", "priority": 4, "status": "NEUTRAL", "kinds": ["AI_ENGINEERING"], "ordering": "STANDARD" },
-    { "key": "PRODUCT", "label": "Product", "priority": 5, "status": "NEUTRAL", "kinds": ["PRODUCT", "AI_STRATEGY_LEADERSHIP"], "ordering": "STANDARD" },
+    { "key": "GAMMA", "label": "Gamma", "priority": 3, "status": "TRANSITION", "kinds": ["PRODUCT", "FORWARD_DEPLOYED"], "ordering": "STANDARD" },
     {
-      "key": "COORDINATION", "label": "Coordination", "priority": 6, "status": "TRANSITION",
-      "kinds": ["DELIVERY_MANAGEMENT", "ENGINEERING_MANAGEMENT"], "ordering": "LOAD_AWARE"
+      "key": "DELTA", "label": "Delta", "priority": 4, "status": "TARGET", "kinds": ["ARCHITECTURE", "ENGINEERING_MANAGEMENT"], "ordering": "STANDARD",
+      "status_when": { "external_client_facing": "TARGET", "consulting_employer": "TRANSITION", "in_house": "NEVER" }
     },
     {
-      "key": "FIELD", "label": "Field", "priority": 7, "status": "NEUTRAL", "kinds": ["FORWARD_DEPLOYED"], "ordering": "STANDARD",
-      "requires": { "work_modes": ["REMOTE"], "max_travel_percent": 10, "top_technology_employer": true }
+      "key": "EPSILON", "label": "Epsilon", "priority": 5, "status": "NEUTRAL",
+      "kinds": ["AI_ENGINEERING", "RESEARCH_ENGINEERING", "DELIVERY_MANAGEMENT"], "ordering": "STANDARD"
     }
   ],
-  "unknown_role_status": "NEUTRAL",
+  "unknown_role_status": "TARGET",
   "stakeholder_heavy_min_mentions": 3,
   "lists": {
-    "size": 10,
-    "overall_size": 10,
-    "comparison_size": 15,
-    "comparison_band": [0.4, 0.6],
-    "overall_from_unsaved_only": true,
+    "size": 3,
+    "overall_size": 7,
+    "comparison_size": 4,
+    "comparison_band": [0.1, 0.8],
+    "overall_from_unsaved_only": false,
     "seed": "example-seed"
   }
 }

@@ -26,6 +26,8 @@ export interface PostingRecordEntry {
   readonly keys: readonly string[];
   /** Rated before: no record of the same posting is listed again. */
   readonly rated: boolean;
+  /** Removed by the owner or known closed: the posting stays out under every record. */
+  readonly dismissed: boolean;
   readonly saved: boolean;
   /** null when the record only identifies a posting (not a candidate itself). */
   readonly candidate: Candidate | null;
@@ -37,11 +39,11 @@ export interface PoolJob extends Candidate {
 }
 
 export interface CollapsedPool {
-  /** One entry per unrated posting with a candidate record, without never roles and never sectors. */
+  /** One entry per unrated, undismissed posting with a candidate record, without never roles and never sectors. */
   readonly eligible: PoolJob[];
   /** The same before never roles and never sectors are left out. */
   readonly postings: PoolJob[];
-  readonly dropped: { rated: number; duplicate: number; neverRole: number; neverSector: number };
+  readonly dropped: { rated: number; dismissed: number; duplicate: number; neverRole: number; neverSector: number };
 }
 
 /** Records that share any key are one posting (transitively). */
@@ -69,12 +71,16 @@ function groupByKeys(records: readonly PostingRecordEntry[]): PostingRecordEntry
 export function collapsePool(records: readonly PostingRecordEntry[]): CollapsedPool {
   const eligible: PoolJob[] = [];
   const postings: PoolJob[] = [];
-  const dropped = { rated: 0, duplicate: 0, neverRole: 0, neverSector: 0 };
+  const dropped = { rated: 0, dismissed: 0, duplicate: 0, neverRole: 0, neverSector: 0 };
   for (const group of groupByKeys(records)) {
     const candidates = group.filter((record) => record.candidate !== null);
     if (candidates.length === 0) continue;
     if (group.some((record) => record.rated)) {
       dropped.rated += candidates.length;
+      continue;
+    }
+    if (group.some((record) => record.dismissed)) {
+      dropped.dismissed += candidates.length;
       continue;
     }
     dropped.duplicate += candidates.length - 1;

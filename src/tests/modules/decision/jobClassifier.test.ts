@@ -21,14 +21,15 @@ const changed = (change: (raw: any) => void) => {
 };
 
 const TAGS: CompanyIndustryTags[] = [
-  { names: ["Example Tagged Grove"], tags: ["CORE_AI_DATA", "HEALTH_BIO_PHARMA"] },
+  { names: ["Example Tagged Grove"], tags: ["CORE_AI_DATA", "SOCIAL_IMPACT_MULTILATERAL"] },
   { names: ["Example Model Shop"], tags: ["CORE_AI_DATA"] },
 ];
 
-const classify = (overrides: Partial<Parameters<typeof classifyJob>[2]> = {}) =>
-  classifyJob(design, TAGS, {
-    title: "software engineer",
+const classify = (overrides: Partial<Parameters<typeof classifyJob>[2]> = {}, using = design) =>
+  classifyJob(using, TAGS, {
+    title: "zorblat software engineer",
     company: "Example Orchard",
+    employerUnknown: false,
     description: "You write Python services.",
     workMode: null,
     externalClientFacing: false,
@@ -37,9 +38,13 @@ const classify = (overrides: Partial<Parameters<typeof classifyJob>[2]> = {}) =>
     ...overrides,
   });
 
+/** The example with one invented change, for a test of a single mechanism. */
+const designWith = (change: (raw: any) => void) => parseRankingDesign(changed(change));
+const strictManagement = designWith((raw) => { raw.management_without_hands_on = "NEVER"; });
+
 describe("ranking design", () => {
   it("accepts the invented example and defaults the overall list to unsaved jobs", () => {
-    expect(design.lists.overall_from_unsaved_only).toBe(true);
+    expect(design.schema_version).toBe("ranking_design_v1");
     const without = parseRankingDesign(changed((raw) => delete raw.lists.overall_from_unsaved_only));
     expect(without.lists.overall_from_unsaved_only).toBe(true);
   });
@@ -69,71 +74,75 @@ describe("ranking design", () => {
 
 describe("role kind from the title", () => {
   it.each([
-    ["engineering manager, orchard platform", "ENGINEERING_MANAGEMENT"],
-    ["senior manager, engineering", "ENGINEERING_MANAGEMENT"],
-    ["head of platform engineering", "ENGINEERING_MANAGEMENT"],
-    ["associate director, data engineering", "DATA_ML"],
-    ["software engineering, vp", "SOFTWARE"],
-    ["head of ai governance", "AI_STRATEGY_LEADERSHIP"],
-    ["director, ai strategy and adoption", "AI_STRATEGY_LEADERSHIP"],
-    ["vp, data & ai risk", "AI_STRATEGY_LEADERSHIP"],
-    ["senior ai engineer", "AI_ENGINEERING"],
-    ["senior manager, ai engineering", "AI_ENGINEERING"],
-    ["ai governance engineer", "AI_ENGINEERING"],
-    ["director, ai architecture", "ARCHITECTURE"],
-    ["ai product manager", "PRODUCT"],
-    ["technical program manager, ai", "DELIVERY_MANAGEMENT"],
-    ["research engineer, evaluations", "RESEARCH_ENGINEERING"],
-    ["machine learning engineer", "DATA_ML"],
-    ["senior data scientist", "DATA_ML"],
-    ["full stack developer", "SOFTWARE"],
-    ["forward deployed engineer", "FORWARD_DEPLOYED"],
-    ["lighthouse keeper", null],
+    ["zorblat engineering manager, quindle", "ENGINEERING_MANAGEMENT"],
+    ["quindle manager, engineering", "ENGINEERING_MANAGEMENT"],
+    ["head of zorblat engineering", "ENGINEERING_MANAGEMENT"],
+    ["zorblat associate director, wibbet engineering", null],
+    ["wibbet engineering, vp", null],
+    ["head of zorblat ai governance", "AI_STRATEGY_LEADERSHIP"],
+    ["director, quindle ai strategy", "AI_STRATEGY_LEADERSHIP"],
+    ["vp, wibbet ai risk", "AI_STRATEGY_LEADERSHIP"],
+    ["zorblat ai engineer", "AI_ENGINEERING"],
+    ["manager of wibbet ai engineering", "AI_ENGINEERING"],
+    ["mirvane ai governance engineer", "AI_ENGINEERING"],
+    ["mirvane ai architecture", "ARCHITECTURE"],
+    ["mirvane ai product manager", "PRODUCT"],
+    ["fennick program manager for quindles", "DELIVERY_MANAGEMENT"],
+    ["snorple research engineer", "RESEARCH_ENGINEERING"],
+    ["glimmet machine learning wrangler", "DATA_ML"],
+    ["tovrik data scientist", "DATA_ML"],
+    ["brumble full stack developer", "SOFTWARE"],
+    ["skellet forward deployed wrangler", "FORWARD_DEPLOYED"],
+    ["zorblat keeper", null],
   ])("%s is %s", (title, kind) => {
     expect(roleKindOfTitle(title)).toBe(kind);
   });
 });
 
 describe("classification", () => {
-  it("never treats an engineering manager as generic software", () => {
-    const result = classify({ title: "engineering manager, delivery fleet", description: "You run the fleet and its people." });
-    expect(result).toMatchObject({ kind: "ENGINEERING_MANAGEMENT", roleType: "COORDINATION", status: "NEVER" });
+  it("classifies an engineering management title as management", () => {
+    const result = classify(
+      { title: "zorblat engineering manager, quindle snorple", description: "You look after the snorples." },
+      strictManagement,
+    );
+    expect(result).toMatchObject({ kind: "ENGINEERING_MANAGEMENT", roleType: "DELTA", status: "NEVER" });
     expect(result.reasons).toContain("MANAGEMENT_WITHOUT_HANDS_ON");
-    expect(classify({ title: "engineering manager", description: "Hands-on: you write code with the team." }))
-      .toMatchObject({ roleType: "COORDINATION", status: "TRANSITION" });
+    expect(classify({ title: "quindle engineering manager", description: "Hands-on: you write code with the zorblats." }, strictManagement))
+      .toMatchObject({ roleType: "DELTA", status: "TARGET" });
   });
 
   it("gives AI strategy leadership the type the design assigns and measures its stakeholder load", () => {
-    const heavy = classify({ title: "head of ai strategy", description: "Stakeholders, steering committee and alignment." });
-    expect(heavy).toMatchObject({ kind: "AI_STRATEGY_LEADERSHIP", roleType: "PRODUCT", status: "NEUTRAL", stakeholderHeavy: true });
-    expect(classify({ title: "head of ai strategy", description: "One stakeholder." }).stakeholderHeavy).toBe(false);
+    const heavy = classify({ title: "head of zorblat ai strategy", description: "Stakeholders, steering committee and alignment." });
+    expect(heavy).toMatchObject({ kind: "AI_STRATEGY_LEADERSHIP", roleType: "ALPHA", status: "NEUTRAL", stakeholderHeavy: true });
+    expect(classify({ title: "head of zorblat ai strategy", description: "One stakeholder." }).stakeholderHeavy).toBe(false);
   });
 
-  it("flags management as never only without hands-on wording", () => {
-    expect(classify({ title: "data lead", peopleManagementCore: true, description: "You manage the team." }).status).toBe("NEVER");
-    expect(classify({ title: "data scientist", peopleManagementCore: true, description: "You manage the team and write SQL." }).status)
-      .toBe("TARGET");
+  it("applies the management rule only where the design asks and only without hands-on wording", () => {
+    const managing = { title: "tovrik data scientist", peopleManagementCore: true, description: "You manage the quindles." };
+    expect(classify(managing, strictManagement).status).toBe("NEVER");
+    expect(classify(managing).status).toBe("TARGET");
+    expect(classify({ ...managing, description: "You manage the quindles and write SQL." }, strictManagement).status).toBe("TARGET");
   });
 
-  it("sets architecture status from client facing, consulting and in-house wording", () => {
-    const architect = (overrides: Parameters<typeof classify>[0]) => classify({ title: "data architect", ...overrides }).status;
-    expect(architect({ description: "Design the estate." })).toBe("TRANSITION");
-    expect(architect({ description: "Own our platform in-house." })).toBe("TARGET");
-    expect(architect({ description: "Own our platform in-house.", externalClientFacing: true })).toBe("NEUTRAL");
-    expect(architect({ company: "Example Advisers Pte Ltd", description: "in-house" })).toBe("NEVER");
-    expect(architect({ company: "Harbour Consulting Group" })).toBe("NEVER");
+  it("applies conditional statuses in their order", () => {
+    const architect = (overrides: Parameters<typeof classify>[0]) => classify({ title: "mirvane data architect", ...overrides });
+    expect(architect({ description: "Shape the quindles." }).status).toBe("TARGET");
+    expect(architect({ description: "Own our platform in-house." }).status).toBe("NEVER");
+    expect(architect({ description: "Own our platform in-house.", externalClientFacing: true }))
+      .toMatchObject({ status: "TARGET", reasons: expect.arrayContaining(["EXTERNAL_CLIENT_FACING"]) });
+    expect(architect({ company: "Example Advisers Pte Ltd", description: "in-house" }).status).toBe("TRANSITION");
+    expect(architect({ company: "Harbour Consulting Group" }).status).toBe("TRANSITION");
   });
 
-  it("does not read a solution architect title as client-facing", () => {
-    expect(REVIEW_LIST_RULES.externalClientFacing("Design the data estate of the harbour.")).toBe(false);
+  it("does not read a job title as evidence of client-facing work", () => {
+    expect(REVIEW_LIST_RULES.externalClientFacing("Shape the quindles of the harbour.")).toBe(false);
     expect(REVIEW_LIST_RULES.externalClientFacing("A customer-facing role with client engagements.")).toBe(true);
   });
 
   it("leaves a never title phrase out and matches whole words only", () => {
-    expect(classify({ title: "night watch software engineer" }).status).toBe("NEVER");
-    expect(classify({ title: "knight watching software engineer" }).status).toBe("TARGET");
+    expect(classify({ title: "night watch zorblat developer" }).status).toBe("NEVER");
+    expect(classify({ title: "knight watching zorblat developer" }).status).toBe("NEUTRAL");
   });
-
   it("decides the sector from the employer only", () => {
     // Posting words about a preferred or never industry change nothing.
     expect(classify({ company: "Example Unknown Co", description: "We serve orchards, lighthouses and pyrotechnics." }))
@@ -150,18 +159,32 @@ describe("classification", () => {
   });
 
   it("keeps unknown roles and unknown sectors in the pool", () => {
-    expect(classify({ title: "lighthouse keeper", company: null }))
-      .toMatchObject({ kind: "UNKNOWN", roleType: null, status: "NEUTRAL", sector: "NEUTRAL" });
-    expect(classify({ title: "lighthouse keeper", fallbackKind: "PRODUCT" })).toMatchObject({ roleType: "PRODUCT" });
+    expect(classify({ title: "zorblat keeper", company: null, employerUnknown: true }))
+      .toMatchObject({ kind: "UNKNOWN", roleType: null, status: "TARGET", sector: "NEUTRAL" });
+    expect(classify({ title: "zorblat keeper", fallbackKind: "PRODUCT" })).toMatchObject({ roleType: "GAMMA" });
   });
 
+  const demanding = designWith((raw) => {
+    raw.role_types[2].requires = { work_modes: ["ONSITE"], max_travel_percent: 55, top_technology_employer: true };
+  });
+  const field = (overrides: Parameters<typeof classify>[0]) =>
+    classify({ title: "skellet forward deployed wrangler", company: "Example Robotics", ...overrides }, demanding).status;
+
   it("applies a requirement only to a known fact", () => {
-    const field = (overrides: Parameters<typeof classify>[0]) =>
-      classify({ title: "forward deployed engineer", company: "Example Robotics", ...overrides }).status;
-    expect(field({})).toBe("NEUTRAL");
-    expect(field({ workMode: "ONSITE" })).toBe("NEVER");
-    expect(field({ description: "Expect 40% travel." })).toBe("NEVER");
-    expect(field({ description: "Travel of up to 5%." })).toBe("NEUTRAL");
+    expect(field({})).toBe("TRANSITION");
+    expect(field({ workMode: "REMOTE" })).toBe("NEVER");
+    expect(field({ description: "Expect 80% travel." })).toBe("NEVER");
+    expect(field({ description: "Travel of up to 5%." })).toBe("TRANSITION");
     expect(field({ company: "Example Orchard" })).toBe("NEVER");
+  });
+
+  it("never turns an unknown employer into never", () => {
+    expect(field({ company: null, employerUnknown: true })).toBe("TRANSITION");
+    expect(field({ company: null })).toBe("TRANSITION");
+    expect(field({ company: "Unknown Company", employerUnknown: true })).toBe("TRANSITION");
+    // A name that identifies no employer decides no sector either.
+    expect(classify({ company: "www.pyrotechnics.example", employerUnknown: true }))
+      .toMatchObject({ sector: "NEUTRAL", sectorSource: "UNKNOWN" });
+    expect(REVIEW_LIST_RULES.isUnknownEmployer("Unknown Company")).toBe(true);
   });
 });

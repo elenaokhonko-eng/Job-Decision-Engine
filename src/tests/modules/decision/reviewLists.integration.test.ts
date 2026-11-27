@@ -21,6 +21,11 @@ if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
 
 const raw = JSON.parse(fs.readFileSync("fixtures/ranking_design.example.json", "utf8"));
 raw.employer_override.approved = true;
+// This file tests candidacy and identity, not a design: long lists and no requirement.
+raw.lists.size = 20;
+raw.lists.overall_size = 20;
+raw.lists.overall_from_unsaved_only = true;
+delete raw.role_types[1].requires;
 const design = parseRankingDesign(JSON.stringify(raw));
 
 let admin: pg.Pool | undefined;
@@ -75,6 +80,25 @@ async function observe(name: string, source: string, url: string): Promise<void>
   );
 }
 
+async function archive(name: string): Promise<void> {
+  const archiveRun = crypto.randomUUID();
+  await pool.query(
+    `INSERT INTO job_archive_runs (id, run_started_at, cutoff_at, mode, status) VALUES ($1, NOW(), NOW() - INTERVAL '1 day', 'DRY_RUN', 'SUCCEEDED')`,
+    [archiveRun],
+  );
+  await pool.query(
+    `UPDATE canonical_jobs SET archived_at = NOW(), archive_run_id = $2, archive_reason = 'fixture archive',
+        archive_age_basis = 'OBSERVED_AGE_PUBLICATION_UNKNOWN', archive_reference_at = NOW() WHERE id = $1`,
+    [ids[name], archiveRun],
+  );
+}
+
+const close = (name: string) =>
+  pool.query(
+    `UPDATE job_versions SET availability_status = 'CLOSED' WHERE id = (SELECT latest_job_version_id FROM canonical_jobs WHERE id = $1)`,
+    [ids[name]],
+  );
+
 /** Replaces the job's only sighting and link (the fixture's employer-board one). */
 async function onlySeenOn(name: string, source: string, url: string): Promise<void> {
   await pool.query(
@@ -109,30 +133,42 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
     }
     profileVersionId = await createProfile(pool, workspace);
 
-    await seed("best", { company: "Example Orchard", title: "software engineer", similarity: 0.9 });
-    await seed("second", { company: "Example Plain Co", title: "software developer", similarity: 0.8 });
-    await seed("noScore", { company: "Example Plain Co", title: "backend developer", similarity: null });
-    await seed("saved", { company: "Example Saved Co", title: "software engineer" });
+    await seed("best", { company: "Example Orchard", title: "zorblat software engineer", similarity: 0.9 });
+    await seed("second", { company: "Example Plain Co", title: "zorblat software developer", similarity: 0.8 });
+    await seed("noScore", { company: "Example Plain Co", title: "quindle backend developer", similarity: null });
+    await seed("saved", { company: "Example Saved Co", title: "zorblat software engineer" });
     await observe("saved", "LINKEDIN_SAVED", "https://www.linkedin.com/jobs/view/4900000001");
-    await seed("linkedIn", { company: "Example Linked Co", title: "software engineer" });
+    await seed("linkedIn", { company: "Example Linked Co", title: "zorblat software engineer" });
     await onlySeenOn("linkedIn", "GMAIL_ALERT", "https://www.linkedin.com/jobs/view/4900000002");
-    await seed("lead", { company: "Example Board Co", title: "software engineer", similarity: 1 });
+    await seed("lead", { company: "Example Board Co", title: "zorblat software engineer", similarity: 1 });
     await onlySeenOn("lead", "HIMALAYAS", "https://himalayas.app/companies/x/jobs/y");
-    await seed("closed", { company: "Example Closed Co", title: "software engineer" });
+    await seed("closed", { company: "Example Closed Co", title: "zorblat software engineer" });
     await pool.query(
       `UPDATE job_versions SET availability_status = 'CLOSED' WHERE id = (SELECT latest_job_version_id FROM canonical_jobs WHERE id = $1)`,
       [ids.closed],
     );
-    await seed("gated", { company: "Example Gated Co", title: "software engineer" });
+    await seed("gated", { company: "Example Gated Co", title: "zorblat software engineer" });
     await pool.query("UPDATE canonical_jobs SET gate_decision = 'NEEDS_VERIFICATION' WHERE id = $1", [ids.gated]);
-    await seed("incomplete", { company: "Example Short Co", title: "software engineer" });
+    await seed("incomplete", { company: "Example Short Co", title: "zorblat software engineer" });
     await pool.query("UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE id = $1", [ids.incomplete]);
-    await seed("fixture", { company: "Example Fixture Co", title: "software engineer" });
+    await seed("fixture", { company: "Example Fixture Co", title: "zorblat software engineer" });
     await pool.query("UPDATE canonical_jobs SET is_test_fixture = TRUE WHERE id = $1", [ids.fixture]);
-    await seed("never", { company: "Example Sparkler", title: "software engineer" });
+    await seed("never", { company: "Example Sparkler", title: "zorblat software engineer" });
     // The same posting twice: a legal suffix and a way of writing the location apart. One record was rated.
-    await seed("rated", { company: "Example Twice Pte Ltd", title: "data engineer" });
-    await seed("ratedAgain", { company: "Example Twice", title: "data engineer" });
+    await seed("rated", { company: "Example Twice Pte Ltd", title: "tovrik data scientist" });
+    await seed("ratedAgain", { company: "Example Twice", title: "tovrik data scientist" });
+
+    // Each of these postings has a second record that is live and untouched.
+    for (const [name, company] of [["removed", "Example Removed Co"], ["shut", "Example Shut Co"], ["longGone", "Example Gone Co"], ["oldSaved", "Example Kept Co"]]) {
+      await seed(name!, { company: `${company} Pte Ltd`, title: "zorblat software engineer" });
+      await seed(`${name}Twin`, { company: company!, title: "zorblat software engineer" });
+    }
+    await pool.query("UPDATE canonical_jobs SET processing_state = 'MANUALLY_REMOVED' WHERE id = $1", [ids.removed]);
+    await close("shut");
+    await close("longGone");
+    await archive("longGone");
+    await observe("oldSaved", "LINKEDIN_SAVED", "https://www.linkedin.com/jobs/view/4900000003");
+    await archive("oldSaved");
   }, 240_000);
 
   afterAll(async () => {
@@ -145,9 +181,9 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
 
   it("lists only live, gate-passed, complete, open-or-unknown, non-lead, unrated postings", async () => {
     const result = await run([ids.rated!]);
-    const software = result.lists.byType.find((list) => list.type.key === "SOFTWARE")!;
+    const software = result.lists.byType.find((list) => list.type.key === "ALPHA")!;
     expect(software.jobs.map((job) => job.id).sort())
-      .toEqual(["best", "second", "noScore", "saved", "linkedIn"].map((name) => ids[name]).sort());
+      .toEqual(["best", "second", "noScore", "saved", "linkedIn", "oldSavedTwin"].map((name) => ids[name]).sort());
     // Preferred sector first, then top-K from the stored similarity, then no score.
     expect(software.jobs.slice(0, 2).map((job) => job.id)).toEqual([ids.best, ids.second]);
     expect(software.jobs.at(-1)!.id).toBe(ids.noScore);
@@ -159,14 +195,27 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
     expect(byId.get(ids.linkedIn!)).toMatchObject({ saved: false, linkedInOnly: true });
     expect(result.lists.overall.map((job) => job.id)).not.toContain(ids.saved);
 
-    expect(result.excluded).toMatchObject({ LEAD: 1, KNOWN_CLOSED: 1, NOT_GATE_PASSED: 1, AWAITING_CONTENT: 1 });
+    expect(result.excluded).toMatchObject({ LEAD: 1, KNOWN_CLOSED: 2, NOT_GATE_PASSED: 1, AWAITING_CONTENT: 1 });
     expect(result.dropped).toMatchObject({ rated: 2, neverSector: 1 });
-    expect(result.lists.byType.find((list) => list.type.key === "DATA")!.jobs).toEqual([]);
+    expect(result.lists.byType.find((list) => list.type.key === "BETA")!.jobs).toEqual([]);
+  });
+
+  it("does not bring a removed or known-closed posting back through its other record", async () => {
+    const result = await run();
+    const listed = result.postings.map((job) => job.id);
+    for (const name of ["removedTwin", "shutTwin", "longGoneTwin"]) expect(listed).not.toContain(ids[name]);
+    expect(result.dropped.dismissed).toBe(3);
+  });
+
+  it("marks the live copy of a posting saved under an archived record", async () => {
+    const result = await run();
+    expect(result.postings.find((job) => job.id === ids.oldSavedTwin)).toMatchObject({ saved: true });
+    expect(result.lists.overall.map((job) => job.id)).not.toContain(ids.oldSavedTwin);
   });
 
   it("collapses the two records of one posting when neither was rated", async () => {
     const result = await run();
-    expect(result.lists.byType.find((list) => list.type.key === "DATA")!.jobs).toHaveLength(1);
+    expect(result.lists.byType.find((list) => list.type.key === "BETA")!.jobs).toHaveLength(1);
     expect(result.dropped.duplicate).toBe(1);
   });
 

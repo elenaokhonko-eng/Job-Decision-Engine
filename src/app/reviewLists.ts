@@ -50,7 +50,7 @@ const roleShapeInput = (title: string, description: string) =>
 
 export const REVIEW_LIST_RULES: ReviewListRules = {
   topKScore: (rows) => topKCapabilityScore(rows).score,
-  // Posting wording only: a title such as "solution architect" is not evidence of external client work.
+  // Posting wording only: a job title is not evidence of external client work.
   externalClientFacing: (description) => detectCustomerFacingDelivery(roleShapeInput("", description)) !== null,
   peopleManagementCore: (title, description) => detectPeopleManagementCore(roleShapeInput(title, description)) !== null,
   fallbackKind: (title) => FALLBACK_KINDS[classifyCareerTrack(title).track] ?? null,

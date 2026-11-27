@@ -13,6 +13,8 @@ export type KnownWorkMode = "REMOTE" | "HYBRID" | "ONSITE" | null;
 export interface ClassifierInput {
   readonly title: string;
   readonly company: string | null;
+  /** True when the stored name does not identify an employer: it then decides nothing. */
+  readonly employerUnknown: boolean;
   readonly description: string;
   /** null when unknown; an assumed work mode counts as unknown. */
   readonly workMode: KnownWorkMode;
@@ -177,11 +179,12 @@ export function classifyJob(
   const kind = titleKind ?? input.fallbackKind;
   reasons.push(titleKind ? "ROLE_FROM_TITLE" : kind ? "ROLE_FROM_TITLE_FAMILY" : "ROLE_UNKNOWN");
   const type = kind ? design.role_types.find((entry) => entry.kinds.includes(kind))! : null;
-  const sector = classifySector(design, companyTags, input.company);
+  const company = input.employerUnknown ? null : input.company;
+  const sector = classifySector(design, companyTags, company);
   const handsOn = showsHandsOnWork(input.title, input.description);
   const stakeholderHeavy = stakeholderMentions(input.description) >= design.stakeholder_heavy_min_mentions;
   const inHouse = saysInHouse(input.description);
-  const employer = employerKey(input.company);
+  const employer = employerKey(company);
   const consulting = matchesAny(employer, design.consulting.employers) || hasWords(employer, design.consulting.employer_name_words);
 
   let status: RoleStatus = type?.status ?? design.unknown_role_status;
@@ -215,8 +218,8 @@ export function classifyJob(
     const failed = [
       requires.work_modes && input.workMode !== null && !requires.work_modes.includes(input.workMode) ? "REQUIRES_WORK_MODE" : null,
       requires.max_travel_percent !== undefined && travel !== null && travel > requires.max_travel_percent ? "REQUIRES_TRAVEL" : null,
-      // The list is the definition of such an employer, so absence from it is a known "no".
-      requires.top_technology_employer && !matchesAny(employer, design.top_technology_employers) ? "REQUIRES_TOP_TECHNOLOGY_EMPLOYER" : null,
+      // The list is the definition of such an employer, so a known employer absent from it is a known "no".
+      requires.top_technology_employer && employer !== "" && !matchesAny(employer, design.top_technology_employers) ? "REQUIRES_TOP_TECHNOLOGY_EMPLOYER" : null,
     ].filter((reason): reason is string => reason !== null);
     if (failed.length) {
       status = "NEVER";

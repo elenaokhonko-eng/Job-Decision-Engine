@@ -23,7 +23,10 @@ export interface ReviewJobRow {
   identity_hashes: Array<string | null> | null;
 }
 
-/** Live jobs, plus the named records (rated before) whatever their state. */
+/**
+ * Every record that is not a test fixture, archived ones included (their postings must still be recognised), plus the
+ * named records (rated before) whatever their state. An archived record carries no description.
+ */
 export async function selectReviewJobs(
   db: DecisionQueryable,
   workspaceId: string,
@@ -39,7 +42,7 @@ export async function selectReviewJobs(
             job.is_test_fixture IS TRUE AS test_fixture,
             content.content_complete IS TRUE AS content_complete,
             availability.availability_state,
-            version.description_text AS description,
+            CASE WHEN job.archived_at IS NULL THEN version.description_text END AS description,
             (SELECT ARRAY_AGG(any_version.source_posting_identity_hash) FROM job_versions any_version
               WHERE any_version.workspace_id = job.workspace_id AND any_version.canonical_job_id = job.id) AS identity_hashes
        FROM canonical_jobs job
@@ -51,7 +54,7 @@ export async function selectReviewJobs(
          ON availability.workspace_id = job.workspace_id AND availability.canonical_job_id = job.id
         AND availability.job_version_id::text = content.job_version_id::text
       WHERE job.workspace_id = $1::uuid
-        AND ((job.archived_at IS NULL AND job.is_test_fixture IS NOT TRUE) OR job.id::text = ANY($2::text[]))
+        AND (job.is_test_fixture IS NOT TRUE OR job.id::text = ANY($2::text[]))
       ORDER BY job.id`,
     [workspaceId, [...alsoIds]],
   );
