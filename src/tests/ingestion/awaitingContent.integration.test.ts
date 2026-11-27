@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import crypto from "node:crypto";
 import pg from "pg";
 
-import { classifyContentCompleteness, reportAwaitingContentOutputs } from "../../ingestion/contentCompleteness.js";
+import { awaitingVisibilityFailures, classifyContentCompleteness, LIST_READ_MODELS, NON_LIST_READ_MODELS, reportAwaitingContentOutputs, reportAwaitingContentVisibility } from "../../ingestion/contentCompleteness.js";
 import { sourceContentEvidencePredicate } from "../../pipeline/descriptionQuality.js";
 import { archiveJobsAsPostingNotConfirmable } from "../../services/jobArchive.js";
 import { readFileSync } from "node:fs";
@@ -55,6 +55,7 @@ const CASES: readonly Case[] = [
   { name: "archived snippet is not live", quality: "INCOMPLETE", observations: [{ source: "GMAIL_ALERT" }], decisions: true, archived: true, expectAwaiting: true, expectViolation: false },
 ];
 
+let schemaName = "";
 let pool: pg.Pool | undefined;
 let client: pg.PoolClient | undefined;
 let context: WorkspaceContext | undefined;
@@ -69,7 +70,7 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
   beforeAll(async () => {
     pool = new pg.Pool(pgConnectionConfig(databaseUrl));
     client = await pool.connect();
-    const schemaName = `awaiting_content_${crypto.randomUUID().replaceAll("-", "")}`;
+    schemaName = `awaiting_content_${crypto.randomUUID().replaceAll("-", "")}`;
     await client.query(`CREATE SCHEMA ${schemaName}`);
     await client.query(`SET search_path TO ${schemaName}, public`);
     await runMigrations(client);
@@ -142,7 +143,12 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
   }, 180_000);
 
   afterAll(async () => {
-    client?.release();
+    if (client) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      await client.query("RESET search_path").catch(() => undefined);
+      if (schemaName) await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+      client.release();
+    }
     await pool?.end();
   });
 
@@ -220,6 +226,91 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
     expect(report.awaitingContentJobs).toBe(CASES.filter((c) => c.expectAwaiting && !c.archived && !c.hardRejected).length);
     expect(report.byOutput).toEqual({ GATE_DECISION: 3, LANE: 3, RECOMMENDATION: 3 });
     for (const violation of report.violations) expect(violation.outputs).toEqual(["GATE_DECISION", "LANE", "RECOMMENDATION"]);
+  });
+
+  it("check 8: no awaiting-content job is visible in any list, and stored outputs on awaiting jobs are information only", async () => {
+    const database = db();
+    const workspaceId = context!.workspaceId;
+    // A feed-only job (Himalayas style): awaiting, no fetch can serve it, and it keeps a stored gate decision, lane and recommendation.
+    const stale = await database.query<{ id: string }>(
+      `INSERT INTO canonical_jobs (workspace_id, company_name, normalized_title, canonical_url, processing_state, processing_status,
+         gate_decision, primary_lane, recommendation_outcome, recommendation_eligibility, description_quality_status)
+       VALUES ($1, 'Feed Fixture Co', 'feed-only-stale-outputs', $2, 'UNMATCHED', 'UNMATCHED', 'PASS', 'CORE_AI_DATA', 'SKIP', 'INELIGIBLE', 'INCOMPLETE') RETURNING id`,
+      [workspaceId, `https://example.test/feed/${crypto.randomUUID()}`],
+    );
+    const staleId = stale.rows[0]!.id;
+    const version = await database.query<{ id: string }>(
+      `INSERT INTO job_versions (workspace_id, canonical_job_id, version_number, content_hash, description_text, observed_at)
+       VALUES ($1, $2, 1, $3, 'Short feed text.', NOW()) RETURNING id`,
+      [workspaceId, staleId, `feed-${crypto.randomUUID()}`],
+    );
+    await database.query(`UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE id = $2`, [version.rows[0]!.id, staleId]);
+    const observationId = crypto.randomUUID();
+    await database.query(
+      `INSERT INTO raw_job_observations (id, workspace_id, source_name, source_external_id, source_url, retrieved_at, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id)
+       VALUES ($1, $2, 'HIMALAYAS', $3, 'https://example.test/feed', NOW(), 'Feed Fixture Co', 'feed', 'Short feed text.', '{}'::jsonb, $4, 'PROCESSED', $5)`,
+      [observationId, workspaceId, `feed-${observationId}`, `raw-${observationId}`, version.rows[0]!.id],
+    );
+
+    // Hidden by the read models: not a violation, but its stored outputs are reported as information.
+    const hidden = await reportAwaitingContentVisibility(database, workspaceId);
+    expect(hidden.visible).toEqual([]);
+    expect(hidden.viewsChecked).toContain("v_canonical_shortlist_scoped");
+    expect(hidden.viewsChecked).toContain("v_job_status_buckets_scoped");
+    const info = await reportAwaitingContentOutputs(database, workspaceId);
+    expect(info.violations.map((entry) => entry.canonicalJobId)).toContain(staleId);
+
+    // A list that shows an awaiting job is a violation: put the pre-120 shortlist back inside a transaction and roll it back.
+    const migrations = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../migrations");
+    const text = readFileSync(path.join(migrations, "093_reversible_job_archiving.sql"), "utf8").split(String.fromCharCode(13)).join("");
+    const start = text.indexOf("CREATE OR REPLACE VIEW v_canonical_shortlist_scoped AS");
+    const end = text.indexOf("AND canonical.archived_at IS NULL;", start) + "AND canonical.archived_at IS NULL;".length;
+    await database.query("BEGIN");
+    try {
+      await database.query(text.slice(start, end));
+      const visible = await reportAwaitingContentVisibility(database, workspaceId);
+      expect(visible.visible.length).toBeGreaterThan(0);
+      expect(visible.visible.every((entry) => entry.views.includes("v_canonical_shortlist_scoped"))).toBe(true);
+    } finally {
+      await database.query("ROLLBACK");
+    }
+    expect((await reportAwaitingContentVisibility(database, workspaceId)).visible).toEqual([]);
+  });
+
+  it("every v_*_scoped view is classified: a list checked by check 8 or an exempt view with a reason (a new view fails until classified)", async () => {
+    const views = await db().query<{ table_name: string }>(
+      `SELECT table_name FROM information_schema.views WHERE table_schema = $1 AND table_name LIKE 'v\_%\_scoped' ORDER BY table_name`, [schemaName]);
+    const checked = new Set<string>(LIST_READ_MODELS);
+    const exempt = new Set(Object.keys(NON_LIST_READ_MODELS));
+    const unclassified = views.rows.map((row) => row.table_name).filter((name) => !checked.has(name) && !exempt.has(name));
+    expect(unclassified).toEqual([]);
+    // No view is both, and every listed name still exists (a renamed or dropped view must be removed from the lists).
+    expect([...checked].filter((name) => exempt.has(name))).toEqual([]);
+    const existing = new Set(views.rows.map((row) => row.table_name));
+    expect([...checked, ...exempt].filter((name) => !existing.has(name))).toEqual([]);
+    for (const reason of Object.values(NON_LIST_READ_MODELS)) expect(reason.length).toBeGreaterThan(10);
+  });
+
+  it("check 8 fails when an expected list read model is missing or nothing was checked (an empty check is never a pass)", async () => {
+    const database = db();
+    const workspaceId = context!.workspaceId;
+    const normal = await reportAwaitingContentVisibility(database, workspaceId);
+    expect(normal.viewsMissing).toEqual([]);
+    expect(awaitingVisibilityFailures(normal)).toEqual([]);
+    await database.query("BEGIN");
+    try {
+      // Only this schema on the path: the shared test database also has a public copy of every view.
+      await database.query(`SET LOCAL search_path TO ${schemaName}`);
+      await database.query("ALTER VIEW v_track_jobs_scoped RENAME TO v_track_jobs_scoped_renamed");
+      const missing = await reportAwaitingContentVisibility(database, workspaceId);
+      expect(missing.viewsMissing).toContain("v_track_jobs_scoped");
+      expect(awaitingVisibilityFailures(missing).join(" ")).toMatch(/could not verify the lists.*v_track_jobs_scoped/);
+    } finally {
+      await database.query("ROLLBACK");
+    }
+    expect(awaitingVisibilityFailures({ visible: [], viewsChecked: [], viewsMissing: [] }).join(" ")).toMatch(/could not verify the lists: 0 checked/);
+    expect(awaitingVisibilityFailures({ visible: [{ canonicalJobId: "x", views: ["v"] }], viewsChecked: ["v"], viewsMissing: [] }).join(" ")).toMatch(/shown by a list read model/);
   });
 
   it("each live job is in exactly one bucket or in awaiting content, and the counts add up", async () => {

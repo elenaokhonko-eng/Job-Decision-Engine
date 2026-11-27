@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { findStrandedNonterminalJobs } from "../src/ingestion/nonterminalRecovery.js";
-import { reportAwaitingContentOutputs } from "../src/ingestion/contentCompleteness.js";
+import { awaitingVisibilityFailures, reportAwaitingContentOutputs, reportAwaitingContentVisibility } from "../src/ingestion/contentCompleteness.js";
 import { reportContentWithoutFetchTask } from "../src/ingestion/fetchTaskCoverage.js";
 
 dotenv.config();
@@ -151,20 +151,25 @@ async function runIntegrityChecks() {
       console.log("OK: Every automatic nonterminal job has active recovery work.");
     }
 
-    // Check 8: a job awaiting its posting text has no gate result, lane or recommendation.
-    const awaiting = await reportAwaitingContentOutputs(pool, ctx.workspaceId);
-    if (awaiting.violations.length > 0) {
-      console.error(
-        `Found ${awaiting.violations.length} live job(s) awaiting content that still carry a gate decision, lane or recommendation `
-        + `(gate=${awaiting.byOutput.GATE_DECISION} lane=${awaiting.byOutput.LANE} recommendation=${awaiting.byOutput.RECOMMENDATION}); `
-        + `first ids: ${awaiting.violations.slice(0, 5).map((v) => v.canonicalJobId).join(", ")}`,
-      );
+    // Check 8: no list shows an awaiting-content job. Stored gate, lane and recommendation on such a job are evidence
+    // and are reported as information only.
+    const visibility = await reportAwaitingContentVisibility(pool, ctx.workspaceId);
+    const stored = await reportAwaitingContentOutputs(pool, ctx.workspaceId);
+    console.log(
+      `INFO: ${stored.awaitingContentJobs} awaiting-content job(s); ${stored.violations.length} keep a stored gate decision, lane or recommendation `
+      + `(hidden by the read models; first ids: ${stored.violations.slice(0, 5).map((v) => v.canonicalJobId).join(", ") || "none"}).`,
+    );
+    // Every expected list read model must exist and be checked (migration 120 is on main): a missing view or an empty check fails.
+    const visibilityFailures = awaitingVisibilityFailures(visibility);
+    if (visibilityFailures.length > 0) {
+      for (const failure of visibilityFailures) console.error(`Check 8: ${failure}`);
       errors++;
     } else {
-      console.log(`OK: No awaiting-content job (${awaiting.awaitingContentJobs}) carries a gate decision, lane or recommendation.`);
+      console.log(`OK: No awaiting-content job is shown by any list read model (${visibility.viewsChecked.length} checked).`);
     }
 
-    // Check 9: a live job needs complete content or a fetch task; with neither it can never become complete.
+    // Check 9: a live alert-backed job needs complete content or a fetch task; with neither it can never become complete.
+    // Jobs a fetch cannot serve (feed or saved-export sources) are information only.
     const coverage = await reportContentWithoutFetchTask(pool, ctx.workspaceId);
     if (coverage.withoutFetchTask.length > 0) {
       console.error(
@@ -174,7 +179,7 @@ async function runIntegrityChecks() {
       errors++;
     } else {
       console.log(
-        `OK: Every live job has complete content or a fetch task (${coverage.awaitingContentJobs} waiting, `
+        `OK: Every live alert-backed job has complete content or a fetch task (${coverage.awaitingContentJobs} waiting, ${coverage.notFetchableWithoutTask} not fetchable, `
         + `${coverage.fetchDeadLetteredOnly} with only a dead-lettered fetch).`,
       );
     }

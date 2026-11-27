@@ -220,7 +220,6 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
 
     const capped = await ensureFetchTasksForAwaitingContent(db(), ctx, { apply: true, producer: "test", limit: 2 });
     expect(capped.queued).toBe(2);
-    expect(capped.skippedOwnerSaved).toBe(1);
     const afterFirst = await db().query<{ observation_id: string }>(
       `SELECT payload->>'observation_id' AS observation_id FROM pipeline_tasks WHERE workspace_id = $1 AND task_type = 'FETCH_JOB_CONTENT'`, [ctx.workspaceId]);
     // The first call took the two lowest-id eligible jobs, not an excluded one.
@@ -233,6 +232,59 @@ describe.skipIf(skipReal)("fetch-task coverage for alert observations (PostgreSQ
     for (const untouched of [saved, lead, feed, archivedJob]) {
       expect(tasks.rows.map((row) => row.observation_id)).not.toContain(untouched.observationId);
     }
+  });
+
+  it("check 9 covers alert-backed jobs only: feed-only and owner-saved jobs without a task are information, not violations", async () => {
+    const ctx = await newContext();
+    const alertJob = await seedAlertJob("alert-no-task", ctx);
+    const feedJob = await seedAlertJob("feed-no-task", ctx);
+    await db().query(`UPDATE raw_job_observations SET source_name = 'HACKER_NEWS' WHERE id = $1`, [feedJob.observationId]);
+    const savedJob = await seedAlertJob("saved-no-task", ctx);
+    const version = await db().query<{ job_version_id: string }>(`SELECT job_version_id FROM raw_job_observations WHERE id = $1`, [savedJob.observationId]);
+    const savedObservation = randomUUID();
+    await db().query(
+      `INSERT INTO raw_job_observations (id, workspace_id, source_name, source_external_id, source_url, retrieved_at, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id)
+       VALUES ($1, $2, 'MCF_SAVED', $3, 'https://example.test/saved', NOW(), 'Coverage Fixture Co', 'saved', 'Short.', '{}'::jsonb, $4, 'PROCESSED', $5)`,
+      [savedObservation, ctx.workspaceId, `saved-${savedObservation}`, `raw-${savedObservation}`, version.rows[0]!.job_version_id],
+    );
+    // LinkedIn saved export too: the other owner-saved source.
+    const linkedInJob = await seedAlertJob("linkedin-saved-no-task", ctx);
+    const linkedInVersion = await db().query<{ job_version_id: string }>(`SELECT job_version_id FROM raw_job_observations WHERE id = $1`, [linkedInJob.observationId]);
+    const linkedInObservation = randomUUID();
+    await db().query(
+      `INSERT INTO raw_job_observations (id, workspace_id, source_name, source_external_id, source_url, retrieved_at, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id)
+       VALUES ($1, $2, 'LINKEDIN_SAVED', $3, 'https://example.test/linkedin-saved', NOW(), 'Coverage Fixture Co', 'saved', 'Short.', '{}'::jsonb, $4, 'PROCESSED', $5)`,
+      [linkedInObservation, ctx.workspaceId, `linkedin-saved-${linkedInObservation}`, `raw-${linkedInObservation}`, linkedInVersion.rows[0]!.job_version_id],
+    );
+    const report = await reportContentWithoutFetchTask(db(), ctx.workspaceId);
+    expect(report.withoutFetchTask).toEqual([alertJob.canonicalJobId]);
+    expect(report.notFetchableWithoutTask).toBe(3);
+    expect(report.awaitingContentJobs).toBe(4);
+  });
+
+  it("an aggregator lead (marked, or an older card on an aggregator host) gets no fetch task and is not counted by check 9", async () => {
+    const ctx = await newContext();
+    const marked = await seedAlertJob("marked-lead", ctx);
+    await db().query(`UPDATE raw_job_observations SET processing_status = 'FETCH_BLOCKED', raw_payload = '{"lead_kind":"AGGREGATOR_LEAD"}'::jsonb WHERE id = $1`, [marked.observationId]);
+    const legacyHost = await seedAlertJob("legacy-aggregator-host", ctx);
+    await db().query(`UPDATE raw_job_observations SET source_url = 'https://www.linkedin.com/jobs/view/4900000555' WHERE id = $1`, [legacyHost.observationId]);
+    const subdomain = await seedAlertJob("legacy-aggregator-subdomain", ctx);
+    await db().query(`UPDATE raw_job_observations SET source_url = 'https://sg.indeed.com/viewjob?jk=abc' WHERE id = $1`, [subdomain.observationId]);
+    const lookalike = await seedAlertJob("lookalike-host-is-fetchable", ctx);
+    await db().query(`UPDATE raw_job_observations SET source_url = 'https://notlinkedin.com/jobs/view/1' WHERE id = $1`, [lookalike.observationId]);
+
+    const report = await reportContentWithoutFetchTask(db(), ctx.workspaceId);
+    expect(report.withoutFetchTask).toEqual([lookalike.canonicalJobId]);
+    expect(report.notFetchableWithoutTask).toBe(3);
+    expect(report.awaitingContentJobs).toBe(4);
+
+    const ensured = await ensureFetchTasksForAwaitingContent(db(), ctx, { apply: true, producer: "test" });
+    expect(ensured.queued).toBe(1);
+    const tasks = await db().query<{ observation_id: string }>(
+      `SELECT payload->>'observation_id' AS observation_id FROM pipeline_tasks WHERE workspace_id = $1 AND task_type = 'FETCH_JOB_CONTENT'`, [ctx.workspaceId]);
+    expect(tasks.rows.map((row) => row.observation_id)).toEqual([lookalike.observationId]);
   });
 
   it("reconciliation lists exactly the live jobs with neither complete content nor a fetch task", async () => {

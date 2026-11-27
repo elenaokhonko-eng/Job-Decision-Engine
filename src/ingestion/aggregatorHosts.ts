@@ -22,6 +22,15 @@ export const AGGREGATOR_HOSTS = [
   "jobbank.gov.sg",
 ] as const;
 
+/**
+ * A case-insensitive POSIX regex (Postgres ~*) that matches a URL whose host is an aggregator or a subdomain of one.
+ * "[.]" matches a literal dot without a backslash escape.
+ */
+export function aggregatorUrlPattern(): string {
+  const hosts = AGGREGATOR_HOSTS.map((host) => host.split(".").join("[.]"));
+  return `^https?://([^/@]*[.])?(${hosts.join("|")})([:/?#]|$)`;
+}
+
 export type AlertLeadKind = "COMPANY_POSTING" | "AGGREGATOR_LEAD";
 
 /** The aggregator a hostname belongs to (the host itself or a subdomain of it), or null for an employer site. */

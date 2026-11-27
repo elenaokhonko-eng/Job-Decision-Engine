@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { aggregatorUrlPattern } from "./aggregatorHosts.js";
 import type { Queryable } from "./contentCompleteness.js";
 import { enqueuePipelineTask } from "../tasks/pipelineTasks.js";
 import type { WorkspaceContext } from "../workspace/context.js";
@@ -72,8 +73,17 @@ export async function assertObservationsHaveFetchTask(
 export interface FetchTaskCoverageReport {
   /** Live jobs without complete content. */
   awaitingContentJobs: number;
-  /** Of those, jobs with no FETCH_JOB_CONTENT task for any of their observations (each is a violation). */
+  /**
+   * Of those, alert-backed jobs (a Gmail alert observation, no owner-saved observation, no aggregator lead: a card marked lead_kind AGGREGATOR_LEAD or a link on an aggregator host) with no
+   * FETCH_JOB_CONTENT task for any of their observations (each is a violation: a fetch could serve them).
+   */
   withoutFetchTask: string[];
+  /**
+   * Awaiting jobs with no fetch task that a fetch cannot serve (Hacker News, Himalayas, saved-export and other feed jobs).
+   * Information only: they wait for a re-export, a paste or a new source, and are read through
+   * v_job_awaiting_content_scoped.
+   */
+  notFetchableWithoutTask: number;
   /** Of those, jobs whose every fetch task is DEAD_LETTER: stuck until the expiry rule archives them (information). */
   fetchDeadLetteredOnly: number;
 }
@@ -83,8 +93,33 @@ export async function reportContentWithoutFetchTask(
   client: Queryable,
   workspaceId: string,
 ): Promise<FetchTaskCoverageReport> {
-  const result = await client.query<{ canonical_job_id: string; task_count: number; live_task_count: number }>(
+  const result = await client.query<{ canonical_job_id: string; task_count: number; live_task_count: number; fetchable: boolean }>(
     `SELECT awaiting.canonical_job_id::text AS canonical_job_id,
+            (EXISTS (
+               SELECT 1 FROM raw_job_observations alert
+                 JOIN job_versions alert_version
+                   ON alert_version.workspace_id = alert.workspace_id AND alert_version.id = alert.job_version_id
+                WHERE alert.workspace_id = awaiting.workspace_id
+                  AND alert_version.canonical_job_id = awaiting.canonical_job_id
+                  AND alert.source_name = 'GMAIL_ALERT'
+             ) AND NOT EXISTS (
+               SELECT 1 FROM raw_job_observations saved
+                 JOIN job_versions saved_version
+                   ON saved_version.workspace_id = saved.workspace_id AND saved_version.id = saved.job_version_id
+                WHERE saved.workspace_id = awaiting.workspace_id
+                  AND saved_version.canonical_job_id = awaiting.canonical_job_id
+                  AND saved.source_name IN ('LINKEDIN_SAVED', 'MCF_SAVED')
+             ) AND NOT EXISTS (
+               -- An aggregator lead has no fetch task by design (FETCH_BLOCKED, see leadStaging.ts) and a retired aggregator page cannot be
+               -- fetched: a card marked lead_kind AGGREGATOR_LEAD, or an older alert card whose link is on an aggregator host.
+               SELECT 1 FROM raw_job_observations lead
+                 JOIN job_versions lead_version
+                   ON lead_version.workspace_id = lead.workspace_id AND lead_version.id = lead.job_version_id
+                WHERE lead.workspace_id = awaiting.workspace_id
+                  AND lead_version.canonical_job_id = awaiting.canonical_job_id
+                  AND lead.source_name = 'GMAIL_ALERT'
+                  AND (lead.raw_payload->>'lead_kind' = 'AGGREGATOR_LEAD' OR lead.source_url ~* $2)
+             )) AS fetchable,
             COALESCE(tasks.task_count, 0)::int AS task_count,
             COALESCE(tasks.live_task_count, 0)::int AS live_task_count
        FROM v_job_awaiting_content_scoped awaiting
@@ -103,24 +138,13 @@ export async function reportContentWithoutFetchTask(
             AND version.canonical_job_id = awaiting.canonical_job_id
        ) tasks ON TRUE
       WHERE awaiting.workspace_id = $1::uuid
-        -- An aggregator lead deliberately has no fetch task (FETCH_BLOCKED, see leadStaging.ts): it waits for the
-        -- employer's posting or a saved-jobs export. Such a job is not a coverage violation.
-        AND NOT EXISTS (
-          SELECT 1
-            FROM raw_job_observations lead
-            JOIN job_versions lead_version
-              ON lead_version.workspace_id = lead.workspace_id AND lead_version.id = lead.job_version_id
-           WHERE lead.workspace_id = awaiting.workspace_id
-             AND lead_version.canonical_job_id = awaiting.canonical_job_id
-             AND lead.processing_status = 'FETCH_BLOCKED'
-             AND lead.raw_payload->>'lead_kind' = 'AGGREGATOR_LEAD'
-        )
       ORDER BY awaiting.canonical_job_id`,
-    [workspaceId],
+    [workspaceId, aggregatorUrlPattern()],
   );
   return {
     awaitingContentJobs: result.rows.length,
-    withoutFetchTask: result.rows.filter((row) => row.task_count === 0).map((row) => row.canonical_job_id),
+    withoutFetchTask: result.rows.filter((row) => row.task_count === 0 && row.fetchable).map((row) => row.canonical_job_id),
+    notFetchableWithoutTask: result.rows.filter((row) => row.task_count === 0 && !row.fetchable).length,
     fetchDeadLetteredOnly: result.rows.filter((row) => row.task_count > 0 && row.live_task_count === 0).length,
   };
 }
@@ -130,8 +154,6 @@ export interface EnsureFetchTasksReport {
   /** Live waiting jobs with no fetch task whose latest alert observation can be fetched, after the cap. */
   candidates: number;
   queued: number;
-  /** Waiting jobs without a fetch task that were left alone because the owner saved them (their text comes from the export). */
-  skippedOwnerSaved: number;
 }
 
 /** Per-run cap used by the worker seed (seedRecoverablePipelineTasks maxSeedPerType default). */
@@ -154,16 +176,9 @@ export async function ensureFetchTasksForAwaitingContent(
   const coverage = await reportContentWithoutFetchTask(client, ctx.workspaceId);
   const limit = input.limit ?? AWAITING_FETCH_SEED_DEFAULT_CAP;
   const jobIds = coverage.withoutFetchTask;
-  const found = jobIds.length === 0 ? { rows: [] as { observation_id: string; owner_saved: boolean }[] } : await client.query<{ observation_id: string; owner_saved: boolean }>(
-    `SELECT DISTINCT ON (version.canonical_job_id) observation.id::text AS observation_id,
-            EXISTS (
-              SELECT 1 FROM job_versions saved_version
-                JOIN raw_job_observations saved_observation
-                  ON saved_observation.workspace_id = saved_version.workspace_id AND saved_observation.job_version_id = saved_version.id
-               WHERE saved_version.workspace_id = observation.workspace_id
-                 AND saved_version.canonical_job_id = version.canonical_job_id
-                 AND saved_observation.source_name IN ('LINKEDIN_SAVED', 'MCF_SAVED')
-            ) AS owner_saved
+  // Which jobs a fetch can serve (alert-backed, not owner-saved, not a lead) is decided once, in reportContentWithoutFetchTask.
+  const found = jobIds.length === 0 ? { rows: [] as { observation_id: string }[] } : await client.query<{ observation_id: string }>(
+    `SELECT DISTINCT ON (version.canonical_job_id) observation.id::text AS observation_id
        FROM raw_job_observations observation
        JOIN job_versions version
          ON version.workspace_id = observation.workspace_id AND version.id = observation.job_version_id
@@ -173,8 +188,7 @@ export async function ensureFetchTasksForAwaitingContent(
       ORDER BY version.canonical_job_id, observation.retrieved_at DESC, observation.id DESC`,
     [ctx.workspaceId, jobIds],
   );
-  const skippedOwnerSaved = found.rows.filter((row) => row.owner_saved).length;
-  const observations = found.rows.filter((row) => !row.owner_saved).slice(0, limit);
+  const observations = found.rows.slice(0, limit);
   let queued = 0;
   if (input.apply) {
     for (const row of observations) {
@@ -182,5 +196,5 @@ export async function ensureFetchTasksForAwaitingContent(
       if (task.inserted) queued += 1;
     }
   }
-  return { mode: input.apply ? "APPLY" : "DRY_RUN", candidates: observations.length, queued, skippedOwnerSaved };
+  return { mode: input.apply ? "APPLY" : "DRY_RUN", candidates: observations.length, queued };
 }
