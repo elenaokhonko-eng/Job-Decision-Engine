@@ -312,6 +312,6 @@ describe("Bug A: each gate verification names its own open fact", () => {
   });
 
   it("keeps these semantics in the current gate version", () => {
-    expect(GATE_VERSION).toBe("gate-2026-11.10");
+    expect(GATE_VERSION).toBe("gate-2026-11.11");
   });
 });
