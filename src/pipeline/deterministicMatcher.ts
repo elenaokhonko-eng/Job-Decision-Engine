@@ -1375,8 +1375,10 @@ export async function runDeterministicMatcher(
 
         const canonicalUpdate = await client.query(
           `UPDATE canonical_jobs
-           SET deterministic_match_score = CASE WHEN $8::boolean THEN NULL ELSE $2::numeric END,
-               deterministic_match_coverage = CASE WHEN $8::boolean THEN NULL ELSE $3::numeric END,
+           -- $8: a requirement or profile embedding is missing, so this run has no result. A re-run never clears a result:
+           -- the stored scores, outcome and decision stay, and the FAILED match run marks them as not current.
+           SET deterministic_match_score = CASE WHEN $8::boolean THEN deterministic_match_score ELSE $2::numeric END,
+               deterministic_match_coverage = CASE WHEN $8::boolean THEN deterministic_match_coverage ELSE $3::numeric END,
                latest_match_run_id = $4,
                profile_match_status = $6,
                processing_state = CASE
@@ -1396,25 +1398,8 @@ export async function runDeterministicMatcher(
                  WHEN NOT $8::boolean AND COALESCE(processing_state, processing_status) = 'UNMATCHED' THEN NULL
                  ELSE rejection_reason
                END,
-               recommendation_eligibility = CASE
-                 WHEN $9::boolean THEN 'INELIGIBLE'
-                 WHEN $8::boolean THEN NULL
-                 ELSE recommendation_eligibility
-               END,
-               recommendation_outcome = CASE
-                 WHEN $9::boolean THEN 'SKIP'
-                 WHEN $8::boolean THEN NULL
-                 ELSE recommendation_outcome
-               END,
-               recommendation_requirement_score = CASE WHEN $8::boolean THEN NULL ELSE recommendation_requirement_score END,
-               recommendation_coverage_score = CASE WHEN $8::boolean THEN NULL ELSE recommendation_coverage_score END,
-               recommendation_evidence_completeness = CASE WHEN $8::boolean THEN NULL ELSE recommendation_evidence_completeness END,
-               recommendation_decided_at = CASE WHEN $8::boolean THEN NULL ELSE recommendation_decided_at END,
-               recommendation_score_policy = CASE WHEN $8::boolean THEN NULL ELSE recommendation_score_policy END,
-               recommendation_degree_asked_for = CASE WHEN $8::boolean THEN NULL ELSE recommendation_degree_asked_for END,
-               recommendation_role_signals = CASE WHEN $8::boolean THEN '[]'::jsonb ELSE recommendation_role_signals END,
-               recommendation_evidence_confidence = CASE WHEN $8::boolean THEN NULL ELSE recommendation_evidence_confidence END,
-               latest_deterministic_decision_id = CASE WHEN $8::boolean THEN NULL ELSE latest_deterministic_decision_id END,
+               recommendation_eligibility = CASE WHEN $9::boolean THEN 'INELIGIBLE' ELSE recommendation_eligibility END,
+               recommendation_outcome = CASE WHEN $9::boolean THEN 'SKIP' ELSE recommendation_outcome END,
                updated_at = NOW()
            WHERE workspace_id = $1
              AND id = $5

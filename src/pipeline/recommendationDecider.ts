@@ -94,7 +94,7 @@ export interface RecommendationDeciderSummary {
   outcomeConflicts?: number;
   /** One entry per conflict: the stored and the recomputed outcome and eligibility (ids and codes only). */
   outcomeConflictDetails?: OutcomeConflictDetail[];
-  /** Jobs left untouched in `keepStoredScore` mode. */
+  /** Jobs left untouched because the recompute had no score or coverage where the job has a stored one. */
   scoresKept?: number;
   policySnapshotId: string;
   policySnapshotHash: string;
@@ -353,11 +353,6 @@ export async function runRecommendationDecider(
      * latest_deterministic_decision_id moves to the stamped decision.
      */
     preserveStoredOutcome?: boolean;
-    /**
-     * Writes nothing for a job that has a stored requirement score when this recompute would have none (its match is
-     * no longer current). Counted in `scoresKept`.
-     */
-    keepStoredScore?: boolean;
   }
 ): Promise<RecommendationDeciderSummary> {
   let scoresKept = 0;
@@ -670,13 +665,19 @@ export async function runRecommendationDecider(
             : null,
         });
         const requirementScore = applyRoleShapePenalty(rawRequirementScore, shape);
-        if (options?.keepStoredScore && requirementScore === null && job.recommendation_requirement_score !== null) {
+        const coverageScore =
+          coverageScorePct == null ? null : Number((coverageScorePct / 100).toFixed(3));
+        // A re-run never clears a result: a recompute with no score or coverage (usually a PASS job whose profile match
+        // is not current) writes nothing over a stored one, so score, coverage, outcome, labels and decision pointer stay
+        // together as they were until a recompute can score the job again. preserveStoredOutcome writes no result column.
+        if (!preserveStoredOutcome && (
+          (requirementScore === null && job.recommendation_requirement_score !== null)
+          || (coverageScore === null && job.recommendation_coverage_score !== null)
+        )) {
           await client.query("ROLLBACK");
           scoresKept += 1;
           continue;
         }
-        const coverageScore =
-          coverageScorePct == null ? null : Number((coverageScorePct / 100).toFixed(3));
         const evidenceCompleteness = computeEvidenceCompleteness(
           confirmedWorkplaceType(job.workplace_type, confirmedFacts),
           job.workability_facts

@@ -4000,6 +4000,10 @@ async function executeStageTask(
     if (summary.errors > 0) {
       throw new Error(`Recommendation decider reported ${summary.errors} error(s).`);
     }
+    if ((summary.scoresKept ?? 0) > 0) {
+      onDesignedNoOp(decisionNotStampable("STORED_SCORE_KEPT"));
+      return;
+    }
     // Completion guard: the task is a success only when a decision row exists for this version (stamped under the current
     // decider version for a reassessment), or the decider could not select the job by design, recorded as a repair_action. A
     // decider run that wrote nothing for a job it should have decided is a failure, never a silent completion.

@@ -16,7 +16,8 @@
  * A MANUAL check (src/tasks/manualAvailabilityCheck.ts) reads the posting page once and stores availability
  * evidence only. It never queues a retry or a re-gate, changes no job fact, never archives, adds nothing to the
  * cannot-tell or absence counters, and its events are ignored by the archive gate and by the task-key sequence.
- * It never lets the decision recompute replace a stored requirement score with none.
+ *
+ * No read, manual or automatic, clears a stored result: the decider writes nothing when it would have no score.
  *
  * Reads are rate-limited per host, using the source plugin manifest's requests_per_minute when the
  * source has one. A job whose work mode or territory changed is queued for a forced re-gate through
@@ -461,7 +462,6 @@ async function storeVerdict(
   target: { canonicalJobId: string; jobVersionId: string; observation: RecheckObservation },
   verdict: { status: "OPEN" | "CLOSED"; reasonCode: string; method: z.infer<typeof AvailabilityEvidenceSchema>["verification_method"] },
   now: Date,
-  options: { readonly keepStoredScore?: boolean } = {},
 ): Promise<{ readinessRecomputed: boolean; readinessError: string | null; scoreKept: boolean }> {
   const availability = evidenceNow(verdict.status, now, verdict.reasonCode, verdict.method);
   const current = await client.query<{ job_source_evidence: unknown }>(
@@ -530,7 +530,6 @@ async function storeVerdict(
       context,
       canonicalJobIds: [target.canonicalJobId],
       jobVersionIds: [target.jobVersionId],
-      keepStoredScore: options.keepStoredScore,
     });
     const scoreKept = (readiness.scoresKept ?? 0) > 0;
     return {
@@ -950,7 +949,7 @@ export async function runAvailabilityRecheck(
     // Availability evidence only: no job fact is filled and no re-gate follows from a manual check.
     const stored = await storeVerdict(client, context, identity, {
       status: "OPEN", reasonCode: decision.reasonCode, method: "VERIFIED_POSTING_RETRIEVAL",
-    }, now, { keepStoredScore: true });
+    }, now);
     details.readiness_recomputed = stored.readinessRecomputed;
     if (stored.scoreKept) details.readiness_recompute_skipped = "WOULD_LOSE_STORED_SCORE";
     if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
@@ -960,6 +959,7 @@ export async function runAvailabilityRecheck(
         status: "OPEN", reasonCode: decision.reasonCode, method: "VERIFIED_POSTING_RETRIEVAL",
       }, now);
       details.readiness_recomputed = stored.readinessRecomputed;
+      if (stored.scoreKept) details.readiness_recompute_skipped = "WOULD_LOSE_STORED_SCORE";
       if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
       // Page text is untrusted. A page may FILL an unknown work mode or location, and only from an explicit
       // statement: work mode must be exactly REMOTE, HYBRID or ONSITE (the closed list the page reader emits;
@@ -1050,7 +1050,7 @@ export async function runAvailabilityRecheck(
       status: "CLOSED",
       reasonCode: decision.reasonCode,
       method: outcome.kind === "CLOSED_BY_PAGE" ? "EXPLICIT_SOURCE_STATUS" : "EMPLOYER_ATS_LISTING",
-    }, now, { keepStoredScore: manual });
+    }, now);
     details.readiness_recomputed = stored.readinessRecomputed;
     if (stored.scoreKept) details.readiness_recompute_skipped = "WOULD_LOSE_STORED_SCORE";
       if (stored.readinessError !== null) details.readiness_error = stored.readinessError;

@@ -533,11 +533,11 @@ describe.skipIf(skipReal)("manual same-day availability check (PostgreSQL)", () 
       `SELECT recommendation_requirement_score::float AS score, recommendation_outcome AS outcome, latest_deterministic_decision_id AS decision
          FROM canonical_jobs WHERE id = $1`, [job.id])).rows[0];
 
-    // The risk is real: the same recompute without the guard writes no score.
-    const unguarded = await withScore();
-    const summary = await runRecommendationDecider(db(), { context: ctx(), canonicalJobIds: [unguarded.id], jobVersionIds: [unguarded.versionId] });
-    expect(summary.errors).toBe(0);
-    expect((await stored(unguarded)).score).toBeNull();
+    // The decider itself keeps it, for every caller: nothing about the manual check is special here.
+    const direct = await withScore();
+    const summary = await runRecommendationDecider(db(), { context: ctx(), canonicalJobIds: [direct.id], jobVersionIds: [direct.versionId] });
+    expect(summary).toMatchObject({ errors: 0, scoresKept: 1 });
+    expect((await stored(direct)).score).toBe(0.75);
 
     for (const respond of [(job: Fixture) => (url: URL) => openPage(url, job.board), () => (url: URL) => page(url, 404)]) {
       const job = await withScore();

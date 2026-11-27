@@ -143,6 +143,29 @@ describe.skipIf(skipReal)("stage no-op guards and the decide reopen rule (Postgr
     expect(await stamped(job)).toBe(0);
   });
 
+  it("a decide run that keeps a stored score completes with the reason recorded, and the score stays", async () => {
+    const job = await terminalJob("kept-score", "NEEDS_VERIFICATION", "REVIEW", "VERIFY");
+    await s().db.query(
+      `UPDATE canonical_jobs SET gate_decision = 'NEEDS_VERIFICATION', recommendation_requirement_score = 0.8,
+              deterministic_match_score = NULL, deterministic_match_coverage = NULL
+        WHERE workspace_id = $1 AND id = $2`,
+      [s().ctx.workspaceId, job.canonicalJobId],
+    );
+    await oldDecision(job);
+    await seedDecide(job);
+    const summary = await drain(["DECIDE_RECOMMENDATION"], defaultPipelineStageWorkerDependencies, [job.jobVersionId]);
+    expect(summary.failed + summary.blocked + summary.deadLettered).toBe(0);
+    expect(await tasks(job, "DECIDE_RECOMMENDATION")).toEqual([
+      { status: "COMPLETED", repair_action: "DECISION_NOT_STAMPABLE:STORED_SCORE_KEPT", attempt_count: 1 },
+    ]);
+    const { rows } = await s().db.query(
+      `SELECT recommendation_requirement_score::float AS score, recommendation_outcome AS outcome FROM canonical_jobs WHERE id = $1`,
+      [job.canonicalJobId],
+    );
+    expect(rows[0]).toEqual({ score: 0.8, outcome: "REVIEW" });
+    expect(await reported()).not.toContain(job.jobVersionId);
+  });
+
   it("a decider run that writes nothing for a decidable job is not a completed task", async () => {
     const job = await terminalJob("silent", "HARD_REJECTED", "SKIP", "INELIGIBLE");
     await oldDecision(job);
