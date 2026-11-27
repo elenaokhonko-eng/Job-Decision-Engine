@@ -82,6 +82,7 @@ import {
   heartbeatPipelineTask,
   releasePipelineTaskForRetry,
   type ClaimedPipelineTask,
+  JOB_IS_LEAD_NO_OP_REPAIR_ACTION,
 } from "./pipelineTasks.js";
 import {
   diffProviderCalls,
@@ -4097,7 +4098,10 @@ async function executeStageTask(
     await requireCurrentLaneRouting(jobVersionId, clientOrPool, ctx);
     await requireCurrentProfileMatchAndDecision(jobVersionId, clientOrPool, ctx);
     // A task created before its job became a lead completes without queueing: a lead waits for no cut-off approval.
-    if (await isLeadJobVersion(clientOrPool, ctx.workspaceId, jobVersionId)) return;
+    if (await isLeadJobVersion(clientOrPool, ctx.workspaceId, jobVersionId)) {
+      onDesignedNoOp(JOB_IS_LEAD_NO_OP_REPAIR_ACTION);
+      return;
+    }
     // A task created before the cut-off applied waits, visibly, instead of completing without queueing anything.
     if (!(await jobVersionMayReceiveAiWork(clientOrPool, ctx.workspaceId, jobVersionId, readAiWorkSettings()))) {
       throw new PipelineTaskDependencyBlockedError(

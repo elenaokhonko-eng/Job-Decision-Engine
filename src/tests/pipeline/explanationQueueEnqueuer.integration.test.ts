@@ -9,7 +9,7 @@ import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqu
 import { selectEligibleEvaluationQueueRows, supersedeStaleEvaluationQueueRows } from "../../pipeline/evaluationQueueLineage.js";
 import { runPipelineStageTaskWorker, seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
 import { describeAiWork } from "../../modules/evaluation/index.js";
-import { leadsInListsOrQueue } from "../../tasks/integrityZeroChecks.js";
+import { leadsInListsOrQueue, returnedLeadsNotQueued, runZeroChecks } from "../../tasks/integrityZeroChecks.js";
 import { findStrandedNonterminalJobs } from "../../ingestion/nonterminalRecovery.js";
 import { readScopedAiHold } from "../../../scripts/run_scoped_pilot.js";
 import { loadGlobalLanesConfig, loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
@@ -782,6 +782,19 @@ describe.skipIf(skipReal)("AI queue: leads are left out", () => {
     }
   });
 
+  it("gives a lead no seed slot: with a cap of one, an older lead does not hold back the next job", async () => {
+    await getClient().query(`UPDATE canonical_jobs SET updated_at = NOW() - INTERVAL '30 days' WHERE id = $1`, [leadId]);
+    const summary = await seedRecoverablePipelineTasks(getClient(), {
+      context: getContext(), taskTypes: ["ENQUEUE_EXPLANATION"], maxSeedPerType: 1,
+    });
+    expect(summary.byType.ENQUEUE_EXPLANATION).toEqual({ inserted: 1, existing: 0 });
+    const { rows } = await getClient().query<{ id: string }>(
+      `SELECT payload->>'canonical_job_id' AS id FROM pipeline_tasks WHERE task_type = 'ENQUEUE_EXPLANATION'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.id).not.toBe(leadId);
+  }, 60_000);
+
   it("seeds no enqueue task for a lead", async () => {
     await seedRecoverablePipelineTasks(getClient(), { context: getContext(), taskTypes: ["ENQUEUE_EXPLANATION"] });
     const { rows } = await getClient().query<{ id: string }>(
@@ -992,6 +1005,57 @@ describe.skipIf(skipReal)("AI queue: a queued job that becomes a lead, and stops
     await seedAndRun();
     expect(await observed(id)).toEqual({ ...queuedState, queue: ["SUPERSEDED", "PENDING"], openTasks: 0 });
     expect(await stranded()).not.toContain(id);
+  }, 120_000);
+
+  const notQueued = async () => (await returnedLeadsNotQueued(getClient(), getContext().workspaceId)).sample;
+  const asBoardJob = (id: string, n: number) => setLink(id, `https://jobicy.com/jobs/invented-again-${n}`);
+  const asEmployerJob = (id: string, n: number) => setLink(id, `https://careers.example.com/jobs/invented-again-${n}`);
+
+  it("a job that is a lead again before its new task runs is queued when it stops being one", async () => {
+    const id = jobs[2]!;
+    await asBoardJob(id, 1);
+    await seedAndRun();
+    await asEmployerJob(id, 1);
+    await seed();
+    await asBoardJob(id, 2);
+    // The new task completes without queueing.
+    expect(await runWorker()).toMatchObject({ failed: 0 });
+    const skipped = await getClient().query(
+      `SELECT status FROM pipeline_tasks WHERE repair_action = 'SKIPPED_JOB_IS_LEAD' AND payload->>'canonical_job_id' = $1`, [id]);
+    expect(skipped.rows).toEqual([{ status: "COMPLETED" }]);
+    const history = (await observed(id)).queue;
+    expect(history.at(-1)).toBe("SUPERSEDED");
+    expect(await notQueued()).toEqual([]);
+
+    await asEmployerJob(id, 2);
+    await seedAndRun();
+    expect(await observed(id)).toEqual({ ...queuedState, queue: [...history, "PENDING"], openTasks: 0 });
+    expect(await notQueued()).toEqual([]);
+  }, 120_000);
+
+  it("the zero check reports a returned job whose new task closed without queueing it, also while held", async () => {
+    const id = jobs[2]!;
+    await asBoardJob(id, 3);
+    await seedAndRun();
+    await asEmployerJob(id, 3);
+    // Not yet queued with the switch open: reported. Held: it is only waiting.
+    expect(await notQueued()).toEqual([id]);
+    vi.stubEnv("AI_EVALUATION_ENABLED", "false");
+    try {
+      expect(await notQueued()).toEqual([]);
+      vi.stubEnv("AI_EVALUATION_ENABLED", "true");
+      await seed();
+      await getClient().query(
+        `UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW()
+          WHERE status = 'PENDING' AND payload->>'canonical_job_id' = $1`, [id]);
+      vi.stubEnv("AI_EVALUATION_ENABLED", "false");
+      expect(await notQueued()).toEqual([id]);
+      expect(await stranded()).toContain(id);
+      const checks = await runZeroChecks(getClient(), getContext().workspaceId);
+      expect(checks.find((check) => check.name === "returned_lead_not_queued")).toMatchObject({ total: 1 });
+    } finally {
+      vi.stubEnv("AI_EVALUATION_ENABLED", "true");
+    }
   }, 120_000);
 
   it("a queued job with no active row for any other reason is still reported", async () => {

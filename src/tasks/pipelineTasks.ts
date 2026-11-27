@@ -105,6 +105,12 @@ export interface ReplayDeadLetterPipelineTaskResult {
   replayed: boolean;
 }
 
+/**
+ * An AI enqueue task that completed without queueing because its job had become a lead. Like a task superseded by a
+ * gate outcome it discharged nothing, so the same task identity is reopened when it is enqueued again.
+ */
+export const JOB_IS_LEAD_NO_OP_REPAIR_ACTION = "SKIPPED_JOB_IS_LEAD";
+
 export async function enqueuePipelineTask(
   input: EnqueuePipelineTaskInput,
   clientOrPool: pg.Pool | pg.PoolClient,
@@ -231,7 +237,8 @@ export async function enqueuePipelineTask(
     // A task superseded by a gate outcome is a recorded no-op, not a discharged obligation: when the job becomes routable again
     // (a later gate version) the same task identity must run, so a re-enqueue reopens it just like a blocked task.
     const supersededByGate = existing.rows[0].status === "COMPLETED" && (await (client as QueryClient).query<{ id: string }>(
-      `SELECT id FROM pipeline_tasks WHERE workspace_id = $1 AND id = $2 AND repair_action = 'SUPERSEDED_BY_GATE_OUTCOME'`,
+      `SELECT id FROM pipeline_tasks WHERE workspace_id = $1 AND id = $2
+          AND repair_action IN ('SUPERSEDED_BY_GATE_OUTCOME', '${JOB_IS_LEAD_NO_OP_REPAIR_ACTION}')`,
       [ctx.workspaceId, existing.rows[0].id]
     )).rows.length > 0;
     if (existing.rows[0].status === "BLOCKED_DEPENDENCY" || supersededByGate) {
@@ -244,6 +251,8 @@ export async function enqueuePipelineTask(
               lease_expires_at = NULL,
               heartbeat_at = NULL,
               claimed_by = NULL,
+              -- Skipping a lead is not a failed attempt, however often the job turns into one.
+              attempt_count = CASE WHEN repair_action = '${JOB_IS_LEAD_NO_OP_REPAIR_ACTION}' THEN 0 ELSE attempt_count END,
               last_error = NULL,
               blocked_on = NULL,
               blocked_reason = NULL,
@@ -253,7 +262,8 @@ export async function enqueuePipelineTask(
           WHERE workspace_id = $1
             AND id = $2
             AND (status = 'BLOCKED_DEPENDENCY'
-                 OR (status = 'COMPLETED' AND repair_action = 'SUPERSEDED_BY_GATE_OUTCOME'))
+                 OR (status = 'COMPLETED'
+                     AND repair_action IN ('SUPERSEDED_BY_GATE_OUTCOME', '${JOB_IS_LEAD_NO_OP_REPAIR_ACTION}')))
           RETURNING id
         `,
         [ctx.workspaceId, existing.rows[0].id]

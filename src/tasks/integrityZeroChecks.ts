@@ -3,6 +3,7 @@
  * short sample of ids (never titles or employers); any count above zero is an error. Read only.
  * Wired into scripts/reconcile_pipeline.ts and scripts/check_integrity.ts, so the scripts hold no SQL.
  */
+import { findReturnedLeadsNotQueued } from "../ingestion/nonterminalRecovery.js";
 import type pg from "pg";
 
 import { OWNER_SAVED_SOURCE_NAMES } from "../services/jobArchiveHardRejectedPolicy.js";
@@ -356,6 +357,14 @@ export async function leadsInListsOrQueue(db: Queryable, workspaceId: string): P
 }
 
 /**
+ * A job parked in QUEUED_FOR_AI because it was a lead, which is not one any more and was not queued again. Zero while
+ * it legitimately waits (the owner's switch or cut-off, or the AI budget).
+ */
+export async function returnedLeadsNotQueued(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
+  return result("returned_lead_not_queued", await findReturnedLeadsNotQueued(db as never, workspaceId), {});
+}
+
+/**
  * `phase` "pre" is for a run BEFORE a drain: it leaves out the stale-stage check, which is non-zero by design
  * right after a rule-version change until the reopen seeds have drained. The default, "post", is strict
  * and runs every check.
@@ -371,6 +380,7 @@ export async function runZeroChecks(
     await terminalOutcomeConflicts(db, workspaceId),
     await staleStageResults(db, workspaceId),
     await leadsInListsOrQueue(db, workspaceId),
+    await returnedLeadsNotQueued(db, workspaceId),
   ];
   return [
     await rejectedJobsWithRecommendation(db, workspaceId),
