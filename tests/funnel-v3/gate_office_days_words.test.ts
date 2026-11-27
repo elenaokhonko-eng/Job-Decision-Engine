@@ -120,7 +120,14 @@ describe("office-day counts in words", () => {
     "Gone are the days of five days a week in the office.",
     "Tired of five days a week in the office.",
     "Five days a week in the office? Not here.",
-  ])("does not read a temporary, dismissed or asked word count: %s", (sentence) => {
+    "You will not need to spend five days a week in the office.",
+    "No more five days a week in the office.",
+    "Forget five days a week in the office.",
+    "Forget being in the office five days a week.",
+    "You don't have to spend four days a week in the office.",
+    "Five days a week in the office is not required.",
+    "Four days on-site per week is optional.",
+  ])("does not read a negated, temporary, dismissed or asked word count: %s", (sentence) => {
     for (const workplaceType of ["HYBRID", "UNKNOWN", "ASSUMED_HYBRID"]) {
       expect(officeReject(gate(sentence, workplaceType)), `${workplaceType}: ${sentence}`).toBe(false);
     }
@@ -134,6 +141,9 @@ describe("office-day counts in words", () => {
     "Onboarding is quick. Five days a week in the office.",
     "Five days a week in the office. Questions? Ask us.",
     "Five days a week in the office. The first month is busy.",
+    "This is not a remote role. Five days a week in the office.",
+    "Five days a week in the office. No exceptions.",
+    "Unforgettable team, five days a week in the office.",
   ])("still rejects a standing word count: %s", (sentence) => {
     for (const workplaceType of ["HYBRID", "UNKNOWN", "ASSUMED_HYBRID"]) {
       expect(officeReject(gate(sentence, workplaceType)), `${workplaceType}: ${sentence}`).toBe(true);
@@ -144,6 +154,8 @@ describe("office-day counts in words", () => {
     for (const sentence of [
       "During onboarding, 5 days a week in the office.",
       "5 days a week in the office? Not here.",
+      "No more 5 days a week in the office.",
+      "Forget 5 days a week in the office.",
     ]) {
       expect(officeReject(gate(sentence)), sentence).toBe(true);
     }

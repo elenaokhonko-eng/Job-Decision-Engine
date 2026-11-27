@@ -10,7 +10,7 @@
  * - the words before the office say that people attend it (or it opens a
  *   sentence or bullet), so "lunch in the office five days a week" is not;
  * - nothing in its sentence negates or hedges it, it is not a question or a
- *   "gone are the days" / "tired of" line, and it is not limited to a starting
+ *   "gone are the days" / "tired of" / "forget" line, and it is not limited to a starting
  *   period ("during probation", "for your first 90 days", "initially");
  * - for the "on-site" and "in-office" wording, which has its own subject rule
  *   (onsiteStatements.ts): it opens a sentence or bullet, or its subject is the
@@ -66,8 +66,8 @@ const NEGATED_OR_HEDGED = /\b(?:not|never|no|nor|without|instead\s+of|rather\s+t
 /** The subject is a perk or a premises service, not the people hired. */
 const PERK_SUBJECT = /\b(?:lunch(?:es)?|breakfast|dinner|meals?|snacks?|food|catering|coffee|barista|yoga|massages?|gym|fitness|class(?:es)?|doctor|nurse|physio(?:therapist)?|clinic|security|reception(?:ist)?|caf[eé]|canteen)\b/i;
 const NEGATION_AFTER = /^\s{0,3}[,:(–-]?\s{0,3}(?:(?:is|are)\s{1,3})?(?:not\b|n['’]t\b|optional\b)/i;
-/** "Gone are the days of ...", "Tired of ...": the sentence dismisses the arrangement. */
-const DISMISSED = /\b(?:gone\s{1,3}are\s{1,3}the\s{1,3}days|tired\s{1,3}of)\b/i;
+/** "Gone are the days of ...", "Tired of ...", "Forget ...": the sentence dismisses the arrangement. */
+const DISMISSED = /\b(?:gone\s{1,3}are\s{1,3}the\s{1,3}days|tired\s{1,3}of|forget)\b/i;
 /** The rest of the sentence ends in a question mark. */
 const QUESTION_AFTER = /^[^.!?;\n•<>]{0,80}\?/;
 /** A starting period: "your first 90 days", "the initial three months", "probation", "onboarding". */
@@ -115,6 +115,11 @@ export function isTemporaryDismissedOrAsked(text: string, start: number, end: nu
   return TIME_LIMITED_AFTER.test(after) || STARTING_PERIOD_AFTER.test(after) || QUESTION_AFTER.test(after);
 }
 
+/** Whether the sentence negates or hedges the statement at `start`..`end`. Shared with officeDayWords.ts. */
+export function isNegatedOrHedged(text: string, start: number, end: number): boolean {
+  return NEGATED_OR_HEDGED.test(sentenceBefore(text, start)) || NEGATION_AFTER.test(text.slice(end, end + 80));
+}
+
 /** The office-first statement with the highest weekly count, or null. */
 export function findOfficeFirstDays(text: string): OfficeFirstDays | null {
   let found: OfficeFirstDays | null = null;
@@ -124,9 +129,9 @@ export function findOfficeFirstDays(text: string): OfficeFirstDays | null {
     const preceding = text.slice(Math.max(0, start - 60), start);
     if (!ATTENDANCE_BEFORE.test(preceding) && !OPENS_BEFORE.test(preceding)) continue;
     const sentence = sentenceBefore(text, start);
-    if (NEGATED_OR_HEDGED.test(sentence) || PERK_SUBJECT.test(sentence)) continue;
+    if (PERK_SUBJECT.test(sentence)) continue;
     if (PRESENCE_PLACE.test(match[0]) && !INSTRUCTION_ONLY.test(sentence) && !ROLE_OR_APPLICANT.test(sentence)) continue;
-    if (NEGATION_AFTER.test(text.slice(end, end + 80)) || isTemporaryDismissedOrAsked(text, start, end)) continue;
+    if (isNegatedOrHedged(text, start, end) || isTemporaryDismissedOrAsked(text, start, end)) continue;
     const first = countValue(match[1] ?? "");
     const second = match[2] === undefined ? first : countValue(match[2]);
     const max = Math.max(first, second);

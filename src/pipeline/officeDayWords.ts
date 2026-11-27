@@ -14,14 +14,15 @@
  *   "four-day work week", "five days of annual leave", "within five working days"
  *   and "four days remote" are untouched;
  * - it is not a count per month, quarter or year, and not "N of five days";
- * - it is not limited to a starting period ("during onboarding"), dismissed
- *   ("gone are the days", "tired of") or asked as a question, the same exceptions
- *   as for counts after the office (officeFirstDays.ts).
+ * - it is not negated or hedged ("not", "no more", "may"), limited to a starting
+ *   period ("during onboarding"), dismissed ("gone are the days", "forget") or
+ *   asked as a question, the same exceptions as for counts after the office
+ *   (officeFirstDays.ts).
  *
  * Counts written in digits are never changed. All quantifiers are bounded.
  */
 
-import { isTemporaryDismissedOrAsked } from "./officeFirstDays.js";
+import { isNegatedOrHedged, isTemporaryDismissedOrAsked } from "./officeFirstDays.js";
 
 const WORD_VALUES: Readonly<Record<string, number>> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7 };
 
@@ -61,7 +62,8 @@ export function readOfficeDayWords(text: string): string {
     const phrase = OFFICE_PHRASE_AT_START.exec(rest)?.[0] ?? "";
     if (OTHER_PERIOD_AFTER.test(rest.slice(phrase.length)) || LONG_BLANK_RUN.test(rest)) return count;
     const weekly = WEEKLY_AT_START.exec(rest.slice(phrase.length))?.[0] ?? "";
-    if (isTemporaryDismissedOrAsked(text, offset, offset + count.length + phrase.length + weekly.length)) return count;
+    const end = offset + count.length + phrase.length + weekly.length;
+    if (isNegatedOrHedged(text, offset, end) || isTemporaryDismissedOrAsked(text, offset, end)) return count;
     // "four (4)" is one count: the bracketed repeat is blanked.
     return count
       .replace(/\([ \t]?[1-7][ \t]?\)/g, (repeat) => " ".repeat(repeat.length))
