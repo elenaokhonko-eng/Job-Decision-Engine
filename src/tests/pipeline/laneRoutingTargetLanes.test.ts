@@ -519,7 +519,6 @@ describe("Lane title families", () => {
     expect(hasNonTechnicalRoleFamily("Head of Finance")).toBe(true);
     expect(hasNonTechnicalRoleFamily("VP, Finance")).toBe(true);
     expect(hasNonTechnicalRoleFamily("Budgeting Coach Product Owner (AI Finance)")).toBe(false);
-    expect(hasNonTechnicalRoleFamily("Budgeting Coach Product Owner (AI Finance)")).toBe(false);
     expect(hasNonTechnicalRoleFamily("Engineer, Finance Platform")).toBe(false);
   });
 });

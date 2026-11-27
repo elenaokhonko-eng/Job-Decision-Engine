@@ -54,10 +54,10 @@ function response(url: URL, value: unknown): SafeHttpResponse {
 const postingId = "0f1e2d3c-4b5a-4968-8776-655443322110";
 const postingTitle = "Technical Project Steward - Observatory Systems";
 const postingDescription = [
-  "This position runs analytics engagements for client organisations and keeps several technical workstreams moving together.",
-  "Responsibilities: Draw up delivery plans, support engineers, hold scope and fee budgets, and brief senior sponsors.",
-  "Requirements: Proven background in data platforms, AI delivery, project management, client communication, and risk controls.",
-  "The person appointed partners with mixed teams, records choices, clears delivery blockers, and helps with rollout.",
+  "Tide Hall is a public aquarium where animal records still live on clipboards beside each tank.",
+  "Requirements: you have turned a paper routine into software before, you write SQL, and you can plan a technical project around feeding times.",
+  "Responsibilities: pick which tank logs go digital first, try each screen with the night keepers, and publish what broke.",
+  "No diving ticket is needed. An interest in water chemistry sensors is welcome.",
 ].join(" ").repeat(4);
 
 function postingDependencies(): PostingFetcherDependencies {

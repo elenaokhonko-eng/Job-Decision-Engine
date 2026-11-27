@@ -7,14 +7,13 @@ import {
 } from "../../ingestion/jobContentFetcher.js";
 
 const sampleDescription = [
-  "The Head of AI Engineering sets technical direction for applied AI at NLTB Asia Pacific.",
-  "Responsibilities",
-  "Set reference designs, agree safe release practices, and chair design reviews for product and platform groups.",
+  "NLTB runs the sluices on a chain of inland canals and wants its night shifts to sleep.",
   "Requirements",
-  "11+ years of experience building and running software platforms.",
-  "6+ years leading platform delivery on a major public cloud.",
-  "3–5 years shipping machine learning or language-model services to production.",
-  "The post also calls for clear influence with senior colleagues, model risk controls, and hands-on engineering depth.",
+  "9+ years of experience wiring control equipment that cannot be allowed to fail.",
+  "4+ years leading small field crews outdoors.",
+  "2–3 years shipping remote monitoring to unattended sites.",
+  "Responsibilities",
+  "Decide which lock gates are automated first, rehearse manual override with keepers, and sign off each site.",
 ].join(" ");
 
 const sampleHtml = [
@@ -23,24 +22,22 @@ const sampleHtml = [
   JSON.stringify({
     "@context": "https://schema.org",
     "@type": "JobPosting",
-    title: "Head of AI Engineering",
+    title: "Lock Gate Automation Lead",
     identifier: { propertyID: "NLTB", value: "7000000001" },
-    hiringOrganization: { "@type": "Organization", name: "Northern Ledger Trading Bank" },
-    description: "<h2>Responsibilities</h2><p>Set reference designs, agree safe release practices, and chair design reviews for product and platform groups.</p><h2>Requirements</h2><ul><li>11+ years of experience building and running software platforms.</li><li>6+ years leading platform delivery on a major public cloud.</li><li>3–5 years shipping machine learning or language-model services to production.</li></ul><p>The post also calls for clear influence with senior colleagues, model risk controls, and hands-on engineering depth.</p>",
+    hiringOrganization: { "@type": "Organization", name: "Northern Lockside Transit Board" },
+    description: "<p>NLTB runs the sluices on a chain of inland canals and wants its night shifts to sleep.</p><h3>Requirements</h3><ul><li>9+ years of experience wiring control equipment that cannot be allowed to fail.</li><li>4+ years leading small field crews outdoors.</li><li>2–3 years shipping remote monitoring to unattended sites.</li></ul><h3>Responsibilities</h3><ul><li>Decide which lock gates are automated first.</li><li>Rehearse manual override with keepers and sign off each site.</li></ul>",
     datePosted: "2026-10-24",
     jobLocation: { "@type": "Place", address: { addressLocality: "Singapore", addressCountry: "SG" } },
-    url: "https://careers.nltb.example/NLTB/job/Head-of-AI-Engineering/7000000001/",
+    url: "https://careers.nltb.example/NLTB/job/Lock-Gate-Automation-Lead/7000000001/",
   }),
   "</script></head><body>",
   "<nav>Careers search navigation</nav>",
   "<div class=\"cookie-banner\">Accept cookies</div>",
   "<main>",
-  "<h1>Head of AI Engineering</h1>",
+  "<h1>Lock Gate Automation Lead</h1>",
   "<p>Location: Singapore</p>",
-  "<p>Set reference designs, agree safe release practices, and chair design reviews for product and platform groups.</p>",
-  "<p>Visitors can browse openings by team, city or contract length.</p>",
-  "<p>11+ years building and running software platforms; 6+ years on a major public cloud; 3–5 years shipping machine learning services.</p>",
-  "<p>Our recruiters reply within a fortnight, even when the answer is no.</p>",
+  "<table><tr><th>Shift pattern</th><td>Daytime, with a pager-free weekend</td></tr></table>",
+  "<p>Boots, waterproofs and a bicycle are supplied.</p>",
   '<a href="/talentcommunity/apply/7000000001/?locale=en_US">Apply now »</a>',
   "</main><footer>Careers homepage</footer></body></html>",
 ].join("");
@@ -70,16 +67,16 @@ function htmlDependencies(html: string): PostingFetcherDependencies {
 describe("fetchJobContent", () => {
   it("extracts a job-specific NLTB posting and its explicit evidence", async () => {
     const result = await fetchJobContent(
-      "https://careers.nltb.example/NLTB/job/Head-of-AI-Engineering/7000000001/",
-      { title: "Head of AI Engineering", companyName: "NLTB", requisitionId: "7000000001" },
+      "https://careers.nltb.example/NLTB/job/Lock-Gate-Automation-Lead/7000000001/",
+      { title: "Lock Gate Automation Lead", companyName: "NLTB", requisitionId: "7000000001" },
       htmlDependencies(sampleHtml),
     );
 
     expect(result.kind).toBe("COMPLETE");
     if (result.kind !== "COMPLETE") return;
-    expect(result.posting.description).toContain("11+ years of experience");
-    expect(result.posting.description).toContain("6+ years leading");
-    expect(result.posting.description).toContain("3–5 years shipping");
+    expect(result.posting.description).toContain("9+ years of experience");
+    expect(result.posting.description).toContain("4+ years leading");
+    expect(result.posting.description).toContain("2–3 years shipping");
     expect(result.posting.location).toContain("Singapore");
     expect(result.posting.applyUrl).toContain("/talentcommunity/apply/7000000001/");
     expect(result.posting.publishedAt).toBe("2026-10-24T00:00:00.000Z");
@@ -117,23 +114,23 @@ describe("fetchJobContent", () => {
   it("uses the direct Lever record and preserves commercial and stakeholder evidence", async () => {
     const apiBody = JSON.stringify({
       id: "0f1e2d3c-4b5a-4968-8776-655443322110",
-      text: "Analytics Delivery Lead — Client Programmes",
+      text: "Touring Producer — Autumn Dates",
       hostedUrl: "https://jobs.lever.co/quillmark/0f1e2d3c-4b5a-4968-8776-655443322110",
       applyUrl: "https://jobs.lever.co/quillmark/0f1e2d3c-4b5a-4968-8776-655443322110/apply",
       categories: { location: "United States", commitment: "Full-time" },
       workplaceType: "remote",
       createdAt: Date.parse("2025-08-01T12:00:00Z"),
       salaryRange: { currency: "USD", interval: "per-year-salary", min: 120000, max: 160000 },
-      descriptionPlain: "Run analytics engagements for client organisations, keeping scope, staffing and results on track.",
+      descriptionPlain: "A chamber orchestra takes its autumn programme to nine market towns.",
       lists: [
-        { text: "Responsibilities", content: "<ul><li>Report progress to client review boards and brief their senior sponsors.</li><li>Hold the fee budget, delivery margin, and agreed results.</li></ul>" },
-        { text: "Requirements", content: "<ul><li>Background running analytics work for advisory clients.</li><li>Sound planning and writing skills.</li></ul>" },
+        { text: "Requirements", content: "<ul><li>Experience getting people, instruments and a lorry to the same hall on time.</li><li>Calm, brief writing when a date falls through.</li></ul>" },
+        { text: "Responsibilities", content: "<ul><li>Agree box office splits with each venue and watch ticket revenue weekly.</li><li>Keep venue trustees and the players' committee informed before plans change.</li></ul>" },
       ],
     });
     const requests: string[] = [];
     const result = await fetchJobContent(
       "https://jobs.lever.co/quillmark/0f1e2d3c-4b5a-4968-8776-655443322110",
-      { title: "Analytics Delivery Lead — Client Programmes", companyName: "Quillmark", requisitionId: "0f1e2d3c-4b5a-4968-8776-655443322110" },
+      { title: "Touring Producer — Autumn Dates", companyName: "Quillmark", requisitionId: "0f1e2d3c-4b5a-4968-8776-655443322110" },
       {
         resolveAddresses: async () => [{ address: "93.184.216.34", family: 4 }],
         fetchOnce: async (url) => {
@@ -147,8 +144,8 @@ describe("fetchJobContent", () => {
     expect(requests[0]).toContain("/v0/postings/quillmark/0f1e2d3c-4b5a-4968-8776-655443322110");
     expect(result.kind).toBe("COMPLETE");
     if (result.kind !== "COMPLETE") return;
-    expect(result.posting.description).toContain("client review boards");
-    expect(result.posting.description).toContain("fee budget");
+    expect(result.posting.description).toContain("venue trustees");
+    expect(result.posting.description).toContain("box office splits");
     expect(result.provider.key).toBe("LEVER");
     expect(result.posting.publishedAt).toBe("2025-08-01T12:00:00.000Z");
     expect(result.posting.workplaceType).toBe("REMOTE");
@@ -316,7 +313,7 @@ describe("fetchJobContent", () => {
     const redirectCalls: string[] = [];
     const redirected = await fetchJobContent(
       "https://public.example/jobs/1",
-      { title: "Head of AI Engineering", companyName: "NLTB" },
+      { title: "Lock Gate Automation Lead", companyName: "NLTB" },
       {
         resolveAddresses: async (host) => publicAddress(host),
         fetchOnce: async (url) => {

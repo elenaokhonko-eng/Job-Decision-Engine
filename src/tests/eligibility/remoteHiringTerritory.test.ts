@@ -54,6 +54,11 @@ describe("remote hiring territory: description signals", () => {
     expect(result.signals[0]?.evidence).toContain("markets across Canada");
   });
 
+  it("reads a salary stated for every location in a foreign country", () => {
+    const result = assess({ description: `${BODY} Salary is identical for every location in Canada.` });
+    expect(result).toMatchObject({ status: "RESTRICTED_FOREIGN", territories: ["CANADA"] });
+  });
+
   it.each([
     "Location: Remote (US)",
     "This position is 100% remote within LatAm.",
