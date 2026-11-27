@@ -36,6 +36,9 @@ export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
 // are judged by the same office-days rule and thresholds as digits (officeDayWords.ts); a weekly count that follows the office
 // ("in the office four days a week", "work from office 5 days a week"), in digits or words, is judged by them too
 // (officeFirstDays.ts, owner decision 2026-11-26). 11.9 is a separate change (PR #297).
-export const GATE_VERSION = "gate-2026-11.10" as const;
+// 2026-11.11: owner decision 2026-11-27: payments is neutral. A title about payments (payments, merchant acquiring,
+// remittance, card issuing, credit cards, POS terminals, buy now pay later) is no longer GATE_OUT_OF_SCOPE_DOMAIN.
+// "consumer lending" in a title still is.
+export const GATE_VERSION = "gate-2026-11.11" as const;
 export const PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;
 
