@@ -18,7 +18,7 @@ export const sampleGmailEnvelope: IngestionEnvelope = {
   source_run_id: "11111111-1111-4111-8111-111111111111",
   observed_at: "2026-08-28T12:00:00.000Z",
   raw_payload_hash: "sha256-abc123gmailhash",
-  raw_payload: "<html>Job Alert: Senior AI Solutions Officer at The World Bank Group</html>",
+  raw_payload: "<html>Job Alert: Applied Reasoning Platform Officer at Meridian Development Facility</html>",
   metadata: { subject: "Job Alert: AI Roles" }
 };
 
@@ -36,7 +36,7 @@ export const sampleAtsObservation: JobObservation = {
   observed_at: "2026-08-28T12:05:00.000Z",
   retrieved_at: "2026-08-28T12:05:00.000Z",
   company_name_raw: "Databricks",
-  title_raw: "Staff Solutions Architect - GenAI",
+  title_raw: "Principal Retrieval Systems Engineer",
   location_raw: "Singapore",
   workplace_type_raw: "HYBRID",
   employment_type_raw: "FULL_TIME",
@@ -175,9 +175,9 @@ export const sampleFailedThenRetriedQueueItem: EvaluationQueueItem = {
 export const sampleEvaluatedShortlistRow: ShortlistRow = {
   canonical_job_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
   job_version_id: "v1",
-  title: "Associate Senior AI Solutions Officer",
-  company: "The World Bank Group",
-  canonical_url: "https://worldbank.org/careers/req38014",
+  title: "Applied Reasoning Platform Officer",
+  company: "Meridian Development Facility",
+  canonical_url: "https://careers.example.org/jobs/dev-0001",
   source: "GREENHOUSE",
   location: "Singapore",
   workplace_type: "HYBRID",

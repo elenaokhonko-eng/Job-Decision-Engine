@@ -206,7 +206,7 @@ function safeAbsoluteHttpUrl(value: string): string | null {
   }
 }
 
-function unwrapForClassification(value: string): string {
+export function unwrapForClassification(value: string): string {
   try {
     const url = new URL(value);
     if (/(?:^|\.)google\.[a-z.]+$/i.test(url.hostname) && url.pathname === "/url") {

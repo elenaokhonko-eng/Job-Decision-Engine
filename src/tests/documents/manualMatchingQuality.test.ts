@@ -22,17 +22,17 @@ import {
   type ManualRequirement,
 } from "../../documents/manualPreparation.js";
 
-// Anonymised stand-in for a vendor market-data product owner posting: the real requirements mixed
+// Invented posting: skill requirements mixed
 // with location, language and travel lines, and a governance line softened only by "ideally".
 const VENDOR_DATA_POSTING = [
   "What you will bring:",
-  "- Experience in market data or vendor data management, data product ownership or asset management technology",
-  "- Knowledge of market data vendors and delivery mechanisms such as APIs and SFTP",
-  "- Data governance, data lineage, data quality and cataloguing, ideally with Unity Catalog",
+  "- Has looked after a reference collection that many research groups draw on",
+  "- Knows how outside suppliers send records, whether by web service or nightly file",
+  "- Metadata rules, provenance notes and duplicate cleanup, ideally with Unity Catalog",
   "- Experience with streaming platforms such as Kafka is a plus",
-  "- Based in Frankfurt, Munich, Hong Kong or Singapore",
+  "- Based in Bergen, Valparaiso or Hobart",
   "- Fluent English; German is an advantage",
-  "- Willingness to travel up to 20% of the time",
+  "- Willingness to travel to two field stations each winter",
   "- Valid right to work in the location of the role",
 ].join("\n");
 
@@ -66,7 +66,7 @@ function comparison(requirements: ManualRequirement[], pairs: ManualEvidencePair
     source_observation_id: "33333333-3333-4333-8333-333333333333",
     source_evidence_fingerprint: "f".repeat(64),
     job_content_hash: "a".repeat(64),
-    title: "Data Product Owner - Vendor Market Data",
+    title: "Specimen Records Custodian",
     company: "Example Investors",
     canonical_url: null,
     profile_version_id: "44444444-4444-4444-8444-444444444444",
@@ -94,14 +94,14 @@ describe("manual matching quality", () => {
   it("leaves location, permit, language and travel lines out of the match table", () => {
     const texts = documentRequirements([], VENDOR_DATA_POSTING).map((row) => row.requirement_text);
     expect(texts).toEqual([
-      "Experience in market data or vendor data management, data product ownership or asset management technology",
-      "Knowledge of market data vendors and delivery mechanisms such as APIs and SFTP",
-      "Data governance, data lineage, data quality and cataloguing, ideally with Unity Catalog",
+      "Has looked after a reference collection that many research groups draw on",
+      "Knows how outside suppliers send records, whether by web service or nightly file",
+      "Metadata rules, provenance notes and duplicate cleanup, ideally with Unity Catalog",
       "Experience with streaming platforms such as Kafka is a plus",
     ]);
     // AI-quoted rows are filtered the same way.
     const quoted: StoredRequirementRow[] = [
-      { requirement_key: "R-001", requirement_type: "LOCATION", importance: "MUST", requirement_text: "Based in Frankfurt, Munich, Hong Kong or Singapore", extractor_type: "LLM_QUOTED", quote_text: "Based in Frankfurt, Munich, Hong Kong or Singapore" },
+      { requirement_key: "R-001", requirement_type: "LOCATION", importance: "MUST", requirement_text: "Based in Bergen, Valparaiso or Hobart", extractor_type: "LLM_QUOTED", quote_text: "Based in Bergen, Valparaiso or Hobart" },
       { requirement_key: "R-002", requirement_type: "LANGUAGE", importance: "MUST", requirement_text: "Business-level proficiency in written and spoken English", extractor_type: "LLM_QUOTED", quote_text: null },
     ];
     expect(documentRequirements(quoted, null)).toEqual([]);
@@ -112,14 +112,14 @@ describe("manual matching quality", () => {
   });
 
   it("keeps a requirement MUST when only a trailing 'ideally' clause is optional", () => {
-    expect(postingImportance("Data governance, data lineage, data quality and cataloguing, ideally with Unity Catalog")).toBe("MUST");
+    expect(postingImportance("Metadata rules, provenance notes and duplicate cleanup, ideally with Unity Catalog")).toBe("MUST");
     expect(postingImportance("Strong SQL skills (preferably Snowflake)")).toBe("MUST");
     expect(postingImportance("Experience with streaming platforms such as Kafka is a plus")).toBe("PREFERRED");
     expect(postingImportance("Ideally, a background in derivatives clearing")).toBe("PREFERRED");
     expect(postingImportance("Nice to have: Databricks certification")).toBe("PREFERRED");
     // The extractor's PREFERRED on such a line is corrected too.
     const quoted: StoredRequirementRow[] = [{ requirement_key: "R-004", requirement_type: "SKILL", importance: "PREFERRED",
-      requirement_text: "Data governance, data lineage, data quality and cataloguing, ideally with Unity Catalog", extractor_type: "LLM_QUOTED", quote_text: null }];
+      requirement_text: "Metadata rules, provenance notes and duplicate cleanup, ideally with Unity Catalog", extractor_type: "LLM_QUOTED", quote_text: null }];
     expect(documentRequirements(quoted, null)[0].importance).toBe("MUST");
   });
 

@@ -147,9 +147,9 @@ describe("manual document quality (baseline regression)", () => {
 
   it("keeps every requirement bullet when the model quotes only a few of them", () => {
     const background = [
-      "Experience delivering or integrating trading platforms such as OMS, EMS or PMS.",
-      "Ability to translate investment requirements into technology deliverables.",
-      "Stakeholder management across investment, technology and data teams.",
+      "A past go-live of dealing screens that traders still use.",
+      "Writing specifications that developers can build without a second meeting.",
+      "Calm handling of disagreements between desks about what ships first.",
       "Product ownership for front office investment technology.",
       "Knowledge of derivatives and the trade lifecycle.",
       "Experience with market data and reference data platforms.",
@@ -300,7 +300,7 @@ describe("manual document quality (baseline regression)", () => {
       fact("f-import-ledger", "Rebuilt the trade documentation ledger for import and export shipments.", "eng-import"),
     ];
     const base = comparisonFor([{ requirement_key: "R-001", requirement_type: "FUNCTION", importance: "MUST",
-      requirement_text: "Experience integrating trading platforms such as OMS, EMS or PMS." }], withOldRoles);
+      requirement_text: "Has wired order routing venues into back-office settlement." }], withOldRoles);
     // The model paired the requirement with the 2004 role's fact.
     const comparison = { ...base, rows: (base.rows as Array<Record<string, unknown>>).map((row) => ({ ...row,
       evidence: [{ id: "f-broker-oms", evidence_type: "FACT", label: "f-broker-oms", statement: "Integrated an order management system across 3 custodians for a brokerage." }] })) };
@@ -346,7 +346,7 @@ describe("manual document quality (baseline regression)", () => {
     for (const line of EXCHANGE_REQUIREMENTS.filter((line) => importance(line) === "MUST")) expect(texts).toContain(line);
     expect(requirements.filter((row) => row.importance !== "MUST").length).toBeLessThanOrEqual(MAX_OPTIONAL_THEMES);
     // Sub-headings, the opening paragraphs and the closing "Why this role matters" section are not requirements.
-    expect(texts.some((text) => /Stakeholder Management|Why this role|critical market infrastructure|WE RUN MARKETS|partnership role/.test(text))).toBe(false);
+    expect(texts.some((text) => /Requests and Returns|Why it counts|reading rooms|WE LEND BOOKS|shared post/.test(text))).toBe(false);
   });
 
   it("falls back to requirement and duty sentences when a posting has no headings", () => {
