@@ -243,6 +243,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     expect(result.temporary_work_abroad_status).toBe('ALLOWED');
     expect(result.timezone_compatibility_score).toBeNull();
     expect(result.remote_freedom_score).toBeGreaterThanOrEqual(85);
+    expect(result.is_hard_reject).toBe(false);
   });
 
   // Scenario 2: Singapore hybrid 3 days/week -> accepted, lower preference
@@ -256,6 +257,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     const result = evaluateMobilityMatch(job, approvedMobility);
 
     expect(result.is_workable).toBe(true);
+    expect(result.is_hard_reject).toBe(false);
     expect(result.remote_freedom_score).toBeLessThan(70);
     expect(result.remote_freedom_score).toBeGreaterThanOrEqual(40);
   });
@@ -297,6 +299,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     'Remote role. Candidates must reside in South-East Asia.',
   ])('does not treat a region that includes the home base as a residency mismatch: %j', (description) => {
     const result = evaluateMobilityMatch({ workplace_type: 'REMOTE', description, location: 'Unknown' }, approvedMobility);
+    expect(result.is_hard_reject).toBe(false);
   });
 
   it('still rejects a residency requirement for a region outside the home base', () => {

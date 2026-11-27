@@ -225,6 +225,14 @@ describe('preference diff output', () => {
     expect(describePreferenceFollowUps([{ path: 'stage3.research_geographies.preferred_regions', change: 'CHANGED', valueKind: 'list' }])).toEqual([]);
   });
 
+  it('asks for no re-gate when only the freshness preference changes', () => {
+    const followUps = describePreferenceFollowUps([
+      { path: 'stage3.freshness.max_posting_age_days', change: 'CHANGED', valueKind: 'value' },
+      { path: 'stage3.freshness.stale_gate_disposition', change: 'CHANGED', valueKind: 'value' },
+    ]);
+    expect(followUps.map((followUp) => followUp.stage)).toEqual(['RECOMMENDATION', 'APPLICATION_RANKING']);
+  });
+
   it('binds the diff hash to the target database, the starting revision and the target content', () => {
     const database = { host: 'db.example.test', port: '5432', database: 'appdb', systemIdentifier: '7000000000000000001' };
     const base = { action: 'APPLY' as const, workspaceId: WORKSPACE, userId: WORKSPACE, database };
