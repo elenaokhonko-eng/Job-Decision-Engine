@@ -259,21 +259,7 @@ export function applyPersistedRequirementGates(
     return true;
   };
 
-  // Stage 3: Freshness only uses authoritative publication or genuine-repost timestamps.
-  const freshness = evaluateJobFreshness({
-    posted_at: job.posted_at,
-    reposted_at: job.reposted_at,
-    source_updated_at: job.source_updated_at,
-    freshness_basis: job.freshness_basis,
-    is_repost: isRepostFreshnessBasis(job.freshness_basis),
-    posting_identity_is_new: job.freshness_basis === 'NEW_POSTING_ID',
-  }, stage3Preferences?.freshness);
-  if (freshness.is_hard_reject) {
-    return makeReject(
-      [freshness.rejection_code || 'GATE_STALE_POSTING'],
-      [freshness.evidence]
-    );
-  }
+  // Posting age is not a gate (owner decision 2026-11-27): availability and lifecycle decide whether a job is open.
 
   // Stage 3: enforce user-scoped hiring eligibility and mobility, never global defaults.
   const mobility = evaluateMobilityMatch({

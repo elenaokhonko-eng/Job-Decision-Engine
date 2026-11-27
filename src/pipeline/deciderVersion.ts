@@ -10,8 +10,9 @@
  * written in the decision's INSERT, and it is part of the decision context fingerprint so a post-migration decision never
  * collides with an unstamped row of the same inputs.
  */
+// v5: posting age no longer blocks or holds application readiness (owner decision 2026-11-27).
 // v6: a re-run never clears a result (owner decision): a job without a current match keeps its stored score and
-// outcome, lowered only by facts that do not depend on the score. v5 is the posting-age change merged just before.
+// outcome, lowered only by facts that do not depend on the score.
 export const DECIDER_VERSION = "recommendation_decider_v6" as const;
 
 /** SQL (alias `c` = canonical_jobs) true when the job's latest decision was made by another decider version. */

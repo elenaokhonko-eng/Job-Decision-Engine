@@ -20,6 +20,7 @@ CI runs `npm run contracts:check`, which regenerates schemas and fails when comm
 - `EvaluationResult`: validated model output and provider audit metadata.
 - `ShortlistRow`: version-pinned database read model consumed by Streamlit.
 - `ApplicationReadiness`: strict runtime validation on persistence and on current-readiness consumption; `READY` cannot include unresolved mandatory checks.
+- Posting age is information, not eligibility (gate-2026-11.12, `application_readiness_policy_v2`, `recommendation_decider_v5`): the gate emits no `GATE_STALE_POSTING`, and the `FRESHNESS` check is `PREFERRED` with status `MET` (within the preferred age) or `NOT_APPLICABLE`, no reason code and no expiry. `stage3.freshness.stale_gate_disposition` still parses and is not read. Stored `GATE_STALE_POSTING` rows stay valid history.
 - `DocumentOutputManifest`: versioned DOCX/PDF paths and SHA-256 hashes; document provenance rejects unversioned or malformed output manifests.
 - Profile contact facts use versioned `CONTACT` rows with a supported key/value pair, `PRIVATE_INTERNAL` confidentiality, and `VERIFIED` or `SELF_ATTESTED` status. They are available to document rendering only and must be excluded from matching, embeddings, model evaluation context, and capability-profile artifacts.
 - Compensation readiness treats undisclosed base salary as a preferred verification item; disclosed below-floor compensation remains a blocking check.
@@ -39,6 +40,7 @@ Gate reason codes are free strings in `gate_decisions.rejection_codes` (JSONB) a
 | `GATE_LIFESTYLE_INCOMPATIBLE` | Legacy umbrella code for travel, on-call and shift work | No longer emitted. Stored rows stay valid. |
 | `NON_TECHNICAL_FUNCTION`, `GATE_NOT_AI_DATA` | Axis 1 (generic technical-function check) and Axis 2 (AI/data domain) | No longer emitted. A non-technical PM, programme, transformation, product-policy or investigator role is acceptable when it fits a lane and the candidate's experience, and lane routing decides. |
 | `NON_TARGET_ROLE_FAMILY` + `GATE_OUT_OF_SCOPE_DOMAIN` | Explicit non-target title families: `GLOBAL_TITLE_EXCLUSIONS` (HR, sales, customer success, legal practice and counsel) and `NON_TECHNICAL_FUNCTION_TITLES` (accountant, payroll, support specialist, graphic/UX designer) | Still hard rejects. The second list emitted `NON_TECHNICAL_FUNCTION` before 2026-11 and now uses this role-family code. Legal-technology titles ("Legal Engineer", "Legal Innovation Technologist") and agency names such as "Attorney-General's Office" do not match. |
+| `GATE_OUT_OF_SCOPE_DOMAIN` (title domain) | A title containing "consumer lending". Since gate-2026-11.11 payments is neutral (owner decision 2026-11-27): a title about payments, merchant acquiring, remittance, card issuing, credit cards, POS terminals or buy now pay later is no longer rejected, and the discovery pre-screen no longer lists those concepts for `INVESTMENT_MARKETS_FINTECH`. Payments is not preferred. | Narrowed in 11.11 |
 
 ### Gate verification codes (gate-2026-11.4)
 
@@ -167,7 +169,7 @@ In PowerShell, set `$env:PREFERENCES_PROD_ACTIVATION_ALLOWED = 'true'` before st
 
 | Changed path | Follow-up |
 |---|---|
-| `stage3.mobility`, `stage3.watchlist`, `stage3.compensation`, `stage3.freshness` | Re-gate: `scripts/replay_hard_gate_policy_2026_11.ts` or `scripts/regate_job_ids.ts --ids-file` (both from PR #173). |
+| `stage3.mobility`, `stage3.watchlist`, `stage3.compensation` | Re-gate: `scripts/replay_hard_gate_policy_2026_11.ts` or `scripts/regate_job_ids.ts --ids-file` (both from PR #173). |
 | `stage3.compensation`, `stage3.freshness`, `lane_intent` | Re-decide. Stored decisions keep their pinned preference revision until `DECIDE_RECOMMENDATION` runs again. |
 | `lane_intent` | Re-route with `scripts/reroute_all_gate_pass.ts`. Route currency follows lane `routing_content_hash`, not `lane_intent`. |
 | `stage3.mobility`, `stage3.freshness`, `stage3.culture_priorities`, `stage3.application_priority_weights` | Re-materialize with `scripts/materialize_application_rankings.ts`. |

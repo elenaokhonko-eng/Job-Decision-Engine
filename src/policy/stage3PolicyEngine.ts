@@ -2,7 +2,7 @@
  * Stage 3 Policy Engine: Mobility, Compensation, Freshness & Employer Watchlist
  *
  * Implements deterministic evaluations for:
- * 1. Authoritative Job Freshness Curve & 60-Day Hard Gate
+ * 1. Authoritative Job Freshness Curve (posting age is information, never a rejection)
  * 2. Mobility Matching (Remote from SG, Temporary Abroad, Timezone Compatibility)
  * 3. Compensation Thresholds by Opportunity Category
  * 4. Employer Exclusions & Staffing Agency Filter
@@ -34,7 +34,9 @@ import {
 import { extractTerritories, isTerritoryAuthorized } from '../pipeline/workabilityPolicy.js';
 
 // ============================================================================
-// 1. Freshness Evaluation & 60-Day Hard Gate
+// 1. Freshness Evaluation
+// Posting age never rejects or holds a job (owner decision 2026-11-27): whether a job is still open is
+// decided by the availability check and lifecycle. STALE only describes the age against the preference.
 // ============================================================================
 
 export interface JobFreshnessInput {
@@ -59,8 +61,6 @@ export interface FreshnessEvaluationResult {
   freshness_score: number;
   freshness_basis: 'REPOSTED_AT' | 'POSTED_AT' | 'POSTED_AT_APPROXIMATE' | 'REPOSTED_AT_APPROXIMATE' | 'NEW_POSTING_ID' | 'NO_DATE';
   freshness_confidence: 'HIGH' | 'MEDIUM' | 'LOW';
-  is_hard_reject: boolean;
-  rejection_code?: string;
   evidence: string;
 }
 
@@ -95,17 +95,12 @@ function evaluateApproximateFreshness(
   const label = `Approximate posting age of ${range} days (from relative source text, precision ${unit}; not an authoritative date)`;
   const limit = policy.max_posting_age_days;
   if (limit !== undefined && minAgeDays > limit) {
-    // How the source rounds months and years is not confirmed, so a stale verdict at that
-    // precision does not hard-reject; it stays STALE (readiness NEEDS_VERIFICATION).
-    const shouldHardReject = policy.stale_gate_disposition === 'HARD_REJECT' && unit !== 'MONTH' && unit !== 'YEAR';
     return {
       status: 'STALE',
       job_age_days: minAgeDays,
       freshness_score: 0,
       freshness_basis: basis,
       freshness_confidence: 'LOW',
-      is_hard_reject: shouldHardReject,
-      rejection_code: shouldHardReject ? 'GATE_STALE_POSTING' : undefined,
       evidence: `${label}: at least ${minAgeDays} days exceeds the ${limit}-day limit.`,
     };
   }
@@ -116,7 +111,6 @@ function evaluateApproximateFreshness(
       freshness_score: freshnessCurveScore(maxAgeDays),
       freshness_basis: basis,
       freshness_confidence: 'LOW',
-      is_hard_reject: false,
       evidence: `${label} may exceed the ${limit}-day limit; verify the posting date.`,
     };
   }
@@ -126,7 +120,6 @@ function evaluateApproximateFreshness(
     freshness_score: freshnessCurveScore(maxAgeDays),
     freshness_basis: basis,
     freshness_confidence: 'LOW',
-    is_hard_reject: false,
     evidence: `${label}; at most ${maxAgeDays} days${limit !== undefined ? `, within the ${limit}-day limit` : ''}.`,
   };
 }
@@ -147,7 +140,6 @@ export function evaluateJobFreshness(
       freshness_score: 50,
       freshness_basis: 'NEW_POSTING_ID',
       freshness_confidence: 'MEDIUM',
-      is_hard_reject: false,
       evidence: 'A distinct authoritative ATS posting identity indicates a new posting instance; exact age remains unknown because no publication timestamp was supplied.',
     };
   }
@@ -183,7 +175,6 @@ export function evaluateJobFreshness(
       freshness_score: 50, // Neutral score for unverified age
       freshness_basis: 'NO_DATE',
       freshness_confidence: 'LOW',
-      is_hard_reject: false,
       evidence: 'No authoritative posting date or ATS timestamp available.',
     };
   }
@@ -196,7 +187,6 @@ export function evaluateJobFreshness(
       freshness_score: 50,
       freshness_basis: 'NO_DATE',
       freshness_confidence: 'LOW',
-      is_hard_reject: false,
       evidence: 'The posting date is later than the assessment time; posting age is unknown.',
     };
   }
@@ -217,7 +207,6 @@ export function evaluateJobFreshness(
       freshness_score: 50,
       freshness_basis: 'NO_DATE',
       freshness_confidence: 'LOW',
-      is_hard_reject: false,
       evidence: 'The posting date has an unrecognized freshness basis; posting age is unknown.',
     };
   }
@@ -228,20 +217,17 @@ export function evaluateJobFreshness(
   const ageMs = asOf.getTime() - effectiveDate.getTime();
   const ageDays = Math.max(0, Math.floor(ageMs / (1000 * 60 * 60 * 24)));
 
-  // Apply the per-user hard gate only when an active preference version configures it.
+  // Past the preferred maximum age the posting is described as STALE; nothing is rejected.
   if (
     policy.max_posting_age_days !== undefined &&
     ageDays > policy.max_posting_age_days
   ) {
-    const shouldHardReject = policy.stale_gate_disposition === 'HARD_REJECT';
     return {
       status: 'STALE',
       job_age_days: ageDays,
       freshness_score: 0,
       freshness_basis: basis,
       freshness_confidence: confidence,
-      is_hard_reject: shouldHardReject,
-      rejection_code: shouldHardReject ? 'GATE_STALE_POSTING' : undefined,
       evidence: `Authoritative job posting age of ${ageDays} days exceeds the ${policy.max_posting_age_days}-day limit.`,
     };
   }
@@ -267,7 +253,6 @@ export function evaluateJobFreshness(
     freshness_score: score,
     freshness_basis: basis,
     freshness_confidence: confidence,
-    is_hard_reject: false,
     evidence: `Authoritative posting age is ${ageDays} days (basis: ${basis}).`,
   };
 }
