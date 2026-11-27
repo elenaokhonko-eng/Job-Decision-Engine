@@ -26,7 +26,7 @@ function route(title: string, description: string, companyName: string, favoured
 }
 
 const BENEFITS_SENTENCE =
-  "We offer a competitive salary and comprehensive benefit offerings such as medical, dental, and flexible time off.";
+  "Dental and medical cover head our benefit offerings, followed by paid time off.";
 
 const LOGISTICS_IDENTITY_ENGINEER = [
   "About Us",
@@ -36,7 +36,7 @@ const LOGISTICS_IDENTITY_ENGINEER = [
   "- Run our identity provider on cloud infrastructure with Terraform and AWS, and automate joiner-mover-leaver workflows.",
   "- Partner with security engineering on least-privilege access reviews.",
   BENEFITS_SENTENCE,
-  "Example Freight Co is an equal opportunity employer and does not discriminate on the basis of race, religion, health status or medical condition.",
+  "Hiring at Example Freight Co is on merit; health status and medical condition are never asked about.",
 ].join("\n");
 
 const RETAIL_BACKEND_ENGINEER = [
@@ -81,10 +81,10 @@ const HOSPITAL_DATA_PLATFORM_ENGINEER = [
 const FEDERAL_HEALTHCARE_SALESFORCE_ARCHITECT = [
   "Example Federal Consulting delivers technology programs for government clients.",
   "The Role",
-  "- Provide technical leadership, solution design and architecture oversight for a large federal healthcare modernization program.",
+  "- Redraw how a federal healthcare agency stores enrolment records, and approve each build team's design.",
   "- Define the enterprise Salesforce architecture, data model and integration patterns for the platform.",
   "- Lead Salesforce developers through design reviews and release planning.",
-  "Preferred qualifications: experience supporting federal healthcare or health IT initiatives.",
+  "A plus: time spent on health IT for federal healthcare bodies.",
 ].join("\n");
 
 const GAMING_BACKEND_ENGINEER = [
@@ -101,7 +101,7 @@ const GAMING_BACKEND_ENGINEER = [
 describe("Sector scope: user fixtures", () => {
   it("routes a logistics company's identity engineer to UNCLASSIFIED, not HEALTH_BIO_PHARMA", () => {
     const result = route(
-      "Senior Systems Engineer (Identity and Access)",
+      "Workforce Sign-on Engineer",
       LOGISTICS_IDENTITY_ENGINEER,
       "Example Freight Co",
       "HEALTH_BIO_PHARMA"
@@ -238,17 +238,17 @@ describe("Sector scope: review regressions (PR #179) stay in scope", () => {
   });
 
   it("keeps 'pension plan administration' as role substance, not a perk clause", () => {
-    const text = "experience in pension plan administration or financial services industry experience using azure devops for test management";
+    const text = "azure devops boards hold every defect raised against pension plan administration releases";
     expect(stripEmployerBoilerplatePhrases(text)).toContain("azure devops");
     expect(stripEmployerBoilerplatePhrases("we offer a pension plan, dental cover and paid time off")).not.toContain("dental");
   });
 
   it("routes a health-and-wellbeing provider's QA analyst to HEALTH_BIO_PHARMA", () => {
     const description = [
-      "Example Health is a global-leading health and well-being provider improving health outcomes for millions.",
+      "Started by nurses, Example Health has grown into a health and well-being provider.",
       "The Role",
       "- Test our pension and benefits administration software and track defects in Azure DevOps.",
-      "- Experience in pension plan administration is an asset.",
+      "- Anyone who has run pension plan administration will settle in fast.",
     ].join("\n");
     const result = route("Quality Assurance Analyst", description, "Example Health", "HEALTH_BIO_PHARMA");
     expect(result.primaryLane).toBe("HEALTH_BIO_PHARMA");
@@ -298,7 +298,7 @@ describe("Sector scope: benefit, perk and EEO words are never health signals", (
     "Include a short biography with your application.",
     "We support your mental health.",
     "Life insurance and a pension plan.",
-    "We do not discriminate on the basis of health status, medical condition or genetic information.",
+    "Hiring ignores genetic information, and nobody is asked about health status or a medical condition.",
     "Medical leave and parental leave are available.",
   ];
 
@@ -327,9 +327,9 @@ describe("Sector scope: evidence text", () => {
   });
 
   it("removes industry lists naming another industry but keeps health-only lists", () => {
-    expect(stripIndustryLists("industries like finance, manufacturing, defense, healthcare, and the public sector run"))
+    expect(stripIndustryLists("sectors such as education, healthcare, agriculture and the public sector"))
       .not.toContain("healthcare");
-    expect(stripIndustryLists("critical infrastructure including medical devices, power grids and telecommunication networks"))
+    expect(stripIndustryLists("equipment sold into mining, medical devices and aerospace"))
       .not.toContain("medical devices");
     expect(stripIndustryLists("work with clinicians, nurses and patients across the hospital"))
       .toBe("work with clinicians, nurses and patients across the hospital");
@@ -353,7 +353,7 @@ describe("Sector scope: evidence text", () => {
   it("does not let an industry served by the employer make it a health employer", () => {
     const description = [
       "About Us",
-      "Example AI builds AI systems for customers in finance, manufacturing, defense, healthcare, and the public sector.",
+      "Most Example AI buyers work in education, healthcare, agriculture and media.",
       "The Role",
       "- Build backend services on a cloud platform with Kubernetes.",
     ].join("\n");
@@ -371,7 +371,7 @@ describe("Sector scope: other lanes", () => {
       "- Detect and respond to threats, investigate fraud and account-takeover attempts.",
       "- Build detection rules and automation on cloud infrastructure.",
     ].join("\n");
-    const result = route("Senior Security Engineer, Detection & Response", description, "Example Freight Co", "LEGAL_REGTECH");
+    const result = route("Intrusion Detection and Response Engineer", description, "Example Freight Co", "LEGAL_REGTECH");
     expect(result.primaryLane).toBe("UNCLASSIFIED");
     expect(result.laneEvidence.some((e) => e.startsWith("LEGAL_REGTECH:excluded_sector="))).toBe(true);
   });

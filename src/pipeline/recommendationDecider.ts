@@ -94,6 +94,8 @@ export interface RecommendationDeciderSummary {
   outcomeConflicts?: number;
   /** One entry per conflict: the stored and the recomputed outcome and eligibility (ids and codes only). */
   outcomeConflictDetails?: OutcomeConflictDetail[];
+  /** Jobs left untouched in `keepStoredScore` mode. */
+  scoresKept?: number;
   policySnapshotId: string;
   policySnapshotHash: string;
 }
@@ -351,8 +353,14 @@ export async function runRecommendationDecider(
      * latest_deterministic_decision_id moves to the stamped decision.
      */
     preserveStoredOutcome?: boolean;
+    /**
+     * Writes nothing for a job that has a stored requirement score when this recompute would have none (its match is
+     * no longer current). Counted in `scoresKept`.
+     */
+    keepStoredScore?: boolean;
   }
 ): Promise<RecommendationDeciderSummary> {
+  let scoresKept = 0;
   const preserveStoredOutcome = options?.preserveStoredOutcome === true;
   let outcomeConflicts = 0;
   const outcomeConflictDetails: OutcomeConflictDetail[] = [];
@@ -662,6 +670,11 @@ export async function runRecommendationDecider(
             : null,
         });
         const requirementScore = applyRoleShapePenalty(rawRequirementScore, shape);
+        if (options?.keepStoredScore && requirementScore === null && job.recommendation_requirement_score !== null) {
+          await client.query("ROLLBACK");
+          scoresKept += 1;
+          continue;
+        }
         const coverageScore =
           coverageScorePct == null ? null : Number((coverageScorePct / 100).toFixed(3));
         const evidenceCompleteness = computeEvidenceCompleteness(
@@ -1359,6 +1372,7 @@ export async function runRecommendationDecider(
       decisionsInserted,
       errors,
       outcomeConflicts,
+      scoresKept,
       outcomeConflictDetails,
       policySnapshotId: snapshot.snapshotId,
       policySnapshotHash: snapshot.snapshotHash,

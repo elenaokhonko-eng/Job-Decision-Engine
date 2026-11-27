@@ -38,7 +38,7 @@ describe('extractDeterministicRequirements', () => {
     });
 
     it.each([
-      ['Fellow of the Society of Actuaries', 'You are a Fellow of the Society of Actuaries (FSA) and a Member of the American Academy of Actuaries.'],
+      ['Fellow of the Society of Actuaries', 'Sign-off holder: FSA, that is, Fellow of the Society of Actuaries.'],
       ['FSA', 'Credential: FSA required for this role.'],
       ['ACCA', 'Qualified accountant (ACCA) preferred.'],
     ])('extracts a professional credential: %s', (_label, text) => {
@@ -61,9 +61,9 @@ describe('extractDeterministicRequirements', () => {
       });
 
       it('keeps a parenthetical and the subject whole', () => {
-        const ref = reference('You hold a PhD (or expect to complete one shortly) in Computer Science or a closely related discipline.');
-        expect(ref).toContain('(or expect to complete one shortly)');
-        expect(ref).toContain('Computer Science');
+        const ref = reference('You hold a PhD (or will have submitted your thesis) in Statistics or a neighbouring quantitative field.');
+        expect(ref).toContain('(or will have submitted your thesis)');
+        expect(ref).toContain('Statistics');
       });
 
       it('never ends the subject in the middle of a word', () => {
@@ -74,7 +74,7 @@ describe('extractDeterministicRequirements', () => {
       });
 
       it('does not treat an audience description as a degree requirement', () => {
-        expect(degreeOf('Whether you are a PhD researcher, engineer or scientist, your knowledge will shape the product.')).toBeUndefined();
+        expect(degreeOf('Whether you are a PhD candidate, developer or analyst, your skills will matter here.')).toBeUndefined();
         expect(degreeOf("Whether you're a PhD researcher or an engineer, you will fit in.")).toBeUndefined();
       });
     });
@@ -160,23 +160,23 @@ describe('extractDeterministicRequirements', () => {
 
   const SECTIONED_POSTING = [
     'The role',
-    'We are building a shared data platform for the business.',
+    'A seed bank needs its catalogue to outlast every season of volunteers.',
     '',
     'Responsibilities',
-    '- Lead delivery of the enterprise data platform roadmap',
-    '- Partner with engineering and product to define priorities',
+    '- Lead renewal of the specimen catalogue service',
+    '- Partner with curators and growers to rank repairs',
     '',
     'Requirements',
-    '- 8+ years of experience in data engineering or architecture',
-    '- Strong SQL and Python',
-    "- Bachelor's degree in computer science or a related field",
-    '- Experience with AWS, Azure or GCP',
+    '- 8+ years of experience in data engineering for living collections',
+    '- Strong R and Python',
+    "- Bachelor's degree in botany, ecology or a related discipline",
+    '- Knowledge of Terraform, Pulumi or Ansible',
     '',
     'Nice to have',
     '- Familiarity with Snowflake',
     '',
     'About us',
-    '- We offer free lunch and a great culture',
+    '- We offer garden passes and a quiet reading room',
   ].join('\n');
 
   it('turns each bullet of a sectioned posting into its own requirement with its exact quote', () => {
@@ -184,10 +184,10 @@ describe('extractDeterministicRequirements', () => {
     const items = result.requirements.filter((r) => r.requirement_type === 'CUSTOM');
 
     expect(items.map((r) => r.requirement_text)).toEqual([
-      'Lead delivery of the enterprise data platform roadmap',
-      'Partner with engineering and product to define priorities',
-      'Strong SQL and Python',
-      'Experience with AWS, Azure or GCP',
+      'Lead renewal of the specimen catalogue service',
+      'Partner with curators and growers to rank repairs',
+      'Strong R and Python',
+      'Knowledge of Terraform, Pulumi or Ansible',
       'Familiarity with Snowflake',
     ]);
     for (const item of items) {
@@ -199,21 +199,21 @@ describe('extractDeterministicRequirements', () => {
     expect(result.needsDescription).toBe(false);
     expect(result.hasRequirementsSection).toBe(true);
     // Intro prose and the "About us" section are not requirements.
-    expect(items.some((r) => /shared data platform/.test(r.requirement_text))).toBe(false);
-    expect(items.some((r) => /free lunch/.test(r.requirement_text))).toBe(false);
+    expect(items.some((r) => /seed bank/.test(r.requirement_text))).toBe(false);
+    expect(items.some((r) => /garden passes/.test(r.requirement_text))).toBe(false);
   });
 
   it('classifies items and marks nice-to-have items optional', () => {
     const result = extractDeterministicRequirements({ ...IDS, description_text: SECTIONED_POSTING });
     const byText = new Map(result.requirements.map((r) => [r.requirement_text, r]));
 
-    expect(byText.get('Lead delivery of the enterprise data platform roadmap')?.structured_value).toMatchObject({
+    expect(byText.get('Lead renewal of the specimen catalogue service')?.structured_value).toMatchObject({
       item_class: 'RESPONSIBILITY',
       section: 'RESPONSIBILITIES',
     });
-    expect(byText.get('Strong SQL and Python')?.structured_value).toMatchObject({ item_class: 'TOOL', section: 'REQUIREMENTS' });
+    expect(byText.get('Strong R and Python')?.structured_value).toMatchObject({ item_class: 'TOOL', section: 'REQUIREMENTS' });
     expect(byText.get('Familiarity with Snowflake')?.importance).toBe('NICE_TO_HAVE');
-    expect(byText.get('Strong SQL and Python')?.importance).toBe('MUST');
+    expect(byText.get('Strong R and Python')?.importance).toBe('MUST');
   });
 
   describe('duties and unheaded skills are not mandatory (deterministic_v6)', () => {
@@ -224,16 +224,16 @@ describe('extractDeterministicRequirements', () => {
     it('makes a duty under a responsibilities heading PREFERRED, and keeps a skill under a requirements heading MUST', () => {
       const posting = [
         'Responsibilities',
-        '- Lead delivery of the enterprise data platform roadmap',
+        '- Lead renewal of the specimen catalogue service',
         '- Partner with product and engineering teams to ship features',
         '',
         'Requirements',
-        '- Strong SQL and Python',
+        '- Strong R and Python',
         '- Experience building data pipelines in production',
       ].join('\n');
-      expect(importanceOf(posting, 'Lead delivery')).toBe('PREFERRED');
+      expect(importanceOf(posting, 'Lead renewal')).toBe('PREFERRED');
       expect(importanceOf(posting, 'Partner with product')).toBe('PREFERRED');
-      expect(importanceOf(posting, 'Strong SQL')).toBe('MUST');
+      expect(importanceOf(posting, 'Strong R')).toBe('MUST');
       expect(importanceOf(posting, 'Experience building data pipelines')).toBe('MUST');
     });
 
@@ -263,9 +263,9 @@ describe('extractDeterministicRequirements', () => {
     });
 
     it('still keeps duties in the requirement set so the matcher can score them', () => {
-      const posting = ['Responsibilities', '- Lead delivery of the enterprise data platform roadmap'].join('\n');
+      const posting = ['Responsibilities', '- Lead renewal of the specimen catalogue service'].join('\n');
       const lead = extractDeterministicRequirements({ ...IDS, description_text: posting })
-        .requirements.find((r) => r.requirement_text.startsWith('Lead delivery'));
+        .requirements.find((r) => r.requirement_text.startsWith('Lead renewal'));
       expect(lead).toBeDefined();
       expect(lead?.structured_value).toMatchObject({ item_class: 'RESPONSIBILITY' });
     });
@@ -273,8 +273,8 @@ describe('extractDeterministicRequirements', () => {
 
   it('records alternatives such as "A, B or C" options and "or related field"', () => {
     const result = extractDeterministicRequirements({ ...IDS, description_text: SECTIONED_POSTING });
-    const cloud = result.requirements.find((r) => r.requirement_text === 'Experience with AWS, Azure or GCP');
-    expect(cloud?.structured_value).toMatchObject({ alternatives: { options: ['AWS', 'Azure', 'GCP'] } });
+    const cloud = result.requirements.find((r) => r.requirement_text === 'Knowledge of Terraform, Pulumi or Ansible');
+    expect(cloud?.structured_value).toMatchObject({ alternatives: { options: ['Terraform', 'Pulumi', 'Ansible'] } });
 
     const degree = result.requirements.find((r) => r.requirement_type === 'DEGREE');
     expect(degree?.structured_value).toMatchObject({ accepts_related_field: true, accepts_equivalent_experience: false });
@@ -299,16 +299,16 @@ describe('extractDeterministicRequirements', () => {
     const result = extractDeterministicRequirements({
       ...IDS,
       description_text:
-        'You will lead the development of innovation programmes across the bank. ' +
-        'Experience with financial regulation or supervision is valued. ' +
-        'You will find a place where you can be yourself and prioritise your wellbeing. ' +
+        'You will lead the rollout of experiment tooling across the group. ' +
+        'Experience with payments oversight or audit is valued. ' +
+        'You will find a team where you can grow at your own pace and look after your wellbeing. ' +
         'Strong stakeholder management and communication skills.',
     });
     const items = result.requirements.filter((r) => r.requirement_type === 'CUSTOM');
     const byPrefix = (prefix: string) => items.find((r) => r.requirement_text.startsWith(prefix));
 
     expect(byPrefix('You will lead')?.structured_value).toMatchObject({ item_class: 'RESPONSIBILITY' });
-    expect(byPrefix('Experience with financial regulation')?.importance).toBe('PREFERRED');
+    expect(byPrefix('Experience with payments oversight')?.importance).toBe('PREFERRED');
     // No headings: nothing says this is required, so it is not mandatory (deterministic_v6).
     expect(byPrefix('Strong stakeholder')?.importance).toBe('PREFERRED');
     expect(byPrefix('You will lead')?.importance).toBe('PREFERRED');
@@ -386,7 +386,7 @@ describe('extractDeterministicRequirements', () => {
     const additional = extractDeterministicRequirements({
       canonical_job_id: 'efefefef-efef-4efe-8efe-efefefefefef',
       job_version_id: '12121212-1212-4121-8121-121212121212',
-      description_text: 'Minimum of 2 additional years of experience related to the functional area.',
+      description_text: 'Minimum of 2 additional years of wet-laboratory experience.',
     });
     const additionalExperience = additional.requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS');
     expect(additionalExperience?.structured_value).toMatchObject({ minimum_years: 2 });
@@ -394,7 +394,7 @@ describe('extractDeterministicRequirements', () => {
     const writtenNumber = extractDeterministicRequirements({
       canonical_job_id: 'abababab-abab-4aba-8aba-abababababac',
       job_version_id: 'cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdce',
-      description_text: 'At least three years of relevant technology experience in a related technical environment.',
+      description_text: 'At least three years of professional experience with tide instruments.',
     }).requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS');
     expect(writtenNumber?.structured_value).toMatchObject({ minimum_years: 3 });
 

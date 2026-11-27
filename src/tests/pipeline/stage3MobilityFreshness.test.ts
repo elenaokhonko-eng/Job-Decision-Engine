@@ -705,15 +705,15 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
   // Hard gate integration test for excluded employer
   it('does not reject a direct-employer fixed-term contract in persisted requirement gates', () => {
     const gateResult = applyPersistedRequirementGates({
-      title: 'Lead Data Architect (Investment Management) (Contract)',
+      title: 'Principal Data Modeller (Treasury Reporting) (Contract)',
       company_name: 'Monetary Authority of Singapore',
       employment_type: 'CONTRACT',
       workplace_type: 'REMOTE',
       location: 'Singapore',
       posted_at: new Date().toISOString(),
-      description: 'Lead data architecture for investment management, including data models, governance, lineage, and platforms.',
+      description: 'Own data modelling for treasury reporting, covering lineage, quality controls, and platforms.',
     }, [{
-      requirement_key: 'MAS-CONTRACT-1',
+      requirement_key: 'TDM-CONTRACT-1',
       requirement_type: 'EMPLOYMENT_TYPE',
       importance: 'REQUIRED',
       requirement_text: 'Fixed-term staff appointment',
