@@ -200,7 +200,7 @@ describe("commission as pay: owner and reviewer cases", () => {
 
 describe("commission about other roles or a company-wide policy does not reject", () => {
   it.each([
-    "<p>Most sales positions are eligible for commission under the applicable plan.</p>",
+    "<p>Our sales representatives are eligible for commission; this vacancy is salaried.</p>",
     "<p>We offer a competitive commission structure for some roles.</p>",
     "<p>Sales team members earn commission under the company plan.</p>",
     "<p>Certain positions are commission-based.</p>",
@@ -267,7 +267,7 @@ describe("commission: runtime on hostile text, verb use and eligibility", () => 
   });
 
   it("other roles' eligibility does not reject", () => {
-    const result = gate("Senior Database Architect", `${BASE}<p>Most sales positions are eligible for commission.</p>`);
+    const result = gate("Senior Database Architect", `${BASE}<p>Most jobs on the revenue floor are eligible for commission.</p>`);
     expect(result.status).not.toBe("HARD_REJECT");
   });
 });
@@ -287,7 +287,7 @@ describe("commission scope (gate-2026-11.8)", () => {
     ["commission opportunities without a structure", "<p>Base salary paid in USD + commission opportunities.</p>"],
     ["affiliate commissions paid to others", "<p>You will track affiliate commissions and reconcile partner payouts.</p>"],
     ["referral commission for others", "<p>You will administer the referral commission programme for the sales team.</p>"],
-    ["other roles", "<p>Most sales positions are eligible for commission under the applicable plan.</p>"],
+    ["other roles", "<p>Our sales representatives are eligible for commission; this vacancy is salaried.</p>"],
     ["cold calling as experience", "<p>Experience in cold calling is helpful but not required.</p>"],
     ["cold calling done by a team", "<p>You will manage an intake team that handles scheduling, and the sales group does cold calling.</p>"],
     ["negated cold calling duty", "<p>This role does not involve cold calling.</p>"],
@@ -341,7 +341,7 @@ describe("commission scope: dry-run patterns and owner rulings", () => {
     ["pre-K: end-of-semester commission based on performance (bonus-like)", "<p>Pay is $16-$22 per hour, plus an end-of-semester commission based on performance, targeting 15% of yearly salary.</p>"],
     ["commission as a performance bonus for a non-sales role", "<p>Staff receive a performance bonus, sometimes called commission, each term.</p>"],
     ["affiliate specialist: track affiliate commissions", "<p>Track affiliate commissions, payouts and creator performance.</p>"],
-    ["director: variable commission for quota-based roles", "<p>Compensation includes base salary, an equity incentive plan and variable commission (for quota-based roles).</p>"],
+    ["director: variable commission for quota-based roles", "<p>Base salary, shares and variable commission appear together only for quota-based roles.</p>"],
     ["engineering boilerplate: bonus or commission", "<p>In addition to base pay, we offer a performance-driven annual bonus or commission.</p>"],
     ["generic eligibility list", "<p>You may be eligible for a bonus, commission, or incentive program.</p>"],
     ["tuition-fee commission paid to an agency", "<p>The agency takes a commission on tuition fees it collects from families.</p>"],
@@ -356,7 +356,7 @@ describe("commission scope: dry-run patterns and owner rulings", () => {
   });
 
   it.each([
-    ["lead intake manager: cold outbound as the role's duty", "Lead Intake Manager", "<ul><li>Cold calling and cold emailing: conduct structured outbound campaigns targeting priority markets.</li></ul>"],
+    ["admissions outreach manager: cold outbound as the role's duty", "Admissions Outreach Manager", "<ul><li>Cold calling and cold emailing: every Monday, work through schools that have never enrolled.</li></ul>"],
     ["sales development representative", "Sales Development Representative", "<p>Base + commission OTE $60,000-$80,000.</p>"],
     ["inside sales", "Inside Sales Executive", "<p>Base + commission OTE $110,000-$140,000.</p>"],
     ["business development", "Business Development Manager", "<p>OTE 80k base + 40k commission.</p>"],

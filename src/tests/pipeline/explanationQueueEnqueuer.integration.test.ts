@@ -843,6 +843,10 @@ describe.skipIf(skipReal)("AI queue: leads are left out", () => {
     expect(after.jobsWithoutEvaluation).toBe(before.jobsWithoutEvaluation - 1);
     expect(await readScopedAiHold(database, workspaceId, version)).toMatchObject({ reason: "JOB_IS_LEAD" });
     expect((await leadsInListsOrQueue(database, workspaceId)).detail).toMatchObject({ evaluation_queue: 1 });
+    const otherRows = async () => (await database.query(
+      `SELECT id, status, last_error, updated_at FROM evaluation_queue WHERE canonical_job_id <> $1 ORDER BY id`, [target])).rows;
+    const othersBefore = await otherRows();
+    expect(othersBefore.some((row) => row.status === "PENDING")).toBe(true);
 
     vi.stubEnv("AI_EVALUATION_ENABLED", "false");
     try {
@@ -855,6 +859,8 @@ describe.skipIf(skipReal)("AI queue: leads are left out", () => {
       vi.stubEnv("AI_EVALUATION_ENABLED", "true");
     }
     expect((await leadsInListsOrQueue(database, workspaceId)).detail).toMatchObject({ evaluation_queue: 0 });
+    // Only the lead's row changed: held work that is not a lead's stays exactly as it was.
+    expect(await otherRows()).toEqual(othersBefore);
     const { rows } = await database.query(
       `SELECT status FROM evaluation_queue WHERE canonical_job_id = $1`, [target]);
     expect(rows).toEqual([{ status: "SUPERSEDED" }]);

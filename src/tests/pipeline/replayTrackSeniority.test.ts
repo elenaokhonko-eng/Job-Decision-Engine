@@ -33,7 +33,7 @@ describe("track seniority replay plan", () => {
 
   it("reports a location reject or verification before any seniority change", () => {
     const [restricted, unclear] = planTrackSeniorityReplay([
-      job({ description: "The base pay ranges from $75,000 to $100,000 CAD within any geographic market in Canada." }),
+      job({ description: "Our pay scale does not vary: all regions within Canada get one figure." }),
       job({ description: "Mexico Benefits: medical insurance." }),
     ], SCOPE, EXPERIENCE);
     expect(restricted).toMatchObject({ after: "HARD_REJECTED", territory: "HARD_REJECT" });
@@ -43,7 +43,7 @@ describe("track seniority replay plan", () => {
 
   it("re-gates an in-flight job that has no outcome yet without inventing one", () => {
     const [restricted, open] = planTrackSeniorityReplay([
-      job({ outcome: null, description: "The base pay ranges from $75,000 to $100,000 CAD within any geographic market in Canada." }),
+      job({ outcome: null, description: "Our pay scale does not vary: all regions within Canada get one figure." }),
       job({ outcome: null }),
     ], SCOPE, EXPERIENCE);
     expect(restricted).toMatchObject({ before: null, after: "HARD_REJECTED", territory: "HARD_REJECT" });

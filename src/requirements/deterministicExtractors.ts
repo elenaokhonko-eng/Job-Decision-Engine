@@ -540,7 +540,7 @@ export function extractDeterministicRequirements(
     /\b(?:B\.?Sc|M\.?Sc|M\.?Eng|BA|BS|B\.A|B\.S)\b\.?(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100}(?!\w))?/,
     /\bdegree\s+in\s+[^.;\n]{1,100}(?!\w)/i,
   ]);
-  // "Whether you're a PhD researcher, engineer or scientist" describes the audience, not an entry requirement.
+  // "Whether you're a PhD candidate, developer or analyst" describes the audience, not an entry requirement.
   const degreeIsAudience = firstDegree !== null
     && /\bwhether\s+you(?:'|’)?(?:re|\s+are)\b/i.test(
       findEnclosingClause(description, firstDegree.quote_start_offset, firstDegree.quote_end_offset).clauseText,

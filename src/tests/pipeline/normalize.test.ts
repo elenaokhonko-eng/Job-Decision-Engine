@@ -181,11 +181,11 @@ describe('Pipeline Stage: Normalization', () => {
           id: 'derived-observation-id',
           retrieved_at: '2026-10-28T00:00:00.000Z',
           source_name: 'EMPLOYER_WEBSITE',
-          source_external_id: 'employer-1441267233',
-          source_url: 'https://careers.example.org/jobs/1441267233',
-          canonical_apply_url: 'https://careers.example.org/jobs/1441267233/apply',
+          source_external_id: 'employer-7000000001',
+          source_url: 'https://careers.example.org/jobs/7000000001',
+          canonical_apply_url: 'https://careers.example.org/jobs/7000000001/apply',
           company_name: 'Example Corporation',
-          title: 'Director, AI Solution Architect',
+          title: 'Head of AI Engineering',
           description_raw: completeDescription,
           location_raw: 'Singapore',
           workplace_type_raw: 'UNKNOWN',
@@ -198,7 +198,7 @@ describe('Pipeline Stage: Normalization', () => {
         }] };
       }
       if (sql.includes('SELECT discovery.title, version.canonical_job_id, version.id AS job_version_id')) {
-        return { rows: [{ title: 'Director, AI Solution Architect', canonical_job_id: 'canonical-job-id', job_version_id: 'stub-version-id', content_hash: 'stub-content-hash' }] };
+        return { rows: [{ title: 'Head of AI Engineering', canonical_job_id: 'canonical-job-id', job_version_id: 'stub-version-id', content_hash: 'stub-content-hash' }] };
       }
       if (sql.includes('FROM job_versions version') && sql.includes('source_posting_identity_hash =')) return { rows: [] };
       if (sql.includes('FROM job_versions version') && sql.includes('source_posting_identity_hash IS NULL')) return { rows: [] };
