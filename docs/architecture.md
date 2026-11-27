@@ -382,6 +382,10 @@ Whether a posting is currently open is decided in one place: `assessAvailability
 | Re-check gets a clear closure: the page says not found or no longer accepting, or the feed was read successfully and the job is absent twice in a row | Archived the same day as closed |
 | Re-check cannot tell: timeout, server error, paywall, login | Retried up to 3 times over 3 days, then archived as not confirmable |
 
+A manual same-day check of a chosen job list (`scripts/check_availability_now.ts`, replay copies only; plan mode unless `--apply`) reads each posting link once, never a LinkedIn, aggregator or job-board link, and stores availability evidence through the same re-check. It queues nothing, changes no job fact, never archives, and its reads count for neither the retries nor the archive health check. An apply is bound to the confirmed plan, and its recompute never removes a stored requirement score. It can take the page reader's verdict back to cannot-tell, never the other way; the automatic re-check does not use that rule.
+
+Posting age decides nothing about whether a job is open (owner decision 2026-11-27). The gate never rejects or holds a job for its age, whatever the freshness preference says, and the `FRESHNESS` readiness check is information only: importance `PREFERRED`, never blocking, holding or expiring readiness. Age still lowers the ranking freshness score, and the age archive rule (three calendar months, `docs/job-archiving.md`) is a lifecycle rule.
+
 An expired window is "unknown", never "closed". Saved, applied and held jobs are never archived automatically, and an archived job that reappears is restored. The rule and the list filtering are built; the automatic re-check and archive are in progress.
 
 ### Unknown facts
@@ -410,9 +414,11 @@ The view `v_job_lead_state` (migration 123) is the one definition; no list, scri
 
 Every host and source entry is a row of `v_job_lead_rules`; changing the MyCareersFuture row from `NOT_LEAD` to `AGGREGATOR` makes those jobs leads. A job stops being a lead as soon as the employer's or the owner's posting is observed, and returns to the lists with its stored artifacts.
 
-`v_canonical_shortlist_scoped` excludes leads, so every view built on it does. The AI enqueue, the evaluation queue selection and the review draw ask the `catalog` module (`listLeadJobIds`, `isLeadJobVersion`); unstarted queue rows of a lead are marked `SUPERSEDED`. Hard gates, lanes, matching, decisions and content fetches run for leads as for any job. The must-be-zero check `lead_in_list_or_queue` fails a post-drain reconcile when a lead is in a list or the AI queue.
+`v_canonical_shortlist_scoped` excludes leads, so every view built on it does. The AI enqueue, the evaluation queue selection and the review draw ask the `catalog` module (`listLeadJobIds`, `isLeadJobVersion`); unstarted queue rows of a lead are marked `SUPERSEDED`. The blind review draw counts the leads it leaves out under their own reason, `LEAD_JOB_BOARD_OR_AGGREGATOR`; its LinkedIn exclusion is a separate rule. Hard gates, lanes, matching, decisions and content fetches run for leads as for any job. The must-be-zero check `lead_in_list_or_queue` fails a post-drain reconcile when a lead is in a list or the AI queue.
 
 The superseding does not wait for the owner's AI switch: the pipeline worker (any run that includes `ENQUEUE_EXPLANATION`) and `scripts/evaluate_queue.ts` do it while the switch is closed too, so a held queue never keeps a lead. The `aiWork` counts leave leads out. A waiting enqueue task of a lead completes without queueing and is never blocked on the cut-off. An application handoff, a document draft preflight, a document currentness check and the scoped pilot's `aiHold` name a lead as `JOB_IS_LEAD`.
+
+A job already queued when it becomes a lead keeps its state, normally `QUEUED_FOR_AI`; no job status is rewritten and its superseded row stays as history. When it stops being a lead, the recoverable seed reads that row and creates a new enqueue task (`lead_superseded_queue_id` in the task context), so the completed earlier task does not hold it back; the switch, cut-off and lane budget apply as for any job. The integrity check for nonterminal jobs without work does not count such a job while it is a lead, while the switch or cut-off admits no AI work for it, or after the AI budget deferred it; otherwise it counts it until the seed has queued it. An enqueue task that finds its job has become a lead completes as `SKIPPED_JOB_IS_LEAD` without queueing, and the same task identity is reopened when it is enqueued again. The post-drain must-be-zero check `returned_lead_not_queued` reports an eligible job with an AI outcome that is no longer a lead and was left unqueued: while the switch admits it, or, whatever the switch says, when its new task has completed without queueing it.
 
 A live job is therefore in exactly one of: a status bucket, awaiting content, or `v_job_leads_scoped` (live, content-complete, not hard-rejected or removed leads). A hard-rejected or removed lead stays in its audit bucket. A lead the owner saved to the application tracker stays there, marked as a lead.
 
@@ -441,6 +447,8 @@ Lanes are defined in `config/lanes/registry.yml`, one file per lane in `config/l
 
 Every observation keeps source identity and raw payload evidence. Canonical jobs may have multiple immutable `job_versions`. Gates, queue rows, evaluations, shortlist rows, and documents are pinned to `job_version_id`.
 
+To ask whether two records are the same posting, compare employer and location through `normalizeJobIdentity` (`src/modules/catalog/`): legal suffixes and the ways of writing Singapore do not matter. It changes no stored key and merges no record. The blind review draw uses it; the stored dedupe keys and the lists do not yet.
+
 Public connectors are described by versioned source plugin manifests under `config/source-plugins/`. Each raw observation can link to the active immutable source plugin revision, enabling later compliance and audit reporting. See [`docs/source-adapters.md`](source-adapters.md).
 
 ## 13. Entry points
@@ -468,7 +476,7 @@ All four stop when the repository variable `WORKFLOW_KILL_SWITCH` is `true`.
 
 ## 14. As built
 
-Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `catalog` and `evaluation` repositories; `src/modules/catalog/` (the lead questions) and `src/modules/evaluation/` (the owner's AI switch) are the first domain modules. `src/modules/decision/` with its repository holds the review lists (section 9), whose wiring is the first file under `src/app/`. Nothing lives under `src/interfaces/` yet.
+Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `catalog` and `evaluation` repositories; `src/modules/evaluation/` holds the owner's AI switch, the first domain module, and `src/modules/catalog/` holds the lead questions and the employer and location comparison used to recognise one posting under two records. `src/modules/decision/` with its repository holds the review lists (section 9), whose wiring is the first file under `src/app/`. Nothing lives under `src/interfaces/` yet.
 
 | Area today | Holds | Goes to |
 |---|---|---|

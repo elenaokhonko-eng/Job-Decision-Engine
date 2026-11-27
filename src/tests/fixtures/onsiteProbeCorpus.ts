@@ -251,7 +251,7 @@ export const KNOWN_FALSE_ACCEPTS: readonly OnsiteProbe[] = [
   sg("This is an on-site role.\nWe are an equal opportunity employer. Our remote and hybrid teams thrive together."),
   sg("This role is on site in Singapore."),
   sg("Location: On site"),
-  sg("In-office 5 days a week."),
+  // "In-office 5 days a week." left this list with gate-2026-11.10: the office-days rule now rejects it.
   sg("WFO 5 days a week."),
   sg("On-site Monday to Friday."),
   sg("The role will be office-based in Singapore."),

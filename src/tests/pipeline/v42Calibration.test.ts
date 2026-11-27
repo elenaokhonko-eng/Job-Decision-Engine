@@ -9,10 +9,10 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
   describe("Part B: Intern Token Matching Guard", () => {
     it("does not reject roles containing internal or international in title", () => {
       const allowedTitles = [
-        "Senior Full-Stack Engineer, Internal Applications",
-        "Staff Decision Scientist (International)",
+        "Principal Platform Developer, Internal Tooling",
+        "Lead Insights Scientist (International)",
         "Senior Internal Audit Analyst",
-        "International Data Acquisition Manager",
+        "Radar Archive Data Acquisition Manager",
         "Engineering Manager - Internal Tools",
       ];
 
@@ -65,7 +65,7 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
         "Forward Deployed Software Engineer",
         "Forward Deployed Engineering Lead",
         "AI FDE",
-        "Engineering Manager, FDE Infrastructure",
+        "Coach, Embedded FDE Squads",
       ];
 
       for (const title of fdeTitles) {

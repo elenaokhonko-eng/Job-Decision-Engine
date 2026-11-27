@@ -21,7 +21,7 @@ import { LANE_ROUTER_RULE_VERSION, runLaneRouting as defaultRunLaneRouting } fro
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/laneRoutingCurrency.js";
 import { isLeadJobVersion, listLeadJobIds } from "../modules/catalog/index.js";
-import { supersedeLeadEvaluationQueueRows } from "../pipeline/evaluationQueueLineage.js";
+import { LEAD_QUEUE_NOTE, supersedeLeadEvaluationQueueRows } from "../pipeline/evaluationQueueLineage.js";
 import {
   AI_EVALUATION_OUTCOMES,
   AI_EVALUATION_OUTCOMES_SQL,
@@ -82,6 +82,7 @@ import {
   heartbeatPipelineTask,
   releasePipelineTaskForRetry,
   type ClaimedPipelineTask,
+  JOB_IS_LEAD_NO_OP_REPAIR_ACTION,
 } from "./pipelineTasks.js";
 import {
   diffProviderCalls,
@@ -999,7 +1000,8 @@ export async function seedRecoverablePipelineTasks(
       "ENQUEUE_EXPLANATION",
       `SELECT c.id AS canonical_job_id,
               COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
-              last_deferral.budget_run_id::text AS deferred_budget_run_id
+              last_deferral.budget_run_id::text AS deferred_budget_run_id,
+              last_lead_row.id::text AS lead_superseded_queue_id
        FROM canonical_jobs c
        LEFT JOIN LATERAL (
          SELECT id
@@ -1017,6 +1019,17 @@ export async function seedRecoverablePipelineTasks(
          ORDER BY deferral.created_at DESC, deferral.id DESC
          LIMIT 1
        ) last_deferral ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT queue.id
+         FROM evaluation_queue queue
+         WHERE queue.workspace_id = c.workspace_id
+           AND queue.canonical_job_id = c.id
+           AND queue.job_version_id = COALESCE(c.latest_job_version_id, jv.id)
+           AND queue.status = 'SUPERSEDED'
+           AND strpos(queue.last_error, $6::text) > 0
+         ORDER BY queue.enqueued_at DESC, queue.id DESC
+         LIMIT 1
+       ) last_lead_row ON TRUE
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET')
          AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
@@ -1078,6 +1091,7 @@ export async function seedRecoverablePipelineTasks(
         maxPerType,
         ...(aiWork.mode === "OPEN" ? [aiWork.scoreCutoff, aiWork.scorePolicy] : [null, null]),
         leadIds,
+        LEAD_QUEUE_NOTE,
       ],
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
@@ -1093,6 +1107,10 @@ export async function seedRecoverablePipelineTasks(
           // task. The enqueuer still applies the lane budget to that attempt.
           ...(typeof row.deferred_budget_run_id === "string" && row.deferred_budget_run_id !== ""
             ? { queue_budget_run_id: row.deferred_budget_run_id }
+            : {}),
+          // A queue row superseded because the job was a lead: once it is not one, the same context must run again.
+          ...(typeof row.lead_superseded_queue_id === "string"
+            ? { lead_superseded_queue_id: row.lead_superseded_queue_id }
             : {}),
         },
       }),
@@ -4080,7 +4098,10 @@ async function executeStageTask(
     await requireCurrentLaneRouting(jobVersionId, clientOrPool, ctx);
     await requireCurrentProfileMatchAndDecision(jobVersionId, clientOrPool, ctx);
     // A task created before its job became a lead completes without queueing: a lead waits for no cut-off approval.
-    if (await isLeadJobVersion(clientOrPool, ctx.workspaceId, jobVersionId)) return;
+    if (await isLeadJobVersion(clientOrPool, ctx.workspaceId, jobVersionId)) {
+      onDesignedNoOp(JOB_IS_LEAD_NO_OP_REPAIR_ACTION);
+      return;
+    }
     // A task created before the cut-off applied waits, visibly, instead of completing without queueing anything.
     if (!(await jobVersionMayReceiveAiWork(clientOrPool, ctx.workspaceId, jobVersionId, readAiWorkSettings()))) {
       throw new PipelineTaskDependencyBlockedError(

@@ -1070,4 +1070,40 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
       openSwitch("0");
     }
   }, 180_000);
+
+  // The successor path (a decision made by a task), which no seed filter covers.
+  it("a decision made for a lead creates no AI enqueue task", async () => {
+    const lead = await seedRoutableJob("successor-lead", ["Zebra telemetry platform engineering experience"]);
+    const control = await seedRoutableJob("successor-control", ["Zebra telemetry platform engineering experience"]);
+    await publishEmbeddings();
+    await runLaneRouter(db(), { context: ctx(), jobVersionIds: [lead.jobVersionId, control.jobVersionId] });
+    const board = "https://himalayas.app/jobs/invented-successor";
+    await db().query(
+      `UPDATE raw_job_observations SET source_name = 'HIMALAYAS', source_url = $3
+        WHERE workspace_id = $1 AND job_version_id = $2`,
+      [ctx().workspaceId, lead.jobVersionId, board],
+    );
+    await db().query(`UPDATE canonical_jobs SET canonical_url = $3 WHERE workspace_id = $1 AND id = $2`,
+      [ctx().workspaceId, lead.canonicalJobId, board]);
+    expect(await isLeadJobVersion(db(), ctx().workspaceId, lead.jobVersionId)).toBe(true);
+
+    for (const job of [control, lead]) {
+      await enqueuePipelineTask({
+        taskType: "MATCH_PROFILE_EVIDENCE",
+        taskKey: `MATCH_PROFILE_EVIDENCE:${job.jobVersionId}:successor-fixture`,
+        payload: { canonical_job_id: job.canonicalJobId, job_version_id: job.jobVersionId, profile_version_id: profileV2 },
+      }, db(), { context: ctx() });
+      const summary = await runPipelineStageTaskWorker(db(), {
+        ...workerOptions,
+        context: ctx(),
+        taskTypes: ["MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION"],
+        jobVersionIds: [job.jobVersionId],
+        maxTasks: 5,
+      });
+      expect(summary).toMatchObject({ failed: 0, errors: [] });
+      expect((await jobState(job)).recommendation_outcome).toBe("REVIEW");
+    }
+    expect(await tasksFor(control, "ENQUEUE_EXPLANATION")).toHaveLength(1);
+    expect(await tasksFor(lead, "ENQUEUE_EXPLANATION")).toEqual([]);
+  }, 120_000);
 });

@@ -119,7 +119,7 @@ Okhonko
 
 ### Email *
 ```text
-elena.okhonko@gmail.com
+<your contact email, entered in the form; not kept in this repository>
 ```
 
 ### Company Name *(optional)*

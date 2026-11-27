@@ -1,3 +1,4 @@
+/** Public file of the catalog module: the only file other code may import. */
 export {
   JOB_IS_LEAD_MESSAGE,
   JOB_IS_LEAD_REASON,
