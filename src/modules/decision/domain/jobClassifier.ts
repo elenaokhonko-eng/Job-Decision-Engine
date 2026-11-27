@@ -138,7 +138,7 @@ export function classifySector(
 
   const override = design.employer_override;
   // An override name also covers its longer forms (its local or product companies).
-  if (override.employers.some((name) => sameEmployer(employer, name) || employer.startsWith(`${employerKey(name)} `))) {
+  if (override && override.employers.some((name) => sameEmployer(employer, name) || employer.startsWith(`${employerKey(name)} `))) {
     return decided(override.industry, "EMPLOYER_OVERRIDE");
   }
   // The private list is the owner's word on an employer, so it wins over a tag or a name.

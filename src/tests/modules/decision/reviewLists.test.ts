@@ -249,7 +249,7 @@ describe("command", () => {
           branch: "br-invented-branch",
           result: {
             lists, eligible: POOL.length, dropped: { rated: 0, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0,
-            withoutTopK: 0, excluded: { ARCHIVED_OR_FIXTURE: 0, MANUALLY_REMOVED_OR_REJECTED: 0, NOT_GATE_PASSED: 0,
+            withoutTopK: 0, postings: [], leads: { total: 0, source: "READ_MODEL" as const }, excluded: { ARCHIVED_OR_FIXTURE: 0, MANUALLY_REMOVED_OR_REJECTED: 0, NOT_GATE_PASSED: 0,
               AWAITING_CONTENT: 0, NO_LINK: 0, LEAD: 0, KNOWN_CLOSED: 0 },
           },
         };
@@ -282,7 +282,7 @@ describe("command", () => {
   it("prints counts without titles", () => {
     const lists = buildReviewLists(design, POOL);
     const text = formatReviewSummary({
-      lists, eligible: POOL.length, dropped: { rated: 0, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0, withoutTopK: 0,
+      lists, eligible: POOL.length, dropped: { rated: 0, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0, withoutTopK: 0, postings: [], leads: { total: 0, source: "READ_MODEL" as const },
       excluded: { ARCHIVED_OR_FIXTURE: 0, MANUALLY_REMOVED_OR_REJECTED: 0, NOT_GATE_PASSED: 0, AWAITING_CONTENT: 0, NO_LINK: 0, LEAD: 0, KNOWN_CLOSED: 0 },
     });
     expect(text).toContain("list SOFTWARE: eligible=40 listed=10 unsaved=6");

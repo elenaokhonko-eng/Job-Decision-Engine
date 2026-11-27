@@ -1,5 +1,5 @@
 /** Public file of the decision module: the only file other code may import. */
-export { classifyJob, roleKindOfTitle, type CompanyIndustryTags, type JobClassification } from "./domain/jobClassifier.js";
+export { classifyJob, classifySector, roleKindOfTitle, type CompanyIndustryTags, type JobClassification } from "./domain/jobClassifier.js";
 export {
   FUNCTION_TAGS,
   parseRankingDesign,
@@ -18,7 +18,6 @@ export {
 } from "./domain/reviewSheet.js";
 export {
   buildReviewListsFromStore,
-  type LeadDefinition,
   type ReviewListInput,
   type ReviewListResult,
   type ReviewListRules,

@@ -39,6 +39,8 @@ export interface PoolJob extends Candidate {
 export interface CollapsedPool {
   /** One entry per unrated posting with a candidate record, without never roles and never sectors. */
   readonly eligible: PoolJob[];
+  /** The same before never roles and never sectors are left out. */
+  readonly postings: PoolJob[];
   readonly dropped: { rated: number; duplicate: number; neverRole: number; neverSector: number };
 }
 
@@ -66,6 +68,7 @@ function groupByKeys(records: readonly PostingRecordEntry[]): PostingRecordEntry
 
 export function collapsePool(records: readonly PostingRecordEntry[]): CollapsedPool {
   const eligible: PoolJob[] = [];
+  const postings: PoolJob[] = [];
   const dropped = { rated: 0, duplicate: 0, neverRole: 0, neverSector: 0 };
   for (const group of groupByKeys(records)) {
     const candidates = group.filter((record) => record.candidate !== null);
@@ -86,11 +89,12 @@ export function collapsePool(records: readonly PostingRecordEntry[]): CollapsedP
       saved: group.some((record) => record.saved),
       linkedInOnly: candidates.every((record) => record.candidate!.linkedInOnly),
     };
+    postings.push(job);
     if (job.classification.status === "NEVER") dropped.neverRole += 1;
     else if (job.classification.sector === "NEVER") dropped.neverSector += 1;
     else eligible.push(job);
   }
-  return { eligible, dropped };
+  return { eligible, postings, dropped };
 }
 
 export const seededHash = (seed: string, purpose: string, id: string): string =>

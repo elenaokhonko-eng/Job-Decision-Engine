@@ -3,7 +3,7 @@ import fs from "node:fs";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { REVIEW_LIST_RULES } from "../../../app/reviewLists.js";
+import { loadLeadDefinitionSql, REVIEW_LIST_RULES } from "../../../app/reviewLists.js";
 import { runMigrations } from "../../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../../db/pgSsl.js";
 import { buildReviewListsFromStore, parseRankingDesign, type ReviewListResult } from "../../../modules/decision/index.js";
@@ -91,6 +91,7 @@ const run = (ratedIds: string[] = []): Promise<ReviewListResult> =>
     () => undefined,
     (db) => buildReviewListsFromStore(db, {
       workspaceId: workspace.workspaceId, design, companyTags: [], ratedIds, rules: REVIEW_LIST_RULES,
+      leadDefinitionSql: loadLeadDefinitionSql(),
     }),
   );
 
@@ -177,10 +178,45 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
     )).rejects.toThrow(/read-only/);
   });
 
-  it("refuses when the lead definition is missing", async () => {
-    await expect(buildReviewListsFromStore(pool, {
-      workspaceId: workspace.workspaceId, design, companyTags: [], ratedIds: [], rules: REVIEW_LIST_RULES,
-      leads: { available: async () => false, ids: async () => [] },
-    })).rejects.toThrow(/migration 123/);
+  it("leaves the same leads out when migration 123 is not installed", async () => {
+    const withView = await run();
+    expect(withView.leads).toEqual({ total: 1, source: "READ_MODEL" });
+    // The views are dropped inside a transaction that is rolled back: a database that never had the migration.
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Only this schema: another schema of the test database may hold the views.
+      await client.query(`SET LOCAL search_path TO ${schema}`);
+      await client.query("DROP VIEW v_job_lead_state CASCADE");
+      await client.query("DROP VIEW v_job_lead_rules");
+      const without = await buildReviewListsFromStore(client, {
+        workspaceId: workspace.workspaceId, design, companyTags: [], ratedIds: [], rules: REVIEW_LIST_RULES,
+        leadDefinitionSql: loadLeadDefinitionSql(),
+      });
+      expect(without.leads).toEqual({ total: 1, source: "MIGRATION_TEXT" });
+      expect(without.excluded.LEAD).toBe(1);
+      expect(without.postings.map((job) => job.id)).not.toContain(ids.lead);
+      expect(without.postings.map((job) => job.id).sort()).toEqual(withView.postings.map((job) => job.id).sort());
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+  });
+
+  it("refuses when the lead definition cannot be read", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Only this schema: another schema of the test database may hold the views.
+      await client.query(`SET LOCAL search_path TO ${schema}`);
+      await client.query("DROP VIEW v_job_lead_state CASCADE");
+      await expect(buildReviewListsFromStore(client, {
+        workspaceId: workspace.workspaceId, design, companyTags: [], ratedIds: [], rules: REVIEW_LIST_RULES,
+        leadDefinitionSql: "-- no views here",
+      })).rejects.toThrow(/was not found/);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
   });
 });

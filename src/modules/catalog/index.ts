@@ -6,5 +6,7 @@ export {
   isLeadJobVersion,
   leadReadModelAvailable,
   listLeadJobIds,
+  listLeadJobsByDefinition,
+  type LeadJobs,
 } from "./handlers/jobLead.js";
 export { normalizeJobIdentity, type JobIdentityNames } from "./domain/jobIdentity.js";

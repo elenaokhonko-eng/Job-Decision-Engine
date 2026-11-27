@@ -59,8 +59,11 @@ export const RankingDesignSchema = z.object({
   employers: z.array(z.object({ industry: Name, names: z.array(Name).min(1) }).strict()),
   /** Words in an employer's name that state its industry. */
   employer_name_words: z.array(z.object({ industry: Name, words: z.array(Name).min(1) }).strict()),
-  /** Employers with their own sector decision, which overrides every other source. Unusable until approved. */
-  employer_override: z.object({ approved: z.boolean(), industry: Name, employers: z.array(Name).min(1) }).strict(),
+  /**
+   * Employers with their own sector decision, which overrides every other source. A design that holds the list is
+   * unusable until it is approved; a design without it overrides nothing.
+   */
+  employer_override: z.object({ approved: z.boolean(), industry: Name, employers: z.array(Name).min(1) }).strict().optional(),
   consulting: z.object({ employers: z.array(Name), employer_name_words: z.array(Name) }).strict(),
   top_technology_employers: z.array(Name),
   /** Title words or phrases that put a role out of every list. */
@@ -88,7 +91,7 @@ export const RankingDesignSchema = z.object({
     ...Object.values(design.company_tag_industries),
     ...design.employers.map((entry) => entry.industry),
     ...design.employer_name_words.map((entry) => entry.industry),
-    design.employer_override.industry,
+    ...(design.employer_override ? [design.employer_override.industry] : []),
   ];
   if (referenced.some((industry) => !declared.includes(industry))) fail("An industry is used but not declared in `industries`.");
   for (const tag of Object.keys(design.company_tag_industries)) {
@@ -126,7 +129,7 @@ export function parseRankingDesign(text: string): RankingDesign {
 
 /** The override list decides sectors, so no list is built until the owner has approved it. */
 export function requireApprovedDesign(design: RankingDesign): void {
-  if (!design.employer_override.approved) {
+  if (design.employer_override && !design.employer_override.approved) {
     throw new Error(
       "Refusing to build review lists: employer_override.approved is false in the ranking design. " +
       "The owner approves that employer list, then sets it to true.",

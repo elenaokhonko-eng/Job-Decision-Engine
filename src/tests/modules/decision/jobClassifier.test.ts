@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { REVIEW_LIST_RULES } from "../../../app/reviewLists.js";
 import {
   classifyJob,
+  classifySector,
   parseRankingDesign,
   requireApprovedDesign,
   roleKindOfTitle,
@@ -57,6 +58,12 @@ describe("ranking design", () => {
 
   it("refuses to build while the employer override list is not approved", () => {
     expect(() => requireApprovedDesign(design)).toThrow(/approved is false/);
+  });
+
+  it("needs no approval without an override list, and then overrides nothing", () => {
+    const without = parseRankingDesign(changed((raw) => delete raw.employer_override));
+    expect(() => requireApprovedDesign(without)).not.toThrow();
+    expect(classifySector(without, [], "Example Loaf")).toMatchObject({ sector: "NEUTRAL", source: "UNKNOWN" });
   });
 });
 

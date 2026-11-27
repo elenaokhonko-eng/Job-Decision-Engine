@@ -323,10 +323,10 @@ Worked example: fit 80, coverage 60, evidence 70, lane 100 gives (80 x 37.5 + 60
 | Read-only session | `src/platform/persistence/index.ts` |
 | Wiring, replay guard, files | `src/app/reviewLists.ts` |
 
-- **The ranking design is profile data.** Role types, statuses, sectors and employer lists are in `private/profile/ranking_design.json`, checked by a strict schema. The repository holds an invented example, `fixtures/ranking_design.example.json`. A missing or invalid design, or an employer override list not marked approved, stops the command.
+- **The ranking design is profile data.** Role types, statuses, sectors and employer lists are in `private/profile/ranking_design.json`, checked by a strict schema. The repository holds an invented example, `fixtures/ranking_design.example.json`. A missing or invalid design stops the command, and so does an employer override list that is not marked approved. A design that holds no such list overrides no employer.
 - **Sector** is the employer's industry: the design's lists, the industry tags of `config/companies.yml` that the design maps (never a tag that names a function), or words in the employer's name. A job's lane and its posting text do not decide it. Unknown is neutral.
 - **Role type** comes from the title, with the career track as a fallback. An unknown role stays in the pool. A "never" role type or sector is only left out of the lists.
-- **Candidates**: live, not a fixture, gate `PASS`, complete content (`v_job_content_state`), with a link, not a lead (`listLeadJobIds`, `v_job_lead_state`; without migration 123 the command stops), not known `CLOSED` (`v_job_availability_current`), and not rated in an earlier key file under `private/review/`. Records of one posting are collapsed.
+- **Candidates**: live, not a fixture, gate `PASS`, complete content (`v_job_content_state`), with a link, not a lead (`v_job_lead_state`; on a database without migration 123 the same view bodies are read from the migration's text and run as query expressions, creating nothing), not known `CLOSED` (`v_job_availability_current`), and not rated in an earlier key file under `private/review/`. Records of one posting are collapsed.
 - **Output** is only under `private/review/`: a blind sheet, a key and a job id file for the same-day availability check. `--score` reads a filled sheet and its key and applies the pass rule.
 
 ## 10. Job states, decisions and status

@@ -59,6 +59,11 @@ export const REVIEW_LIST_RULES: ReviewListRules = {
   savedSourceNames: OWNER_SAVED_SOURCE_NAMES,
 };
 
+/** The migration that states what a lead is; read as text, never applied. */
+export function loadLeadDefinitionSql(file = path.resolve("migrations", "123_job_lead_read_model.sql")): string {
+  return fs.readFileSync(file, "utf8");
+}
+
 const CompaniesSchema = z.object({
   companies: z.array(z.object({
     name: z.string(),
@@ -159,6 +164,7 @@ export function formatReviewSummary(result: ReviewListResult): string {
   const { lists } = result;
   const counts = (record: Record<string, number>) => Object.entries(record).map(([key, value]) => `${key}=${value}`).join(" ");
   return [
+    `leads in the workspace=${result.leads.total} (definition: ${result.leads.source})`,
     `excluded: ${counts(result.excluded)}`,
     `dropped: ${counts(result.dropped)}`,
     `eligible postings=${result.eligible} candidate records without top-K=${result.withoutTopK} rated ids not found=${result.ratedNotFound}`,
@@ -198,7 +204,12 @@ async function readFromReplay(request: StoreRequest, env: NodeJS.ProcessEnv): Pr
     },
     async (db) => {
       const workspace = await resolveWorkspaceContext(db as never);
-      return buildReviewListsFromStore(db, { ...request, workspaceId: workspace.workspaceId, rules: REVIEW_LIST_RULES });
+      return buildReviewListsFromStore(db, {
+        ...request,
+        workspaceId: workspace.workspaceId,
+        rules: REVIEW_LIST_RULES,
+        leadDefinitionSql: loadLeadDefinitionSql(),
+      });
     },
   );
   return { branch, result };
@@ -233,6 +244,7 @@ async function build(args: CommandArguments, env: NodeJS.ProcessEnv, dependencie
   fs.writeFileSync(files.jobIds, sheetJobs(lists, design.lists.seed).map((job) => `${job.id}\n`).join(""), "utf8");
 
   log(`branch=${branch} earlier key files=${rated.files} rated ids=${rated.ids.length}`);
+  log(`employer override list: ${design.employer_override ? "approved" : "none in this design"}`);
   log(formatReviewSummary(result));
   log(`overall list from unsaved jobs only: ${design.lists.overall_from_unsaved_only}`);
   log(`wrote ${key.items.length} jobs: review_lists_{sheet,key,job_ids}_${args.name} under private/review/`);

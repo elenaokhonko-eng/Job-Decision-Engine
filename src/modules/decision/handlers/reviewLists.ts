@@ -1,7 +1,7 @@
 /**
  * Builds the review lists from the stored posting records. Reads only: no decision, state or table changes, and nothing
  * is rejected. A job is a candidate when it is live, passed the gates, has complete content and a link, is not a lead
- * (v_job_lead_state, through the catalog), is not known closed and was not rated before.
+ * (the catalog's lead definition, also before migration 123 is applied), is not known closed and was not rated before.
  */
 import {
   selectJobSightings,
@@ -12,13 +12,14 @@ import {
   type SightingRow,
   type SimilarityRow,
 } from "../../../platform/persistence/decision/index.js";
-import { leadReadModelAvailable, listLeadJobIds, normalizeJobIdentity } from "../../catalog/index.js";
+import { listLeadJobsByDefinition, normalizeJobIdentity, type LeadJobs } from "../../catalog/index.js";
 import { classifyJob, type CompanyIndustryTags, type KnownWorkMode } from "../domain/jobClassifier.js";
 import { requireApprovedDesign, type RankingDesign, type RoleKind } from "../domain/rankingDesign.js";
 import {
   buildReviewLists,
   collapsePool,
   type Candidate,
+  type PoolJob,
   type PostingRecordEntry,
   type ReviewLists,
 } from "../domain/reviewLists.js";
@@ -42,18 +43,14 @@ export interface ReviewListRules {
   readonly savedSourceNames: readonly string[];
 }
 
-export interface LeadDefinition {
-  available(db: DecisionQueryable): Promise<boolean>;
-  ids(db: DecisionQueryable, workspaceId: string): Promise<string[]>;
-}
-
 export interface ReviewListInput {
   readonly workspaceId: string;
   readonly design: RankingDesign;
   readonly companyTags: readonly CompanyIndustryTags[];
   readonly ratedIds: readonly string[];
   readonly rules: ReviewListRules;
-  readonly leads?: LeadDefinition;
+  /** The text of the lead definition migration, used when its view is not installed. */
+  readonly leadDefinitionSql: string;
 }
 
 export const REVIEW_EXCLUSIONS = [
@@ -71,6 +68,10 @@ export interface ReviewListResult {
   readonly ratedNotFound: number;
   /** Candidate records with no stored similarity: ordered after the scored ones. */
   readonly withoutTopK: number;
+  /** One per unrated candidate posting, never roles and sectors included: for counting. */
+  readonly postings: readonly PoolJob[];
+  /** All lead records of the workspace, whatever else would also leave them out. */
+  readonly leads: { readonly total: number; readonly source: LeadJobs["source"] };
 }
 
 /** A link on LinkedIn's site or short link, also when a redirect wrapper carries it. */
@@ -150,12 +151,9 @@ function topKByJob(rows: readonly SimilarityRow[], rules: ReviewListRules): Map<
 export async function buildReviewListsFromStore(db: DecisionQueryable, input: ReviewListInput): Promise<ReviewListResult> {
   const { workspaceId, design, rules } = input;
   requireApprovedDesign(design);
-  const leads = input.leads ?? { available: leadReadModelAvailable, ids: listLeadJobIds };
-  // Without the lead definition job-board jobs would be listed, so nothing is built.
-  if (!(await leads.available(db))) {
-    throw new Error("Refusing to build review lists: the lead read model v_job_lead_state is missing (migration 123).");
-  }
-  const leadIds = new Set(await leads.ids(db, workspaceId));
+  // Job-board and aggregator jobs stay out, also on a database without migration 123.
+  const leads = await listLeadJobsByDefinition(db, workspaceId, input.leadDefinitionSql);
+  const leadIds = new Set(leads.ids);
   const rated = new Set(input.ratedIds.map((id) => id.toLowerCase()));
 
   const jobs = await selectReviewJobs(db, workspaceId, [...rated]);
@@ -237,5 +235,7 @@ export async function buildReviewListsFromStore(db: DecisionQueryable, input: Re
     dropped: pool.dropped,
     ratedNotFound: [...rated].filter((id) => !found.has(id)).length,
     withoutTopK,
+    postings: pool.postings,
+    leads: { total: leadIds.size, source: leads.source },
   };
 }
