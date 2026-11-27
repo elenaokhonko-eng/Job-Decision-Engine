@@ -48,9 +48,9 @@ if __name__ == "__main__":
     test_row = {
         "canonical_job_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
         "job_version_id": "v1",
-        "title": "Associate Senior AI Solutions Officer",
-        "company": "The World Bank Group",
-        "canonical_url": "https://worldbank.org/careers/req38014",
+        "title": "Applied Reasoning Platform Officer",
+        "company": "Meridian Development Facility",
+        "canonical_url": "https://careers.example.org/jobs/dev-0001",
         "location": "Singapore",
         "workplace_type": "HYBRID",
         "gate_status": "PASS",

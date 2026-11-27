@@ -52,10 +52,10 @@ const DESCRIPTION = [
   "Write well-tested Python and TypeScript code, review pull requests, and document service interfaces and data contracts.",
   "Operate PostgreSQL and object storage for training data, monitor data quality, and automate data lineage checks.",
   "Deploy containerised services with Docker and Kubernetes, and keep continuous integration pipelines fast and reliable.",
-  "Requirements: five or more years of professional software engineering experience with production machine learning systems.",
+  "Requirements: you have kept live prediction services healthy for five years or longer.",
   "Strong knowledge of SQL, distributed data processing, and evaluation methods for large language models.",
   "Experience building observability for model performance and reliability is valued.",
-  "Qualifications: a degree in computer science, mathematics, or a related field, or equivalent practical experience.",
+  "Qualifications: any route that taught you statistics and careful programming is welcome.",
 ].join(" ");
 
 function item(id: string, title: string, companyName: string) {

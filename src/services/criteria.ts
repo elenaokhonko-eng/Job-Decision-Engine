@@ -2,6 +2,8 @@ import crypto from "crypto";
 import { RawJob } from "../db/db.ts";
 import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
 import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
+import { readOfficeDayWords } from "../pipeline/officeDayWords.js";
+import { findOfficeFirstDays } from "../pipeline/officeFirstDays.js";
 import { findExplicitOnsiteStatement, isSingaporeLocatedJob, withoutNonOfferedWorkModes } from "../pipeline/onsiteStatements.js";
 import { findPostingLocationLine, isUnknownJobLocation } from "../pipeline/postingLocationLine.js";
 import { findExplicitSalesDuty } from "../pipeline/customerFacingDuties.js";
@@ -365,6 +367,8 @@ function numericRange(match: RegExpMatchArray): [number, number] {
 /** Extract only attendance phrases; unrelated durations such as annual leave are ignored. */
 export function extractHybridAttendance(description: string): HybridAttendanceFacts | null {
   const text = String(description || "").toLowerCase();
+  // Same length as `text`; office counts spelled in words become digits (gate-2026-11.10).
+  const officeText = readOfficeDayWords(text);
   const ranges: Array<{ range: [number, number]; evidence: string }> = [];
   const officePatterns = [
     /\b(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:days?|d)\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)\s+(?:the\s+)?(?:office|on-?site|onsite)\b/gi,
@@ -378,9 +382,9 @@ export function extractHybridAttendance(description: string): HybridAttendanceFa
   ];
 
   for (const pattern of officePatterns) {
-    for (const match of text.matchAll(pattern)) {
+    for (const match of officeText.matchAll(pattern)) {
       const range = numericRange(match);
-      ranges.push({ range, evidence: match[0] });
+      ranges.push({ range, evidence: text.slice(match.index, match.index + match[0].length) });
     }
   }
   for (const pattern of wfhPatterns) {
@@ -599,8 +603,9 @@ function evaluateWorkabilityRules(
   // explicit work-location evidence and must be evaluated here.
   // Workplace perks ("onsite gym", "on-site cafe") are neutral, never work-mode evidence.
   const workModeText = neutralizeWorkplacePerkPhrases(d);
-  const officeDaysMatch = workModeText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)
-    || workModeText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
+  const officeDayText = readOfficeDayWords(workModeText);
+  const officeDaysMatch = officeDayText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)
+    || officeDayText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
   const onsiteStatement = findExplicitOnsiteStatement(workModeText, d, {
     singapore: isSingaporeLocatedJob(loc, d),
     location: loc,
@@ -1315,30 +1320,43 @@ function evaluateGlobalGates(
   );
   // Workplace perks ("in-office snacks", "onsite gym") are neutral for office-day reads.
   const workModeText = neutralizeWorkplacePerkPhrases(d);
-  const configuredOfficeDaysMatch = workModeText.match(configuredOfficeDaysRegex);
+  const officeDayText = readOfficeDayWords(workModeText);
+  const configuredOfficeDaysMatch = officeDayText.match(configuredOfficeDaysRegex);
+  // Evidence is the posting's own words at the matched offset.
+  const postingWords = (match: RegExpMatchArray): string => workModeText.slice(match.index, (match.index ?? 0) + match[0].length);
   const configuredOfficeDaysConflict = configuredOfficeDaysMatch !== null && (Number(configuredOfficeDaysMatch[1]) >= effectivePolicy.hardFailOfficeDaysPerWeek
     || Number(configuredOfficeDaysMatch[1]) > effectivePolicy.maxOfficeDaysPerWeek);
   if (configuredOfficeDaysConflict && onsiteException) {
-    recordOnsiteException(`"${configuredOfficeDaysMatch?.[0]}"`);
+    recordOnsiteException(`"${configuredOfficeDaysMatch ? postingWords(configuredOfficeDaysMatch) : ""}"`);
   } else if (configuredOfficeDaysMatch && configuredOfficeDaysConflict) {
     return makeReject(
       ["GATE_HIGH_OFFICE_DAYS"],
-      [configuredOfficeDaysMatch[0]],
+      [postingWords(configuredOfficeDaysMatch)],
       {
         office_days_min: Number(configuredOfficeDaysMatch[1]),
         office_days_max: Number(configuredOfficeDaysMatch[1]),
       }
     );
   }
+  // The count after the office ("in the office four days a week"), judged by the same thresholds.
+  const officeFirst = findOfficeFirstDays(workModeText);
+  const officeFirstConflict = officeFirst !== null && (officeFirst.max >= effectivePolicy.hardFailOfficeDaysPerWeek
+    || officeFirst.max > effectivePolicy.maxOfficeDaysPerWeek);
+  if (officeFirst && officeFirstConflict && onsiteException) {
+    recordOnsiteException(`"${officeFirst.quote}"`);
+  } else if (officeFirst && officeFirstConflict) {
+    return makeReject(["GATE_HIGH_OFFICE_DAYS"], [officeFirst.quote], { office_days_min: officeFirst.min, office_days_max: officeFirst.max });
+  }
   const hardOnsiteKeyword = hardOnsiteKw.find((kw) => workModeText.includes(kw));
-  const hardOnsiteMatch = workModeText.match(hardOnsiteRegex);
+  const hardOnsiteMatch = officeDayText.match(hardOnsiteRegex);
+  const hardOnsiteWords = hardOnsiteMatch ? postingWords(hardOnsiteMatch) : undefined;
   const hardOnsiteDays = hardOnsiteKeyword?.match(/\b([45])\s*days?\b/i)?.[1] ?? hardOnsiteMatch?.[1];
   const hardOnsiteAllowedByAnswer =
     hardOnsiteDays !== undefined && effectivePolicy.maxOfficeDaysPerWeek >= Number(hardOnsiteDays);
   if ((hardOnsiteKeyword !== undefined || hardOnsiteMatch !== null) && !hardOnsiteAllowedByAnswer && onsiteException) {
-    recordOnsiteException(`"${hardOnsiteKeyword ?? hardOnsiteMatch?.[0] ?? "on-site requirement"}"`);
+    recordOnsiteException(`"${hardOnsiteKeyword ?? hardOnsiteWords ?? "on-site requirement"}"`);
   } else if ((hardOnsiteKeyword !== undefined || hardOnsiteMatch !== null) && !hardOnsiteAllowedByAnswer) {
-    const evidenceKeyword = hardOnsiteKeyword ?? hardOnsiteMatch?.[0] ?? "on-site requirement";
+    const evidenceKeyword = hardOnsiteKeyword ?? hardOnsiteWords ?? "on-site requirement";
     return makeReject(["GATE_HIGH_OFFICE_DAYS"], findEvidence(d, [evidenceKeyword]), { office_days_min: 4, office_days_max: 5 });
   }
 
@@ -1349,8 +1367,8 @@ function evaluateGlobalGates(
     "office to be evaluated", "partner discussions", "location flexible", "location tbd"
   ];
   const hasExplicitDays = hardOnsiteKw.some(k => workModeText.includes(k))
-    || hardOnsiteRegex.test(workModeText)
-    || /\b[1-5]\s*(?:day|days)\s*(?:per week|a week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i.test(workModeText)
+    || hardOnsiteRegex.test(officeDayText)
+    || /\b[1-5]\s*(?:day|days)\s*(?:per week|a week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i.test(officeDayText)
     || d.includes("1 day/week") || d.includes("2 days/week") || d.includes("3 days/week")
     || d.includes("remote-first") || d.includes("fully remote") || d.includes("work from home");
 
