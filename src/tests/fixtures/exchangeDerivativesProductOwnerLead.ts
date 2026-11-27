@@ -1,57 +1,56 @@
-// Invented stand-in for a technical product owner lead posting pasted from a job site.
-// The wording is invented; the layout is the pasted one: line breaks lost in the opening paragraphs
-// (runs of spaces instead), the first section heading run into its first sub-heading, sub-headings
-// between bullets, blank separator lines that hold a space, "Label. Sentence" requirement bullets,
-// and a closing section that is not a requirement.
+// Invented posting for a made-up library consortium. It exercises the pasted-from-a-job-site layout:
+// line breaks lost in the opening paragraphs (runs of spaces instead), the first section heading run
+// into its first sub-heading, sub-headings between bullets, blank separator lines that hold a space,
+// "Label. Sentence" requirement bullets, and a closing section that is not a requirement.
 export const EXCHANGE_DERIVATIVES_PRODUCT_OWNER_RESPONSIBILITIES = [
-  "Study how the booking engine works from end to end and feed that knowledge into the technology plan.",
-  "Pick a headline measure with the operations lead and check that the engineers can actually record it.",
-  "Turn open problems into stories and acceptance checks that internal squads and suppliers can build from.",
-  "Co-own the release plan with the operations lead and revisit it whenever port rules or neighbouring systems change.",
-  "Order incoming work by weighing user pain, revenue, legal deadlines and build effort.",
-  "Check that supplier release calendars line up with what the terminal operator intends to ship.",
-  "Report direction, figures and progress to colleagues and outside partners in plain language.",
-  "Broker agreement when priorities clash and be candid about what is still unknown.",
-  "Stand beside the team when a partner conversation turns difficult.",
-  "Try ideas with AI assistants before asking engineers to commit time.",
-  "Keep learning from users through site visits, mock-up trials and log reviews.",
-  "Lay out choices such as buying or building, then push for a decision.",
-  "Recruit and coach a small group of product owners and designers.",
-  "Help squads move faster by explaining the trade and what the platform can already do.",
-  "Describe where the product should be in three years and keep people interested in getting there.",
-  "Protect time for reliability work on the systems that the harbour cannot run without.",
+  "Shadow desk staff for a fortnight and map how a reservation travels between branches.",
+  "Publish a quarterly list of what will change, with the reason for each item.",
+  "Write acceptance examples that a volunteer tester could follow unaided.",
+  "Agree with the courier firm which parcels the new scanner must recognise.",
+  "Retire reports that nobody has opened since last spring.",
+  "Keep a visible queue of branch complaints and answer each within ten days.",
+  "Rehearse the overnight catalogue sync before every school holiday.",
+  "Negotiate shared opening rules among councils that disagree about fines.",
+  "Show trustees what the money bought, using branch figures they can check.",
+  "Pair a new analyst with a librarian during their first month.",
+  "Test screen designs with readers who use large print.",
+  "Decide when a supplier's patch is safe to switch on.",
+  "Record why an idea was turned down so it is not argued twice.",
+  "Walk the sorting room whenever returns start to pile up.",
+  "Plan the move off the ageing kiosk software one branch at a time.",
+  "Thank the people who report faults and tell them what happened next.",
 ];
 
 export const EXCHANGE_DERIVATIVES_PRODUCT_OWNER_REQUIREMENTS = [
-  "Experience. 10+ years across product, analysis or engineering roles that carried real delivery ownership.",
-  "Leadership. You have steered sizeable products and the squads behind them",
-  "Domain expertise. Time spent with ports, shipping lines, freight booking or customs systems is a strong plus; other logistics work also counts.",
-  "Technical fluency. Comfortable reading source, questioning an interface design and joining architecture debates.",
-  "AI-native working. You already draft, mock up and check your thinking with AI assistants.",
-  "Product judgement. You frame problems crisply, cut scope when needed and act on evidence despite gaps.",
-  "Communication. You can bring operational and engineering people round at any level.",
-  "Builder mindset. Happy to work while ways of working are still taking shape.",
-  "Comfort with complexity. Working under heavy regulation with many interested parties is a plus.",
+  "Background. Seven or more years shaping software that front-desk staff depend on.",
+  "Stewardship. You have answered for a service that could not simply be switched off",
+  "Sector knowledge. Time in libraries, archives or postal sorting is a strong plus; any lending service counts.",
+  "Data sense. Able to query loan records yourself and spot a figure that cannot be right.",
+  "Assistive tools. You already use AI assistants to draft notes and check them with care.",
+  "Judgement. You can say no kindly and show the evidence behind it.",
+  "Writing. Councillors and shelving volunteers alike understand your updates.",
+  "Patience. Content to improve a process in small, steady steps.",
+  "Committees. Having worked with elected members is a plus.",
 ];
 
 const [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16] = EXCHANGE_DERIVATIVES_PRODUCT_OWNER_RESPONSIBILITIES;
 const bullets = (lines: string[]) => lines.flatMap((line) => [line, " "]);
 
 export const EXCHANGE_DERIVATIVES_PRODUCT_OWNER_DESCRIPTION = [
-  "WE MOVE CARGO. A terminal operator that writes its own booking software.   The opportunity We need someone to head the product owners for berth booking. You will help them turn user pain into measured results, and you will not be shipping code yourself.   The product owner team The group connects operational needs with delivery by engineers, analysts and suppliers.   This is a joint role with operations and engineering.   What you will do Product Analysis and Shaping  ",
+  "WE LEND BOOKS. Nine councils, one catalogue and a van that visits every branch.   The opportunity The kiosks are old and readers wait too long for reservations. We want one person to own what gets fixed first.   This is a shared post between the library service and the digital office.   What you will do Requests and Returns  ",
   ...bullets([r1, r2, r3]),
-  "  Roadmap and Prioritisation  ",
+  "  Branch Services  ",
   ...bullets([r4, r5, r6]),
-  "  Stakeholder Management  ",
+  "  Councils and Suppliers  ",
   ...bullets([r7, r8, r9]),
-  "  Ways of Working  ",
+  "  People  ",
   ...bullets([r10, r11, r12]),
-  "  Leadership  ",
+  "  Housekeeping  ",
   ...bullets([r13, r14, r15, r16]),
-  "    What we are looking for  ",
+  "    About you  ",
   ...bullets(EXCHANGE_DERIVATIVES_PRODUCT_OWNER_REQUIREMENTS),
-  "    Why this role matters  ",
-  "These systems underpin harbour operations that others depend on, so choices made here are felt quickly.",
+  "    Why it counts  ",
+  "Quiet reading rooms still run on these systems, and a failed sync is noticed by opening time.",
   " ",
-  "The job is wider than a ticket queue: you will influence which problems get picked and how success is judged.",
+  "The post is more than logging faults: you will choose which ones are worth solving.",
 ].join("\n");

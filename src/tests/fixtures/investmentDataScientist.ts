@@ -1,40 +1,39 @@
 /**
- * An anonymised posting shaped like a sovereign-fund data-science role: question headings, narrative
- * paragraphs about the team, nine qualification bullets and an office-attendance line. The wording
- * is invented; only the structure follows the real posting that the parser misread.
+ * An invented data-science posting with the shapes the parser must handle: question headings, narrative
+ * paragraphs about the team, nine qualification bullets and an office-attendance line.
  */
 export const INVESTMENT_DATA_SCIENTIST_QUALIFICATIONS = [
-  "Degree in statistics, computer science, data science, mathematics or a related quantitative field",
+  "A degree that taught you to reason from messy field observations",
   "At least 3 years spent shipping machine learning systems that people rely on",
-  "Fluent programming in Python and SQL, with experience of version control and code review",
-  "Experience with cloud data platforms and distributed computing frameworks",
-  "Understanding of the data used across investment management and experience sourcing and governing such data",
-  "Ability to explain model results clearly to portfolio managers and senior stakeholders",
-  "Familiarity with natural language processing and large language model applications",
-  "Experience designing experiments and evaluating models with sound statistical methods",
-  "A collaborative working style and the curiosity to learn new domains quickly",
+  "Comfort writing R or Julia that another person can rerun a year later",
+  "A habit of recording where each dataset came from and who may use it",
+  "Some practice with satellite imagery or acoustic recordings",
+  "Able to tell a warden what a forecast does and does not show",
+  "Curiosity about how birds, weather and land use affect one another",
+  "Care in designing surveys so that a small sample is still honest",
+  "Willing to be corrected by people who walk the marshes every week",
 ];
 
 export const INVESTMENT_DATA_SCIENTIST_NARRATIVE = [
-  "You will be joining a small group of modellers and developers who support the desks that pick holdings.",
-  "As the central modelling guild, the group agrees how forecasts are written, tested and reviewed.",
+  "You will be part of a five-person field science unit that counts migrating shorebirds.",
+  "As the charity's evidence desk, the unit checks every count before it is published.",
 ];
 
 export const INVESTMENT_DATA_SCIENTIST_DESCRIPTION = [
   "Who are we?",
-  "Example Fund manages a global portfolio across public and private markets.",
+  "Example Fund pays for wetland restoration along a long coastline.",
   INVESTMENT_DATA_SCIENTIST_NARRATIVE[1],
   "",
   "What will you do?",
   INVESTMENT_DATA_SCIENTIST_NARRATIVE[0],
-  "- Build and deploy machine learning models that support investment decisions",
-  "- Turn alternative and market data into features that portfolio teams can use",
-  "- Work with data engineers to put models into production and monitor them",
+  "- Forecast roosting numbers ahead of each tide season",
+  "- Replace the wardens' spreadsheets with one checked dataset",
+  "- Publish a plain note whenever a model changes",
   "",
-  "What qualifications and strengths will help you succeed in this team?",
+  "What qualifications would a good applicant bring to this survey work?",
   ...INVESTMENT_DATA_SCIENTIST_QUALIFICATIONS.map((line) => `- ${line}`),
   "",
   "What can we offer?",
-  "- Competitive pay and learning budget",
-  "- Come into the office three days per week, with the other two flexible",
+  "- Binoculars, boots and a training budget",
+  "- Be in the office two days a week; the rest is yours to arrange",
 ].join("\n");

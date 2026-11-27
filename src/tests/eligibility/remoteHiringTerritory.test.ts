@@ -48,17 +48,17 @@ describe("remote hiring territory: board candidate-region field", () => {
 
 describe("remote hiring territory: description signals", () => {
   it("rejects a pay range defined for every market in one foreign country", () => {
-    const result = assess({ description: `${BODY} Our pay band of $64,000 to $82,000/yr CAD applies in any geographic market within Canada.` });
+    const result = assess({ description: `${BODY} One fixed compensation scale covers any markets across Canada, so your town makes no difference.` });
     expect(result.status).toBe("RESTRICTED_FOREIGN");
     expect(result.territories).toEqual(["CANADA"]);
-    expect(result.signals[0]?.evidence).toContain("geographic market within Canada");
+    expect(result.signals[0]?.evidence).toContain("markets across Canada");
   });
 
   it.each([
     "Location: Remote (US)",
     "This position is 100% remote within LatAm.",
     "Location: 100% Remote (U.S.)",
-    "You will work remotely from Bulgaria alongside two colleagues there.",
+    "Whoever joins will work remotely from Bulgaria.",
   ])("rejects a clear remote territory statement: %s", (sentence) => {
     expect(assess({ description: `${sentence}\n${BODY}` }).status).toBe("RESTRICTED_FOREIGN");
   });

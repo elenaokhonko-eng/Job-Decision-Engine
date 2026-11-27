@@ -38,9 +38,9 @@ const sampleHtml = [
   "<h1>Head of AI Engineering</h1>",
   "<p>Location: Singapore</p>",
   "<p>Set reference designs, agree safe release practices, and chair design reviews for product and platform groups.</p>",
-  "<p>Define end-to-end architectures, establish secure delivery standards, and lead architecture reviews across business and technology teams.</p>",
+  "<p>Visitors can browse openings by team, city or contract length.</p>",
   "<p>11+ years building and running software platforms; 6+ years on a major public cloud; 3–5 years shipping machine learning services.</p>",
-  "<p>12+ years of experience in technology or solution architecture; 5+ years with Microsoft Power Platform; 2–4 years delivering AI and Generative AI solutions.</p>",
+  "<p>Our recruiters reply within a fortnight, even when the answer is no.</p>",
   '<a href="/talentcommunity/apply/7000000001/?locale=en_US">Apply now »</a>',
   "</main><footer>Careers homepage</footer></body></html>",
 ].join("");

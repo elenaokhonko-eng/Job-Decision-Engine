@@ -41,16 +41,16 @@ describe("posting parser on a question-headed posting", () => {
     const requirementTexts = lines.filter((line) => line.requirement_type === "POSTING_REQUIREMENT").map((line) => line.requirement_text);
     expect(requirementTexts).toEqual(INVESTMENT_DATA_SCIENTIST_QUALIFICATIONS);
     expect(lines.filter((line) => line.requirement_type === "POSTING_RESPONSIBILITY").map((line) => line.requirement_text)).toEqual([
-      "Build and deploy machine learning models that support investment decisions",
-      "Turn alternative and market data into features that portfolio teams can use",
-      "Work with data engineers to put models into production and monitor them",
+      "Forecast roosting numbers ahead of each tide season",
+      "Replace the wardens' spreadsheets with one checked dataset",
+      "Publish a plain note whenever a model changes",
     ]);
 
     // The model's quotes included the team description and the office line; neither survives.
     const rows = documentRequirements([
       quotedRow("Q-1", INVESTMENT_DATA_SCIENTIST_NARRATIVE[0]),
       quotedRow("Q-2", INVESTMENT_DATA_SCIENTIST_NARRATIVE[1]),
-      quotedRow("Q-3", "Come into the office three days per week"),
+      quotedRow("Q-3", "Be in the office two days a week"),
       quotedRow("Q-4", INVESTMENT_DATA_SCIENTIST_QUALIFICATIONS[1]),
     ], INVESTMENT_DATA_SCIENTIST_DESCRIPTION);
     const texts = rows.map((row) => row.requirement_text);
@@ -61,7 +61,7 @@ describe("posting parser on a question-headed posting", () => {
 
   it("treats office attendance, hybrid and on-site rules as workability, but not hybrid cloud", () => {
     for (const line of [
-      "Come into the office three days per week",
+      "Be in the office two days a week",
       "This is a hybrid role with 3 days a week in the office",
       "On-site presence at our Singapore campus is expected",
       "Days in office: Monday to Thursday",

@@ -40,23 +40,23 @@ const BOILERPLATE = [
 ].join("");
 
 const CUSTOMER_SOLUTIONS_ARCHITECT = `
-<p>Quillbyte AI is hiring a Customer Platform Architect in Singapore (hybrid).</p>
+<p>Bramblewick Robotics needs a Grower Rollout Architect, based in Singapore with hybrid days.</p>
 <h3>What you'll do</h3>
 <ul>
-<li>Be responsible for the entire customer journey, starting at scoping and ending at go-live.</li>
-<li>Run regular customer engagements so that teams keep using our tooling.</li>
-<li>Agree proof-of-value milestones and exit measures with prospective customers.</li>
-<li>Write Python services that score and serve language models for customer rollouts.</li>
+<li>Train image models in Python that spot leaf disease from greenhouse cameras.</li>
+<li>Own the entire customer journey for each grower, from site survey to first harvest report.</li>
+<li>Set exit tests for proofs of value with prospective customers before planting season.</li>
+<li>Hold weekly customer visits and note what the growers struggle with.</li>
 </ul>
 <h3>Customer Success</h3>
-<p>After launch you pair closely with our Customer Success team.</p>
+<p>Once cameras are mounted, our Customer Success team answers the phone.</p>
 ${BOILERPLATE}`;
 
 const LEGAL_ENGINEER_ADOPTION = `
-<p>Lexora Systems builds AI for in-house legal teams. We are hiring a Legal Engineer – Adoption Advisor in Singapore (hybrid).</p>
-<p>The Legal Engineer – Adoption Advisor serves as the face of Lexora in Vietnam, setting up our drafting tool for in-house lawyers.</p>
-<p>This role sits within Lexora's post-sales organization and teams up with Account Executives on adoption and renewal.</p>
-<ul><li>Maintain clause templates and reusable prompts.</li></ul>
+<p>Ledgerleaf makes filing screens for court registries and is adding a Registry Adoption Coach in Singapore (hybrid).</p>
+<ul><li>Keep the template shelf and worked examples current.</li></ul>
+<p>As the Registry Adoption Coach, you will act as the face of Ledgerleaf in Indonesia while clerks learn the screens.</p>
+<p>This position sits within our post-sales organisation; you partner with account managers on renewals.</p>
 ${BOILERPLATE}`;
 
 describe("findCustomerFacingRoleDuty", () => {
@@ -66,10 +66,10 @@ describe("findCustomerFacingRoleDuty", () => {
     ["You will join the Customer Success team.", "customer success team"],
     ["• Responsible for the entire customer journey.", "entire customer journey"],
     ["Set proof-of-value timelines and success criteria with prospective customers.", "proof-of-value"],
-    ["Deliver an early proof of concept to a customer before the quarter ends.", "to a customer"],
+    ["Run one proof of concept for a customer each sprint.", "for a customer"],
     ["Respond to RFPs from enterprise buyers.", "respond to rfps"],
-    ["Reporting to our VP of Customer Success, this post heads contract renewals.", "vp of customer success"],
-    ["You will serve as a trusted face of the company for visiting delegations.", "face of the company"],
+    ["Reporting into our regional VP of Customer Success comes with the post.", "vp of customer success"],
+    ["You will be serving as the face of the company across vineyard cooperatives.", "face of the company"],
     ["Run technical demos with prospects.", "demos with prospects"],
     ["You will serve as the face of Brightquay in Japan.", "face of"],
     ["Regular customer engagements to unblock adoption.", "regular customer engagements"],
@@ -77,7 +77,7 @@ describe("findCustomerFacingRoleDuty", () => {
     ["Responsibilities: Deliver product demos to prospects.", "demos to prospects"],
     ["Run proofs of concept with prospective customers.", "prospective customers"],
     ["Run PoCs with prospective customers.", "pocs"],
-    ["In this role you partner with our account executives on onboarding plans and renewals.", "account executives"],
+    ["In this role you partner with our account executives to plan each expansion.", "account executives"],
   ])("reads %s", (text, fragment) => {
     expect(findCustomerFacingRoleDuty(text.toLowerCase())).toContain(fragment);
   });
@@ -92,15 +92,15 @@ describe("findCustomerFacingRoleDuty", () => {
     "We offer benefits to every member of the customer success team.",
     "We are an equal opportunity employer; our post-sales organization welcomes all qualified applicants.",
     "Engineers who partner with sales to close deals use our platform.",
-    "PoC leadership: run short PoCs that test an idea, agreeing what good looks like first.",
-    "Customer champion duties: act as the voice of the customer when internal priorities are set.",
-    "Serve as a named representative on data stewardship programmes in the Nordics.",
-    "You will be part of the platform solution engineering group that maintains shared tooling.",
-    "Support RFP sizing and technical effort estimates for large programmes.",
+    "Internal pilots: you lead two-week PoCs so our own teams can judge a new tool.",
+    "In design reviews you argue for how growers will actually use each screen.",
+    "You represent the platform guild at the monthly architecture forum.",
+    "You will join the solution engineering guild that looks after our build servers.",
+    "Help cost the build work whenever the bids desk receives an RFP.",
     "Owns renewal rate reporting and variance analysis against plan.",
-    "What you'll be doing: run lifecycle campaigns that generate customer demand.",
-    "Prototype proof of concept tools, now and then alongside partner customers.",
-    "About the role: the deal desk team works closely with our sales organisation on large bids.",
+    "What you'll be doing: schedule email journeys that warm up new leads.",
+    "Occasionally you run a proof of concept with a customer.",
+    "About the role: finance colleagues here sit beside the sales organisation during audits.",
   ])("ignores %s", (text) => {
     expect(findCustomerFacingRoleDuty(text.toLowerCase())).toBeNull();
   });
@@ -108,15 +108,15 @@ describe("findCustomerFacingRoleDuty", () => {
 
 describe("GATE_HIGH_INTERACTION for pre-sales and post-sales roles", () => {
   // gate-2026-11.7 (owner decision 2026-11-25): duty phrases alone no longer reject; they downrank (roleShape.ts).
-  it("does not reject a Customer Platform Architect with customer-journey and proof-of-value duties", () => {
-    const result = fullGate("Customer Platform Architect", "Quillbyte AI", CUSTOMER_SOLUTIONS_ARCHITECT);
+  it("does not reject a Grower Rollout Architect with customer-journey and proof-of-value duties", () => {
+    const result = fullGate("Grower Rollout Architect", "Bramblewick Robotics", CUSTOMER_SOLUTIONS_ARCHITECT);
     expect(result.status).toBe("PASS");
     expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
     expect(findCustomerFacingRoleDuty(CUSTOMER_SOLUTIONS_ARCHITECT.replace(/<[^>]+>/g, " . ").toLowerCase())).toContain("entire customer journey");
   });
 
-  it.each(["UNKNOWN", "ASSUMED_HYBRID", "HYBRID"])("does not reject a post-sales Legal Engineer – Adoption Advisor (stored %s)", (mode) => {
-    const result = fullGate("Legal Engineer – Adoption Advisor", "Lexora Systems", LEGAL_ENGINEER_ADOPTION, mode);
+  it.each(["UNKNOWN", "ASSUMED_HYBRID", "HYBRID"])("does not reject a post-sales Registry Adoption Coach (stored %s)", (mode) => {
+    const result = fullGate("Registry Adoption Coach", "Ledgerleaf", LEGAL_ENGINEER_ADOPTION, mode);
     expect(result.rejection_codes).not.toContain("GATE_HIGH_INTERACTION");
     expect(result.status).not.toBe("HARD_REJECT");
   });

@@ -52,7 +52,7 @@ function response(url: URL, value: unknown): SafeHttpResponse {
 }
 
 const postingId = "0f1e2d3c-4b5a-4968-8776-655443322110";
-const postingTitle = "Analytics Delivery Lead - Client Programmes";
+const postingTitle = "Technical Project Steward - Observatory Systems";
 const postingDescription = [
   "This position runs analytics engagements for client organisations and keeps several technical workstreams moving together.",
   "Responsibilities: Draw up delivery plans, support engineers, hold scope and fee budgets, and brief senior sponsors.",

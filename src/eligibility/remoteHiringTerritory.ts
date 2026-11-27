@@ -8,7 +8,7 @@ import { extractTerritories, isTerritoryAuthorized, normalizeTerritories } from 
  * for an employer ATS but wrong for remote-job boards: Jobicy's `jobGeo`, Remotive's
  * `candidate_required_location` and We Work Remotely's region name where the candidate must
  * live. Remote postings also often state their territory only in the description ("Remote -
- * Canada", a pay range "within any geographic market in Canada"). This module reads both.
+ * Canada", a pay scale stated for "every location in Canada"). This module reads both.
  *
  * A clear foreign territory is a deterministic workability conflict (hard reject with the quoted
  * evidence). A weak or contradicted signal is NEEDS_VERIFICATION, never a guessed rejection.

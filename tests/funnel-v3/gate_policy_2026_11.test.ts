@@ -142,7 +142,7 @@ describe("Gate policy 2026-11 — rule 1: on-site exceptions", () => {
 
   it("lifts persisted OFFICE_DAYS and WORK_MODE requirements for an exception and records evidence", () => {
     const job = {
-      title: "Research Associate (Machine Vision)",
+      title: "Research Associate (Coral Imaging)",
       company_name: "National University of Singapore",
       workplace_type: "ONSITE",
       location: "Singapore",
@@ -185,7 +185,7 @@ describe("Gate policy 2026-11 — rule 2: function and domain are not hard gates
 
   it("does not emit NON_TECHNICAL_FUNCTION from the persisted requirement gates", () => {
     const result = applyPersistedRequirementGates({
-      title: "Product Lead (Tribunal Services)",
+      title: "Casework Screens Product Owner",
       company_name: "Synthetic Government Technology Agency",
       workplace_type: "HYBRID",
       location: "Singapore",
@@ -249,7 +249,7 @@ describe("Gate policy 2026-11 — rule 3: territory false positives", () => {
     const foreign = evaluateMobilityMatch({
       workplace_type: "HYBRID",
       location: "Kuala Lumpur (Hybrid)",
-      description: "This position is a manager-level role based in Malaysia.",
+      description: "The role is based in Malaysia for the whole contract.",
     }, mobility);
     expect(foreign.is_hard_reject).toBe(true);
   });

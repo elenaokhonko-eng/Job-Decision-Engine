@@ -51,7 +51,7 @@ describe("career track classification", () => {
     ["Software Engineer II", "GENERIC_SOFTWARE"],
     ["Front-End Software Engineer", "GENERIC_SOFTWARE"],
     ["Senior Commercial Counsel", "UNCLASSIFIED"],
-    ["Freelance AI Annotators (SQL Specialists)", "UNCLASSIFIED"],
+    ["Casual AI Trainers (Cookery Prompts)", "UNCLASSIFIED"],
     ["Sr. Data Analytics Engineer", "HANDS_ON_AI_DATA"],
     ["Senior Data Platform Architect", "ARCHITECTURE"],
     ["Head of Data Architecture", "ARCHITECTURE"],

@@ -32,9 +32,9 @@ describe("non-target title families in the hard gates", () => {
   it.each([
     ["Senior GL Accountant", "GL Accountant"],
     ["Accountant", "Accountant"],
-    ["Team Manager, Payroll Operations - Nordics", "Payroll Operations"],
+    ["Payroll Operations Shift Supervisor", "Payroll Operations"],
     ["Fund Operations Support Specialist", "Support Specialist"],
-    ["Sr. UX Designer for Security Consoles", "UX Designer"],
+    ["Museum Kiosk UX Designer (Security Desk)", "UX Designer"],
     ["Marketplace Creative Strategist/Graphic Designer", "Graphic Designer"],
   ])("rejects %j as NON_TARGET_ROLE_FAMILY with the matched title as evidence", (title, matched) => {
     expect(nonTechnicalFunctionTitle(title)).toBe(matched);
@@ -55,14 +55,14 @@ describe("non-target title families in the hard gates", () => {
   });
 
   it.each([
-    "Lead Product Manager (Courts and Legal Services)",
-    "Principal Product Manager for Data Programmes",
-    "Product Policy Lead or Manager",
+    "Product Manager for Harbour Tribunal Filings",
+    "Seed Catalogue Product Manager",
+    "Toy Safety Standards Manager / Lead",
     "Corporate Transformation Director",
-    "Controls and Regulatory Program Manager, Insurance",
-    "Deputy Director of Enforcement (Fraud Investigator)",
+    "Capital Rulebook Program Manager",
+    "Wildlife Trade Investigator",
     "Manager, Investigation Department",
-    "Lead for Strategic Transformation and Portfolio Planning",
+    "Warehouse Change Portfolio Lead",
   ])("does not re-block the in-lane non-technical role %j", (title) => {
     expect(nonTechnicalFunctionTitle(title)).toBeNull();
     const { persisted, global } = gates(title, "Lead the programme with policy owners and stakeholders, and report outcomes to leadership.");
@@ -87,18 +87,18 @@ describe("non-target title families in the hard gates", () => {
 // industrial or physical engineering titles are rejected outright, with the role-family code.
 describe("owner-rejected role families (2026-11-22)", () => {
   it.each([
-    "Sr. Engineer for Network and Infrastructure Security",
+    "Engineer II, Infrastructure Security",
     "Senior DevOps Engineer",
-    "Vice President, DevOps Engineering Chapter Lead",
+    "Rail Ticketing DevOps Engineering Head",
     "Site Reliability Engineer",
     "Senior Security Engineer",
-    "Associate Director and AI Security Architect",
+    "AI Red Team Security Architect",
     "Cloud Support Engineer",
-    "Technical Support Engineer for Storage Arrays",
-    "Database Support Engineer, Nordic Region",
+    "Ground Station Technical Support Engineer",
+    "Night Desk Database Support Engineer",
     "QA Engineer",
     "Quality Assurance Analyst",
-    "Embedded Firmware Test Engineer",
+    "Satellite Payload Test Engineer",
     "Software Development Engineer in Test",
     "Applied Modelling Fellow for Rail Crashworthiness",
     "Mechanical Design Engineer",
@@ -114,8 +114,8 @@ describe("owner-rejected role families (2026-11-22)", () => {
 
   it.each([
     // Program, project, risk and governance titles are not infrastructure roles.
-    "Principal Technical Program Manager for Shared Infrastructure Estates",
-    "Vice President, Cyber and Technology Risk Oversight",
+    "Tunnel Works Infrastructure Programme Manager",
+    "Cyber Risk Governance Chair",
     "Infrastructure Project Manager",
     "Security Governance and Compliance Lead",
     // Existing owner decisions that stay allowed.
@@ -167,8 +167,8 @@ describe("forward-deployed titles are high-interaction rejects (owner policy, 20
   it.each([
     ["Forward Deployed Engineer", "Forward Deployed"],
     ["AI FDE", "FDE"],
-    ["Manager of the FDE Tooling Group", "FDE"],
-    ["Deployed Architect for Client Delivery (Remote)", "Deployed Architect"],
+    ["Coach, Embedded FDE Squads", "FDE"],
+    ["Water Utilities Deployed Architect", "Deployed Architect"],
     ["Deployed Engineer", "Deployed Engineer"],
   ])("rejects %j as GATE_HIGH_INTERACTION in both gates", (title, matched) => {
     expect(forwardDeployedTitle(title)).toBe(matched);
