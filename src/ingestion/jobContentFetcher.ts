@@ -149,6 +149,12 @@ export interface PublicAddress {
 }
 
 export interface PostingFetcherDependencies {
+  /** Asked before every request, redirect hops included; true means the URL is never requested. */
+  readonly refuseRequest?: (url: URL) => boolean;
+  /** Awaited before every request, redirect hops included (pacing); the time spent does not count against the read's limit. */
+  readonly beforeRequest?: (url: URL) => Promise<void>;
+  /** Told of every response, redirects included. */
+  readonly onResponse?: (url: URL, response: SafeHttpResponse) => void;
   readonly fetchOnce?: (
     url: URL,
     timeoutMs: number,
@@ -494,12 +500,22 @@ export async function fetchSafe(
   let current = parseHttpUrl(decodeTrackingWrapper(input));
   const redirects: string[] = [];
   const totalTimeoutMs = Math.min(MAX_TOTAL_TIME_MS, Math.max(1, dependencies.totalTimeoutMs ?? MAX_TOTAL_TIME_MS));
-  const deadline = Date.now() + totalTimeoutMs;
+  let deadline = Date.now() + totalTimeoutMs;
   const controller = new AbortController();
-  const deadlineTimer = setTimeout(() => controller.abort(), totalTimeoutMs);
+  let deadlineTimer = setTimeout(() => controller.abort(), totalTimeoutMs);
 
   try {
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+      if (dependencies.refuseRequest?.(current)) {
+        throw new UnsafePostingUrlError("Posting URL or redirect is on a site this read must not request.");
+      }
+      if (dependencies.beforeRequest) {
+        clearTimeout(deadlineTimer);
+        const pausedAt = Date.now();
+        await dependencies.beforeRequest(current);
+        deadline += Date.now() - pausedAt;
+        deadlineTimer = setTimeout(() => controller.abort(), Math.max(0, deadline - Date.now()));
+      }
       const remainingMs = Math.min(DEFAULT_REQUEST_TIMEOUT_MS, deadline - Date.now());
       if (remainingMs <= 0) throw new Error("Posting fetch exceeded its total request time limit.");
       if (!dependencies.fetchOnce) {
@@ -518,6 +534,7 @@ export async function fetchSafe(
         fetchOnce(current, requestRemainingMs, addresses, controller.signal, maxBytes),
         controller.signal,
       );
+      dependencies.onResponse?.(current, response);
       if (response.body.byteLength > maxBytes) throw new Error(bodyLimitMessage(maxBytes));
       if (![301, 302, 303, 307, 308].includes(response.status)) {
         return { response, redirects };
@@ -930,6 +947,16 @@ function atsPostingAddress(url: URL): AtsPostingAddress | null {
     };
   }
   return null;
+}
+
+/** The URL the reader requests first for a posting link (an ATS link is read from the board's public API). */
+export function postingRequestUrl(link: string): URL {
+  const source = parseHttpUrl(decodeTrackingWrapper(link));
+  if (/(?:^|\.)jobs\.lever\.co$/i.test(source.hostname)) {
+    return new URL("https://api.lever.co/v0/postings/" + source.pathname.split("/").filter(Boolean).slice(0, 2).join("/"));
+  }
+  const address = atsPostingAddress(source);
+  return address ? new URL(address.apiUrl) : source;
 }
 
 const fetchIdentityIds = new WeakMap<Function, number>();
