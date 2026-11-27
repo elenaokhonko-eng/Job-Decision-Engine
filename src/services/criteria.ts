@@ -99,12 +99,37 @@ export const NON_TECHNICAL_FUNCTION_TITLES: RegExp[] = [
   // Industrial and physical engineering domains.
   /\b(?:(?:mechanical|civil|chemical|structural|aerospace|automotive|manufacturing|electrical|hardware)\s+(?:\w+\s+)?(?:engineers?|engineering|designers?)|crashworthiness|crash\s+(?:safety|simulation|analysis))\b/i,
 ];
+const PHYSICAL_ENGINEERING_TITLE = NON_TECHNICAL_FUNCTION_TITLES[NON_TECHNICAL_FUNCTION_TITLES.length - 1];
+
+// gate-2026-11.9: the family rule judges the main role of a title, not any word in it.
+/** A role the title names in its own right, so a family word after it is a secondary mention. */
+// The role word names a person, so a department ("Product Engineering") is not a role; a data centre is infrastructure.
+const DISTINCT_MAIN_ROLE = /\b(?:ai|ml|llm|machine\s+learning|artificial\s+intelligence|data(?!\s+cent(?:er|re)s?\b)|full[\s-]?stack|back[\s-]?end|front[\s-]?end|product|applications?|analytics|research|quant(?:itative)?)\b[\w\s&\/+.-]{0,30}?\b(?:engineer|developer|scientist|architect|analyst|manager|lead|researcher)\b/i;
+/** Families that reject wherever the title names them, a distinct leading role or not (owner decision). */
+const NEVER_SECONDARY_FAMILY = /\b(?:customer success|systems?\s+administrators?|sysadmin)\b/i;
+/** Punctuation that starts a qualifier. A hyphen splits only when spaced ("full-stack" stays whole). */
+const TITLE_QUALIFIER_BREAK = /\s+-\s*|\s*-\s+|\s*[–—|(,:[]\s*/;
+/** A second role joined after a complete first role: "AI Engineer & DevOps Lead". */
+const SECOND_ROLE_AFTER = /^(.*?\b(?:engineer|developer|scientist|architect|analyst|manager|lead|researcher))\s*(?:&|\/|\+|\band\b)/i;
+
+/** The leading role of a title, before any qualifier or second role. */
+function mainRoleOfTitle(title: string): string {
+  const head = title.split(TITLE_QUALIFIER_BREAK)[0] ?? title;
+  return head.match(SECOND_ROLE_AFTER)?.[1] ?? head;
+}
 
 /** The matched non-technical function title phrase, or null. */
 export function nonTechnicalFunctionTitle(title: string): string | null {
+  const text = String(title || "");
+  const mainRole = mainRoleOfTitle(text);
+  // A generic head ("Senior Engineer - DevOps", "AVP, Site Reliability Engineer") is judged by the whole title.
+  // Industrial and physical engineering names the domain of the work, so it rejects wherever it appears.
+  const hasDistinctMainRole = DISTINCT_MAIN_ROLE.test(mainRole);
   for (const pattern of NON_TECHNICAL_FUNCTION_TITLES) {
-    const match = String(title || "").match(pattern);
-    if (match) return match[0];
+    const match = text.match(pattern);
+    if (!match) continue;
+    if (hasDistinctMainRole && pattern !== PHYSICAL_ENGINEERING_TITLE && !pattern.test(mainRole) && !NEVER_SECONDARY_FAMILY.test(text)) continue;
+    return match[0];
   }
   return null;
 }
@@ -652,9 +677,11 @@ function evaluateWorkabilityRules(
       ? locationTerritories
       : [];
   const relevantLocationTerritories = isRemote ? remoteLocationTerritories : locationTerritories;
-  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d, {
+  // The text as written: capitals tell the country "US" from the pronoun "us".
+  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(description || "", {
     jobLocation: loc,
     authorizedRegions: [...authorizedRegions],
+    splitIgnoringCase: true,
   });
   const workerTerritoryEvaluation = evaluateWorkerTerritoryRequirements(
     workerTerritoryRequirements,
@@ -939,7 +966,7 @@ function makeVerification(codes: string[], evidence: string[], facts?: Partial<G
  */
 /** The posting's own words for each incompatible worker condition, quoted for the gate evidence. */
 function quotedRestrictionEvidence(evaluation: { readonly incompatibleRequirements: readonly { readonly evidenceText: string }[] }): string {
-  const quotes = [...new Set(evaluation.incompatibleRequirements.map((requirement) => requirement.evidenceText.trim()).filter(Boolean))]
+  const quotes = [...new Set(evaluation.incompatibleRequirements.map((requirement) => requirement.evidenceText.trim().toLowerCase()).filter(Boolean))]
     .slice(0, 3)
     .map((quote) => `"${quote.slice(0, 300)}"`);
   return quotes.length > 0 ? `. Evidence: ${quotes.join("; ")}` : "";
@@ -1124,7 +1151,7 @@ function evaluateGlobalGates(
   const workability = evaluateWorkability(
     job.location || "",
     job.workplace_type || "",
-    d,
+    descriptionCorpus(job),
     job.employment_type || "",
     effectivePolicy,
     answerContext,
@@ -1376,9 +1403,10 @@ function evaluateGlobalGates(
       ? locationTerritories
       : [];
   const relevantLocationTerritories = explicitlyRemote ? remoteLocationTerritories : locationTerritories;
-  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d, {
+  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(descriptionCorpus(job), {
     jobLocation: String(job.location || ""),
     authorizedRegions: [...authorizedRegions],
+    splitIgnoringCase: true,
   });
   const disallowedLocationTerritories = relevantLocationTerritories.filter((territory) =>
     effectivePolicy.rejectExplicitForeignTerritory

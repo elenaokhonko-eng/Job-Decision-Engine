@@ -9,6 +9,8 @@ import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pg
 import { runEmbeddingBatchWithFallback } from "../../embeddings/batchCoordinator.js";
 import { upsertLaneRevision } from "../../lanes/registry.js";
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
+import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
+import { TEST_SCORE_POLICY } from "../fixtures/aiWorkSwitch.js";
 import { loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
 import { runLaneRouter } from "../../pipeline/laneRouter.js";
 import {
@@ -34,6 +36,9 @@ const ENV_KEYS = [
   "EMBEDDING_PRIMARY_PROVIDER",
   "EMBEDDING_PRIMARY_DIMENSIONS",
   "EMBEDDING_FALLBACK_DIMENSIONS",
+  "AI_EVALUATION_ENABLED",
+  "AI_EVALUATION_SCORE_CUTOFF",
+  "AI_EVALUATION_SCORE_POLICY",
 ] as const;
 const originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 
@@ -227,6 +232,8 @@ async function recordMatchAndDecision(
      SET latest_match_run_id = $1, latest_deterministic_decision_id = $2,
          processing_state = 'MATCHED', processing_status = 'MATCHED',
          deterministic_match_score = $3, deterministic_match_coverage = 100.00,
+         recommendation_requirement_score = $3::numeric / 100,
+         recommendation_score_policy = '${TEST_SCORE_POLICY}',
          profile_match_status = 'POSITIVE_MATCH',
          recommendation_eligibility = 'ELIGIBLE', recommendation_outcome = $4
      WHERE workspace_id = $5 AND id = $6`,
@@ -316,6 +323,10 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
     process.env.EMBEDDING_PRIMARY_PROVIDER = "gemini";
     process.env.EMBEDDING_PRIMARY_DIMENSIONS = "4";
     process.env.EMBEDDING_FALLBACK_DIMENSIONS = "4";
+    // The owner's AI switch is closed by default; these cases need it open with a cut-off every match passes.
+    process.env.AI_EVALUATION_ENABLED = "true";
+    process.env.AI_EVALUATION_SCORE_CUTOFF = "0";
+    process.env.AI_EVALUATION_SCORE_POLICY = TEST_SCORE_POLICY;
     const agent = await import("../../services/agent.js");
     vi.spyOn(agent, "generateEmbedding").mockImplementation(syntheticEmbedding);
     vi.spyOn(agent, "generateEmbeddingWithProvider").mockImplementation(syntheticEmbedding as any);
@@ -879,4 +890,159 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
       else process.env.SCORING_POLICY = previous;
     }
   }, 120_000);
+
+  it("holds all AI work until the owner's switch and cut-off, keeps it visible, and runs it afterwards", async () => {
+    const closeSwitch = () => {
+      delete process.env.AI_EVALUATION_ENABLED;
+      delete process.env.AI_EVALUATION_SCORE_CUTOFF;
+      delete process.env.AI_EVALUATION_SCORE_POLICY;
+    };
+    const openSwitch = (cutoff: string, policy: string = TEST_SCORE_POLICY) => {
+      process.env.AI_EVALUATION_ENABLED = "true";
+      process.env.AI_EVALUATION_SCORE_CUTOFF = cutoff;
+      process.env.AI_EVALUATION_SCORE_POLICY = policy;
+    };
+    const taskRows = async (job: FixtureJob) => (await db().query(
+      `SELECT id, status, attempt_count, blocked_on, updated_at, last_error FROM pipeline_tasks
+        WHERE workspace_id = $1 AND task_type = 'ENQUEUE_EXPLANATION' AND payload->>'job_version_id' = $2 ORDER BY id`,
+      [ctx().workspaceId, job.jobVersionId],
+    )).rows;
+    const counts = async () => (await db().query(
+      `SELECT (SELECT COUNT(*)::int FROM evaluation_queue) AS queue,
+              (SELECT COUNT(*)::int FROM evaluation_budget_deferrals) AS deferrals,
+              (SELECT COUNT(*)::int FROM ai_evaluation_budget_runs) AS runs`,
+    )).rows[0];
+    const run = (job: FixtureJob, taskTypes: Parameters<typeof runPipelineStageTaskWorker>[1] extends infer O
+      ? O extends { taskTypes?: infer T } ? T : never : never) => runPipelineStageTaskWorker(db(), {
+      ...workerOptions,
+      seed: true,
+      reconcileStalePending: true,
+      context: ctx(),
+      taskTypes,
+      jobVersionIds: [job.jobVersionId],
+      maxTasks: 10,
+    });
+    try {
+      // A job with a pending AI enqueue task from before the switch was closed.
+      const waiting = await seedRoutableJob("held-waiting", ["Zebra telemetry platform engineering experience"]);
+      const rematched = await seedRoutableJob("held-rematch", ["Zebra telemetry platform engineering experience"]);
+      await publishEmbeddings();
+      await runLaneRouter(db(), { context: ctx(), jobVersionIds: [waiting.jobVersionId, rematched.jobVersionId] });
+      await recordMatchAndDecision(waiting, profileV2, "REVIEW", 80);
+      openSwitch("0");
+      await seedRecoverablePipelineTasks(db(), {
+        context: ctx(), taskTypes: ["ENQUEUE_EXPLANATION"], includeTestFixtures: true,
+        jobVersionIds: [waiting.jobVersionId],
+      });
+      const pending = await taskRows(waiting);
+      expect(pending).toEqual([expect.objectContaining({ status: "PENDING", attempt_count: 0 })]);
+
+      closeSwitch();
+      const before = await counts();
+      const stateBefore = await jobState(waiting);
+
+      // Already pending: not claimed, not reconciled, not blocked, not touched.
+      const held = await run(waiting, ["ENQUEUE_EXPLANATION"]);
+      expect(held).toMatchObject({ claimed: 0, blocked: 0, failed: 0, deadLettered: 0, errors: [] });
+      expect(held.seeded?.byType.ENQUEUE_EXPLANATION).toBeUndefined();
+      expect(held.aiWork).toMatchObject({ mode: "HELD", reason: "AI_EVALUATION_NOT_ENABLED" });
+      expect(held.aiWork!.waitingExplanationTasks).toBeGreaterThan(0);
+      expect(held.aiWork!.jobsWithoutEvaluation).toBeGreaterThan(0);
+      expect(await taskRows(waiting)).toEqual(pending);
+
+      // The direct caller (re-match script) writes nothing either.
+      expect(await runExplanationQueueEnqueuer(db(), { context: ctx(), canonicalJobIds: [waiting.canonicalJobId] }))
+        .toEqual({ enqueued: 0, updated: 0, deferred: 0, heldReason: "AI_EVALUATION_NOT_ENABLED" });
+      // The switch without an approved cut-off is still closed.
+      process.env.AI_EVALUATION_ENABLED = "true";
+      expect((await runExplanationQueueEnqueuer(db(), { context: ctx() })).heldReason).toBe("AI_SCORE_CUTOFF_NOT_APPROVED");
+      // So is a cut-off without the score policy it was approved on.
+      process.env.AI_EVALUATION_SCORE_CUTOFF = "0";
+      expect((await runExplanationQueueEnqueuer(db(), { context: ctx() })).heldReason).toBe("AI_SCORE_POLICY_NOT_APPROVED");
+      closeSwitch();
+      expect(await counts()).toEqual(before);
+      expect(await jobState(waiting)).toEqual(stateBefore);
+
+      // A re-match and decision run through the worker queue no AI work: no successor, nothing seeded.
+      await enqueuePipelineTask({
+        taskType: "MATCH_PROFILE_EVIDENCE",
+        taskKey: `MATCH_PROFILE_EVIDENCE:${rematched.jobVersionId}:held-fixture`,
+        payload: {
+          canonical_job_id: rematched.canonicalJobId,
+          job_version_id: rematched.jobVersionId,
+          profile_version_id: profileV2,
+        },
+      }, db(), { context: ctx() });
+      const matched = await run(rematched, ["MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION", "ENQUEUE_EXPLANATION"]);
+      expect(matched).toMatchObject({ failed: 0, errors: [] });
+      expect((await jobState(rematched)).recommendation_outcome).toBe("REVIEW");
+      expect(await taskRows(rematched)).toEqual([]);
+      expect(await activeQueueRows(rematched)).toEqual([]);
+      expect(await counts()).toEqual(before);
+
+      // Open, but neither job is above the cut-off: no new task; the waiting task blocks visibly.
+      await db().query(
+        `UPDATE canonical_jobs SET recommendation_requirement_score = 0.5 WHERE workspace_id = $1 AND id = $2`,
+        [ctx().workspaceId, rematched.canonicalJobId],
+      );
+      openSwitch("0.9");
+      const below = await run(rematched, ["ENQUEUE_EXPLANATION"]);
+      expect(below.seeded?.byType.ENQUEUE_EXPLANATION).toBeUndefined();
+      expect(await taskRows(rematched)).toEqual([]);
+      const blocked = await run(waiting, ["ENQUEUE_EXPLANATION"]);
+      expect(blocked).toMatchObject({ claimed: 1, blocked: 1, failed: 0, deadLettered: 0 });
+      expect(await taskRows(waiting)).toEqual([expect.objectContaining({
+        status: "BLOCKED_DEPENDENCY",
+        blocked_on: `AI_SCORE_CUTOFF:${waiting.jobVersionId}`,
+      })]);
+      expect(await runExplanationQueueEnqueuer(db(), { context: ctx(), canonicalJobIds: [waiting.canonicalJobId] }))
+        .toEqual({ enqueued: 0, updated: 0, deferred: 0 });
+      expect((await counts()).queue).toBe(before.queue);
+      expect(await jobState(waiting)).toEqual(stateBefore);
+
+      expect(blocked.aiWork).toMatchObject({ mode: "OPEN", blockedOnScoreCutoff: 1 });
+
+      // The cut-off passes but the score policy is another one: still nothing, in the seed, the task and the enqueuer.
+      openSwitch("0", "deterministic_v3|role_shape_v1");
+      for (const job of [waiting, rematched]) {
+        const other = await run(job, ["ENQUEUE_EXPLANATION"]);
+        expect(other.seeded?.byType.ENQUEUE_EXPLANATION).toBeUndefined();
+        expect(other.completed).toBe(0);
+        expect(await runExplanationQueueEnqueuer(db(), { context: ctx(), canonicalJobIds: [job.canonicalJobId] }))
+          .toEqual({ enqueued: 0, updated: 0, deferred: 0 });
+      }
+      expect(await taskRows(rematched)).toEqual([]);
+      expect((await counts()).queue).toBe(before.queue);
+
+      // A job that does not qualify takes no seed slot: with a cap of one the older, lower job is passed over.
+      openSwitch("0.6");
+      await db().query(
+        `UPDATE canonical_jobs SET updated_at = NOW() - INTERVAL '10 days' WHERE workspace_id = $1 AND id = $2`,
+        [ctx().workspaceId, rematched.canonicalJobId],
+      );
+      const higher = await seedRoutableJob("held-higher", ["Zebra telemetry platform engineering experience"]);
+      await publishEmbeddings();
+      await runLaneRouter(db(), { context: ctx(), jobVersionIds: [higher.jobVersionId] });
+      await recordMatchAndDecision(higher, profileV2, "REVIEW", 90);
+      const capped = await seedRecoverablePipelineTasks(db(), {
+        context: ctx(), taskTypes: ["ENQUEUE_EXPLANATION"], includeTestFixtures: true,
+        jobVersionIds: [rematched.jobVersionId, higher.jobVersionId], maxSeedPerType: 1,
+      });
+      expect(capped.byType.ENQUEUE_EXPLANATION).toEqual({ inserted: 1, existing: 0 });
+      expect(await taskRows(higher)).toHaveLength(1);
+      expect(await taskRows(rematched)).toEqual([]);
+
+      // The owner's go with a cut-off both pass: the blocked task and the never-created one both run.
+      openSwitch("0");
+      for (const job of [waiting, rematched]) {
+        const released = await run(job, ["ENQUEUE_EXPLANATION"]);
+        expect(released).toMatchObject({ failed: 0, errors: [] });
+        expect(released.completed).toBe(1);
+        expect(await taskRows(job)).toEqual([expect.objectContaining({ status: "COMPLETED" })]);
+        expect(await activeQueueRows(job)).toHaveLength(1);
+      }
+    } finally {
+      openSwitch("0");
+    }
+  }, 180_000);
 });
