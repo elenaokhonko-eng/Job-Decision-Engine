@@ -1,3 +1,4 @@
+import type { AiScoreApproval } from "../platform/config/index.js";
 import pg from "pg";
 import { listLeadJobIds } from "../modules/catalog/index.js";
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
@@ -32,6 +33,11 @@ export interface EvaluationQueueSelection {
   readonly jobVersionIds?: readonly string[];
   readonly enqueuedAtOrAfter?: Date | string;
   readonly limit?: number;
+  /**
+   * Select only jobs whose stored ranking score is strictly above the owner's approved cut-off and was computed
+   * under the approved score policy.
+   */
+  readonly approval?: AiScoreApproval;
 }
 
 export interface EvaluationQueueReconciliation {
@@ -64,6 +70,10 @@ export async function selectEligibleEvaluationQueueRows(
   const leadIds = await listLeadJobIds(client, selection.workspaceId);
   const leadFilter = leadIds.length > 0
     ? `AND NOT (c.id = ANY($${params.push(leadIds)}::uuid[]))`
+    : "";
+  const scoreFilter = selection.approval
+    ? `AND c.recommendation_requirement_score > $${params.push(selection.approval.scoreCutoff)}::numeric
+       AND c.recommendation_score_policy = $${params.push(selection.approval.scorePolicy)}::text`
     : "";
   const limitClause = selection.limit !== undefined
     ? `LIMIT $${params.push(selection.limit)}`
@@ -103,6 +113,7 @@ export async function selectEligibleEvaluationQueueRows(
        ${jobVersionFilter}
        ${enqueuedAfterFilter}
        ${leadFilter}
+       ${scoreFilter}
        AND (
          eq.status = 'PENDING'
          OR (eq.status = 'RETRY_WAIT' AND (eq.available_at IS NULL OR eq.available_at <= NOW()))
@@ -254,7 +265,7 @@ export async function supersedeStaleEvaluationQueueRows(
  * Takes the unstarted queue rows of leads out of the queue. The row stays as history, the job keeps its state
  * (a lead is not rejected), and a job that stops being a lead is queued again like any other.
  */
-async function supersedeLeadEvaluationQueueRows(
+export async function supersedeLeadEvaluationQueueRows(
   client: pg.Pool | pg.PoolClient,
   reconciliation: EvaluationQueueReconciliation,
 ): Promise<number> {

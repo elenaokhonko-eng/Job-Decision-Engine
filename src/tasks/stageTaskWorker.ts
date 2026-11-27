@@ -21,7 +21,9 @@ import { LANE_ROUTER_RULE_VERSION, runLaneRouting as defaultRunLaneRouting } fro
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/laneRoutingCurrency.js";
 import { isLeadJobVersion, listLeadJobIds } from "../modules/catalog/index.js";
+import { supersedeLeadEvaluationQueueRows } from "../pipeline/evaluationQueueLineage.js";
 import {
+  AI_EVALUATION_OUTCOMES,
   AI_EVALUATION_OUTCOMES_SQL,
   PROFILE_REMATCH_OUTCOMES,
   currentMatcherPolicySql,
@@ -36,6 +38,14 @@ import {
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
+import { readAiWorkSettings } from "../platform/config/index.js";
+import {
+  AI_WORK_TASK_TYPE,
+  claimableTaskTypes,
+  describeAiWork,
+  jobVersionMayReceiveAiWork,
+  type AiWorkReport,
+} from "../modules/evaluation/index.js";
 import { classifyDescriptionQuality, completeRetrievedPostingPredicate, sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
 import { applicationReadinessViewAvailable } from "../services/currentApplicationReadiness.js";
 import { isRoutableWorkabilityVerification, routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
@@ -267,6 +277,8 @@ export interface PipelineStageWorkerSummary {
    * that decision completes.
    */
   decisionSuperseded: number;
+  /** The owner's AI switch during this run, with the waiting AI work (src/modules/evaluation). */
+  aiWork?: AiWorkReport;
   /** Model calls made by this run, by provider/model, with 429/timeout/retry counts. */
   providerCalls?: ProviderCallSummary;
   /** Logical AI calls by served path (FLEX/STANDARD/OPENAI/OPENAI_FALLBACK) with the go-live stop rules. */
@@ -354,10 +366,12 @@ function incrementSeed(
   summary: SeedPipelineTasksSummary,
   taskType: PipelineStageTaskType,
   inserted: boolean,
-  skippedReason?: "JOB_ARCHIVED" | "JOB_IS_LEAD",
+  skippedReason?: "JOB_ARCHIVED" | "JOB_IS_LEAD" | "AI_WORK_HELD",
 ): void {
   // A lead's AI enqueue task is not created: neither inserted nor existing.
   if (skippedReason === "JOB_IS_LEAD") return;
+  // Held AI work is neither inserted nor existing; the worker summary's aiWork counts it.
+  if (skippedReason === "AI_WORK_HELD") return;
   summary.byType[taskType] ??= { inserted: 0, existing: 0 };
   if (skippedReason === "JOB_ARCHIVED") {
     summary.skippedArchived += 1;
@@ -630,8 +644,14 @@ async function enqueueStageTaskResult(
 ) {
   // A lead never reaches the AI queue. No task is created, so none is left completed to suppress the enqueue once
   // the job has the employer's or the owner's posting and stops being a lead.
-  if (taskType === "ENQUEUE_EXPLANATION" && (await isLeadJobVersion(clientOrPool, context.workspaceId, id))) {
+  if (taskType === AI_WORK_TASK_TYPE && (await isLeadJobVersion(clientOrPool, context.workspaceId, id))) {
     return { taskId: "", inserted: false, reactivated: false, skippedReason: "JOB_IS_LEAD" as const };
+  }
+  // The one place every AI enqueue task is created (successors, re-route and seed): nothing is created while the
+  // owner's switch is closed or for a job not above the cut-off. The job keeps its state; the seed finds it later.
+  if (taskType === AI_WORK_TASK_TYPE &&
+    !(await jobVersionMayReceiveAiWork(clientOrPool, context.workspaceId, id, readAiWorkSettings()))) {
+    return { taskId: "", inserted: false, reactivated: false, skippedReason: "AI_WORK_HELD" as const };
   }
   const maxAttempts = MODEL_BACKED_STAGE_TASK_TYPES.has(taskType) ? 3 : 8;
   let taskPayload = payload;
@@ -967,10 +987,12 @@ export async function seedRecoverablePipelineTasks(
     // Leads are filtered before the cap, so they take no seed slot.
     const leadIds = await listLeadJobIds(client as any, ctx.workspaceId);
 
+    const aiWork = readAiWorkSettings();
     // Seed AI enqueue first. Jobs matched and decided outside the task chain (rematch and replay
     // scripts) reach the AI queue only through this seed, and it is the last stage before Apply Now.
     // Seeding stops at a shared time budget, so this seed must not wait behind the upstream seeds.
-    await selectAndEnqueue(
+    // Nothing is seeded while AI work is held. The cut-off filters before the cap, so jobs below it take no slot.
+    if (aiWork.mode === "OPEN") await selectAndEnqueue(
       client as any,
       ctx,
       summary,
@@ -1000,7 +1022,9 @@ export async function seedRecoverablePipelineTasks(
          AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
          -- AI evaluation is for Apply Now outcomes only; TRACK is excluded by design.
          AND c.recommendation_outcome IN (${AI_EVALUATION_OUTCOMES_SQL})
-         AND NOT (c.id = ANY($3::uuid[]))
+         AND c.recommendation_requirement_score > $3::numeric
+         AND c.recommendation_score_policy = $4::text
+         AND NOT (c.id = ANY($5::uuid[]))
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
          AND EXISTS (
            SELECT 1
@@ -1049,7 +1073,12 @@ export async function seedRecoverablePipelineTasks(
          )
        ORDER BY c.updated_at ASC
        LIMIT $2`,
-      [ctx.workspaceId, maxPerType, leadIds],
+      [
+        ctx.workspaceId,
+        maxPerType,
+        ...(aiWork.mode === "OPEN" ? [aiWork.scoreCutoff, aiWork.scorePolicy] : [null, null]),
+        leadIds,
+      ],
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
         payload: {
@@ -4050,6 +4079,16 @@ async function executeStageTask(
   if (taskType === "ENQUEUE_EXPLANATION") {
     await requireCurrentLaneRouting(jobVersionId, clientOrPool, ctx);
     await requireCurrentProfileMatchAndDecision(jobVersionId, clientOrPool, ctx);
+    // A task created before its job became a lead completes without queueing: a lead waits for no cut-off approval.
+    if (await isLeadJobVersion(clientOrPool, ctx.workspaceId, jobVersionId)) return;
+    // A task created before the cut-off applied waits, visibly, instead of completing without queueing anything.
+    if (!(await jobVersionMayReceiveAiWork(clientOrPool, ctx.workspaceId, jobVersionId, readAiWorkSettings()))) {
+      throw new PipelineTaskDependencyBlockedError(
+        `AI_SCORE_CUTOFF:${jobVersionId}`,
+        "OWNER_AI_CUTOFF",
+        `job_version_id=${jobVersionId} does not qualify under the approved AI score cut-off and score policy; it waits for the owner's approval or a new decision.`,
+      );
+    }
     await dependencies.runExplanationQueueEnqueuer(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
@@ -4266,6 +4305,9 @@ export async function runPipelineStageTaskWorker(
   const client = ownsClient ? await pool.connect() : pool;
   const ctx = options.context ?? (await resolveWorkspaceContext(client as any));
   const taskTypes = options.taskTypes ?? [...PIPELINE_STAGE_TASK_TYPES];
+  // Held AI tasks are not claimed (nor reconciled): they stay PENDING, untouched, until the owner's go.
+  const aiWork = readAiWorkSettings();
+  const claimTypes = claimableTaskTypes(taskTypes, aiWork);
   const maxTasks = options.maxTasks ?? 100;
   const claimBatchSize = options.claimBatchSize ?? 1;
   const stageQuantum = Math.max(1, Math.floor(options.stageQuantum ?? 1));
@@ -4344,7 +4386,8 @@ export async function runPipelineStageTaskWorker(
       });
     }
 
-    if (options.reconcileStalePending !== false) {
+    // An empty type list means "all types" to the reconciler, so it is not called with an emptied one.
+    if (options.reconcileStalePending !== false && !(taskTypes.length > 0 && claimTypes.length === 0)) {
       const reconciliationBudgetRemainingMs = Math.max(
         1,
         Math.min(staleReconciliationTimeBudgetMs, preparationBudgetMs - (Date.now() - startedAt)),
@@ -4356,7 +4399,7 @@ export async function runPipelineStageTaskWorker(
           apply: true,
           limit: options.maxStalePendingReconciliation ?? 100,
           timeBudgetMs: reconciliationBudgetRemainingMs,
-          taskTypes,
+          taskTypes: claimTypes,
           jobVersionIds: options.jobVersionIds,
           observationIds: options.observationIds,
         },
@@ -4400,7 +4443,7 @@ export async function runPipelineStageTaskWorker(
         if (summary.claimed + reservedTotal >= maxTasks || !canStartAnotherTask()) return null;
         if (!round) {
           const plan = planPipelineStageRound(
-            taskTypes,
+            claimTypes,
             stageQuantum,
             claimedByType,
             options.maxTasksByType ?? {},
@@ -4436,7 +4479,7 @@ export async function runPipelineStageTaskWorker(
           return { entry, limit };
         }
         if (currentRound.openClaims > 0) return "WAIT";
-        if (!currentRound.madeProgress || taskTypes.every((taskType) => (claimedByType[taskType] ?? 0) >= stageLimitFor(taskType))) {
+        if (!currentRound.madeProgress || claimTypes.every((taskType) => (claimedByType[taskType] ?? 0) >= stageLimitFor(taskType))) {
           dispatchDone = true;
           return null;
         }
@@ -4652,9 +4695,17 @@ export async function runPipelineStageTaskWorker(
         ? Math.round((stageSummary.executionDurationMs / stageSummary.claimed) / 10) / 100
         : null;
     }
-    const stageLimitsReached = taskTypes.every((taskType) =>
+    const stageLimitsReached = claimTypes.length > 0 && claimTypes.every((taskType) =>
       (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks))
     );
+    // A lead's unstarted queue row is not waiting AI work: it is superseded here whether or not the owner's switch
+    // is open, because the enqueuer and the evaluation worker, which also do this, do not run while it is closed.
+    if (taskTypes.includes(AI_WORK_TASK_TYPE)) {
+      const supersededLeadRows = await supersedeLeadEvaluationQueueRows(client, { workspaceId: ctx.workspaceId });
+      if (supersededLeadRows > 0) {
+        console.log(`[pipeline-worker] superseded ${supersededLeadRows} evaluation queue row(s) of leads.`);
+      }
+    }
     summary.durationMs = durationMs;
     summary.providerCalls = summarizeProviderCalls(diffProviderCalls(providerCallsAtStart, snapshotProviderCalls()));
     if (summary.providerCalls.total_calls > 0) {
@@ -4674,6 +4725,12 @@ export async function runPipelineStageTaskWorker(
         : stageLimitsReached
           ? "STAGE_LIMIT_REACHED"
           : "QUEUE_DRAINED";
+    if (taskTypes.includes(AI_WORK_TASK_TYPE)) {
+      summary.aiWork = await describeAiWork(client, ctx.workspaceId, AI_EVALUATION_OUTCOMES, aiWork);
+      if (aiWork.mode === "HELD") {
+        console.warn(`[pipeline-worker] AI work is held (${aiWork.reason}): ${JSON.stringify(summary.aiWork)}`);
+      }
+    }
 
     return summary;
   } finally {

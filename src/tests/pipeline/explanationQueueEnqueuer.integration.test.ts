@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import crypto from "crypto";
 import pg from "pg";
 import dotenv from "dotenv";
@@ -7,11 +7,15 @@ import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
 import { selectEligibleEvaluationQueueRows, supersedeStaleEvaluationQueueRows } from "../../pipeline/evaluationQueueLineage.js";
-import { seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
+import { runPipelineStageTaskWorker, seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
+import { describeAiWork } from "../../modules/evaluation/index.js";
+import { leadsInListsOrQueue } from "../../tasks/integrityZeroChecks.js";
+import { readScopedAiHold } from "../../../scripts/run_scoped_pilot.js";
 import { loadGlobalLanesConfig, loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
 import { upsertLaneRevision } from "../../lanes/registry.js";
 import { withMaximumAiInterpretationsPerRun } from "../../lanes/evaluationBudgetConfig.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
+import { openAiWorkForSuite, TEST_SCORE_POLICY } from "../fixtures/aiWorkSwitch.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -124,12 +128,12 @@ async function seedBudgetFixture(): Promise<void> {
          location_summary, workplace_type, employment_type,
          processing_status, processing_state, gate_decision, primary_lane,
          semantic_score, deterministic_match_score, recommendation_eligibility,
-         recommendation_outcome
+         recommendation_outcome, recommendation_requirement_score, recommendation_score_policy
        )
        VALUES (
          $1, $2, $3, $4, 'Remote', 'REMOTE', 'PERMANENT',
          'MATCHED', 'MATCHED', 'PASS', $5, 0.80, 80.00,
-         'ELIGIBLE', 'PRIORITY'
+         'ELIGIBLE', 'PRIORITY', 0.8, '${TEST_SCORE_POLICY}'
        )
        RETURNING id`,
       [
@@ -273,6 +277,8 @@ async function seedBudgetFixture(): Promise<void> {
     );
   }
 }
+
+openAiWorkForSuite();
 
 describe.skipIf(skipReal)("Explanation queue budget integration", () => {
   beforeAll(async () => {
@@ -812,5 +818,45 @@ describe.skipIf(skipReal)("AI queue: leads are left out", () => {
     await setLink(queued, "https://careers.example.com/jobs/lead-2");
     const again = await runExplanationQueueEnqueuer(getClient(), { context: getContext(), canonicalJobIds: [queued] });
     expect(again.enqueued).toBe(1);
+  }, 60_000);
+
+  it("while AI work is held, the worker still takes a lead out of the queue and counts nothing of it", async () => {
+    const database = getClient();
+    const { workspaceId } = getContext();
+    const target = ownIds[2]!;
+    const version = (await database.query<{ id: string }>(
+      `SELECT latest_job_version_id::text AS id FROM canonical_jobs WHERE id = $1`, [target])).rows[0]!.id;
+    await database.query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, blocked_on)
+       VALUES ($1, 'ENQUEUE_EXPLANATION', $2, jsonb_build_object('job_version_id', $4::text), 'BLOCKED_DEPENDENCY', $5),
+              ($1, 'ENQUEUE_EXPLANATION', $3, jsonb_build_object('job_version_id', $4::text), 'PENDING', NULL)`,
+      [workspaceId, `held-lead-blocked-${target}`, `held-lead-pending-${target}`, version, `AI_SCORE_CUTOFF:${version}`],
+    );
+    const counts = () => describeAiWork(database, workspaceId, ["PRIORITY"], { mode: "HELD", reason: "AI_EVALUATION_NOT_ENABLED" });
+    const before = await counts();
+    await setLink(target, "https://remotive.com/remote-jobs/invented-3");
+    const after = await counts();
+    expect(after.blockedOnScoreCutoff).toBe(before.blockedOnScoreCutoff - 1);
+    // Two: the task inserted above and the one the seed test created before the job was a lead.
+    expect(after.waitingExplanationTasks).toBe(before.waitingExplanationTasks - 2);
+    expect(after.waitingEvaluations).toBe(before.waitingEvaluations - 1);
+    expect(after.jobsWithoutEvaluation).toBe(before.jobsWithoutEvaluation - 1);
+    expect(await readScopedAiHold(database, workspaceId, version)).toMatchObject({ reason: "JOB_IS_LEAD" });
+    expect((await leadsInListsOrQueue(database, workspaceId)).detail).toMatchObject({ evaluation_queue: 1 });
+
+    vi.stubEnv("AI_EVALUATION_ENABLED", "false");
+    try {
+      const summary = await runPipelineStageTaskWorker(database, {
+        context: getContext(), taskTypes: ["ENQUEUE_EXPLANATION"], seed: false, maxTasks: 5, heartbeatSeconds: 0,
+      });
+      expect(summary).toMatchObject({ claimed: 0, failed: 0 });
+      expect(summary.aiWork).toMatchObject({ mode: "HELD" });
+    } finally {
+      vi.stubEnv("AI_EVALUATION_ENABLED", "true");
+    }
+    expect((await leadsInListsOrQueue(database, workspaceId)).detail).toMatchObject({ evaluation_queue: 0 });
+    const { rows } = await database.query(
+      `SELECT status FROM evaluation_queue WHERE canonical_job_id = $1`, [target]);
+    expect(rows).toEqual([{ status: "SUPERSEDED" }]);
   }, 60_000);
 });

@@ -26,6 +26,12 @@ export async function leadReadModelAvailable(db: CatalogQueryable): Promise<bool
   return available;
 }
 
+/** What every refusal for a lead says, so it is never reported as a stale or missing artifact. */
+export const JOB_IS_LEAD_REASON = "JOB_IS_LEAD";
+export const JOB_IS_LEAD_MESSAGE =
+  "This job is a lead: it is known only from job boards or aggregators, so it is not ranked, evaluated or prepared " +
+  "for application until the employer's own posting or your saved copy of it is observed.";
+
 export async function listLeadJobIds(db: CatalogQueryable, workspaceId: string): Promise<string[]> {
   if (!(await leadReadModelAvailable(db))) return [];
   return selectLeadCanonicalJobIds(db, workspaceId);

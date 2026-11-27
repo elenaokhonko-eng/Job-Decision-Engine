@@ -24,6 +24,8 @@ export interface ZeroCheckResult {
   readonly total: number;
   readonly sample: readonly string[];
   readonly detail?: Record<string, number>;
+  /** Set when the check could not run. Its total of 0 is then not a pass. */
+  readonly notEvaluated?: string;
 }
 
 const SAMPLE = 10;
@@ -333,7 +335,9 @@ export const LEAD_FREE_MEMBERSHIPS: Readonly<Record<string, string>> = {
  */
 export async function leadsInListsOrQueue(db: Queryable, workspaceId: string): Promise<ZeroCheckResult> {
   const name = "lead_in_list_or_queue";
-  if (!(await leadReadModelAvailable(db))) return result(name, [], { not_evaluated_migration_123_missing: 1 });
+  if (!(await leadReadModelAvailable(db))) {
+    return { ...result(name, [], { not_evaluated_migration_123_missing: 1 }), notEvaluated: "migration 123 is not applied" };
+  }
   const ids = new Set<string>();
   const detail: Record<string, number> = {};
   for (const [label, members] of Object.entries(LEAD_FREE_MEMBERSHIPS)) {
@@ -376,6 +380,17 @@ export async function runZeroChecks(
     await protectedJobsAutoArchived(db, workspaceId),
     ...postOnly,
   ];
+}
+
+/** The line scripts/check_integrity.ts prints for one check: OK only for a check that ran and found nothing. */
+export function describeZeroCheck(check: ZeroCheckResult): { status: "OK" | "FAILED" | "NOT_EVALUATED"; line: string } {
+  if (check.total > 0) {
+    return { status: "FAILED", line: `Found ${check.total} for ${check.name}; first ids: ${check.sample.join(", ")}` };
+  }
+  if (check.notEvaluated) {
+    return { status: "NOT_EVALUATED", line: `NOT EVALUATED: ${check.name} (${check.notEvaluated}).` };
+  }
+  return { status: "OK", line: `OK: ${check.name} is zero.` };
 }
 
 export function zeroChecksExitCode(results: readonly Pick<ZeroCheckResult, "total">[]): 0 | 1 {

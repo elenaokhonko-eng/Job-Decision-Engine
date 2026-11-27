@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import express from "express";
+import type { AddressInfo } from "node:net";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -8,9 +10,12 @@ import { SourceNameSchema } from "../../contracts/index.js";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { AGGREGATOR_HOSTS } from "../../ingestion/aggregatorHosts.js";
-import { isLeadJobVersion, listLeadJobIds } from "../../modules/catalog/index.js";
+import { createApiV2Router } from "../../api/v2/router.js";
+import { preflightApplicationDocumentDraft } from "../../documents/applicationDocumentPreflight.js";
+import { validatePersistedDocumentCurrentness } from "../../documents/provenanceCurrentness.js";
+import { isLeadJobVersion, JOB_IS_LEAD_MESSAGE, JOB_IS_LEAD_REASON, listLeadJobIds } from "../../modules/catalog/index.js";
 import { materializeApplicationRankings } from "../../services/applicationRankingMaterializer.js";
-import { LEAD_FREE_MEMBERSHIPS, leadsInListsOrQueue, runZeroChecks } from "../../tasks/integrityZeroChecks.js";
+import { describeZeroCheck, LEAD_FREE_MEMBERSHIPS, leadsInListsOrQueue, runZeroChecks } from "../../tasks/integrityZeroChecks.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { createProfile, createReadyJob, type JobIds } from "../fixtures/readyJobFixture.js";
 
@@ -303,6 +308,39 @@ describe.skipIf(skipReal)("leads leave every list and keep their history", () =>
     expect(marked.rows).toEqual([{ in_application_tracker: true }]);
   });
 
+  it("refuses an application handoff and new documents for a lead by saying it is a lead", async () => {
+    const app = express();
+    app.use(express.json());
+    app.use("/api/v2", createApiV2Router({ pool, resolveContext: async () => ctx }));
+    const server = app.listen(0);
+    try {
+      const { port } = server.address() as AddressInfo;
+      const response = await fetch(`http://127.0.0.1:${port}/api/v2/applications`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ canonical_job_id: board.canonicalJobId, job_version_id: board.jobVersionId }),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: JOB_IS_LEAD_MESSAGE, reason: JOB_IS_LEAD_REASON });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+    const record = await pool.query<{ id: string }>(
+      `SELECT id::text FROM application_records WHERE canonical_job_id = $1`, [board.canonicalJobId]);
+    const client = await pool.connect();
+    try {
+      await expect(preflightApplicationDocumentDraft(client, ctx, {
+        applicationRecordId: record.rows[0]!.id, canonicalJobId: board.canonicalJobId, jobVersionId: board.jobVersionId,
+      })).rejects.toThrow(JOB_IS_LEAD_MESSAGE);
+      expect(await validatePersistedDocumentCurrentness(client, ctx.workspaceId, {
+        canonicalJobId: board.canonicalJobId, jobVersionId: board.jobVersionId, matchRunId: board.matchRunId,
+        profileVersionId: null, deterministicDecisionId: board.decisionId, contextFingerprint: board.decisionFingerprint,
+      })).toEqual({ current: false, reason: JOB_IS_LEAD_REASON });
+    } finally {
+      client.release();
+    }
+  });
+
   it("returns the job to the lists, with the same artifacts, once the employer's posting is observed", async () => {
     const before = await history(board);
     const added = await addObservation(pool, ctx.workspaceId, board.jobVersionId, { source: "GREENHOUSE", url: "https://boards.greenhouse.io/x/jobs/3" });
@@ -350,8 +388,10 @@ describe.skipIf(skipReal)("leads leave every list and keep their history", () =>
     try {
       expect(await listLeadJobIds(alone, ctx.workspaceId)).toEqual([]);
       expect(await isLeadJobVersion(alone, ctx.workspaceId, board.jobVersionId)).toBe(false);
-      expect(await leadsInListsOrQueue(alone, ctx.workspaceId)).toMatchObject({
-        total: 0, detail: { not_evaluated_migration_123_missing: 1 },
+      const unevaluated = await leadsInListsOrQueue(alone, ctx.workspaceId);
+      expect(unevaluated).toMatchObject({ total: 0, detail: { not_evaluated_migration_123_missing: 1 } });
+      expect(describeZeroCheck(unevaluated)).toEqual({
+        status: "NOT_EVALUATED", line: "NOT EVALUATED: lead_in_list_or_queue (migration 123 is not applied).",
       });
     } finally {
       await alone.end();

@@ -1,3 +1,6 @@
+import { assertAiWorkSettingsValid, readAiWorkSettings, type AiWorkSettings } from "../src/platform/config/index.js";
+import { AI_WORK_TASK_TYPE, jobVersionMayReceiveAiWork } from "../src/modules/evaluation/index.js";
+import { isLeadJobVersion, JOB_IS_LEAD_REASON } from "../src/modules/catalog/index.js";
 import pg from "pg";
 import dotenv from "dotenv";
 
@@ -67,6 +70,8 @@ export interface ScopedPilotReport {
   } | null;
   readonly documentsEligible: boolean;
   readonly operationalError: string | null;
+  /** Set when the owner's AI switch held this job's explanation and evaluation; not an operational error. */
+  readonly aiHold?: { readonly reason: string; readonly waitingExplanationTasks: number } | null;
 }
 
 export interface ScopedPilotHistory {
@@ -226,6 +231,7 @@ export async function readScopedTaskHealth(
   client: pg.Pool | pg.PoolClient,
   workspaceId: string,
   jobVersionId: string,
+  aiWork: AiWorkSettings = readAiWorkSettings(),
 ): Promise<ScopedTaskHealth> {
   const { rows } = await client.query<{
     pending: number;
@@ -265,8 +271,10 @@ export async function readScopedTaskHealth(
              AND observation.job_version_id::TEXT = $2
          )
        )
-       AND task.status IN ('PENDING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY', 'RUNNING', 'DEAD_LETTER')`,
-    [workspaceId, jobVersionId],
+       AND task.status IN ('PENDING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY', 'RUNNING', 'DEAD_LETTER')
+       -- A task held by the owner's AI switch cannot be claimed, so it is not backlog or a stall.
+       AND NOT (task.task_type = ANY($3::text[]) AND task.status IN ('PENDING', 'RETRY_WAIT'))`,
+    [workspaceId, jobVersionId, aiWork.mode === "HELD" ? [AI_WORK_TASK_TYPE] : []],
   );
   const row = rows[0];
   return {
@@ -510,8 +518,34 @@ export function assertScopedPilotMode(env: NodeJS.ProcessEnv = process.env): voi
   }
 }
 
+/**
+ * Why the pilot's AI step did not run (a lead says so, whatever the switch), or NULL when the selected job version
+ * qualifies for AI work.
+ */
+export async function readScopedAiHold(
+  client: pg.Pool | pg.PoolClient,
+  workspaceId: string,
+  jobVersionId: string,
+  aiWork: AiWorkSettings = readAiWorkSettings(),
+): Promise<ScopedPilotReport["aiHold"]> {
+  const isLead = await isLeadJobVersion(client, workspaceId, jobVersionId);
+  if (!isLead && aiWork.mode === "OPEN" &&
+    await jobVersionMayReceiveAiWork(client, workspaceId, jobVersionId, aiWork)) return null;
+  const { rows } = await client.query<{ waiting: number }>(
+    `SELECT COUNT(*)::INTEGER AS waiting FROM pipeline_tasks
+      WHERE workspace_id = $1 AND task_type = $3 AND payload->>'job_version_id' = $2
+        AND status IN ('PENDING', 'RETRY_WAIT', 'RUNNING', 'BLOCKED_DEPENDENCY')`,
+    [workspaceId, jobVersionId, AI_WORK_TASK_TYPE],
+  );
+  return {
+    reason: isLead ? JOB_IS_LEAD_REASON : aiWork.mode === "HELD" ? aiWork.reason : "AI_JOB_NOT_APPROVED",
+    waitingExplanationTasks: Number(rows[0]?.waiting ?? 0),
+  };
+}
+
 export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilotReport> {
   assertScopedPilotMode();
+  assertAiWorkSettingsValid(readAiWorkSettings());
   const databaseUrl = process.env.DATABASE_URL?.trim();
   const directUrl = (process.env.DATABASE_URL_UNPOOLED || databaseUrl || "").trim();
   if (!databaseUrl) throw new Error("DATABASE_URL is required for the scoped pilot.");
@@ -599,6 +633,7 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
           evaluation: null,
           readiness: null,
           documentsEligible: false,
+          aiHold: await readScopedAiHold(client, context.workspaceId, args.jobVersionId),
           operationalError: `Source evidence refresh ended with ${sourceRefresh.status}${sourceRefresh.reasonCode ? ` (${sourceRefresh.reasonCode})` : ""}.`,
         };
       }
@@ -609,7 +644,8 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
       });
       if (worker.failed > 0 || worker.deadLettered > 0 || worker.errors.length > 0) {
         const current = await readCurrentDecisionAndReadiness(client, context, args.canonicalJobId, args.jobVersionId);
-        return thisReport({ target, args, preferenceRevisionId, sourceRefresh, resumedExistingWork, worker, evaluation: null, current, error: "Scoped pipeline worker reported a task failure." });
+        const aiHold = await readScopedAiHold(client, context.workspaceId, args.jobVersionId);
+        return { ...thisReport({ target, args, preferenceRevisionId, sourceRefresh, resumedExistingWork, worker, evaluation: null, current, error: "Scoped pipeline worker reported a task failure." }), aiHold };
       }
 
       const evaluationProfileVersionId = await readScopedEvaluationProfileVersion(client, context);
@@ -709,6 +745,7 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
           checks: readinessChecks,
         },
         documentsEligible,
+        aiHold: await readScopedAiHold(client, context.workspaceId, args.jobVersionId),
         operationalError: operationalError ?? (evaluation?.failed ? "Scoped evaluation queued one or more tasks for retry." : null),
       };
     } finally {

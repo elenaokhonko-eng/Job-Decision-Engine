@@ -34,6 +34,7 @@ import { CLAIM_PIPELINE_TASKS_SQL, claimPipelineTasks, enqueuePipelineTask } fro
 import { runPipelineStageTaskWorker, type PipelineStageTaskType } from "../../tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION } from "../fixtures/completePostingEvidence.js";
+import { openAiWorkForSuite } from "../fixtures/aiWorkSwitch.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -260,6 +261,8 @@ async function analyzedPlan(sql: string, params: unknown[], setup: string[] = []
     await db().query("ROLLBACK");
   }
 }
+
+openAiWorkForSuite();
 
 describe.skipIf(skipReal)("pipeline worker throughput (PostgreSQL)", () => {
   beforeAll(async () => {

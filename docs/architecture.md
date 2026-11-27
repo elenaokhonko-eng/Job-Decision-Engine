@@ -243,7 +243,33 @@ Order of work:
 - A job that passes the gates continues to 6, 7, 8 and 9. So does a job whose only open items are workability facts that can be checked later, such as an unknown work mode (`src/pipeline/verificationRouting.ts`). It is matched and triaged while the question is open.
 - A hard-rejected job, and any other job that needs verification, goes straight to stage 9, so its decision is recorded.
 - If lane routing finds no lane, the job becomes `UNMATCHED` and stops. If routing could not run for a technical reason, the job becomes `ROUTING_DEFERRED` and goes to stage 9.
-- Stage 10 follows stage 9 only when eligibility is `ELIGIBLE` and the outcome is `PRIORITY` or `REVIEW`.
+- Stage 10 follows stage 9 only when eligibility is `ELIGIBLE` and the outcome is `PRIORITY` or `REVIEW`, and only when the owner's AI switch allows it (below).
+
+### The owner's AI switch
+
+Explanation and evaluation work fails closed. It is queued and run only when all three are set (`src/platform/config/aiWorkConfig.ts`), with no defaults:
+
+| Setting | Value |
+|---|---|
+| `AI_EVALUATION_ENABLED` | exactly `true` |
+| `AI_EVALUATION_SCORE_CUTOFF` | the cut-off the owner approved, a decimal from 0 up to, not including, 1 |
+| `AI_EVALUATION_SCORE_POLICY` | the score scale it was approved on, as stored in `canonical_jobs.recommendation_score_policy` (`<match policy>\|<role-shape policy>`) |
+
+A job qualifies when its stored ranking score (`canonical_jobs.recommendation_requirement_score`) is strictly above the cut-off and its score policy equals the approved one. A job with no score, or scored under another policy, does not qualify. The rule is in `src/modules/evaluation/`.
+
+A value that is set but cannot be read holds the AI work and fails the run: the pipeline worker finishes its other stages and exits non-zero; the evaluation worker, the enqueuer, the scoped pilot and the model comparison stop at once.
+
+| Path | Switch closed | Switch open, job does not qualify |
+|---|---|---|
+| Creating an `ENQUEUE_EXPLANATION` task (successor of stage 9, successor of a lane re-route, recoverable seed) | Not created | Not created |
+| An `ENQUEUE_EXPLANATION` task already waiting | Not claimed and not reconciled; stays `PENDING`, `RETRY_WAIT`, or `RUNNING` with its expired lease, unchanged | `BLOCKED_DEPENDENCY` on `AI_SCORE_CUTOFF:<job version id>` when claimed |
+| `runExplanationQueueEnqueuer` (any caller, including the re-match script) | Reads and writes nothing | No queue row, no deferral, no state change |
+| `scripts/evaluate_queue.ts` | Evaluates no queue item, makes no model call; only supersedes unstarted rows of leads | Makes no model call for the row; the row stays queued |
+| `scripts/compare_evaluation_models.ts --run` | Refuses and exits non-zero | The job is left out of the sample |
+
+Holding is not a rejection: no job state, decision or deferral row changes. The one queue change made while held is for a lead (below), whose unstarted row is not waiting AI work. When the switch opens, waiting tasks are claimed and the recoverable seed creates the missing ones. A blocked task is reopened only when the same task identity is enqueued again; otherwise a new task is created and the blocked row stays, still counted.
+
+The worker summary and the evaluation worker report `aiWork`: the switch, waiting tasks (and how many of them have an expired lease), tasks blocked on the cut-off, unfinished queue rows (and, while open, how many do not qualify) and jobs without an evaluation. While the switch is closed, the pending and retry SLOs of the pipeline worker and of the scoped pilot leave held tasks out; queue health still counts them. The scoped pilot report names the hold in `aiHold`. While the switch is closed, a waiting task also does not run its lane, profile or decision currency repairs; the lane re-route and profile re-match seeds still run.
 
 Task seeds (`seedRecoverablePipelineTasks`, `src/tasks/stageTaskWorker.ts`):
 
@@ -260,7 +286,7 @@ After the stages:
 
 | Step | Code today | Target module |
 |---|---|---|
-| Advisory evaluation of queued jobs | `scripts/evaluate_queue.ts` | `evaluation` |
+| Advisory evaluation of queued jobs, behind the owner's AI switch | `scripts/evaluate_queue.ts` | `evaluation` |
 | Ranking of Apply Now jobs into Top 10 Ready | `scripts/materialize_application_rankings.ts`, `src/services/applicationRankingMaterializer.ts` | `decision` |
 | Archiving of rejected and aged jobs | `scripts/archive_jobs.ts`, `src/services/jobArchive.ts` | `catalog` |
 
@@ -368,9 +394,11 @@ Every host and source entry is a row of `v_job_lead_rules`; changing the MyCaree
 
 `v_canonical_shortlist_scoped` excludes leads, so every view built on it does. The AI enqueue, the evaluation queue selection and the review draw ask the `catalog` module (`listLeadJobIds`, `isLeadJobVersion`); unstarted queue rows of a lead are marked `SUPERSEDED`. Hard gates, lanes, matching, decisions and content fetches run for leads as for any job. The must-be-zero check `lead_in_list_or_queue` fails a post-drain reconcile when a lead is in a list or the AI queue.
 
+The superseding does not wait for the owner's AI switch: the pipeline worker (any run that includes `ENQUEUE_EXPLANATION`) and `scripts/evaluate_queue.ts` do it while the switch is closed too, so a held queue never keeps a lead. The `aiWork` counts leave leads out. A waiting enqueue task of a lead completes without queueing and is never blocked on the cut-off. An application handoff, a document draft preflight, a document currentness check and the scoped pilot's `aiHold` name a lead as `JOB_IS_LEAD`.
+
 A live job is therefore in exactly one of: a status bucket, awaiting content, or `v_job_leads_scoped` (live, content-complete, not hard-rejected or removed leads). A hard-rejected or removed lead stays in its audit bucket. A lead the owner saved to the application tracker stays there, marked as a lead.
 
-Until migration 123 is applied the code treats no job as a lead, says so in the log, and the check reports that it was not evaluated.
+Until migration 123 is applied the code treats no job as a lead, says so in the log, and the check reports that it was not evaluated (`scripts/check_integrity.ts` prints `NOT EVALUATED`, not `OK`).
 
 ### What blocks a job
 
@@ -422,7 +450,7 @@ All four stop when the repository variable `WORKFLOW_KILL_SWITCH` is `true`.
 
 ## 14. As built
 
-The code predates the target layout. Only the first parts have moved: `src/modules/catalog/` (the lead questions), its repository `src/platform/persistence/catalog/`, `src/platform/config/` and `src/platform/llm/`. Nothing lives under `src/interfaces/` or `src/app/` yet.
+Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `catalog` and `evaluation` repositories; `src/modules/catalog/` (the lead questions) and `src/modules/evaluation/` (the owner's AI switch) are the first domain modules. Nothing lives under `src/interfaces/` or `src/app/` yet.
 
 | Area today | Holds | Goes to |
 |---|---|---|
