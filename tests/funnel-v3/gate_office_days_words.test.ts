@@ -38,7 +38,7 @@ const officeReject = (result: ReturnType<typeof gate>) =>
 describe("office-day counts in words", () => {
   it("keeps the existing thresholds and carries the new gate version", () => {
     expect([policy.maxOfficeDaysPerWeek, policy.hardFailOfficeDaysPerWeek]).toEqual([3, 4]);
-    expect(GATE_VERSION).toBe("gate-2026-11.10");
+    expect(GATE_VERSION).toBe("gate-2026-11.11");
   });
 
   it.each([

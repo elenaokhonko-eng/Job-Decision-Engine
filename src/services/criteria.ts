@@ -1602,10 +1602,9 @@ function evaluateGlobalGates(
   }
 
   // ── 14. Universal Negative Domain Exclusions ──
-  const universalNegativeKw = [
-    "payments", "merchant acquiring", "remittance", "bnpl", "buy now pay later",
-    "consumer lending", "card issuing", "credit card", "pos terminals"
-  ];
+  // Payments is neutral (owner decision, gate-2026-11.11): no payments title is rejected here,
+  // and none is preferred anywhere.
+  const universalNegativeKw = ["consumer lending"];
   for (const kw of universalNegativeKw) {
     if (t.includes(kw)) {
       return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Universal negative domain in title: "${kw}"`]);
