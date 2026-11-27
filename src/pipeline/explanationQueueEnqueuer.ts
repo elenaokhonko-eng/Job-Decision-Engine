@@ -8,7 +8,7 @@ import { loadWorkspaceLanesConfig } from "./laneConfigLoader.js";
 import { PersistedEvaluationQueueItemSchema } from "../contracts/index.js";
 import { supersedeStaleEvaluationQueueRows } from "./evaluationQueueLineage.js";
 import { laneRoutingCurrentSql } from "../lanes/laneRoutingCurrency.js";
-import { AI_EVALUATION_OUTCOMES_SQL } from "./profileMatchCurrency.js";
+import { AI_EVALUATION_OUTCOMES_SQL, carriedScoreDecisionSql } from "./profileMatchCurrency.js";
 import { assertAiWorkSettingsValid, readAiWorkSettings, type AiWorkHoldReason } from "../platform/config/index.js";
 
 dotenv.config();
@@ -356,6 +356,7 @@ export async function runExplanationQueueEnqueuer(
            AND dd.job_version_id = target_jv.id
            AND dd.match_run_id = mr.id
            AND dd.context_fingerprint IS NOT NULL
+           AND NOT ${carriedScoreDecisionSql("dd")}
           LEFT JOIN lane_decisions ld
             ON ld.workspace_id = c.workspace_id
            AND ld.id = c.latest_lane_decision_id

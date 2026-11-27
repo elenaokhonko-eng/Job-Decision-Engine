@@ -256,6 +256,18 @@
           ],
           "default": null
         },
+        "awaiting_rematch_since": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "nd_friendly_score": {
           "anyOf": [
             {

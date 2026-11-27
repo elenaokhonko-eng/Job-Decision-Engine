@@ -1,3 +1,4 @@
+import { STORED_SCORE_CARRIED_NOTE } from "../modules/decision/index.js";
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 import { activeScoringPolicy, matcherPolicyVersionFor } from "./scoringPolicy.js";
 
@@ -232,4 +233,13 @@ export function decisionOnLatestMatchSql(canonicalAlias: string, decisionAlias: 
     AND ${dd}.match_run_id = ${c}.latest_match_run_id
     AND ${dd}.context_fingerprint IS NOT NULL
   )`;
+}
+
+/**
+ * SQL predicate: the decision (alias `dd`) carried a stored score forward instead of computing one. An old score never
+ * sends a job to AI, so such a decision is never enqueued for evaluation.
+ */
+export function carriedScoreDecisionSql(decisionAlias: string): string {
+  const dd = alias(decisionAlias, "decision alias");
+  return `COALESCE(${dd}.decision_json->'trace'->'notes' ? '${STORED_SCORE_CARRIED_NOTE}', FALSE)`;
 }

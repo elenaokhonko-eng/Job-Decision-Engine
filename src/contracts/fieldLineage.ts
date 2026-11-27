@@ -230,6 +230,14 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     nullable: true
   },
   {
+    field: "awaiting_rematch_since",
+    sourceTable: "v_job_awaiting_rematch",
+    sourceColumn: "waiting_since",
+    producerStage: "124_awaiting_rematch_view.sql",
+    transformation: "Since when a job has held a stored score with no current profile match; null when it is not waiting",
+    nullable: true
+  },
+  {
     field: "nd_friendly_score",
     sourceTable: "ai_evaluations",
     sourceColumn: "nd_friendly_score",

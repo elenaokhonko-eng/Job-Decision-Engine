@@ -446,6 +446,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             s.recommendation_coverage_score,
             s.recommendation_evidence_completeness,
             s.recommendation_decided_at,
+            awaiting.waiting_since AS awaiting_rematch_since,
             s.nd_friendly_score,
             s.politics_stress_score,
             s.sensory_overload_index,
@@ -485,6 +486,9 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             ON readiness.workspace_id = s.workspace_id
            AND readiness.canonical_job_id = s.canonical_job_id
            AND readiness.job_version_id::text = s.job_version_id::text
+          LEFT JOIN v_job_awaiting_rematch awaiting
+            ON awaiting.workspace_id = s.workspace_id
+           AND awaiting.canonical_job_id = s.canonical_job_id
           WHERE s.workspace_id = $1
           ${cursorClause}
           ORDER BY s.observed_at DESC, s.canonical_job_id DESC

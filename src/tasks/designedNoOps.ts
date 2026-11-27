@@ -21,9 +21,7 @@ export type DecisionNotStampableReason =
   /** The job was removed by the user (MANUALLY_REMOVED) before or while the task ran. */
   | "JOB_REMOVED"
   /** The job was archived between the claim and the decider run. */
-  | "JOB_ARCHIVED"
-  /** The recompute had no score where the job has a stored one, so the decider wrote nothing. */
-  | "STORED_SCORE_KEPT";
+  | "JOB_ARCHIVED";
 
 export function decisionNotStampable(reason: DecisionNotStampableReason): string {
   return `${DECISION_NOT_STAMPABLE_PREFIX}${reason}`;

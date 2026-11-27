@@ -61,6 +61,8 @@ export const ShortlistRowV2Schema = z.object({
   recommendation_coverage_score: PostgresUnitIntervalSchema,
   recommendation_evidence_completeness: PostgresUnitIntervalSchema,
   recommendation_decided_at: z.coerce.date().nullable(),
+  // Set while the job keeps a stored score and outcome and waits for a re-match (v_job_awaiting_rematch).
+  awaiting_rematch_since: z.coerce.date().nullable().default(null),
   nd_friendly_score: PostgresPercentIntegerSchema,
   politics_stress_score: PostgresPercentIntegerSchema,
   sensory_overload_index: PostgresPercentIntegerSchema,

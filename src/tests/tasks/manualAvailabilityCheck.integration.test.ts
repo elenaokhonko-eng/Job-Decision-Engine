@@ -16,7 +16,6 @@ import {
   type AvailabilityRecheckDependencies,
 } from "../../tasks/availabilityRecheck.js";
 import { fetchJobContent } from "../../ingestion/jobContentFetcher.js";
-import { runRecommendationDecider } from "../../pipeline/recommendationDecider.js";
 import {
   applyAvailabilityCheck,
   checkDate,
@@ -520,7 +519,7 @@ describe.skipIf(skipReal)("manual same-day availability check (PostgreSQL)", () 
     expect(await verdictVisible(db(), ctx().workspaceId, randomUUID(), false, new Date())).toBe(false);
   });
 
-  it("does not let the recompute remove the stored score of a job whose match is not current", async () => {
+  it("keeps the stored score of a job whose match is not current, and writes a posting that closed", async () => {
     const withScore = async () => {
       const job = await createJob();
       await db().query(
@@ -530,21 +529,15 @@ describe.skipIf(skipReal)("manual same-day availability check (PostgreSQL)", () 
       return job;
     };
     const stored = async (job: Fixture) => (await db().query(
-      `SELECT recommendation_requirement_score::float AS score, recommendation_outcome AS outcome, latest_deterministic_decision_id AS decision
+      `SELECT recommendation_requirement_score::float AS score, recommendation_outcome AS outcome
          FROM canonical_jobs WHERE id = $1`, [job.id])).rows[0];
 
-    // The decider itself keeps it, for every caller: nothing about the manual check is special here.
-    const direct = await withScore();
-    const summary = await runRecommendationDecider(db(), { context: ctx(), canonicalJobIds: [direct.id], jobVersionIds: [direct.versionId] });
-    expect(summary).toMatchObject({ errors: 0, scoresKept: 1 });
-    expect((await stored(direct)).score).toBe(0.75);
-
-    for (const respond of [(job: Fixture) => (url: URL) => openPage(url, job.board), () => (url: URL) => page(url, 404)]) {
-      const job = await withScore();
-      const results = await check(job, respond(job));
-      expect(results).toMatchObject([{ visible: true, scoreKept: true }]);
-      expect(await stored(job)).toEqual({ score: 0.75, outcome: "REVIEW", decision: null });
-    }
+    const open = await withScore();
+    expect(await check(open, (url) => openPage(url, open.board))).toMatchObject([{ visible: true }]);
+    expect(await stored(open)).toEqual({ score: 0.75, outcome: "REVIEW" });
+    const closed = await withScore();
+    expect(await check(closed, (url) => page(url, 404))).toMatchObject([{ visible: true }]);
+    expect(await stored(closed)).toEqual({ score: 0.75, outcome: "SKIP" });
   });
 
   it("a manual cannot-tell between automatic reads neither forks the retry chain nor brings the archive closer", async () => {

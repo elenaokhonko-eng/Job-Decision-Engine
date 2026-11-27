@@ -9,6 +9,7 @@ import { OWNER_SAVED_SOURCE_NAMES } from "../services/jobArchiveHardRejectedPoli
 import { GATE_VERSION } from "../contracts/version.js";
 import { DECIDER_VERSION, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
+import { AWAITING_REMATCH_LIMIT_DAYS } from "../modules/decision/index.js";
 import { LANE_ROUTER_RULE_VERSION } from "../pipeline/laneRouter.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
 import { routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
@@ -318,6 +319,22 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
  * right after a rule-version change until the reopen seeds have drained. The default, "post", is strict
  * and runs every check.
  */
+/** A job that has kept a stored result for longer than the limit without a re-match: nothing waits indefinitely. */
+export async function jobsAwaitingRematchOverLimit(
+  db: Queryable,
+  workspaceId: string,
+  limitDays: number = AWAITING_REMATCH_LIMIT_DAYS,
+): Promise<ZeroCheckResult> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT canonical_job_id::text AS id
+       FROM v_job_awaiting_rematch
+      WHERE workspace_id = $1::uuid AND waiting_since < NOW() - make_interval(days => $2::int)
+      ORDER BY canonical_job_id`,
+    [workspaceId, limitDays],
+  );
+  return result("awaiting_rematch_over_limit", rows.map((row) => row.id));
+}
+
 export async function runZeroChecks(
   db: Queryable,
   workspaceId: string,
@@ -325,7 +342,9 @@ export async function runZeroChecks(
 ): Promise<ZeroCheckResult[]> {
   // Post phase only, like the stale-stage check: a job-local policy disagreement that processing cannot fix must stay visible and
   // failing, but must not stop the drain that runs after the pre-drain reconcile.
-  const postOnly = options.phase === "pre" ? [] : [await terminalOutcomeConflicts(db, workspaceId), await staleStageResults(db, workspaceId)];
+  const postOnly = options.phase === "pre"
+    ? []
+    : [await terminalOutcomeConflicts(db, workspaceId), await staleStageResults(db, workspaceId), await jobsAwaitingRematchOverLimit(db, workspaceId)];
   return [
     await rejectedJobsWithRecommendation(db, workspaceId),
     await listedJobsNotCurrentlyOpen(db, workspaceId),

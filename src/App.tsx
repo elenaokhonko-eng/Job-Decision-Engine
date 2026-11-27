@@ -683,6 +683,11 @@ function JobDetail({
         <Info label="Coverage" value={scorePercent(job.recommendation_coverage_score)} />
         <Info label="Observed" value={compactDate(job.observed_at)} />
       </div>
+      {job.awaiting_rematch_since ? (
+        <div className="notice warning">
+          <strong>Awaiting re-match since {compactDate(job.awaiting_rematch_since)}:</strong> the score and outcome shown are the stored ones.
+        </div>
+      ) : null}
       {!artifactIsCurrent ? (
         <div className="notice warning">
           <strong>Verification required:</strong> {job.current_artifact_status}

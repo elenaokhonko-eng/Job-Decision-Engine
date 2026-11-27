@@ -23,6 +23,7 @@ import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/l
 import {
   AI_EVALUATION_OUTCOMES,
   AI_EVALUATION_OUTCOMES_SQL,
+  carriedScoreDecisionSql,
   PROFILE_REMATCH_OUTCOMES,
   currentMatcherPolicySql,
   currentProfileMatchSql,
@@ -3047,6 +3048,21 @@ async function markTaskTargetProcessingError(
   );
 }
 
+async function latestDecisionCarriesStoredScore(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<boolean> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ carried: boolean }>(
+    `SELECT ${carriedScoreDecisionSql("dd")} AS carried
+       FROM canonical_jobs c
+       JOIN deterministic_decisions dd ON dd.workspace_id = c.workspace_id AND dd.id = c.latest_deterministic_decision_id
+      WHERE c.workspace_id = $1 AND c.latest_job_version_id = $2::uuid`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return rows[0]?.carried === true;
+}
+
 async function maybeEnqueueAfterTask(
   taskType: PipelineStageTaskType,
   task: ClaimedPipelineTask,
@@ -3143,15 +3159,21 @@ async function maybeEnqueueAfterTask(
   }
 
   const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
+  // The re-gate of a restored job re-runs the same job version too. Without its own successor identities the completed
+  // tasks of the first run suppress them, and the restored job (outcome cleared) would never be decided again.
+  const restoreReason = taskType === "APPLY_HARD_GATES" && typeof payload.reassessment_reason === "string"
+    && payload.reassessment_reason.startsWith("ARCHIVE_RESTORE:")
+    ? payload.reassessment_reason
+    : null;
   const stagePayload = {
     canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
     job_version_id: jobVersionId,
     // A gate-version refresh whose outcome changed re-runs the downstream stages for the SAME job version: its successors need
     // repair-variant task keys, or the completed tasks of the first run would suppress them and the job would wait forever.
-    ...(payload.reprocess_existing_state === true || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
+    ...(payload.reprocess_existing_state === true || restoreReason !== null || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
       ? { reprocess_existing_state: true }
       : {}),
-    ...(payload.repair_existing_state === true || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
+    ...(payload.repair_existing_state === true || restoreReason !== null || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
       ? { repair_existing_state: true }
       : {}),
     ...(typeof payload.repair_dependency === "string" ? { repair_dependency: payload.repair_dependency } : {}),
@@ -3163,6 +3185,7 @@ async function maybeEnqueueAfterTask(
     ...(taskType === "APPLY_HARD_GATES" && payload.version_refresh === true
       ? { repair_generation: typeof payload.gate_rule_version === "string" && payload.gate_rule_version.trim() !== "" ? payload.gate_rule_version.trim() : GATE_VERSION }
       : {}),
+    ...(restoreReason !== null ? { repair_generation: restoreReason } : {}),
   };
 
   if (taskType === "APPLY_HARD_GATES") {
@@ -3254,7 +3277,9 @@ async function maybeEnqueueAfterTask(
   if (
     taskType === "DECIDE_RECOMMENDATION" &&
     state.recommendationEligibility === "ELIGIBLE" &&
-    isAiEvaluationOutcome(state.recommendationOutcome)
+    isAiEvaluationOutcome(state.recommendationOutcome) &&
+    // An old score never sends a job to AI: a kept result waits for its re-match, whose own decide queues it.
+    !(await latestDecisionCarriesStoredScore(clientOrPool, ctx, jobVersionId))
   ) {
     await enqueueSuccessor("ENQUEUE_EXPLANATION", jobVersionId, stagePayload);
   }
@@ -4026,10 +4051,6 @@ async function executeStageTask(
     }
     if (summary.errors > 0) {
       throw new Error(`Recommendation decider reported ${summary.errors} error(s).`);
-    }
-    if ((summary.scoresKept ?? 0) > 0) {
-      onDesignedNoOp(decisionNotStampable("STORED_SCORE_KEPT"));
-      return;
     }
     // Completion guard: the task is a success only when a decision row exists for this version (stamped under the current
     // decider version for a reassessment), or the decider could not select the job by design, recorded as a repair_action. A

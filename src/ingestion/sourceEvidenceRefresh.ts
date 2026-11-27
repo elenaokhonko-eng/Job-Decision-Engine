@@ -878,14 +878,6 @@ export async function refreshCanonicalJobSourceEvidence(
         canonicalJobIds: [request.canonicalJobId],
         jobVersionIds: [request.jobVersionId],
       });
-      // The decider keeps a stored score it cannot recompute and writes no decision: the evidence is refreshed, and
-      // the decision follows once the job has a current match. That is not a failed recompute.
-      if (readiness.errors === 0 && (readiness.scoresKept ?? 0) > 0) {
-        return refreshResult(request, "REFRESHED", "STORED_SCORE_KEPT", {
-          evidenceRevisionHash: revisionHash,
-          readinessRecomputed: false,
-        });
-      }
       const persistedReadiness = await client.query<{ available: boolean }>(
         `SELECT EXISTS (
            SELECT 1
