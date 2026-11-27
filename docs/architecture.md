@@ -311,6 +311,24 @@ Worked example: fit 80, coverage 60, evidence 70, lane 100 gives (80 x 37.5 + 60
 - A latest policy that gives an AI term a weight is refused for that workspace: the materializer returns `policyError`, writes nothing, and the script exits non-zero.
 - Version rule: a snapshot is keyed by `ranking_policy_version`, and the read models join the latest policy version, so a new `ranking_policies` row makes the materializer write a new snapshot for every eligible job (no AI call). Until it runs, the Top 10 is empty. The previous version's snapshots stay as history. `src/pipeline/rankingPolicyComparison.ts` compares two policy versions read-only (Top 10 side by side, rated rows marked, lane confidence effect).
 
+### Review lists (a command, not a stage)
+
+`scripts/build_review_lists.ts` builds lists for the owner to rate, so that a proposed ordering can be tested before it changes anything. It reads a replay copy only, in one read-only transaction, and writes nothing to the database: no job state, decision, read model or table changes, and nothing is rejected. It makes no model call and reads no posting site.
+
+| Part | Where |
+|---|---|
+| Role-type and sector classifier, list building, blind sheet, pass rule | `src/modules/decision/domain/` (pure) |
+| Candidate loading | `src/modules/decision/handlers/reviewLists.ts` |
+| Queries | `src/platform/persistence/decision/index.ts` |
+| Read-only session | `src/platform/persistence/index.ts` |
+| Wiring, replay guard, files | `src/app/reviewLists.ts` |
+
+- **The ranking design is profile data.** Role types, statuses, sectors and employer lists are in `private/profile/ranking_design.json`, checked by a strict schema. The repository holds an invented example, `fixtures/ranking_design.example.json`. A missing or invalid design, or an employer override list not marked approved, stops the command.
+- **Sector** is the employer's industry: the design's lists, the industry tags of `config/companies.yml` that the design maps (never a tag that names a function), or words in the employer's name. A job's lane and its posting text do not decide it. Unknown is neutral.
+- **Role type** comes from the title, with the career track as a fallback. An unknown role stays in the pool. A "never" role type or sector is only left out of the lists.
+- **Candidates**: live, not a fixture, gate `PASS`, complete content (`v_job_content_state`), with a link, not a lead (`listLeadJobIds`, `v_job_lead_state`; without migration 123 the command stops), not known `CLOSED` (`v_job_availability_current`), and not rated in an earlier key file under `private/review/`. Records of one posting are collapsed.
+- **Output** is only under `private/review/`: a blind sheet, a key and a job id file for the same-day availability check. `--score` reads a filled sheet and its key and applies the pass rule.
+
 ## 10. Job states, decisions and status
 
 ### Job states
@@ -450,7 +468,7 @@ All four stop when the repository variable `WORKFLOW_KILL_SWITCH` is `true`.
 
 ## 14. As built
 
-Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `catalog` and `evaluation` repositories; `src/modules/catalog/` (the lead questions) and `src/modules/evaluation/` (the owner's AI switch) are the first domain modules. Nothing lives under `src/interfaces/` or `src/app/` yet.
+Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `catalog` and `evaluation` repositories; `src/modules/catalog/` (the lead questions) and `src/modules/evaluation/` (the owner's AI switch) are the first domain modules. `src/modules/decision/` with its repository holds the review lists (section 9), whose wiring is the first file under `src/app/`. Nothing lives under `src/interfaces/` yet.
 
 | Area today | Holds | Goes to |
 |---|---|---|
