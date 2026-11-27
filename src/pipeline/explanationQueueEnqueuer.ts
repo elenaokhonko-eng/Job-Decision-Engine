@@ -9,6 +9,7 @@ import { PersistedEvaluationQueueItemSchema } from "../contracts/index.js";
 import { supersedeStaleEvaluationQueueRows } from "./evaluationQueueLineage.js";
 import { laneRoutingCurrentSql } from "../lanes/laneRoutingCurrency.js";
 import { AI_EVALUATION_OUTCOMES_SQL } from "./profileMatchCurrency.js";
+import { listLeadJobIds } from "../modules/catalog/index.js";
 import { assertAiWorkSettingsValid, readAiWorkSettings, type AiWorkHoldReason } from "../platform/config/index.js";
 
 dotenv.config();
@@ -224,6 +225,11 @@ export async function runExplanationQueueEnqueuer(
         runSnapshot.source,
         runSnapshot.version,
       ];
+      // Leads (v_job_lead_state) never enter the AI queue: no queue row, no deferral, no state change.
+      const leadIds = await listLeadJobIds(client, ctx.workspaceId);
+      const leadFilter = leadIds.length > 0
+        ? `AND NOT (c.id = ANY($${params.push(leadIds)}::uuid[]))`
+        : "";
       // Jobs not above the approved cut-off, or scored under another score policy, are left alone: no queue row,
       // no deferral, no state change.
       const cutoffFilter = `AND c.recommendation_requirement_score > $${params.push(aiWork.scoreCutoff)}::numeric
@@ -409,6 +415,7 @@ export async function runExplanationQueueEnqueuer(
                 AND eq.context_fingerprint = dd.context_fingerprint
                 AND eq.status IN ('PENDING', 'EVALUATING', 'RETRY_WAIT')
             )
+            ${leadFilter}
             ${cutoffFilter}
             ${jobVersionFilter}
             ${canonicalJobFilter}

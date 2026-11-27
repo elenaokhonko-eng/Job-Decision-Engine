@@ -1,3 +1,4 @@
+import { listLeadJobIds } from "../../catalog/index.js";
 import type { AiWorkSettings } from "../../../platform/config/index.js";
 import {
   selectHeldAiWorkCounts,
@@ -34,7 +35,10 @@ export async function jobVersionsThatMayReceiveAiWork(
 
 export type AiWorkReport = AiWorkSettings & HeldAiWorkCounts;
 
-/** The switch as it stands, with counts of the waiting work so a hold is never invisible. */
+/**
+ * The switch as it stands, with counts of the waiting work so a hold is never invisible. Leads are never evaluated,
+ * so nothing of theirs is counted as waiting for the owner.
+ */
 export async function describeAiWork(
   db: EvaluationQueryable,
   workspaceId: string,
@@ -43,6 +47,12 @@ export async function describeAiWork(
 ): Promise<AiWorkReport> {
   return {
     ...settings,
-    ...(await selectHeldAiWorkCounts(db, workspaceId, outcomes, settings.mode === "OPEN" ? settings : null)),
+    ...(await selectHeldAiWorkCounts(
+      db,
+      workspaceId,
+      outcomes,
+      settings.mode === "OPEN" ? settings : null,
+      await listLeadJobIds(db, workspaceId),
+    )),
   };
 }

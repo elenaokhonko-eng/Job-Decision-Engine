@@ -27,6 +27,7 @@ import {
 import { rateLimitedRetryAt } from "../src/tasks/pipelineTasks.js";
 import {
   selectEligibleEvaluationQueueRows,
+  supersedeLeadEvaluationQueueRows,
   supersedeStaleEvaluationQueueRows,
   type EvaluationQueueCandidate,
 } from "../src/pipeline/evaluationQueueLineage.js";
@@ -99,8 +100,13 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
     assertAiWorkSettingsValid(aiWork);
     if (aiWork.mode === "HELD") {
       const heldContext = options.context ?? await resolveWorkspaceContext(client as any);
+      // The one change made while held: a lead's unstarted row is not waiting AI work, so it leaves the queue.
+      const supersededLeadRows = await supersedeLeadEvaluationQueueRows(client, { workspaceId: heldContext.workspaceId });
       const held = await describeAiWork(client, heldContext.workspaceId, AI_EVALUATION_OUTCOMES, aiWork);
-      console.warn(`AI evaluation is held (${aiWork.reason}); no queue item was read or changed: ${JSON.stringify(held)}`);
+      console.warn(
+        `AI evaluation is held (${aiWork.reason}); no queued job was evaluated and ${supersededLeadRows} row(s) ` +
+        `of leads were superseded: ${JSON.stringify(held)}`
+      );
       return { processed: 0, failed: 0, manualReview: 0, eligible: 0, rateLimited: 0, notStarted: 0, heldReason: aiWork.reason };
     }
     const preflight = checkModelRegistryPreflight();

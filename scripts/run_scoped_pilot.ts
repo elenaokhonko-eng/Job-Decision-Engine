@@ -1,5 +1,6 @@
 import { assertAiWorkSettingsValid, readAiWorkSettings, type AiWorkSettings } from "../src/platform/config/index.js";
 import { AI_WORK_TASK_TYPE, jobVersionMayReceiveAiWork } from "../src/modules/evaluation/index.js";
+import { isLeadJobVersion, JOB_IS_LEAD_REASON } from "../src/modules/catalog/index.js";
 import pg from "pg";
 import dotenv from "dotenv";
 
@@ -517,14 +518,19 @@ export function assertScopedPilotMode(env: NodeJS.ProcessEnv = process.env): voi
   }
 }
 
-/** Why the pilot's AI step did not run, or NULL when the selected job version qualifies for AI work. */
+/**
+ * Why the pilot's AI step did not run (a lead says so, whatever the switch), or NULL when the selected job version
+ * qualifies for AI work.
+ */
 export async function readScopedAiHold(
   client: pg.Pool | pg.PoolClient,
   workspaceId: string,
   jobVersionId: string,
   aiWork: AiWorkSettings = readAiWorkSettings(),
 ): Promise<ScopedPilotReport["aiHold"]> {
-  if (aiWork.mode === "OPEN" && await jobVersionMayReceiveAiWork(client, workspaceId, jobVersionId, aiWork)) return null;
+  const isLead = await isLeadJobVersion(client, workspaceId, jobVersionId);
+  if (!isLead && aiWork.mode === "OPEN" &&
+    await jobVersionMayReceiveAiWork(client, workspaceId, jobVersionId, aiWork)) return null;
   const { rows } = await client.query<{ waiting: number }>(
     `SELECT COUNT(*)::INTEGER AS waiting FROM pipeline_tasks
       WHERE workspace_id = $1 AND task_type = $3 AND payload->>'job_version_id' = $2
@@ -532,7 +538,7 @@ export async function readScopedAiHold(
     [workspaceId, jobVersionId, AI_WORK_TASK_TYPE],
   );
   return {
-    reason: aiWork.mode === "HELD" ? aiWork.reason : "AI_JOB_NOT_APPROVED",
+    reason: isLead ? JOB_IS_LEAD_REASON : aiWork.mode === "HELD" ? aiWork.reason : "AI_JOB_NOT_APPROVED",
     waitingExplanationTasks: Number(rows[0]?.waiting ?? 0),
   };
 }

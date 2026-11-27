@@ -1,3 +1,6 @@
+import { readAiWorkSettings } from "../../platform/config/index.js";
+import { isLeadJobVersion } from "../../modules/catalog/index.js";
+import { describeAiWork } from "../../modules/evaluation/index.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import crypto from "crypto";
 import fs from "fs";
@@ -1043,6 +1046,28 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
         expect(await taskRows(job)).toEqual([expect.objectContaining({ status: "COMPLETED" })]);
         expect(await activeQueueRows(job)).toHaveLength(1);
       }
+
+      // A job that became a lead while its task waited does not block on the cut-off: the task completes, nothing
+      // is queued, and the task is not counted as waiting for the owner.
+      openSwitch("0.95");
+      const waitingTasks = async () => (await describeAiWork(db(), ctx().workspaceId, ["REVIEW"], readAiWorkSettings()))
+        .waitingExplanationTasks;
+      const waitingBefore = await waitingTasks();
+      await db().query(
+        `UPDATE raw_job_observations SET source_name = 'HIMALAYAS', source_url = 'https://himalayas.app/jobs/invented'
+          WHERE workspace_id = $1 AND job_version_id = $2`,
+        [ctx().workspaceId, higher.jobVersionId],
+      );
+      await db().query(
+        `UPDATE canonical_jobs SET canonical_url = 'https://himalayas.app/jobs/invented' WHERE workspace_id = $1 AND id = $2`,
+        [ctx().workspaceId, higher.canonicalJobId],
+      );
+      expect(await isLeadJobVersion(db(), ctx().workspaceId, higher.jobVersionId)).toBe(true);
+      expect(await waitingTasks()).toBe(waitingBefore - 1);
+      const asLead = await run(higher, ["ENQUEUE_EXPLANATION"]);
+      expect(asLead).toMatchObject({ claimed: 1, completed: 1, blocked: 0, failed: 0 });
+      expect(await taskRows(higher)).toEqual([expect.objectContaining({ status: "COMPLETED", blocked_on: null })]);
+      expect(await activeQueueRows(higher)).toEqual([]);
     } finally {
       openSwitch("0");
     }

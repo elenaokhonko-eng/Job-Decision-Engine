@@ -743,4 +743,34 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
       vi.stubEnv("AI_EVALUATION_SCORE_CUTOFF", "0");
     }
   });
+
+  it("while AI work is held, the evaluation worker takes only a lead's unstarted row out of the queue", async () => {
+    const lead = bulkFixtures[6]!;
+    const other = bulkFixtures[7]!;
+    const database = getClient();
+    const workspaceId = getContext().workspaceId;
+    // Known from a job board only: the employer-source sighting on a board page is not the employer's posting.
+    const boardUrl = "https://jobicy.com/jobs/invented-held-1";
+    await database.query(`UPDATE canonical_jobs SET canonical_url = $2 WHERE id = $1`, [lead.canonicalJobId, boardUrl]);
+    await database.query(`UPDATE raw_job_observations SET source_url = $2 WHERE job_version_id = $1`, [lead.jobVersionId, boardUrl]);
+    const row = async (queueId: string) => (await database.query(
+      `SELECT status, attempt_count, lease_id, last_error, updated_at FROM evaluation_queue WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, queueId],
+    )).rows[0];
+    const otherBefore = await row(other.queueId);
+    expect([(await row(lead.queueId)).status, otherBefore.status]).toEqual(["PENDING", "PENDING"]);
+    const evaluateMock = vi.fn();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.stubEnv("AI_EVALUATION_ENABLED", "false");
+    try {
+      const result = await withMockedEvaluator(evaluateMock, (evaluateQueue) => evaluateQueue({ context: getContext() }));
+      expect(result).toMatchObject({ eligible: 0, processed: 0, heldReason: "AI_EVALUATION_NOT_ENABLED" });
+      expect(evaluateMock).not.toHaveBeenCalled();
+      expect(await row(lead.queueId)).toMatchObject({ status: "SUPERSEDED", last_error: expect.stringContaining("lead") });
+      expect(await row(other.queueId)).toEqual(otherBefore);
+    } finally {
+      warn.mockRestore();
+      vi.stubEnv("AI_EVALUATION_ENABLED", "true");
+    }
+  });
 });

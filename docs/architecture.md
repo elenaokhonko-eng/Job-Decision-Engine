@@ -264,10 +264,10 @@ A value that is set but cannot be read holds the AI work and fails the run: the 
 | Creating an `ENQUEUE_EXPLANATION` task (successor of stage 9, successor of a lane re-route, recoverable seed) | Not created | Not created |
 | An `ENQUEUE_EXPLANATION` task already waiting | Not claimed and not reconciled; stays `PENDING`, `RETRY_WAIT`, or `RUNNING` with its expired lease, unchanged | `BLOCKED_DEPENDENCY` on `AI_SCORE_CUTOFF:<job version id>` when claimed |
 | `runExplanationQueueEnqueuer` (any caller, including the re-match script) | Reads and writes nothing | No queue row, no deferral, no state change |
-| `scripts/evaluate_queue.ts` | Reads and changes no queue item, makes no model call | Makes no model call for the row; the row stays queued |
+| `scripts/evaluate_queue.ts` | Evaluates no queue item, makes no model call; only supersedes unstarted rows of leads | Makes no model call for the row; the row stays queued |
 | `scripts/compare_evaluation_models.ts --run` | Refuses and exits non-zero | The job is left out of the sample |
 
-Holding is not a rejection: no job state, decision or deferral row changes. When the switch opens, waiting tasks are claimed and the recoverable seed creates the missing ones. A blocked task is reopened only when the same task identity is enqueued again; otherwise a new task is created and the blocked row stays, still counted.
+Holding is not a rejection: no job state, decision or deferral row changes. The one queue change made while held is for a lead (below), whose unstarted row is not waiting AI work. When the switch opens, waiting tasks are claimed and the recoverable seed creates the missing ones. A blocked task is reopened only when the same task identity is enqueued again; otherwise a new task is created and the blocked row stays, still counted.
 
 The worker summary and the evaluation worker report `aiWork`: the switch, waiting tasks (and how many of them have an expired lease), tasks blocked on the cut-off, unfinished queue rows (and, while open, how many do not qualify) and jobs without an evaluation. While the switch is closed, the pending and retry SLOs of the pipeline worker and of the scoped pilot leave held tasks out; queue health still counts them. The scoped pilot report names the hold in `aiHold`. While the switch is closed, a waiting task also does not run its lane, profile or decision currency repairs; the lane re-route and profile re-match seeds still run.
 
@@ -365,6 +365,8 @@ Whether a posting is currently open is decided in one place: `assessAvailability
 | Re-check gets a clear closure: the page says not found or no longer accepting, or the feed was read successfully and the job is absent twice in a row | Archived the same day as closed |
 | Re-check cannot tell: timeout, server error, paywall, login | Retried up to 3 times over 3 days, then archived as not confirmable |
 
+A manual same-day check of a chosen job list (`scripts/check_availability_now.ts`, replay copies only; plan mode unless `--apply`) reads each posting link once, never a LinkedIn, aggregator or job-board link, and stores availability evidence through the same re-check. It queues nothing, changes no job fact, never archives, and its reads count for neither the retries nor the archive health check. An apply is bound to the confirmed plan, and its recompute never removes a stored requirement score. It can take the page reader's verdict back to cannot-tell, never the other way; the automatic re-check does not use that rule.
+
 An expired window is "unknown", never "closed". Saved, applied and held jobs are never archived automatically, and an archived job that reappears is restored. The rule and the list filtering are built; the automatic re-check and archive are in progress.
 
 ### Unknown facts
@@ -379,6 +381,27 @@ A job with an unknown workability fact (work mode, hiring territory, office days
 ### Awaiting content
 
 A live job that is not hard-rejected and whose posting text has not reached the completeness rule (`description_quality_status` is not `COMPLETE`, or the only evidence is a bare Gmail alert) has no gate result, lane or recommendation in any list. It waits as "awaiting content" until its posting is fetched. The view `v_job_content_state` states the rule once; `v_canonical_shortlist_scoped` and everything built on it exclude waiting jobs, and `v_job_awaiting_content_scoped` lists them with the state of their fetch task. Stored decisions are kept, so a job returns to the lists when its content is complete. `scripts/check_integrity.ts` fails when a waiting job still carries a gate decision, lane or recommendation.
+
+### Leads
+
+A job known only from job boards or aggregators is a **lead**. It stays stored with its observations, decisions and history, is never rejected or deleted for being a lead, and is left out of every ranked list, the shortlist, Review, Track, Apply Now, Top 10, the AI queue and the review draw.
+
+The view `v_job_lead_state` (migration 123) is the one definition; no list, script or module keeps its own. `is_lead` is true when all of these hold:
+
+1. Some sighting of the job is on a job-board or aggregator host, or comes from a job-board source. A sighting is the job's link, or the source link, apply link or source name of any observation of any version (and of the observation it was derived from).
+2. No observation is the employer's own posting: an employer source (Greenhouse, Lever, Ashby, Workable, SmartRecruiters, Workday, employer website) whose source link is not on a job board or aggregator.
+3. No observation was provided by the owner: LinkedIn or MyCareersFuture saved export, manual import, pasted description.
+4. No sighting is on a host or source marked `NOT_LEAD`: LinkedIn (owner decision) and, while the owner has not decided, MyCareersFuture.
+
+Every host and source entry is a row of `v_job_lead_rules`; changing the MyCareersFuture row from `NOT_LEAD` to `AGGREGATOR` makes those jobs leads. A job stops being a lead as soon as the employer's or the owner's posting is observed, and returns to the lists with its stored artifacts.
+
+`v_canonical_shortlist_scoped` excludes leads, so every view built on it does. The AI enqueue, the evaluation queue selection and the review draw ask the `catalog` module (`listLeadJobIds`, `isLeadJobVersion`); unstarted queue rows of a lead are marked `SUPERSEDED`. The blind review draw counts the leads it leaves out under their own reason, `LEAD_JOB_BOARD_OR_AGGREGATOR`; its LinkedIn exclusion is a separate rule. Hard gates, lanes, matching, decisions and content fetches run for leads as for any job. The must-be-zero check `lead_in_list_or_queue` fails a post-drain reconcile when a lead is in a list or the AI queue.
+
+The superseding does not wait for the owner's AI switch: the pipeline worker (any run that includes `ENQUEUE_EXPLANATION`) and `scripts/evaluate_queue.ts` do it while the switch is closed too, so a held queue never keeps a lead. The `aiWork` counts leave leads out. A waiting enqueue task of a lead completes without queueing and is never blocked on the cut-off. An application handoff, a document draft preflight, a document currentness check and the scoped pilot's `aiHold` name a lead as `JOB_IS_LEAD`.
+
+A live job is therefore in exactly one of: a status bucket, awaiting content, or `v_job_leads_scoped` (live, content-complete, not hard-rejected or removed leads). A hard-rejected or removed lead stays in its audit bucket. A lead the owner saved to the application tracker stays there, marked as a lead.
+
+Until migration 123 is applied the code treats no job as a lead, says so in the log, and the check reports that it was not evaluated (`scripts/check_integrity.ts` prints `NOT EVALUATED`, not `OK`).
 
 ### What blocks a job
 
@@ -402,6 +425,8 @@ Lanes are defined in `config/lanes/registry.yml`, one file per lane in `config/l
 ## 12. Identity, versions and sources
 
 Every observation keeps source identity and raw payload evidence. Canonical jobs may have multiple immutable `job_versions`. Gates, queue rows, evaluations, shortlist rows, and documents are pinned to `job_version_id`.
+
+To ask whether two records are the same posting, compare employer and location through `normalizeJobIdentity` (`src/modules/catalog/`): legal suffixes and the ways of writing Singapore do not matter. It changes no stored key and merges no record. The blind review draw uses it; the stored dedupe keys and the lists do not yet.
 
 Public connectors are described by versioned source plugin manifests under `config/source-plugins/`. Each raw observation can link to the active immutable source plugin revision, enabling later compliance and audit reporting. See [`docs/source-adapters.md`](source-adapters.md).
 
@@ -430,7 +455,7 @@ All four stop when the repository variable `WORKFLOW_KILL_SWITCH` is `true`.
 
 ## 14. As built
 
-Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `evaluation` repository; `src/modules/evaluation/` holds the owner's AI switch, the first domain module. Nothing lives under `src/interfaces/` or `src/app/` yet.
+Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `catalog` and `evaluation` repositories; `src/modules/evaluation/` holds the owner's AI switch, the first domain module, and `src/modules/catalog/` holds the lead questions and the employer and location comparison used to recognise one posting under two records. Nothing lives under `src/interfaces/` or `src/app/` yet.
 
 | Area today | Holds | Goes to |
 |---|---|---|

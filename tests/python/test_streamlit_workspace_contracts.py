@@ -232,7 +232,7 @@ def test_verify_then_apply_contract_requires_matched_review_and_unresolved_readi
         "workspace_id": WORKSPACE_ID,
         "canonical_job_id": "job-1",
         "job_version_id": "version-1",
-        "title": "Director, AI Solution Architect",
+        "title": "Head of AI Engineering",
         "company": "Example AI",
         "gate_status": "NEEDS_VERIFICATION",
         "rejection_codes": ["GATE_UNKNOWN_WORK_MODE", "NEEDS_VERIFICATION"],

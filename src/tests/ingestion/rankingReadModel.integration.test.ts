@@ -27,9 +27,12 @@ describe("no list orders by the raw match score (static)", () => {
   });
 
   it("the review-sheet script orders and filters by the stored adjusted score", () => {
-    const source = read("scripts/experiments/blind_review_set.ts");
-    expect(source).toContain("ORDER BY cj.recommendation_requirement_score DESC");
+    // The pool query moved from the script into src/reporting/blindReviewPool.ts (the function owns the query).
+    const source = read("src/reporting/blindReviewPool.ts") + read("scripts/experiments/blind_review_set.ts");
+    expect(source).toContain("(cj.recommendation_requirement_score * 100)::float AS score");
+    expect(source).toContain("ORDER BY score DESC");
     expect(source).not.toMatch(/ORDER BY[^`]*deterministic_match_score/);
+    expect(source).not.toMatch(/deterministic_match_score/);
   });
 
   it("Streamlit lists order by the stored adjusted score, never by the raw score", () => {

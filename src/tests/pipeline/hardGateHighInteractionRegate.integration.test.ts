@@ -135,4 +135,51 @@ describe.skipIf(skipReal)("hard gate: bare customer-engagement phrase, HARD_REJE
     expect(byId.get(passJob)).toMatchObject({ gate_decision: "PASS", processing_state: "PREQUALIFIED" });
     expect(byId.get(rejectJob)).toMatchObject({ gate_decision: "HARD_REJECT", processing_state: "HARD_REJECTED" });
   });
+
+  it("gate-2026-11.10: a passed job asking four days in the office in words is rejected by the version refresh", async () => {
+    const jobId = randomUUID();
+    const versionId = randomUUID();
+    const url = `https://example.test/gate-office/${jobId}`;
+    const description = `${COMPLETE_TEST_POSTING_DESCRIPTION}\n\nThe team works four days in the office.`;
+    await db().query(
+      `INSERT INTO canonical_jobs (id, workspace_id, company_name, normalized_title, canonical_url, location, workplace_type,
+                                   employment_type, processing_state, processing_status, gate_decision, description_quality_status)
+       VALUES ($1, $2, 'Gate Office Fixture', 'Data Engineer', $3, 'Singapore', 'HYBRID', 'FULL_TIME', 'RAW_STAGED', 'RAW_STAGED', NULL, 'COMPLETE')`,
+      [jobId, ctx().workspaceId, url],
+    );
+    await db().query(
+      `INSERT INTO job_versions (id, workspace_id, canonical_job_id, content_hash, description_text, observed_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())`,
+      [versionId, ctx().workspaceId, jobId, `hash-${versionId}`, description],
+    );
+    await db().query(`UPDATE canonical_jobs SET latest_job_version_id = $2 WHERE id = $1`, [jobId, versionId]);
+    await insertCompletePostingEvidence(db(), {
+      workspaceId: ctx().workspaceId, jobVersionId: versionId, companyName: "Gate Office Fixture", title: "Data Engineer",
+      sourceUrl: url, description,
+    });
+    await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId] });
+    // Rewrite as the pass an earlier gate version stored.
+    await db().query(
+      `UPDATE gate_decisions SET decision = 'PASS', gate_version = 'gate-2026-11.8', rejection_codes = '[]'::jsonb
+        WHERE canonical_job_id = $1`,
+      [jobId],
+    );
+    await db().query(
+      `UPDATE canonical_jobs
+          SET processing_state = 'PREQUALIFIED', processing_status = 'PREQUALIFIED', gate_decision = 'PASS', rejection_reason = NULL
+        WHERE id = $1`,
+      [jobId],
+    );
+
+    const summary = await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId], reprocess: true, versionRefresh: true });
+    expect(summary.errors).toBe(0);
+    const job = (await db().query(`SELECT gate_decision, processing_state FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
+    expect(job).toMatchObject({ gate_decision: "HARD_REJECT", processing_state: "HARD_REJECTED" });
+    const latest = (await db().query(
+      `SELECT gate_version, rejection_codes FROM gate_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [jobId],
+    )).rows[0];
+    expect(latest.gate_version).toBe(GATE_VERSION);
+    expect(latest.rejection_codes).toContain("GATE_HIGH_OFFICE_DAYS");
+  });
 });
