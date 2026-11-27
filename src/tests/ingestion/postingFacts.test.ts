@@ -550,11 +550,11 @@ describe("approximate dates downstream", () => {
 
   it("is within the limit only when the oldest possible date is, and stale only when the newest is past it", () => {
     // "4 weeks ago" means 28-34 days.
-    expect(freshness("4 weeks ago", 30).result).toMatchObject({ status: "UNKNOWN", is_hard_reject: false });
+    expect(freshness("4 weeks ago", 30).result).toMatchObject({ status: "UNKNOWN" });
     expect(freshness("4 weeks ago", 33).result.status).toBe("UNKNOWN");
     expect(freshness("4 weeks ago", 34).result).toMatchObject({ status: "AGING", job_age_days: 34 });
     expect(freshness("3 weeks ago", 30).result).toMatchObject({ status: "AGING", job_age_days: 27 });
-    expect(freshness("5 weeks ago", 30).result).toMatchObject({ status: "STALE", is_hard_reject: true, rejection_code: "GATE_STALE_POSTING" });
+    expect(freshness("5 weeks ago", 30).result).toMatchObject({ status: "STALE" });
     expect(freshness("4 weeks ago", 27).result).toMatchObject({ status: "STALE", job_age_days: 28 });
     // "1 month ago" means 30-59 days: never within a 30-day limit, unknown against 45, within 60.
     expect(freshness("1 month ago", 45).result.status).toBe("UNKNOWN");
@@ -570,7 +570,7 @@ describe("approximate dates downstream", () => {
     for (const basis of ["POSTED_AT_APPROXIMATE_FORTNIGHT", "POSTED_AT_APPROXIMATE", "posted_at", "AUTHORITATIVE"]) {
       expect(parseFreshnessBasis(basis), basis).toEqual({ kind: "UNRECOGNIZED", approximateUnit: null });
       expect(evaluateJobFreshness({ posted_at: "2026-11-01T00:00:00.000Z", freshness_basis: basis }, { max_posting_age_days: 30 } as never, AS_OF), basis)
-        .toMatchObject({ status: "UNKNOWN", freshness_confidence: "LOW", is_hard_reject: false });
+        .toMatchObject({ status: "UNKNOWN", freshness_confidence: "LOW" });
     }
   });
 
@@ -581,9 +581,9 @@ describe("approximate dates downstream", () => {
     expect(result.evidence).not.toMatch(/Authoritative/);
   });
 
-  it("does not hard-reject on month or year precision, whose rounding is unconfirmed", () => {
-    expect(freshness("2 months ago", 45).result).toMatchObject({ status: "STALE", is_hard_reject: false });
-    expect(freshness("9 weeks ago", 60).result).toMatchObject({ status: "STALE", is_hard_reject: true });
+  it("marks month and week ranges past the limit STALE", () => {
+    expect(freshness("2 months ago", 45).result).toMatchObject({ status: "STALE" });
+    expect(freshness("9 weeks ago", 60).result).toMatchObject({ status: "STALE" });
   });
 
   it("carries both bounds in the source evidence and treats a future date as unknown age", () => {

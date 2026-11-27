@@ -10,7 +10,8 @@
  * written in the decision's INSERT, and it is part of the decision context fingerprint so a post-migration decision never
  * collides with an unstamped row of the same inputs.
  */
-export const DECIDER_VERSION = "recommendation_decider_v4" as const;
+// v5: posting age no longer blocks or holds application readiness (owner decision 2026-11-27).
+export const DECIDER_VERSION = "recommendation_decider_v5" as const;
 
 /** SQL (alias `c` = canonical_jobs) true when the job's latest decision was made by another decider version. */
 export function deciderVersionRefreshSql(canonicalAlias = "c", options: { includeTestFixtures?: boolean } = {}): string {
