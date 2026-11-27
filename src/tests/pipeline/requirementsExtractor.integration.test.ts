@@ -321,7 +321,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
         COMPLETE_TEST_POSTING_DESCRIPTION,
         '',
         'Requirements',
-        '- Strong SQL and Python',
+        '- Strong R and Python',
         '- Experience with cloud platforms',
         '- Clear written communication',
         '- Stakeholder management across business units',
@@ -394,11 +394,11 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
         COMPLETE_TEST_POSTING_DESCRIPTION,
         '',
         'Responsibilities',
-        '- Lead delivery of the enterprise data platform roadmap',
+        '- Lead renewal of the specimen catalogue service',
         '',
         'Requirements',
-        '- Strong SQL and Python',
-        '- Experience with AWS, Azure or GCP',
+        '- Strong R and Python',
+        '- Knowledge of Terraform, Pulumi or Ansible',
         '',
         'Nice to have',
         '- Familiarity with Snowflake',
@@ -451,9 +451,9 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
       // the bullets added here must all be present, in order, with their exact quote.
       const texts = items.rows.map((row: any) => row.requirement_text as string);
       const bullets = [
-        'Lead delivery of the enterprise data platform roadmap',
-        'Strong SQL and Python',
-        'Experience with AWS, Azure or GCP',
+        'Lead renewal of the specimen catalogue service',
+        'Strong R and Python',
+        'Knowledge of Terraform, Pulumi or Ansible',
         'Familiarity with Snowflake',
       ];
       expect(texts.filter((text) => bullets.includes(text))).toEqual(bullets);

@@ -15,7 +15,7 @@ const ML_DUTIES = [
 
 describe("cybersecurity content rule", () => {
   it("excludes a role whose title says AI but whose duties are security work", () => {
-    expect(hasCybersecurityFocus("Staff Software Engineer (AI Engineer)", SECURITY_DUTIES)).toBe(true);
+    expect(hasCybersecurityFocus("Principal Platform Developer (AI Engineer)", SECURITY_DUTIES)).toBe(true);
   });
 
   it("excludes a plain security-function title without AI/ML words", () => {
