@@ -1,5 +1,11 @@
 -- Additive: one new table and one new view. No existing table, column or view changes.
--- Reversal: DROP VIEW IF EXISTS v_job_awaiting_rematch; DROP TABLE IF EXISTS job_rematch_waits;
+--
+-- Reversal. First revert the code that reads or writes these objects (the decider, the worker, the zero check, the
+-- API and Streamlit lists), then run these three statements in this order. Without the third, the migration runner
+-- takes 124 as applied and never creates the objects again.
+--   DROP VIEW IF EXISTS v_job_awaiting_rematch;
+--   DROP TABLE IF EXISTS job_rematch_waits;
+--   DELETE FROM schema_migrations WHERE version = '124_awaiting_rematch_view.sql';
 --
 -- A job "awaits a re-match" when it holds a stored score and its profile match is not current: it keeps that score
 -- and outcome, and every list marks it. The current-match test is the decider's. Jobs already settled without a score
@@ -11,9 +17,11 @@
 -- waits.
 CREATE TABLE IF NOT EXISTS job_rematch_waits (
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
-  canonical_job_id UUID NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
+  canonical_job_id UUID NOT NULL,
   waiting_since TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (workspace_id, canonical_job_id)
+  PRIMARY KEY (workspace_id, canonical_job_id),
+  -- The job belongs to that workspace: a row naming another workspace's job is rejected.
+  FOREIGN KEY (workspace_id, canonical_job_id) REFERENCES canonical_jobs (workspace_id, id) ON DELETE CASCADE
 );
 
 COMMENT ON TABLE job_rematch_waits IS

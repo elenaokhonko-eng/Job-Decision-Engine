@@ -2,10 +2,13 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { isLocalPostgresConnectionString } from "../../db/pgSsl.js";
+import { AWAITING_REMATCH_LIMIT_DAYS } from "../../modules/decision/index.js";
 import { DECIDER_VERSION } from "../../pipeline/deciderVersion.js";
 import { runDeterministicMatcher } from "../../pipeline/deterministicMatcher.js";
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
 import { runRecommendationDecider } from "../../pipeline/recommendationDecider.js";
+import { saveWorkspacePreferenceRevision } from "../../policy/workspacePreferenceRegistry.js";
+import { STAGE3_SCHEMA_VERSION } from "../../policy/stage3Contracts.js";
 import {
   AVAILABILITY_RECHECK_ARCHIVE_RULE,
   archiveJobsAsPostingNotConfirmable,
@@ -19,6 +22,7 @@ import { pipelineTaskStageVersion } from "../../tasks/pipelineTaskCurrentness.js
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
 import { runPipelineStageTaskWorker, seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
 import { createTaskIntentV2 } from "../../tasks/taskIntent.js";
+import { openAiWorkForSuite, TEST_SCORE_POLICY } from "../fixtures/aiWorkSwitch.js";
 import { openPipelineStack, type PipelineStack, type StackJob } from "../fixtures/pipelineStackFixture.js";
 
 // "A re-run never clears a result" (owner decision). Real PostgreSQL, real worker, gate, matcher and decider;
@@ -28,6 +32,10 @@ const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
 if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {
   throw new Error("CI must run the re-run result tests against its PostgreSQL service.");
 }
+
+// The owner's AI switch is closed by default: it is opened here, and stored results carry a score policy the cut-off
+// accepts, so "never sent to AI" is proven by a queue that does accept other jobs.
+openAiWorkForSuite();
 
 let stack: PipelineStack | undefined;
 const s = (): PipelineStack => { if (!stack) throw new Error("not initialised"); return stack; };
@@ -51,10 +59,10 @@ async function storeResult(target: StackJob, outcome = "PRIORITY", state = "MATC
             recommendation_eligibility = 'ELIGIBLE', recommendation_outcome = $4,
             recommendation_requirement_score = 0.9, recommendation_coverage_score = 0.8,
             recommendation_evidence_completeness = 1, recommendation_decided_at = NOW(),
-            recommendation_score_policy = 'synthetic_policy|role_shape', recommendation_degree_asked_for = 'A synthetic degree is asked for.',
+            recommendation_score_policy = $5, recommendation_degree_asked_for = 'A synthetic degree is asked for.',
             recommendation_evidence_confidence = 'NORMAL'
       WHERE workspace_id = $1 AND id = $2`,
-    [s().ctx.workspaceId, target.canonicalJobId, state, outcome],
+    [s().ctx.workspaceId, target.canonicalJobId, state, outcome, TEST_SCORE_POLICY],
   );
 }
 
@@ -173,7 +181,7 @@ async function enqueueRerun(target: StackJob, taskType: "APPLY_HARD_GATES" | "EX
 const noFailures = async (target: StackJob) =>
   expect((await tasks(target)).filter((task) => !["COMPLETED", "PENDING", "BLOCKED_DEPENDENCY"].includes(task.status))).toEqual([]);
 
-describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", () => {
+describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeout: 120_000 }, () => {
   beforeAll(async () => { stack = await openPipelineStack(databaseUrl, "rerun_keeps"); await s().publishEmbeddings(); }, 180_000);
   afterAll(async () => { await stack?.close(); });
 
@@ -231,8 +239,39 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", () => {
     await s().db.query(`UPDATE match_runs SET context_fingerprint = NULL WHERE canonical_job_id = $1`, [target.canonicalJobId]);
     expect((await decide(target)).errors).toBe(0);
     expect((await latestDecision(target))!.json.trace.notes).toContain("awaiting_rematch");
+    expect(await stored(target)).toMatchObject({ eligibility: "ELIGIBLE", outcome: "PRIORITY" });
     await runExplanationQueueEnqueuer(s().db, { context: s().ctx, jobVersionIds: [target.jobVersionId] });
     expect(await queued(target)).toBe(0);
+
+    // Positive control: with a current match, the same job in the same setup is queued.
+    await s().db.query(`UPDATE match_runs SET context_fingerprint = 'current-again' WHERE canonical_job_id = $1`, [target.canonicalJobId]);
+    await s().db.query(`UPDATE canonical_jobs SET deterministic_match_score = 95, deterministic_match_coverage = 100, profile_match_status = 'POSITIVE_MATCH' WHERE id = $1`,
+      [target.canonicalJobId]);
+    expect((await decide(target)).errors).toBe(0);
+    expect((await latestDecision(target))!.json.trace.notes).not.toContain("stored_score_carried");
+    expect(await stored(target)).toMatchObject({ eligibility: "ELIGIBLE", policy: TEST_SCORE_POLICY });
+    expect(["PRIORITY", "REVIEW"]).toContain((await stored(target)).outcome);
+    await runExplanationQueueEnqueuer(s().db, { context: s().ctx, jobVersionIds: [target.jobVersionId] });
+    expect(await queued(target)).toBe(1);
+  });
+
+  it("the career-track cap applies to a kept outcome", async () => {
+    const target = await waitingJob("track-cap");
+    // A title that matches no career track cannot be a priority match.
+    await s().db.query(`UPDATE canonical_jobs SET normalized_title = 'synthetic zebra keeper' WHERE id = $1`, [target.canonicalJobId]);
+    expect((await decide(target)).errors).toBe(0);
+    expect(await stored(target)).toMatchObject({ score: 0.9, eligibility: "ELIGIBLE", outcome: "REVIEW" });
+    expect((await latestDecision(target))!.json.trace.notes).toContain("kept_outcome_override:career_track_cap");
+  });
+
+  it("a result changed by another stage gets its own decision: the pointer never names a decision with another outcome", async () => {
+    const target = await waitingJob("carried-identity");
+    expect(await decide(target)).toMatchObject({ errors: 0, decisionsInserted: 1 });
+    // As the lane router or the matcher would, with every other input of the decision unchanged.
+    await s().db.query(`UPDATE canonical_jobs SET recommendation_outcome = 'TRACK' WHERE id = $1`, [target.canonicalJobId]);
+    expect(await decide(target)).toMatchObject({ errors: 0, decisionsInserted: 1 });
+    expect(await stored(target)).toMatchObject({ outcome: "TRACK" });
+    expect(await latestDecision(target)).toMatchObject({ outcome: "TRACK" });
   });
 
   it("a terminal job that waits is stamped without any result column changing", async () => {
@@ -277,6 +316,16 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", () => {
     const since = (await awaiting(target))!;
     expect(since.getTime()).toBeGreaterThan(before - 60_000);
     expect(await flagged(target)).toBe(false);
+  });
+
+  it("the limit is seven days: a wait of six days is not flagged, a wait of seven is", async () => {
+    expect(AWAITING_REMATCH_LIMIT_DAYS).toBe(7);
+    const target = await waitingJob("clock-limit");
+    expect((await decide(target)).errors).toBe(0);
+    await waitedDays(target, 6);
+    expect(await flagged(target)).toBe(false);
+    await waitedDays(target, 7);
+    expect(await flagged(target)).toBe(true);
   });
 
   it("a job that has waited past the limit is flagged; later passes never move its start, and leaving clears it", async () => {
@@ -366,6 +415,16 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", () => {
     expect(after.outcome).not.toBeNull();
     expect(after.decision).not.toBeNull();
     expect(after).toMatchObject({ score: first.score, coverage: first.coverage });
+    // The stages after the restore re-gate ran under their own identities, not suppressed by the first run's tasks.
+    const successors = await s().db.query<{ task_type: string }>(
+      `SELECT DISTINCT task_type FROM pipeline_tasks
+        WHERE workspace_id = $1 AND payload->>'job_version_id' = $2 AND payload->>'repair_generation' LIKE 'ARCHIVE_RESTORE:%'
+          AND status = 'COMPLETED'`,
+      [s().ctx.workspaceId, target.jobVersionId],
+    );
+    expect(successors.rows.map((row) => row.task_type)).toEqual(expect.arrayContaining(["ROUTE_LANE", "MATCH_PROFILE_EVIDENCE"]));
+    const end = await s().db.query<{ matched: boolean }>(`SELECT latest_match_run_id IS NOT NULL AS matched FROM canonical_jobs WHERE id = $1`, [target.canonicalJobId]);
+    expect(end.rows[0]!.matched).toBe(true);
     await noFailures(target);
   }, 120_000);
 
@@ -496,6 +555,22 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", () => {
     }
   }, 120_000);
 
+  it("the decision of a restored job queues no AI step, although its outcome would qualify", async () => {
+    const target = await job("restore-no-ai");
+    await drain(target, 5, ["APPLY_HARD_GATES", "PUBLISH_EMBEDDING", "ROUTE_LANE", "MATCH_PROFILE_EVIDENCE"]);
+    await s().db.query(`UPDATE canonical_jobs SET deterministic_match_score = 95, deterministic_match_coverage = 100, profile_match_status = 'POSITIVE_MATCH' WHERE id = $1`,
+      [target.canonicalJobId]);
+    // Only the restore's own decision is left to run.
+    await s().db.query(`DELETE FROM pipeline_tasks WHERE task_type = 'DECIDE_RECOMMENDATION' AND payload->>'job_version_id' = $1`, [target.jobVersionId]);
+    await RESTORE_PATHS[0]![1](target);
+
+    expect(await decidePass(target)).toMatchObject({ completed: 1, failed: 0 });
+    const after = await stored(target);
+    expect(after.eligibility).toBe("ELIGIBLE");
+    expect(["PRIORITY", "REVIEW"]).toContain(after.outcome);
+    expect((await tasks(target)).filter((task) => task.task_type === "ENQUEUE_EXPLANATION")).toEqual([]);
+  });
+
   it("a restored job that cannot be decided yet keeps its outcome instead of being left without one", async () => {
     const target = await waitingJob("restore-undecidable", "REVIEW");
     await s().db.query(`UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE id = $1`, [target.canonicalJobId]);
@@ -548,4 +623,30 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", () => {
     expect(run.rows[0]).toMatchObject({ status: "FAILED", error_message: "EMBEDDING_DEPENDENCY_INCOMPLETE" });
     expect(await stored(target)).toMatchObject({ score: before.score, coverage: before.coverage, outcome: "PRIORITY", eligibility: "ELIGIBLE" });
   }, 120_000);
+});
+
+// Its own schema: an active pay floor would change what the cases above decide.
+describe.skipIf(skipReal)("a kept outcome and the owner's pay floor (PostgreSQL)", { timeout: 120_000 }, () => {
+  beforeAll(async () => {
+    stack = await openPipelineStack(databaseUrl, "rerun_pay");
+    await saveWorkspacePreferenceRevision(s().db, s().ctx, {
+      preferenceDomain: "stage3",
+      schemaVersion: STAGE3_SCHEMA_VERSION,
+      preferenceValue: { compensation: { target_salary_basis: "GROSS", commercial_min_annual_sgd: 240000, disposition_below_floor: "PREVENT_APPLY_NOW" } },
+      activate: true,
+    });
+  }, 180_000);
+  afterAll(async () => { await stack?.close(); });
+
+  it("pay that cannot be confirmed lowers a kept top priority to review", async () => {
+    const target = await waitingJob("pay-unverified");
+    // A synthetic range that straddles the floor: neither below it nor confirmed above it.
+    await s().db.query(
+      `UPDATE raw_job_observations SET compensation_raw = 'SGD 18,000 - 24,000 per month gross base salary' WHERE job_version_id = $1`,
+      [target.jobVersionId],
+    );
+    expect((await decide(target)).errors).toBe(0);
+    expect((await latestDecision(target))!.json.trace.notes).toContain("kept_outcome_override:pay_needs_verification");
+    expect(await stored(target)).toMatchObject({ score: 0.9, eligibility: "ELIGIBLE", outcome: "REVIEW" });
+  });
 });
