@@ -155,7 +155,7 @@ const NEGATION_BEFORE = /\b(?:not|never|without|no\s+need|need\s+not|no|optional
  */
 const NEGATION_AFTER = /^\s*(?:(?:attendance|presence|work(?:ing)?|requirements?)\s+)?(?:(?:is|are)\s+)?(?:not\b|n['’]t\b|optional\b|n\/a\b|none\b)|^\s*(?:(?:attendance|presence|work(?:ing)?|requirements?)\s+)?(?:isn['’]t|aren['’]t)\b|^\s*(?:attendance|presence|requirements?|required|work|working)?\s*:\s*(?:no|not|n\/a|none|optional|false)\b/i;
 const OTHER_WORK_MODE = /\bhybrid\b|\bremote(?:ly)?\b|\bwfh\b|\bwork(?:ing)?\s+from\s+home\b/i;
-const ROLE_OR_APPLICANT = /\byou(?:['’](?:ll|re|d|ve))?\b|\byour\s+(?:[\w-]+\s+){0,3}?(?:role|position|job)\b|\b(?:this|the)\s+(?:[\w-]+\s+){0,6}?(?:role|position|job|opportunity|candidate|incumbent|hire|post)\b|\b(?:successful|ideal|selected)\s+(?:candidate|applicant)s?\b|\bcandidates?\b|\bapplicants?\b|\bnew\s+hires?\b/i;
+export const ROLE_OR_APPLICANT = /\byou(?:['’](?:ll|re|d|ve))?\b|\byour\s+(?:[\w-]+\s+){0,3}?(?:role|position|job)\b|\b(?:this|the)\s+(?:[\w-]+\s+){0,6}?(?:role|position|job|opportunity|candidate|incumbent|hire|post)\b|\b(?:successful|ideal|selected)\s+(?:candidate|applicant)s?\b|\bcandidates?\b|\bapplicants?\b|\bnew\s+hires?\b/i;
 const RELATIVE_CLAUSE = /\b(?:who|which|that|whose)\b/i;
 const IMPERATIVE_START = /^(?:expect|plan|be\s+(?:prepared|ready|willing|able)|must|will|need)\b/i;
 
