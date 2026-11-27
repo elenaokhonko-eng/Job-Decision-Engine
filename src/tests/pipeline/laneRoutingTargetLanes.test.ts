@@ -249,7 +249,7 @@ const IN_SECTOR_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
     expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
   },
   {
-    title: "Assistant Director, Digital Strategy & Transformation",
+    title: "Deputy Director for Digital Transformation and Strategy",
     description: "About Us\nWe are a government ministry responsible for national defence.\nWhat You Will Do\nShape the digital strategy and transformation roadmap: cloud migration of enterprise systems, data pipelines for decision support and engineering teams across agencies.",
     favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
     expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],

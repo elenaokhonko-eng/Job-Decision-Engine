@@ -89,7 +89,7 @@ describe("row attention and suggested status", () => {
   });
 
   it("compares a years threshold with the profile's own tenure for that field", () => {
-    const short = rowAttention("At least 3 years of hands-on experience building machine learning models in production", [mlFoundation], tenure);
+    const short = rowAttention("At least 3 years spent shipping machine learning systems that people rely on", [mlFoundation], tenure);
     expect(short.suggestedStatus).toBe("PARTIAL");
     expect(short.attention.find((item) => item.code === "YEARS_THRESHOLD")?.detail).toContain("your profile states 2");
     // Enough years for the field: flagged for a look, not marked partial.

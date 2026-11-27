@@ -5,7 +5,7 @@
  */
 export const INVESTMENT_DATA_SCIENTIST_QUALIFICATIONS = [
   "Degree in statistics, computer science, data science, mathematics or a related quantitative field",
-  "At least 3 years of hands-on experience building machine learning models in production",
+  "At least 3 years spent shipping machine learning systems that people rely on",
   "Fluent programming in Python and SQL, with experience of version control and code review",
   "Experience with cloud data platforms and distributed computing frameworks",
   "Understanding of the data used across investment management and experience sourcing and governing such data",
@@ -16,8 +16,8 @@ export const INVESTMENT_DATA_SCIENTIST_QUALIFICATIONS = [
 ];
 
 export const INVESTMENT_DATA_SCIENTIST_NARRATIVE = [
-  "You will be part of a team of data scientists and engineers who partner with investment groups across the fund.",
-  "As the Analytics Centre of Excellence, the team sets standards for how models are built and governed.",
+  "You will be joining a small group of modellers and developers who support the desks that pick holdings.",
+  "As the central modelling guild, the group agrees how forecasts are written, tested and reviewed.",
 ];
 
 export const INVESTMENT_DATA_SCIENTIST_DESCRIPTION = [

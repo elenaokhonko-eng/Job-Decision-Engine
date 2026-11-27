@@ -1669,8 +1669,8 @@ const OTHER_INDUSTRY = /\b(?:finance|financial\s+services|banking|insurance|paym
 
 /**
  * Removes lists of industries ("serves the defense, space, healthcare, and energy sectors";
- * "critical infrastructure including medical devices, power grids and telecommunication
- * networks"). A health word in such a list says whom the employer serves, not that the work
+ * "key services including water utilities, medical devices and rail signalling
+ * systems"). A health word in such a list says whom the employer serves, not that the work
  * is about a healthcare system. A list of health terms alone ("clinicians, nurses and
  * patients") is kept.
  */

@@ -526,7 +526,7 @@ describe("separator and label on-site values (review of b2ce10d)", () => {
   });
 
   it("a hedged or generic 4+ day mention is not a statement about this job", () => {
-    const description = `${TECH}\nWorkplace and information technology positions may require onsite attendance 5 days per week as will be indicated in the job posting.`;
+    const description = `${TECH}\nWarehouse and reception services positions may require onsite presence 5 days per week, as each vacancy notice will state.`;
     expect(evaluateWorkability("Boston, MA", "UNKNOWN", description, "PERMANENT").reasonCode).not.toBe("GATE_HIGH_OFFICE_DAYS");
     expect(evaluateWorkability("Boston, MA", "UNKNOWN", `${TECH}\nYou may be on-site 5 days a week during launches.`, "PERMANENT").reasonCode).not.toBe("GATE_HIGH_OFFICE_DAYS");
   });

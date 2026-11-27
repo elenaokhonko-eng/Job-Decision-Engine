@@ -32,7 +32,7 @@ const RESPONSIBILITY_HEADING = /^(responsibilities|key responsibilities|your res
 // Checked after the requirement heading, so "About you" still opens requirements.
 const OTHER_HEADING = /^(about|why|benefits|what we offer|what (?:can|do) we offer|our offer|perks|package|compensation|salary|location|how to apply|equal opportunity|our (?:culture|values|team)|the opportunity|life at|who we are|who are we|diversity)\b/i;
 // Lines that describe the team or the employer rather than ask anything of the candidate:
-// "You will be part of a team of data scientists ...", "As the Center of Excellence for ...".
+// "You will be joining a small group of modellers ...", "As the central modelling guild, ...".
 const NARRATIVE_LINE = /^(?:you(?:'|’)?ll be (?:part of|joining)|you will be (?:part of|joining)|you will join\b|as (?:the|part of|a member of)\b|we are\b|we(?:'|’)re\b|our (?:team|group|department|mission)\b|the (?:team|group|department)\b|join (?:us|our|a)\b|this (?:role|position) (?:is|sits|reports|will report)\b|reporting (?:to|into)\b)/i;
 const PREFERRED_CUE = /\b(preferred|nice[- ]to[- ]have|a (?:strong |big |definite |real |significant )?(?:plus|bonus)|desirable|advantageous|ideally|preferably)\b/i;
 // "..., ideally Unity Catalog" or "(preferably Python)": the qualifier softens only its own clause.

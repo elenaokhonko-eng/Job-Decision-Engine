@@ -32,9 +32,9 @@ describe("non-target title families in the hard gates", () => {
   it.each([
     ["Senior GL Accountant", "GL Accountant"],
     ["Accountant", "Accountant"],
-    ["Manager, Payroll Operations - APAC", "Payroll Operations"],
+    ["Team Manager, Payroll Operations - Nordics", "Payroll Operations"],
     ["Fund Operations Support Specialist", "Support Specialist"],
-    ["Sr. UX Designer, Security", "UX Designer"],
+    ["Sr. UX Designer for Security Consoles", "UX Designer"],
     ["Marketplace Creative Strategist/Graphic Designer", "Graphic Designer"],
   ])("rejects %j as NON_TARGET_ROLE_FAMILY with the matched title as evidence", (title, matched) => {
     expect(nonTechnicalFunctionTitle(title)).toBe(matched);
@@ -56,13 +56,13 @@ describe("non-target title families in the hard gates", () => {
 
   it.each([
     "Lead Product Manager (Courts and Legal Services)",
-    "Senior Product Manager, Data Programme",
-    "Product Policy Manager / Lead",
+    "Principal Product Manager for Data Programmes",
+    "Product Policy Lead or Manager",
     "Corporate Transformation Director",
-    "Regulatory & Controls Program Manager - Banking",
-    "Assistant Director, Enforcement (Investigator)",
+    "Controls and Regulatory Program Manager, Insurance",
+    "Deputy Director of Enforcement (Fraud Investigator)",
     "Manager, Investigation Department",
-    "Lead, Transformation Portfolio & Strategic Initiatives",
+    "Lead for Strategic Transformation and Portfolio Planning",
   ])("does not re-block the in-lane non-technical role %j", (title) => {
     expect(nonTechnicalFunctionTitle(title)).toBeNull();
     const { persisted, global } = gates(title, "Lead the programme with policy owners and stakeholders, and report outcomes to leadership.");
@@ -87,18 +87,18 @@ describe("non-target title families in the hard gates", () => {
 // industrial or physical engineering titles are rejected outright, with the role-family code.
 describe("owner-rejected role families (2026-11-22)", () => {
   it.each([
-    "Sr. Engineer, Infrastructure Security",
+    "Sr. Engineer for Network and Infrastructure Security",
     "Senior DevOps Engineer",
-    "DevOps Engineering Lead (Vice President)",
+    "Vice President, DevOps Engineering Chapter Lead",
     "Site Reliability Engineer",
     "Senior Security Engineer",
-    "AI Security Architect - Associate Director",
+    "Associate Director and AI Security Architect",
     "Cloud Support Engineer",
-    "Technical Support Engineer (GPU Clusters)",
-    "Database Support Engineer (APAC)",
+    "Technical Support Engineer for Storage Arrays",
+    "Database Support Engineer, Nordic Region",
     "QA Engineer",
     "Quality Assurance Analyst",
-    "Ubuntu Linux Kernel Test Engineer",
+    "Embedded Firmware Test Engineer",
     "Software Development Engineer in Test",
     "Applied Modelling Fellow for Rail Crashworthiness",
     "Mechanical Design Engineer",
@@ -114,8 +114,8 @@ describe("owner-rejected role families (2026-11-22)", () => {
 
   it.each([
     // Program, project, risk and governance titles are not infrastructure roles.
-    "Lead Technical Program Manager, International Infrastructure Platforms",
-    "VP/SVP - Tech & Cyber Risk Management",
+    "Principal Technical Program Manager for Shared Infrastructure Estates",
+    "Vice President, Cyber and Technology Risk Oversight",
     "Infrastructure Project Manager",
     "Security Governance and Compliance Lead",
     // Existing owner decisions that stay allowed.
@@ -167,8 +167,8 @@ describe("forward-deployed titles are high-interaction rejects (owner policy, 20
   it.each([
     ["Forward Deployed Engineer", "Forward Deployed"],
     ["AI FDE", "FDE"],
-    ["Engineering Manager, FDE Infrastructure", "FDE"],
-    ["Deployed Architect, Professional Services (Remote)", "Deployed Architect"],
+    ["Manager of the FDE Tooling Group", "FDE"],
+    ["Deployed Architect for Client Delivery (Remote)", "Deployed Architect"],
     ["Deployed Engineer", "Deployed Engineer"],
   ])("rejects %j as GATE_HIGH_INTERACTION in both gates", (title, matched) => {
     expect(forwardDeployedTitle(title)).toBe(matched);

@@ -90,11 +90,11 @@ describe('parsePosting on flattened text (no line breaks)', () => {
 
   it('splits a heading that flattening glued to the next sentence, with exact offsets', () => {
     const text =
-      'What We Are Looking ForExtensive experience in AI governance across financial services. ' +
+      'What We Are Looking ForDeep grounding in model oversight for insurance carriers. ' +
       'Interview ProcessOur process is designed to move fast and is described below in detail.';
     const posting = parsePosting(text);
     expect(posting.hasRequirementsSection).toBe(true);
-    expect(posting.items.map((i) => i.text)).toEqual(['Extensive experience in AI governance across financial services.']);
+    expect(posting.items.map((i) => i.text)).toEqual(['Deep grounding in model oversight for insurance carriers.']);
     for (const item of posting.items) expect(text.slice(item.start, item.end)).toBe(item.text);
   });
 

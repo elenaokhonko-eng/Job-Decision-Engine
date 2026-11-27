@@ -12,7 +12,7 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
         "Principal Platform Developer, Internal Tooling",
         "Lead Insights Scientist (International)",
         "Senior Internal Audit Analyst",
-        "International Data Acquisition Manager",
+        "Overseas Data Licensing Acquisition Manager",
         "Engineering Manager - Internal Tools",
       ];
 
@@ -65,7 +65,7 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
         "Forward Deployed Software Engineer",
         "Forward Deployed Engineering Lead",
         "AI FDE",
-        "Engineering Manager, FDE Infrastructure",
+        "Manager of the FDE Tooling Group",
       ];
 
       for (const title of fdeTitles) {

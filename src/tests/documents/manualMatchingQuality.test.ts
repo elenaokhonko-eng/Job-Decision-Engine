@@ -26,13 +26,13 @@ import {
 // with location, language and travel lines, and a governance line softened only by "ideally".
 const VENDOR_DATA_POSTING = [
   "What you will bring:",
-  "- Experience in market data or vendor data management, data product ownership or asset management technology",
+  "- Experience in pricing feed administration, catalogue stewardship or treasury platform delivery",
   "- Knowledge of market data vendors and delivery mechanisms such as APIs and SFTP",
-  "- Data governance, data lineage, data quality and cataloguing, ideally with Unity Catalog",
+  "- Stewardship of metadata standards, retention rules and record reconciliation, ideally with Collibra",
   "- Experience with streaming platforms such as Kafka is a plus",
-  "- Based in Frankfurt, Munich, Hong Kong or Singapore",
+  "- Based in Lisbon, Toronto, Nairobi or Auckland",
   "- Fluent English; German is an advantage",
-  "- Willingness to travel up to 20% of the time",
+  "- Willingness to travel for roughly one week each quarter",
   "- Valid right to work in the location of the role",
 ].join("\n");
 
@@ -94,14 +94,14 @@ describe("manual matching quality", () => {
   it("leaves location, permit, language and travel lines out of the match table", () => {
     const texts = documentRequirements([], VENDOR_DATA_POSTING).map((row) => row.requirement_text);
     expect(texts).toEqual([
-      "Experience in market data or vendor data management, data product ownership or asset management technology",
+      "Experience in pricing feed administration, catalogue stewardship or treasury platform delivery",
       "Knowledge of market data vendors and delivery mechanisms such as APIs and SFTP",
-      "Data governance, data lineage, data quality and cataloguing, ideally with Unity Catalog",
+      "Stewardship of metadata standards, retention rules and record reconciliation, ideally with Collibra",
       "Experience with streaming platforms such as Kafka is a plus",
     ]);
     // AI-quoted rows are filtered the same way.
     const quoted: StoredRequirementRow[] = [
-      { requirement_key: "R-001", requirement_type: "LOCATION", importance: "MUST", requirement_text: "Based in Frankfurt, Munich, Hong Kong or Singapore", extractor_type: "LLM_QUOTED", quote_text: "Based in Frankfurt, Munich, Hong Kong or Singapore" },
+      { requirement_key: "R-001", requirement_type: "LOCATION", importance: "MUST", requirement_text: "Based in Lisbon, Toronto, Nairobi or Auckland", extractor_type: "LLM_QUOTED", quote_text: "Based in Lisbon, Toronto, Nairobi or Auckland" },
       { requirement_key: "R-002", requirement_type: "LANGUAGE", importance: "MUST", requirement_text: "Business-level proficiency in written and spoken English", extractor_type: "LLM_QUOTED", quote_text: null },
     ];
     expect(documentRequirements(quoted, null)).toEqual([]);
@@ -112,14 +112,14 @@ describe("manual matching quality", () => {
   });
 
   it("keeps a requirement MUST when only a trailing 'ideally' clause is optional", () => {
-    expect(postingImportance("Data governance, data lineage, data quality and cataloguing, ideally with Unity Catalog")).toBe("MUST");
+    expect(postingImportance("Stewardship of metadata standards, retention rules and record reconciliation, ideally with Collibra")).toBe("MUST");
     expect(postingImportance("Strong SQL skills (preferably Snowflake)")).toBe("MUST");
     expect(postingImportance("Experience with streaming platforms such as Kafka is a plus")).toBe("PREFERRED");
     expect(postingImportance("Ideally, a background in derivatives clearing")).toBe("PREFERRED");
     expect(postingImportance("Nice to have: Databricks certification")).toBe("PREFERRED");
     // The extractor's PREFERRED on such a line is corrected too.
     const quoted: StoredRequirementRow[] = [{ requirement_key: "R-004", requirement_type: "SKILL", importance: "PREFERRED",
-      requirement_text: "Data governance, data lineage, data quality and cataloguing, ideally with Unity Catalog", extractor_type: "LLM_QUOTED", quote_text: null }];
+      requirement_text: "Stewardship of metadata standards, retention rules and record reconciliation, ideally with Collibra", extractor_type: "LLM_QUOTED", quote_text: null }];
     expect(documentRequirements(quoted, null)[0].importance).toBe("MUST");
   });
 

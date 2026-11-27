@@ -38,7 +38,7 @@ describe('extractDeterministicRequirements', () => {
     });
 
     it.each([
-      ['Fellow of the Society of Actuaries', 'You are a Fellow of the Society of Actuaries (FSA) and a Member of the American Academy of Actuaries.'],
+      ['Fellow of the Society of Actuaries', 'Applicants hold the Fellow of the Society of Actuaries (FSA) designation or are close to it.'],
       ['FSA', 'Credential: FSA required for this role.'],
       ['ACCA', 'Qualified accountant (ACCA) preferred.'],
     ])('extracts a professional credential: %s', (_label, text) => {
@@ -167,10 +167,10 @@ describe('extractDeterministicRequirements', () => {
     '- Partner with engineering and product to define priorities',
     '',
     'Requirements',
-    '- 8+ years of experience in data engineering or architecture',
+    '- 8+ years of experience building event pipelines or warehouses',
     '- Strong SQL and Python',
-    "- Bachelor's degree in computer science or a related field",
-    '- Experience with AWS, Azure or GCP',
+    "- Bachelor's degree in mathematics, informatics or a related discipline",
+    '- Knowledge of AWS, Azure or GCP',
     '',
     'Nice to have',
     '- Familiarity with Snowflake',
@@ -187,7 +187,7 @@ describe('extractDeterministicRequirements', () => {
       'Lead delivery of the enterprise data platform roadmap',
       'Partner with engineering and product to define priorities',
       'Strong SQL and Python',
-      'Experience with AWS, Azure or GCP',
+      'Knowledge of AWS, Azure or GCP',
       'Familiarity with Snowflake',
     ]);
     for (const item of items) {
@@ -273,7 +273,7 @@ describe('extractDeterministicRequirements', () => {
 
   it('records alternatives such as "A, B or C" options and "or related field"', () => {
     const result = extractDeterministicRequirements({ ...IDS, description_text: SECTIONED_POSTING });
-    const cloud = result.requirements.find((r) => r.requirement_text === 'Experience with AWS, Azure or GCP');
+    const cloud = result.requirements.find((r) => r.requirement_text === 'Knowledge of AWS, Azure or GCP');
     expect(cloud?.structured_value).toMatchObject({ alternatives: { options: ['AWS', 'Azure', 'GCP'] } });
 
     const degree = result.requirements.find((r) => r.requirement_type === 'DEGREE');
@@ -386,7 +386,7 @@ describe('extractDeterministicRequirements', () => {
     const additional = extractDeterministicRequirements({
       canonical_job_id: 'efefefef-efef-4efe-8efe-efefefefefef',
       job_version_id: '12121212-1212-4121-8121-121212121212',
-      description_text: 'Minimum of 2 additional years of experience related to the functional area.',
+      description_text: 'Minimum of 2 additional years of adjacent-discipline experience.',
     });
     const additionalExperience = additional.requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS');
     expect(additionalExperience?.structured_value).toMatchObject({ minimum_years: 2 });
@@ -394,7 +394,7 @@ describe('extractDeterministicRequirements', () => {
     const writtenNumber = extractDeterministicRequirements({
       canonical_job_id: 'abababab-abab-4aba-8aba-abababababac',
       job_version_id: 'cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdce',
-      description_text: 'At least three years of relevant technology experience in a related technical environment.',
+      description_text: 'At least three years of applied technology experience within a comparable engineering setting.',
     }).requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS');
     expect(writtenNumber?.structured_value).toMatchObject({ minimum_years: 3 });
 

@@ -94,7 +94,7 @@ describe.skipIf(skipReal)("canonical job location width", () => {
          company_name, title, description_raw, location_raw, workplace_type_raw, employment_type_raw,
          compensation_raw, canonical_apply_url, source_lane, search_plan_version, raw_payload, raw_payload_hash
        ) VALUES ($1, $2, 'WORKDAY', 'workday:example:multi-office', $3, NOW(), 'Synthetic Example Analytics',
-         'Business Consultant - Risk Intelligence', $4, $5, 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', $3, 'UNKNOWN',
+         'Advisory Associate - Threat Insights', $4, $5, 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', $3, 'UNKNOWN',
          'location_width_fixture_v1', $6::jsonb, $7) RETURNING id`,
       [ctx.workspaceId, run.rows[0].id, url, description, LONG_LOCATION, payload,
         crypto.createHash("sha256").update(payload).digest("hex")],

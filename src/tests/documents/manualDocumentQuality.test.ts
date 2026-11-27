@@ -147,9 +147,9 @@ describe("manual document quality (baseline regression)", () => {
 
   it("keeps every requirement bullet when the model quotes only a few of them", () => {
     const background = [
-      "Experience delivering or integrating trading platforms such as OMS, EMS or PMS.",
-      "Ability to translate investment requirements into technology deliverables.",
-      "Stakeholder management across investment, technology and data teams.",
+      "Hands-on rollout of order routing or settlement systems for a dealing desk.",
+      "Skill at turning portfolio managers' wishes into buildable engineering work.",
+      "Keeping investment, engineering and data colleagues pointed the same way.",
       "Product ownership for front office investment technology.",
       "Knowledge of derivatives and the trade lifecycle.",
       "Experience with market data and reference data platforms.",

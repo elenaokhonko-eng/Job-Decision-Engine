@@ -155,7 +155,7 @@ function scan(text: string, patterns: readonly Pattern[]): string | null {
  * affiliate commissions"), commission that a clause gives to other roles or company-wide text, a negation, "-free",
  * "commissioning", "commissioned work", and bodies such as the European Commission.
  */
-/** Commission governed by other roles or a company-wide policy ("most sales positions are eligible for commission under the applicable plan"). */
+/** Commission governed by other roles or a company-wide policy ("many sales positions are eligible for commission under a local scheme"). */
 const OTHER_ROLES = /\b(?:most|some|certain|select|other|many|several)[ \t]+(?:sales[ \t]+)?(?:positions?|roles?|jobs?|employees|team[ \t]+members)\b|\bsales[ \t]+(?:positions?|roles?|team(?:[ \t]+members)?|representatives?|staff|employees)\b|\beligible[ \t]+(?:roles?|positions?)\b|\bapplicable[ \t]+(?:commission[ \t]+|sales[ \t]+)?(?:plan|policy|programs?)\b|\bfor[ \t]+(?:some|certain|select)\b|\bfor[ \t]+(?:[\w-]+[ \t]+){0,2}(?:roles?|positions?)\b|\b(?:account[ \t]+executives?|aes|sales[ \t]+reps?|sdrs?|bdrs?|(?:business|sales)[ \t]+development[ \t]+representatives?)\b|\bquota[- ]based\b|\bour[ \t]+sales\b/;
 /** The clause speaks to this role or the applicant. */
 const THIS_ROLE = /\b(?:this|the|your)[ \t]+(?:role|position|job|opportunity)\b|\bthis[ \t]+is[ \t]+an?\b|\byou(?:r|['’]ll)?\b|\bthe[ \t]+successful\b/;

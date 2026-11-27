@@ -49,7 +49,7 @@ const NO_RESTRICTION: Array<[string, string, string]> = [
     "The firm trades within limits authorized by a bank in China."],
   ["an authorised-and-regulated statement", "Singapore",
     "Example Company is authorised and regulated by the financial regulator in the United Kingdom."],
-  ["a commitment to learning a language", "Singapore", "English required, plus a commitment to learning French."],
+  ["a commitment to learning a language", "Singapore", "English needed, plus a willingness to pick up French."],
   ["an export licence note", "Singapore",
     "A US export licence may be required for some tasks under export control rules."],
   ["an export licence application note", "Singapore",
