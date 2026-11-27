@@ -1859,6 +1859,11 @@ except Exception as exc:
 
 for job in jobs_list:
     eligibility, outcome, req_score, cov_score, evidence_completeness = derive_deterministic_recommendation(job)
+    # A job that waits for a re-match keeps its stored result: the "still processing" placeholder must not hide it.
+    if str(job.get("canonical_job_id")) in awaiting_rematch and job.get("recommendation_outcome"):
+        eligibility, outcome = job.get("recommendation_eligibility"), job.get("recommendation_outcome")
+        req_score, cov_score = job.get("recommendation_requirement_score"), job.get("recommendation_coverage_score")
+        evidence_completeness = job.get("recommendation_evidence_completeness")
     job["decision_eligibility"] = eligibility
     job["decision_outcome"] = outcome
     job["decision_requirement_score"] = req_score

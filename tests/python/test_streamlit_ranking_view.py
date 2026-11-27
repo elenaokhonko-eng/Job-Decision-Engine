@@ -233,3 +233,5 @@ def test_the_app_marks_a_waiting_job_wherever_its_outcome_is_shown():
         "awaiting_mark(selected_job)",
     ):
         assert shown in source, shown
+    # The "still processing" placeholder must not replace the stored result of a waiting job.
+    assert 'in awaiting_rematch and job.get("recommendation_outcome")' in source
