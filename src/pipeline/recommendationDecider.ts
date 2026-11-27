@@ -27,7 +27,7 @@ import { resolveEffectiveWorkabilityPolicy } from "./effectiveWorkabilityPolicy.
 import { findOnsiteException } from "./onsiteExceptions.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
-import { APPROXIMATE_DATE_UNIT_MS, isRepostFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
+import { isRepostFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
 import { MIN_CONFIRMED_REQUIREMENTS } from "../requirements/requirementKinds.js";
 import { DECIDER_VERSION } from "./deciderVersion.js";
 import { applyRoleShapePenalty, assessRoleShape, roleShapeFingerprint, ROLE_SHAPE_POLICY_VERSION } from "./roleShape.js";
@@ -864,30 +864,20 @@ export async function runRecommendationDecider(
           is_repost: isRepostFreshnessBasis(job.freshness_basis),
           approximate_unit: evidenceApproximateUnit,
         }, freshnessPolicy);
-        const freshnessStatus = !freshnessPolicy?.max_posting_age_days
-          ? "NEEDS_VERIFICATION"
-          : freshness.status === "STALE"
-            ? freshness.is_hard_reject ? "BLOCKED" : "NEEDS_VERIFICATION"
-            : freshness.status === "UNKNOWN" ? "NEEDS_VERIFICATION" : "MET";
-        // An approximate (relative-text) date expires from its oldest possible value.
-        const approximateUnit = evidenceApproximateUnit ?? parseFreshnessBasis(job.freshness_basis).approximateUnit;
-        const freshnessReference = asIso(job.reposted_at ?? job.source_published_at);
-        const freshnessExpiry = freshnessReference && asIso(job.source_published_at ?? job.reposted_at)
-          && freshnessPolicy?.max_posting_age_days
-          ? new Date(new Date(freshnessReference).getTime()
-            - (approximateUnit ? APPROXIMATE_DATE_UNIT_MS[approximateUnit] - 1 : 0)
-            + freshnessPolicy.max_posting_age_days * 24 * 60 * 60 * 1000).toISOString()
-          : null;
+        // Posting age is information (owner decision 2026-11-27): this check never blocks, holds or expires
+        // readiness. Whether the job is still open is the AVAILABILITY check above and the lifecycle rules.
+        const withinAgePreference = Boolean(freshnessPolicy?.max_posting_age_days)
+          && (freshness.status === "FRESH" || freshness.status === "AGING");
         readinessChecks.push(readinessCheck(
           "FRESHNESS",
-          freshnessStatus,
-          freshnessStatus === "MET" ? freshness.evidence : freshnessPolicy?.max_posting_age_days
+          withinAgePreference ? "MET" : "NOT_APPLICABLE",
+          withinAgePreference || freshnessPolicy?.max_posting_age_days
             ? freshness.evidence : "No active, versioned maximum-posting-age policy is available.",
           readinessAssessedAt,
           {
-            reasonCode: freshnessStatus === "BLOCKED" ? freshness.rejection_code ?? "POSTING_STALE" : freshnessStatus === "MET" ? null : "FRESHNESS_UNVERIFIED",
+            importance: "PREFERRED",
+            policyReference: "posting_age_information_v1",
             evidenceKeys: freshnessPolicy?.max_posting_age_days ? [`posting_age_days:${freshness.job_age_days ?? "unknown"}`] : [],
-            expiresAt: freshnessExpiry,
           },
         ));
 

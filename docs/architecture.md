@@ -364,6 +364,8 @@ Whether a posting is currently open is decided in one place: `assessAvailability
 | Re-check gets a clear closure: the page says not found or no longer accepting, or the feed was read successfully and the job is absent twice in a row | Archived the same day as closed |
 | Re-check cannot tell: timeout, server error, paywall, login | Retried up to 3 times over 3 days, then archived as not confirmable |
 
+Posting age decides nothing about whether a job is open (owner decision 2026-11-27). The gate never rejects or holds a job for its age, whatever the freshness preference says, and the `FRESHNESS` readiness check is information only: importance `PREFERRED`, never blocking, holding or expiring readiness. Age still lowers the ranking freshness score, and the age archive rule (three calendar months, `docs/job-archiving.md`) is a lifecycle rule.
+
 An expired window is "unknown", never "closed". Saved, applied and held jobs are never archived automatically, and an archived job that reappears is restored. The rule and the list filtering are built; the automatic re-check and archive are in progress.
 
 ### Unknown facts

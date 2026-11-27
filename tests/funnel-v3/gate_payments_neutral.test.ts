@@ -41,7 +41,7 @@ const PAYMENTS_TITLES = [
 
 describe("payments titles are neutral at the gate", () => {
   it("carries the new gate version", () => {
-    expect(GATE_VERSION).toBe("gate-2026-11.11");
+    expect(GATE_VERSION).toBe("gate-2026-11.12");
   });
 
   it.each(PAYMENTS_TITLES)("does not reject: %s", (title) => {

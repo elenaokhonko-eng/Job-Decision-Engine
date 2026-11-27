@@ -6,7 +6,7 @@ import {
   type MaterialReadinessCheck,
 } from "../contracts/applicationReadiness.js";
 
-export const APPLICATION_READINESS_POLICY_VERSION = "application_readiness_policy_v1" as const;
+export const APPLICATION_READINESS_POLICY_VERSION = "application_readiness_policy_v2" as const;
 export const QUALIFICATION_COMPARATOR_VERSION = "experience_scope_v2" as const;
 
 export const REQUIRED_MATERIAL_READINESS_CHECK_KEYS = [
