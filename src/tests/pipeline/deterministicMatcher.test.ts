@@ -427,10 +427,10 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
     );
     expect(matchRunUpdate?.[0]).toContain("WHEN $7::boolean THEN 'FAILED'");
     expect(matchRunUpdate?.[0]).toContain("EMBEDDING_DEPENDENCY_INCOMPLETE");
-    expect(canonicalUpdate?.[0]).toContain("recommendation_outcome = CASE");
-    expect(canonicalUpdate?.[0]).toContain("WHEN $8::boolean THEN NULL");
-    expect(canonicalUpdate?.[0]).toContain("recommendation_decided_at = CASE WHEN $8::boolean THEN NULL ELSE recommendation_decided_at END");
-    expect(canonicalUpdate?.[0]).toContain("latest_deterministic_decision_id = CASE WHEN $8::boolean THEN NULL ELSE latest_deterministic_decision_id END");
+    // A re-run never clears a result: an incomplete run keeps the stored scores, outcome and decision.
+    expect(canonicalUpdate?.[0]).toContain("THEN deterministic_match_score ELSE");
+    expect(canonicalUpdate?.[0]).not.toContain("WHEN $8::boolean THEN NULL");
+    expect(canonicalUpdate?.[0]).not.toContain("recommendation_requirement_score");
   });
 
   it('records a completed match with an UNKNOWN, unscored fit when deterministic extraction completed with no requirements', async () => {

@@ -46,7 +46,7 @@ describe("no list orders by the raw match score (static)", () => {
 
 describe("every UPDATE that clears the stored score also clears its evidence (static)", () => {
   const STORED = ["recommendation_score_policy", "recommendation_degree_asked_for", "recommendation_role_signals", "recommendation_evidence_confidence"];
-  it.each(["src/pipeline/hardGate.ts", "src/pipeline/deterministicMatcher.ts"])("%s clears the four evidence columns wherever it clears the adjusted score", (file) => {
+  it.each(["src/pipeline/hardGate.ts"])("%s clears the four evidence columns wherever it clears the adjusted score", (file) => {
     const source = read(file);
     const clears = source.match(/recommendation_requirement_score = CASE WHEN [^\n]*THEN NULL/g) ?? [];
     expect(clears.length).toBeGreaterThan(0);
@@ -55,6 +55,9 @@ describe("every UPDATE that clears the stored score also clears its evidence (st
 ]*THEN (?:NULL|'\[\]'::jsonb)`, 'g')) ?? [];
       expect(columnClears.length, file + " must clear " + column + " in every UPDATE that clears the score").toBe(clears.length);
     }
+  });
+  it("the matcher clears no stored score or evidence column: a re-run never clears a result", () => {
+    expect(read("src/pipeline/deterministicMatcher.ts")).not.toMatch(/recommendation_(requirement_score|score_policy|degree_asked_for|role_signals|evidence_confidence) =/);
   });
 });
 

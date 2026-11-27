@@ -456,6 +456,9 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
       ])],
     );
 
+    // The new profile makes the stored match stale, and the decider keeps a stored score instead of deciding again.
+    // This case is about the career track, so the job starts without a score.
+    await q(`UPDATE canonical_jobs SET recommendation_requirement_score = NULL, recommendation_coverage_score = NULL WHERE id = $1`, [JOB_ID]);
     const second = await runRecommendationDecider(client);
     expect(second.errors).toBe(0);
     expect(second.decisionsInserted).toBe(1);
