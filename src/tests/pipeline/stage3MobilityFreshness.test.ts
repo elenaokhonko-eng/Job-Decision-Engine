@@ -92,7 +92,6 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     expect(extracted.freshnessBasis).toBeNull();
     expect(result.status).toBe('UNKNOWN');
     expect(result.job_age_days).toBeNull();
-    expect(result.is_hard_reject).toBe(false);
   });
 
   it('does not invent an age for a new posting identity without a publication timestamp', () => {
@@ -104,7 +103,6 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     expect(result.status).toBe('UNKNOWN');
     expect(result.freshness_basis).toBe('NEW_POSTING_ID');
     expect(result.job_age_days).toBeNull();
-    expect(result.is_hard_reject).toBe(false);
   });
 
   it('preserves distinct ATS posting identities when content is unchanged', () => {
@@ -492,8 +490,8 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     expect(structuredMaximumAboveFloor.salary_annual_sgd_max).toBe(260000);
   });
 
-  // Scenario 6: Old posting 75 days -> stale reject
-  it('Scenario 6: Authoritative posting age of 75 days triggers GATE_STALE_POSTING hard reject', () => {
+  // Scenario 6: Old posting 75 days -> described as stale, never a rejection
+  it('Scenario 6: Authoritative posting age of 75 days is STALE and carries no rejection', () => {
     const now = new Date('2026-10-18T00:00:00Z');
     const oldPostingDate = new Date('2026-08-04T00:00:00Z'); // 75 days old
 
@@ -503,9 +501,9 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
       now
     );
 
-    expect(result.is_hard_reject).toBe(true);
     expect(result.status).toBe('STALE');
-    expect(result.rejection_code).toBe('GATE_STALE_POSTING');
+    expect(result).not.toHaveProperty('is_hard_reject');
+    expect(result).not.toHaveProperty('rejection_code');
     expect(result.freshness_score).toBe(0);
     expect(result.job_age_days).toBe(75);
   });
@@ -526,7 +524,6 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
       now
     );
 
-    expect(result.is_hard_reject).toBe(false);
     expect(result.status).toBe('FRESH');
     expect(result.freshness_score).toBe(100);
     expect(result.freshness_basis).toBe('REPOSTED_AT');
@@ -548,8 +545,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
       now
     );
 
-    expect(result.is_hard_reject).toBe(true);
-    expect(result.rejection_code).toBe('GATE_STALE_POSTING');
+    expect(result.status).toBe('STALE');
     expect(result.freshness_basis).toBe('POSTED_AT');
   });
 
@@ -620,7 +616,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
   });
 
   // Hard gate integration test
-  it('applies the 60-day freshness gate directly within applyPersistedRequirementGates', () => {
+  it('does not gate on posting age in applyPersistedRequirementGates, whatever the preference says', () => {
     const now = new Date('2026-10-18T00:00:00Z');
     const staleJob = {
       title: 'Senior AI Architect',
@@ -631,9 +627,12 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
 
     const gateResult = applyPersistedRequirementGates(staleJob, [], undefined, null, approvedStage3Preferences);
 
-    expect(gateResult.passed).toBe(false);
-    expect(gateResult.status).toBe('HARD_REJECT');
-    expect(gateResult.rejection_codes).toContain('GATE_STALE_POSTING');
+    expect(approvedStage3Preferences.freshness).toMatchObject({ max_posting_age_days: 60, stale_gate_disposition: 'HARD_REJECT' });
+    expect(gateResult).toEqual(applyPersistedRequirementGates(
+      { ...staleJob, posted_at: new Date().toISOString() }, [], undefined, null, approvedStage3Preferences,
+    ));
+    expect(gateResult.rejection_codes).not.toContain('GATE_STALE_POSTING');
+    expect(gateResult.status).not.toBe('HARD_REJECT');
   });
 
   it('keeps below-floor compensation out of hard-reject gates when policy only prevents Apply Now', () => {

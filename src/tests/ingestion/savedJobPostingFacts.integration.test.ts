@@ -185,7 +185,7 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
     const target = first.get(legacyObservationId as string);
     if (!target) throw new Error("legacy saved job was not normalized");
     expect(await version(target.jobVersionId)).toMatchObject({ source_published_at: null, availability_verified_at: null });
-    expect(await readiness(target.canonicalJobId)).toEqual({ AVAILABILITY: "NEEDS_VERIFICATION", FRESHNESS: "NEEDS_VERIFICATION" });
+    expect(await readiness(target.canonicalJobId)).toEqual({ AVAILABILITY: "NEEDS_VERIFICATION", FRESHNESS: "NOT_APPLICABLE" });
 
     // The re-export: same job with a different (re-fetched) description, plus posting facts.
     const checkedAt = iso(-HOUR);
@@ -270,7 +270,7 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
     expect(await readiness(target.canonicalJobId)).toEqual({ AVAILABILITY: "BLOCKED", FRESHNESS: "MET" });
   });
 
-  it("keeps freshness unverified when an approximate age straddles the limit, and stale only past it", async () => {
+  it("records posting age as information: straddling and past the limit neither hold nor block", async () => {
     // "8 weeks ago" means 56-62 days against the 60-day limit; "9 weeks ago" is at least 63.
     const [straddleId, staleId] = await importLinkedIn([
       linkedInItem("4300000204", { postedAtText: "8 weeks ago", availabilityStatus: "OPEN", postingCheckedAt: iso(-HOUR) }),
@@ -281,11 +281,11 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
     const stale = mapped.get(staleId as string);
     if (!straddle || !stale) throw new Error("approximate saved jobs were not normalized");
     expect((await version(straddle.jobVersionId)).freshness_basis).toBe("POSTED_AT_APPROXIMATE_WEEK");
-    expect(await readiness(straddle.canonicalJobId)).toEqual({ AVAILABILITY: "MET", FRESHNESS: "NEEDS_VERIFICATION" });
-    expect(await readiness(stale.canonicalJobId)).toEqual({ AVAILABILITY: "MET", FRESHNESS: "BLOCKED" });
+    expect(await readiness(straddle.canonicalJobId)).toEqual({ AVAILABILITY: "MET", FRESHNESS: "NOT_APPLICABLE" });
+    expect(await readiness(stale.canonicalJobId)).toEqual({ AVAILABILITY: "MET", FRESHNESS: "NOT_APPLICABLE" });
   });
 
-  it("blocks freshness for a stale posting date and leaves an expired check unverified", async () => {
+  it("does not block a stale posting date; only the expired availability check is unverified", async () => {
     const [observationId] = await importLinkedIn([linkedInItem("4300000203", {
       postedAt: iso(-120 * DAY),
       availabilityStatus: "OPEN",
@@ -295,7 +295,17 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
     const target = (await normalizeAndDecide([observationId as string])).get(observationId as string);
     if (!target) throw new Error("stale saved job was not normalized");
     // The open status was read eight days ago: past its seven-day window.
-    expect(await readiness(target.canonicalJobId)).toEqual({ AVAILABILITY: "NEEDS_VERIFICATION", FRESHNESS: "BLOCKED" });
+    expect(await readiness(target.canonicalJobId)).toEqual({ AVAILABILITY: "NEEDS_VERIFICATION", FRESHNESS: "NOT_APPLICABLE" });
+    const stored = await db().query<{ readiness_json: { status: string; reason_codes: string[]; checks: Array<{ key: string; importance: string; expires_at: string | null; rationale: string }> } }>(
+      `SELECT readiness_json FROM deterministic_decisions WHERE workspace_id = $1 AND canonical_job_id = $2::uuid ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [ctx().workspaceId, target.canonicalJobId],
+    );
+    const assessed = stored.rows[0]!.readiness_json;
+    expect(assessed.status).not.toBe("BLOCKED");
+    expect(assessed.reason_codes.filter((code) => /STALE|FRESHNESS/.test(code))).toEqual([]);
+    const age = assessed.checks.find((check) => check.key === "FRESHNESS");
+    expect(age).toMatchObject({ importance: "PREFERRED", expires_at: null });
+    expect(age?.rationale).toMatch(/exceeds the 60-day limit/);
   });
 
   it("persists MyCareersFuture dates and status to the job version and blocks a passed expiry", async () => {
@@ -352,7 +362,7 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
   });
 
   // Runs last: it switches the workspace's posting-age limit to 30 days.
-  it("enriching a NEW_POSTING_ID version with \"4 weeks ago\" stays NEEDS_VERIFICATION against a 30-day limit", async () => {
+  it("enriching a NEW_POSTING_ID version with \"4 weeks ago\" keeps the approximate age against a 30-day limit", async () => {
     await saveWorkspacePreferenceRevision(db(), ctx(), {
       preferenceDomain: "stage3",
       schemaVersion: "3.0.0",
@@ -386,7 +396,7 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
       return rows[0]?.readiness_json.checks.find((check) => check.key === "FRESHNESS");
     };
     const first = await freshnessCheck();
-    expect(first?.status).toBe("NEEDS_VERIFICATION");
+    expect(first?.status).toBe("NOT_APPLICABLE");
     expect(first?.rationale).toMatch(/^Approximate posting age of 28-3[45] days/);
     expect(first?.rationale).not.toMatch(/Authoritative/);
 
@@ -403,7 +413,7 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
     expect(decided.errors).toBe(0);
     expect(decided.decisionsInserted).toBe(1);
     const second = await freshnessCheck();
-    expect(second?.status).toBe("NEEDS_VERIFICATION");
+    expect(second?.status).toBe("NOT_APPLICABLE");
     expect(second?.rationale).toMatch(/may exceed the 31-day limit/);
     expect(second?.rationale).not.toMatch(/Authoritative/);
   });

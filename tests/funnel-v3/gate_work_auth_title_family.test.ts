@@ -242,7 +242,7 @@ describe("decider readiness reads the same extractor", () => {
   });
 
   it("re-seeds decisions made by earlier decider versions", () => {
-    expect(DECIDER_VERSION).toBe("recommendation_decider_v4");
+    expect(DECIDER_VERSION).toBe("recommendation_decider_v5");
   });
 });
 
