@@ -214,6 +214,62 @@ describe("office-first order (owner decision 2026-11-26)", () => {
     expect(officeReject(gate(sentence)), sentence).toBe(false);
   });
 
+  it.each([
+    "In the office 4-5 days a week.",
+    "You are in the office 4-5 days per week.",
+    "Work from office 4-5 days a week.",
+    "On-site 4-5 days per week.",
+    // A range whose top reaches four rejects, as "3-4 days in the office" does.
+    "In the office 3-4 days a week.",
+    "Our crew sits in the office three-four days a week.",
+    "We want everyone to be in the office 4 days a week.",
+    "You need to be in the office four days a week.",
+    "The post requires you to be in the office four days per week.",
+    "You will need to come into the office four days a week.",
+    "Willingness to work from the office five days a week.",
+    "From your first day, you will be in the office five days a week.",
+    "During the week you are in the office five days a week.",
+    "In your first-rate team you are in the office five days a week.",
+    "You are in the office five days a week. Questions? Ask us.",
+  ])("rejects range, infinitive and standing statements: %s", (sentence) => {
+    for (const workplaceType of ["HYBRID", "UNKNOWN", "ASSUMED_HYBRID"]) {
+      expect(officeReject(gate(sentence, workplaceType)), `${workplaceType}: ${sentence}`).toBe(true);
+    }
+  });
+
+  it.each([
+    "For the first three months, you will be in the office five days a week.",
+    "During probation, you will be in the office 5 days a week.",
+    "In your first two weeks, be in the office five days a week.",
+    "In your first month, you will be in the office five days a week. After that, two days.",
+    "During onboarding you will be in the office five days a week, then two days a week.",
+    "You will be in the office five days a week for the first 90 days.",
+    "You will be in the office five days a week for your first 90 days. Afterwards, hybrid with two days.",
+    "You will be in the office five days a week initially, moving to two days.",
+    "During the first 90 days you are in the office five days a week.",
+    "Initially, you will be in the office five days a week.",
+    "During your 3-month probation, you will be in the office five days a week.",
+    "You will be in the office five days a week for the first eight weeks.",
+    "Gone are the days of being in the office five days a week.",
+    "Tired of being in the office five days a week?",
+    "In the office 5 days a week? Not here.",
+    "In the office 2-3 days a week.",
+    "On-site 2-3 days per week.",
+    "Work from office 4-5 days a month.",
+    "In the office 4-5 days per quarter.",
+    "You need to be in the office up to three days a week.",
+    "You will not need to be in the office four days a week.",
+  ])("does not reject temporary, dismissed, asked or lower statements: %s", (sentence) => {
+    for (const workplaceType of ["HYBRID", "UNKNOWN", "ASSUMED_HYBRID"]) {
+      expect(officeReject(gate(sentence, workplaceType)), `${workplaceType}: ${sentence}`).toBe(false);
+    }
+  });
+
+  it("stores a hyphen range after the office", () => {
+    expect(findOfficeFirstDays("in the office 4-5 days a week.")).toMatchObject({ min: 4, max: 5 });
+    expect(findOfficeFirstDays("in the office five-day rota a week.")).toBeNull();
+  });
+
   it("quotes the statement and stores the stated range", () => {
     const result = gate("Our crew sits in the office four to five days a week.");
     expect(result.rejection_codes).toEqual(["GATE_HIGH_OFFICE_DAYS"]);
@@ -243,6 +299,10 @@ describe("office-first order (owner decision 2026-11-26)", () => {
       "at our big old office four to five days a week ".repeat(3_000),
       `on-site ${"(".repeat(50_000)}`,
       "office ".repeat(20_000),
+      "during the first in the office four days a week ".repeat(3_000),
+      "in your first 90 in the office 4-5 days a week for the first ".repeat(2_000),
+      `in the office four days a week${" ".repeat(100_000)}?`,
+      `in the office ${"4-".repeat(50_000)}`,
     ];
     const started = performance.now();
     for (const text of hostile) findOfficeFirstDays(text);
