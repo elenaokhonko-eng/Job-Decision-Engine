@@ -39,6 +39,7 @@ Gate reason codes are free strings in `gate_decisions.rejection_codes` (JSONB) a
 | `GATE_LIFESTYLE_INCOMPATIBLE` | Legacy umbrella code for travel, on-call and shift work | No longer emitted. Stored rows stay valid. |
 | `NON_TECHNICAL_FUNCTION`, `GATE_NOT_AI_DATA` | Axis 1 (generic technical-function check) and Axis 2 (AI/data domain) | No longer emitted. A non-technical PM, programme, transformation, product-policy or investigator role is acceptable when it fits a lane and the candidate's experience, and lane routing decides. |
 | `NON_TARGET_ROLE_FAMILY` + `GATE_OUT_OF_SCOPE_DOMAIN` | Explicit non-target title families: `GLOBAL_TITLE_EXCLUSIONS` (HR, sales, customer success, legal practice and counsel) and `NON_TECHNICAL_FUNCTION_TITLES` (accountant, payroll, support specialist, graphic/UX designer) | Still hard rejects. The second list emitted `NON_TECHNICAL_FUNCTION` before 2026-11 and now uses this role-family code. Legal-technology titles ("Legal Engineer", "Legal Innovation Technologist") and agency names such as "Attorney-General's Office" do not match. |
+| `GATE_OUT_OF_SCOPE_DOMAIN` (title domain) | A title containing "consumer lending". Since gate-2026-11.11 payments is neutral (owner decision 2026-11-27): a title about payments, merchant acquiring, remittance, card issuing, credit cards, POS terminals or buy now pay later is no longer rejected, and the discovery pre-screen no longer lists those concepts for `INVESTMENT_MARKETS_FINTECH`. Payments is not preferred. | Narrowed in 11.11 |
 
 ### Gate verification codes (gate-2026-11.4)
 

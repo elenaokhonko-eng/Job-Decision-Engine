@@ -47,8 +47,7 @@ To guard against account takeovers and unauthorized code modifications:
 If you discover a potential security vulnerability in Job Decision Engine, please report it privately. **Do not create a public GitHub issue.**
 
 ### How to Report
-1. Use [GitHub Private Vulnerability Reporting](https://github.com/elenaokhonko-eng/Job-Decision-Engine/security/advisories/new) if available on the repository.
-2. Alternatively, email the maintainer directly at **elena.okhonko@gmail.com** with the subject `[SECURITY] Job Decision Engine Vulnerability Report`.
+Use [GitHub Private Vulnerability Reporting](https://github.com/elenaokhonko-eng/Job-Decision-Engine/security/advisories/new) (the "Report a vulnerability" button on the repository’s Security tab).
 
 Please include:
 - A description of the vulnerability and its potential impact.

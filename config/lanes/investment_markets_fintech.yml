@@ -74,11 +74,6 @@ scope:
 
   excluded_domain_concepts:
     any:
-      - PAYMENTS
-      - CARDS
-      - MERCHANT_ACQUIRING
-      - REMITTANCE
-      - BNPL
       - CONSUMER_LENDING
       - CORPORATE_FINANCE
       - TREASURY
@@ -129,8 +124,9 @@ positive_concepts:
   - robo-advisory
   - market data
 # Banking and fintech (payments, cards, lending, retail banking) are in scope for routing;
-# finance-function work stays excluded. scope.excluded_domain_concepts still drives the
-# discovery pre-screen and is unchanged here.
+# finance-function work stays excluded. scope.excluded_domain_concepts drives the discovery
+# pre-screen only; payments concepts are not listed there (payments is neutral, owner decision
+# 2026-11-27) and are not preferred anywhere.
 negative_concepts:
   - corporate finance
   - treasury
