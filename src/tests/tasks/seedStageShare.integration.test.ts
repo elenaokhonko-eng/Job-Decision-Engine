@@ -7,6 +7,8 @@ import { GATE_VERSION } from "../../contracts/version.js";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { runEmbeddingBatchWithFallback } from "../../embeddings/batchCoordinator.js";
+import { LEAD_QUEUE_NOTE } from "../../pipeline/evaluationQueueLineage.js";
+import { enqueuePipelineTask, JOB_IS_LEAD_NO_OP_REPAIR_ACTION } from "../../tasks/pipelineTasks.js";
 import { upsertLaneRevision } from "../../lanes/registry.js";
 import { loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
 import { DECIDER_VERSION } from "../../pipeline/deciderVersion.js";
@@ -429,5 +431,61 @@ describe.skipIf(skipReal)("seeding reaches every stage when the database is far 
     const afterDeadLetter = await seed();
     expect(afterDeadLetter.byType.DECIDE_RECOMMENDATION?.inserted).toBe(2);
     expect(await dead()).toEqual(before);
+  }, 180_000);
+
+  it("the batched seed gives a lead-superseded job the same new task identity as the one-task enqueue, and reopens a lead skip", async () => {
+    await clearTasks();
+    const job = scored[0]!;
+    const workspaceId = ctx().workspaceId;
+    await db().query(
+      `UPDATE canonical_jobs SET recommendation_outcome = 'REVIEW', recommendation_requirement_score = 0.5, recommendation_score_policy = $2
+        WHERE id = $1`,
+      [job.canonicalJobId, TEST_SCORE_POLICY],
+    );
+    const seed = () => seedRecoverablePipelineTasks(db(), {
+      context: ctx(), taskTypes: ["ENQUEUE_EXPLANATION"], jobVersionIds: [job.jobVersionId], maxSeedPerType: CAP, timeBudgetMs: 60_000,
+    });
+    const tasks = async () => (await db().query<{
+      id: string; task_key: string; status: string; attempt_count: number; context_fingerprint: string;
+      payload: Record<string, any>;
+    }>(
+      `SELECT id::text AS id, task_key, status, attempt_count, context_fingerprint, payload FROM pipeline_tasks
+        WHERE workspace_id = $1 AND task_type = 'ENQUEUE_EXPLANATION' ORDER BY created_at, id`,
+      [workspaceId],
+    )).rows;
+
+    expect((await seed()).byType.ENQUEUE_EXPLANATION).toEqual({ inserted: 1, existing: 0 });
+    await db().query(`UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE workspace_id = $1`, [workspaceId]);
+    // The job's queue row was superseded while it was a lead; it is not one now.
+    const row = await db().query<{ id: string }>(
+      `INSERT INTO evaluation_queue (workspace_id, canonical_job_id, job_version_id, lane, priority_score, status, last_error)
+       VALUES ($1, $2, $3, 'CORE_AI_DATA', 1, 'SUPERSEDED', $4) RETURNING id::text AS id`,
+      [workspaceId, job.canonicalJobId, job.jobVersionId, LEAD_QUEUE_NOTE],
+    );
+
+    expect((await seed()).byType.ENQUEUE_EXPLANATION).toEqual({ inserted: 1, existing: 0 });
+    const [earlier, returned] = await tasks();
+    expect(returned!.payload.lead_superseded_queue_id).toBe(row.rows[0]!.id);
+    expect(returned!.context_fingerprint).not.toBe(earlier!.context_fingerprint);
+
+    // The one-task enqueue, given the same payload, finds that very row: the two paths compute one identity.
+    const { task_intent: intent, ...payload } = returned!.payload;
+    const single = await enqueuePipelineTask(
+      { taskType: "ENQUEUE_EXPLANATION", taskKey: returned!.task_key, payload, producer: intent.producer, stageVersion: intent.stageVersion },
+      db(),
+      { context: ctx() },
+    );
+    expect(single).toMatchObject({ inserted: false, taskId: returned!.id });
+    expect((await seed()).byType.ENQUEUE_EXPLANATION).toEqual({ inserted: 0, existing: 1 });
+
+    // The job turned into a lead again before the task ran, and back: the skip is reopened, not counted as an attempt.
+    await db().query(
+      `UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW(), repair_action = $2, attempt_count = 3 WHERE id = $1`,
+      [returned!.id, JOB_IS_LEAD_NO_OP_REPAIR_ACTION],
+    );
+    await seed();
+    const after = await tasks();
+    expect(after).toHaveLength(2);
+    expect(after.find((task) => task.id === returned!.id)).toMatchObject({ status: "PENDING", attempt_count: 0 });
   }, 180_000);
 });

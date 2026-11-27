@@ -110,6 +110,8 @@ export type CompensationPolicy = z.infer<typeof CompensationPolicySchema>;
 // 4. Freshness Policy & Curves
 // ============================================================================
 
+// `stale_gate_disposition` is accepted so stored preferences keep parsing, and is not read: posting age
+// never rejects or holds a job (owner decision 2026-11-27).
 export const FreshnessPolicySchema = z.object({
   max_posting_age_days: z.number().int().min(1).optional(),
   stale_gate_disposition: z.enum(['HARD_REJECT', 'DEFER', 'WARN']).optional(),

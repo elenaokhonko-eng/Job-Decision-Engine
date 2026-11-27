@@ -39,6 +39,8 @@ export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
 // 2026-11.11: owner decision 2026-11-27: payments is neutral. A title about payments (payments, merchant acquiring,
 // remittance, card issuing, credit cards, POS terminals, buy now pay later) is no longer GATE_OUT_OF_SCOPE_DOMAIN.
 // "consumer lending" in a title still is.
-export const GATE_VERSION = "gate-2026-11.11" as const;
+// 2026-11.12: owner decision 2026-11-27: a stale posting is not a non-negotiable. The gate never rejects or holds a
+// job for its posting age, whatever the freshness preference says (GATE_STALE_POSTING is no longer emitted).
+export const GATE_VERSION = "gate-2026-11.12" as const;
 export const PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;
 

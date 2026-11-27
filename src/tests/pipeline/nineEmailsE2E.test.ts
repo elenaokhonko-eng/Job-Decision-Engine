@@ -891,7 +891,8 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         externalId: `readiness-gmail-fetched-${crypto.randomUUID()}`,
         companyName: "Readiness Gmail Fetched Fixture Labs",
         salary: "SGD250,000",
-        expectedStatus: "NEEDS_VERIFICATION",
+        // No publication date: posting age is information and holds nothing.
+        expectedStatus: "READY",
         sourceKind: "GMAIL_FETCHED",
       },
     ] as const;
@@ -1108,6 +1109,8 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         .toBe(posting.expectedStatus === "BLOCKED" ? "BLOCKED" : "MET");
       if (posting.sourceKind === "GMAIL_FETCHED") {
         expect(readiness.checks.find((check: { key: string }) => check.key === "AVAILABILITY").status).toBe("MET");
+        expect(readiness.checks.find((check: { key: string }) => check.key === "FRESHNESS"))
+          .toMatchObject({ status: "NOT_APPLICABLE", importance: "PREFERRED" });
       }
       if (posting.expectedStatus === "BLOCKED") {
         expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").reason_code)

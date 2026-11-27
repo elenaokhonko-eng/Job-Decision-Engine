@@ -106,6 +106,12 @@ export interface ReplayDeadLetterPipelineTaskResult {
   replayed: boolean;
 }
 
+/**
+ * An AI enqueue task that completed without queueing because its job had become a lead. Like a task superseded by a
+ * gate outcome it discharged nothing, so the same task identity is reopened when it is enqueued again.
+ */
+export const JOB_IS_LEAD_NO_OP_REPAIR_ACTION = "SKIPPED_JOB_IS_LEAD";
+
 async function reopenBlockedOrSupersededTasks(client: QueryClient, workspaceId: string, taskIds: readonly string[]): Promise<number> {
   if (taskIds.length === 0) return 0;
   const reopened = await client.query<{ id: string }>(
@@ -117,6 +123,8 @@ async function reopenBlockedOrSupersededTasks(client: QueryClient, workspaceId: 
           lease_expires_at = NULL,
           heartbeat_at = NULL,
           claimed_by = NULL,
+          -- Skipping a lead is not a failed attempt, however often the job turns into one.
+          attempt_count = CASE WHEN repair_action = '${JOB_IS_LEAD_NO_OP_REPAIR_ACTION}' THEN 0 ELSE attempt_count END,
           last_error = NULL,
           blocked_on = NULL,
           blocked_reason = NULL,
@@ -126,7 +134,8 @@ async function reopenBlockedOrSupersededTasks(client: QueryClient, workspaceId: 
       WHERE workspace_id = $1
         AND id = ANY($2::uuid[])
         AND (status = 'BLOCKED_DEPENDENCY'
-             OR (status = 'COMPLETED' AND repair_action = 'SUPERSEDED_BY_GATE_OUTCOME'))
+             OR (status = 'COMPLETED'
+                 AND repair_action IN ('SUPERSEDED_BY_GATE_OUTCOME', '${JOB_IS_LEAD_NO_OP_REPAIR_ACTION}')))
       RETURNING id
     `,
     [workspaceId, [...taskIds]],
@@ -314,7 +323,8 @@ export async function enqueuePipelineTask(
     // A task superseded by a gate outcome is a recorded no-op, not a discharged obligation: when the job becomes routable again
     // (a later gate version) the same task identity must run, so a re-enqueue reopens it just like a blocked task.
     const supersededByGate = existing.rows[0].status === "COMPLETED" && (await (client as QueryClient).query<{ id: string }>(
-      `SELECT id FROM pipeline_tasks WHERE workspace_id = $1 AND id = $2 AND repair_action = 'SUPERSEDED_BY_GATE_OUTCOME'`,
+      `SELECT id FROM pipeline_tasks WHERE workspace_id = $1 AND id = $2
+          AND repair_action IN ('SUPERSEDED_BY_GATE_OUTCOME', '${JOB_IS_LEAD_NO_OP_REPAIR_ACTION}')`,
       [ctx.workspaceId, existing.rows[0].id]
     )).rows.length > 0;
     if (existing.rows[0].status === "BLOCKED_DEPENDENCY" || supersededByGate) {
@@ -342,7 +352,7 @@ export async function enqueuePipelineTask(
 /**
  * The seed's form of `enqueuePipelineTask`: a fixed number of round trips for the whole list. Work already stored under
  * the same identity does not take a slot of `limit`; the same reopen paths apply (blocked, superseded by a gate
- * outcome, unstamped decider reassessment) and a reopened task does take one. Inputs are taken in order. The caller has
+ * outcome, skipped as a job lead, unstamped decider reassessment) and a reopened task does take one. Inputs are taken in order. The caller has
  * excluded archived jobs. `existing` counts the stored tasks met before the limit was filled, `reopened` those of them
  * that were put back to PENDING.
  */
@@ -383,8 +393,8 @@ export async function enqueuePipelineTasks(
       continue;
     }
     existing += 1;
-    if (state.status === "BLOCKED_DEPENDENCY" ||
-        (state.status === "COMPLETED" && state.repairAction === "SUPERSEDED_BY_GATE_OUTCOME")) {
+    if (state.status === "BLOCKED_DEPENDENCY" || (state.status === "COMPLETED" &&
+        (state.repairAction === "SUPERSEDED_BY_GATE_OUTCOME" || state.repairAction === JOB_IS_LEAD_NO_OP_REPAIR_ACTION))) {
       blockedOrSuperseded.push(state.id);
     } else if (state.status === "COMPLETED" && task.input.taskType === "DECIDE_RECOMMENDATION" &&
         state.reassessmentReason?.startsWith("DECIDER_VERSION:")) {

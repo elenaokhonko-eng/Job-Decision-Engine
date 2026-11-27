@@ -537,7 +537,7 @@ const FOLLOW_UP_RULES: ReadonlyArray<{ prefix: string; stages: readonly FollowUp
   { prefix: 'stage3.mobility', stages: ['HARD_GATE', 'APPLICATION_RANKING'] },
   { prefix: 'stage3.watchlist', stages: ['HARD_GATE'] },
   { prefix: 'stage3.compensation', stages: ['HARD_GATE', 'RECOMMENDATION'] },
-  { prefix: 'stage3.freshness', stages: ['HARD_GATE', 'RECOMMENDATION', 'APPLICATION_RANKING'] },
+  { prefix: 'stage3.freshness', stages: ['RECOMMENDATION', 'APPLICATION_RANKING'] },
   { prefix: 'stage3.culture_priorities', stages: ['APPLICATION_RANKING'] },
   { prefix: 'stage3.application_priority_weights', stages: ['APPLICATION_RANKING'] },
   { prefix: 'lane_intent', stages: ['LANE_ROUTING', 'RECOMMENDATION'] },

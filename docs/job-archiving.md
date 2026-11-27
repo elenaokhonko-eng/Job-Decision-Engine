@@ -32,7 +32,7 @@ The daily cutoff is calculated by PostgreSQL as `run_started_at - INTERVAL '3 mo
 2. An authoritative publication date.
 3. The earliest recorded observation of the current posting identity. This basis is displayed as `Observed age; publication date unknown`.
 
-Source updates, repeated ingestion, availability checks, and `updated_at` do not reset the archive clock. Contradictory and future source dates are reported as invalid rather than accepted. The separate 60-day application freshness policy is unchanged.
+Source updates, repeated ingestion, availability checks, and `updated_at` do not reset the archive clock. Contradictory and future source dates are reported as invalid rather than accepted. A posting-age preference is not an archive, gate or readiness rule: it only affects the ranking freshness score.
 
 ## Protection and restoration
 
