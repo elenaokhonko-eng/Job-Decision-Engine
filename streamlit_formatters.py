@@ -194,21 +194,24 @@ def safe_http_url(value: object) -> str | None:
     return url
 
 
-def awaiting_rematch_label(waiting_since: object) -> str:
+def awaiting_rematch_label(waiting: bool, waiting_since: object = None) -> str:
     """Mark for a job that keeps its stored score and outcome while it waits for a re-match.
 
     Args:
-        waiting_since: ``waiting_since`` from ``v_job_awaiting_rematch``, or None when the job is not waiting.
+        waiting: The job is in ``v_job_awaiting_rematch``.
+        waiting_since: When it began to wait, or None when that is not recorded yet.
 
     Returns:
         The mark, or an empty string for a job that is not waiting.
 
     Example:
-        >>> awaiting_rematch_label(None)
+        >>> awaiting_rematch_label(False)
         ''
     """
-    if waiting_since is None:
+    if not waiting:
         return ""
+    if waiting_since is None:
+        return "Awaiting re-match (stored score and outcome)"
     day = (
         waiting_since.date().isoformat()
         if hasattr(waiting_since, "date")

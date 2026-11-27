@@ -1033,7 +1033,8 @@ def fetch_awaiting_rematch():
 
 
 def awaiting_mark(job):
-    return awaiting_rematch_label(awaiting_rematch.get(str(job.get("canonical_job_id"))))
+    job_id = str(job.get("canonical_job_id"))
+    return awaiting_rematch_label(job_id in awaiting_rematch, awaiting_rematch.get(job_id))
 
 
 def fetch_jobs_from_postgres_read_model():

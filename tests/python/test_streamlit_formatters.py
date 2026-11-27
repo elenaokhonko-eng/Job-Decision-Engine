@@ -124,7 +124,10 @@ def test_safe_http_url_rejects_unsafe_or_malformed_links(url):
 
 
 def test_awaiting_rematch_label_marks_only_a_waiting_job():
-    assert awaiting_rematch_label(None) == ""
-    assert awaiting_rematch_label(datetime(2026, 1, 5, 12, tzinfo=UTC)) == (
+    assert awaiting_rematch_label(False) == ""
+    assert (
+        awaiting_rematch_label(True) == "Awaiting re-match (stored score and outcome)"
+    )
+    assert awaiting_rematch_label(True, datetime(2026, 1, 5, 12, tzinfo=UTC)) == (
         "Awaiting re-match since 2026-01-05 (stored score and outcome)"
     )

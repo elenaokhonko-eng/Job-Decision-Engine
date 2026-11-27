@@ -63,6 +63,7 @@ import {
 import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
 import { OUTCOME_CONFLICT_REPAIR_ACTION, applyLiveJobScope, deciderSeedableSql, scopeSeedQuery } from "./seedQueryScope.js";
 import { decidableJobVersionSql } from "./completedWithoutResult.js";
+import { syncRematchWaits } from "../modules/decision/index.js";
 import { decisionNotStampable, matchNotApplicable } from "./designedNoOps.js";
 import { deciderVersionReassessmentReason, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import {
@@ -3276,6 +3277,8 @@ async function maybeEnqueueAfterTask(
 
   if (
     taskType === "DECIDE_RECOMMENDATION" &&
+    // A restored job is still to be re-gated; the decide at the end of that chain queues it for AI.
+    !String(payload.reassessment_reason ?? "").startsWith("ARCHIVE_RESTORE:") &&
     state.recommendationEligibility === "ELIGIBLE" &&
     isAiEvaluationOutcome(state.recommendationOutcome) &&
     // An old score never sends a job to AI: a kept result waits for its re-match, whose own decide queues it.
@@ -3976,7 +3979,16 @@ async function executeStageTask(
       // own context-specific task identity.
       return;
     }
-    if (["RAW_STAGED", "PREQUALIFIED"].includes(decisionState.processingState || "")) {
+    const decidePayload = (task.payload || {}) as Record<string, unknown>;
+    // A restored job has lost its verdict: it is decided now, whatever stage it is in and with or without a current
+    // match (the decider then gives it a result without a score, or carries the stored one).
+    const restored = typeof decidePayload.reassessment_reason === "string" && decidePayload.reassessment_reason.startsWith("ARCHIVE_RESTORE:");
+    if (restored && !(await jobVersionIsDecidable(clientOrPool, ctx, jobVersionId))) {
+      // Its restore kept the outcome it had; the stages that complete the content queue the next decision.
+      onDesignedNoOp(decisionNotStampable("AWAITING_CONTENT_NOT_DECIDABLE"));
+      return;
+    }
+    if (!restored && ["RAW_STAGED", "PREQUALIFIED"].includes(decisionState.processingState || "")) {
       // Recommendation decisions are downstream of lane routing. A stale
       // decision task can survive a retry or historical replay while the job
       // is still in the pre-lane funnel; it is not a dependency failure and
@@ -3989,12 +4001,11 @@ async function executeStageTask(
       onDesignedNoOp(decisionNotStampable("JOB_REMOVED"));
       return;
     }
-    const decidePayload = (task.payload || {}) as Record<string, unknown>;
     // Only a decider-version reassessment bypasses the terminal no-op: other enqueuers (a rematch successor, a readiness
     // refresh) set reprocess_existing_state too and must not re-run the decider on a terminal job that already has a decision.
     const reassessment = typeof decidePayload.reassessment_reason === "string" && decidePayload.reassessment_reason.startsWith("DECIDER_VERSION:");
     let terminalWithOutcome = false;
-    if (decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) {
+    if (!restored && decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) {
       // A terminal job with a recorded outcome needs no decision run, but only when a decision row already exists for this
       // version (the "completed without result" check expects one) and the task is not a reassessment: a decider-version or
       // readiness reassessment must stamp a decision under the current decider_version. The decider never changes the job's
@@ -4016,6 +4027,7 @@ async function executeStageTask(
     const isRoutingDeferred = decisionState.processingState === "ROUTING_DEFERRED";
     const isUnmatched = decisionState.processingState === "UNMATCHED";
     const requiresCurrentMatch =
+      !restored &&
       !isRoutingDeferred &&
       !isUnmatched &&
       (decisionState.gateDecision === "PASS" || matchDependentStates.has(decisionState.processingState || ""));
@@ -4380,6 +4392,8 @@ export async function runPipelineStageTaskWorker(
 
   try {
     throwIfWorkerCancelled(options.abortSignal);
+    // Waits for a re-match that began between runs (a new profile, for example) start their clock here.
+    await syncRematchWaits(client, ctx.workspaceId);
 
     if (options.seed !== false) {
       summary.seeded = await seedRecoverablePipelineTasks(client as any, {
@@ -4733,6 +4747,8 @@ export async function runPipelineStageTaskWorker(
       }
     }
 
+    // Waits that began or ended during this run.
+    await syncRematchWaits(client, ctx.workspaceId);
     return summary;
   } finally {
     if (ownsClient && typeof (client as any).release === "function") {

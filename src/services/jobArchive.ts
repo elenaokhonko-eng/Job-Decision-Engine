@@ -36,6 +36,7 @@ import {
 } from "./jobArchiveHardRejectedPolicy.js";
 import { enqueuePipelineTask } from "../tasks/pipelineTasks.js";
 import { pipelineTaskStageVersion } from "../tasks/pipelineTaskCurrentness.js";
+import { decidableJobVersionSql } from "../tasks/completedWithoutResult.js";
 import { createTaskIntentV2 } from "../tasks/taskIntent.js";
 import type { WorkspaceContext } from "../workspace/context.js";
 
@@ -1658,6 +1659,71 @@ async function enqueueRestoreReassessment(
   return result.taskId;
 }
 
+/**
+ * Takes a restored job back among the live jobs. Its old verdict is cleared only when a decision can be made for it
+ * at once; a job that cannot be decided yet keeps its outcome, so a restore never leaves a job without one.
+ */
+async function clearArchiveFields(client: pg.PoolClient, workspaceId: string, canonicalJobId: string): Promise<void> {
+  const decidable = await client.query<{ decidable: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM canonical_jobs c
+         JOIN job_versions v ON v.workspace_id = c.workspace_id AND v.id = c.latest_job_version_id
+        WHERE c.workspace_id = $1 AND c.id = $2 AND ${decidableJobVersionSql("c", "v")}) AS decidable`,
+    [workspaceId, canonicalJobId],
+  );
+  await client.query(
+    `UPDATE canonical_jobs
+     SET archived_at = NULL,
+         archive_reason = NULL,
+         archive_age_basis = NULL,
+         archive_reference_at = NULL,
+         archive_run_id = NULL,
+         latest_deterministic_decision_id = CASE WHEN $3::boolean THEN NULL ELSE latest_deterministic_decision_id END,
+         recommendation_outcome = CASE WHEN $3::boolean THEN NULL ELSE recommendation_outcome END,
+         updated_at = NOW()
+     WHERE workspace_id = $1 AND id = $2`,
+    [workspaceId, canonicalJobId, decidable.rows[0]?.decidable === true],
+  );
+}
+
+/** Queues the decision of a restored job, so the next worker pass decides it without waiting for the other stages. */
+async function enqueueRestoreDecision(
+  client: pg.PoolClient,
+  input: { workspaceId: string; canonicalJobId: string; jobVersionId: string; eventId: string; context: WorkspaceContext },
+): Promise<void> {
+  const taskType = "DECIDE_RECOMMENDATION";
+  const stageVersion = pipelineTaskStageVersion(taskType);
+  if (stageVersion === null) throw new Error("No registered pipeline stage version for the restored-job decision.");
+  const payload = {
+    canonical_job_id: input.canonicalJobId,
+    job_version_id: input.jobVersionId,
+    reprocess_existing_state: true,
+    reassessment_reason: `ARCHIVE_RESTORE:${input.eventId}`,
+  };
+  const intent = createTaskIntentV2({
+    workspaceId: input.workspaceId,
+    taskType,
+    stageVersion,
+    producer: "job_archive_restore",
+    requestId: input.eventId,
+    mode: "FORCE_RECOMPUTE",
+    triggerRevisionId: input.eventId,
+    payload,
+  });
+  const result = await enqueuePipelineTask({
+    taskType,
+    taskKey: `${taskType}:${input.jobVersionId}:ARCHIVE_RESTORE:${input.eventId}`,
+    payload,
+    intent,
+    producer: "job_archive_restore",
+    stageVersion,
+    requestId: input.eventId,
+    mode: "FORCE_RECOMPUTE",
+    triggerRevisionId: input.eventId,
+  }, client, { context: input.context });
+  if (!result.taskId) throw new Error("The restored-job decision was not queued.");
+}
+
 export async function restoreArchivedJob(
   client: pg.PoolClient,
   input: RestoreArchivedJobInput,
@@ -1694,27 +1760,17 @@ export async function restoreArchivedJob(
       ...(input.details ?? {}),
     },
   });
-  await client.query(
-    `UPDATE canonical_jobs
-     SET archived_at = NULL,
-         archive_reason = NULL,
-         archive_age_basis = NULL,
-         archive_reference_at = NULL,
-         archive_run_id = NULL,
-         latest_deterministic_decision_id = NULL,
-         recommendation_outcome = NULL,
-         updated_at = NOW()
-     WHERE workspace_id = $1 AND id = $2`,
-    [input.workspaceId, input.canonicalJobId],
-  );
+  await clearArchiveFields(client, input.workspaceId, input.canonicalJobId);
   const hold = await addRestoreAssessmentHold(client, input.workspaceId, input.canonicalJobId, input.actor, eventId);
-  const reassessmentTaskId = await enqueueRestoreReassessment(client, {
+  const restored = {
     workspaceId: input.workspaceId,
     canonicalJobId: input.canonicalJobId,
     jobVersionId: job.latest_job_version_id,
     eventId,
     context: input.context,
-  });
+  };
+  const reassessmentTaskId = await enqueueRestoreReassessment(client, restored);
+  await enqueueRestoreDecision(client, restored);
   return {
     restored: true,
     eventId,
@@ -1773,6 +1829,7 @@ export async function reactivateGenuineRepost(
     repostedAt: Date;
     repostEvidenceHash: string;
     evidenceType: "GENUINE_REPOST_DATE" | "NEW_POSTING_IDENTITY";
+    context: WorkspaceContext;
   },
 ): Promise<string | null> {
   const state = await client.query<{
@@ -1780,8 +1837,9 @@ export async function reactivateGenuineRepost(
     archive_reference_at: Date | null;
     archive_age_basis: string | null;
     archive_reason: string | null;
+    latest_job_version_id: string | null;
   }>(
-    `SELECT archived_at, archive_reference_at, archive_age_basis, archive_reason
+    `SELECT archived_at, archive_reference_at, archive_age_basis, archive_reason, latest_job_version_id::text
      FROM canonical_jobs WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
     [input.workspaceId, input.canonicalJobId],
   );
@@ -1808,20 +1866,17 @@ export async function reactivateGenuineRepost(
       repost_evidence_hash: input.repostEvidenceHash,
     },
   });
-  await client.query(
-    `UPDATE canonical_jobs
-     SET archived_at = NULL,
-         archive_reason = NULL,
-         archive_age_basis = NULL,
-         archive_reference_at = NULL,
-         archive_run_id = NULL,
-         latest_deterministic_decision_id = NULL,
-         recommendation_outcome = NULL,
-         updated_at = NOW()
-     WHERE workspace_id = $1 AND id = $2`,
-    [input.workspaceId, input.canonicalJobId],
-  );
+  await clearArchiveFields(client, input.workspaceId, input.canonicalJobId);
   await addRestoreAssessmentHold(client, input.workspaceId, input.canonicalJobId, input.actor, eventId);
+  if (row.latest_job_version_id !== null) {
+    await enqueueRestoreDecision(client, {
+      workspaceId: input.workspaceId,
+      canonicalJobId: input.canonicalJobId,
+      jobVersionId: row.latest_job_version_id,
+      eventId,
+      context: input.context,
+    });
+  }
   return eventId;
 }
 

@@ -3,12 +3,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { isLocalPostgresConnectionString } from "../../db/pgSsl.js";
 import { DECIDER_VERSION } from "../../pipeline/deciderVersion.js";
+import { runDeterministicMatcher } from "../../pipeline/deterministicMatcher.js";
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
 import { runRecommendationDecider } from "../../pipeline/recommendationDecider.js";
 import {
   AVAILABILITY_RECHECK_ARCHIVE_RULE,
   archiveJobsAsPostingNotConfirmable,
+  reactivateGenuineRepost,
+  restoreArchivedJob,
   restoreAvailabilityArchivedJob,
+  restoreHardRejectedArchiveForOwnerSavedObservation,
 } from "../../services/jobArchive.js";
 import { jobsAwaitingRematchOverLimit, staleStageResults } from "../../tasks/integrityZeroChecks.js";
 import { pipelineTaskStageVersion } from "../../tasks/pipelineTaskCurrentness.js";
@@ -106,6 +110,23 @@ async function queued(target: StackJob): Promise<number> {
     [s().ctx.workspaceId, target.canonicalJobId],
   );
   return rows[0]!.n;
+}
+
+async function listedAsWaiting(target: StackJob): Promise<boolean> {
+  const { rows } = await s().db.query(
+    `SELECT 1 FROM v_job_awaiting_rematch WHERE workspace_id = $1 AND canonical_job_id = $2`,
+    [s().ctx.workspaceId, target.canonicalJobId],
+  );
+  return rows.length > 0;
+}
+
+/** A worker pass with nothing to claim for the job: it only keeps the waits. */
+async function drainNothing(target: StackJob): Promise<void> {
+  await runPipelineStageTaskWorker(s().db, {
+    context: s().ctx, seed: false, includeTestFixtures: true, reconcileStalePending: false, heartbeatSeconds: 0,
+    minTimeToStartTaskMs: 0, maxTasks: 1, taskTypes: ["DECIDE_RECOMMENDATION"], jobVersionIds: [randomUUID()],
+  });
+  void target;
 }
 
 const decide = (target: StackJob, options: { preserveStoredOutcome?: boolean } = {}) =>
@@ -223,21 +244,63 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", () => {
     expect(after.decision).not.toBeNull();
   });
 
-  it("a job that waits longer than the limit is flagged, and the clock does not restart on later runs", async () => {
-    const target = await waitingJob("over-limit");
+  const flagged = async (target: StackJob) =>
+    (await jobsAwaitingRematchOverLimit(s().db, s().ctx.workspaceId)).sample.includes(target.canonicalJobId);
+  const waitedDays = (target: StackJob, days: number) => s().db.query(
+    `UPDATE job_rematch_waits SET waiting_since = NOW() - make_interval(days => $3) WHERE workspace_id = $1 AND canonical_job_id = $2`,
+    [s().ctx.workspaceId, target.canonicalJobId, days],
+  );
+
+  it("the clock starts when the job begins to wait: a match that is weeks old does not count", async () => {
+    const target = await waitingJob("clock-start");
     await s().db.query(
-      `UPDATE canonical_jobs SET created_at = NOW() - INTERVAL '40 days' WHERE id = $1`,
+      `UPDATE canonical_jobs SET created_at = NOW() - INTERVAL '60 days', recommendation_decided_at = NOW() - INTERVAL '45 days' WHERE id = $1`,
       [target.canonicalJobId],
     );
-    await s().db.query(`UPDATE profile_versions SET created_at = NOW() - INTERVAL '50 days'`);
-    await s().db.query(`UPDATE job_versions SET observed_at = NOW() - INTERVAL '20 days' WHERE canonical_job_id = $1`, [target.canonicalJobId]);
-    const since = await awaiting(target);
-    const flagged = async (days?: number) =>
-      (await jobsAwaitingRematchOverLimit(s().db, s().ctx.workspaceId, days)).sample.includes(target.canonicalJobId);
-    expect(await flagged()).toBe(true);
-    expect(await flagged(25)).toBe(false);
+    await s().db.query(
+      `INSERT INTO match_runs (workspace_id, canonical_job_id, job_version_id, profile_version_id, requirement_set_id, job_content_hash,
+                               context_fingerprint, status, requirement_count, matched_count, coverage_score, overall_match_score, started_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5, 'an-earlier-content', 'weeks-old', 'COMPLETED', 1, 1, 100, 90, NOW() - INTERVAL '45 days', NOW() - INTERVAL '45 days')`,
+      [s().ctx.workspaceId, target.canonicalJobId, target.jobVersionId, s().profileVersionId, target.requirementSetId],
+    );
+    await s().db.query(
+      `UPDATE canonical_jobs SET latest_match_run_id = (SELECT id FROM match_runs WHERE canonical_job_id = $1) WHERE id = $1`,
+      [target.canonicalJobId],
+    );
+    // Waiting, but no start recorded yet: listed, not flagged.
+    expect(await listedAsWaiting(target)).toBe(true);
+    expect(await awaiting(target)).toBeNull();
+    expect(await flagged(target)).toBe(false);
+
+    const before = Date.now();
     expect((await decide(target)).errors).toBe(0);
-    expect((await awaiting(target))!.getTime()).toBe(since!.getTime());
+    const since = (await awaiting(target))!;
+    expect(since.getTime()).toBeGreaterThan(before - 60_000);
+    expect(await flagged(target)).toBe(false);
+  });
+
+  it("a job that has waited past the limit is flagged; later passes never move its start, and leaving clears it", async () => {
+    const target = await waitingJob("clock-over");
+    await drainNothing(target);
+    expect(await awaiting(target)).not.toBeNull();
+    await waitedDays(target, 8);
+    const since = (await awaiting(target))!;
+    expect(await flagged(target)).toBe(true);
+
+    expect((await decide(target)).errors).toBe(0);
+    await drainNothing(target);
+    expect((await awaiting(target))!.getTime()).toBe(since.getTime());
+    expect(await flagged(target)).toBe(true);
+
+    // It leaves (here: no matching lane settles it), and a later wait starts a new clock.
+    await s().db.query(`UPDATE canonical_jobs SET routing_disposition = 'POLICY_NO_MATCH' WHERE id = $1`, [target.canonicalJobId]);
+    await drainNothing(target);
+    const rows = await s().db.query(`SELECT 1 FROM job_rematch_waits WHERE canonical_job_id = $1`, [target.canonicalJobId]);
+    expect(rows.rows).toEqual([]);
+    await s().db.query(`UPDATE canonical_jobs SET routing_disposition = NULL WHERE id = $1`, [target.canonicalJobId]);
+    await drainNothing(target);
+    expect((await awaiting(target))!.getTime()).toBeGreaterThan(since.getTime());
+    expect(await flagged(target)).toBe(false);
   });
 
   // The four faults the reviewers found in "write nothing", each as a worker chain.
@@ -321,15 +384,25 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", () => {
   });
 
   it.each([
-    ["the forced re-gate an availability re-check queues", "APPLY_HARD_GATES" as const, { force_policy_recalculation: true, reassessment_reason: "AVAILABILITY_RECHECK:1" }],
-    ["a re-extraction by a newer extractor version", "EXTRACT_DETERMINISTIC_REQUIREMENTS" as const, { reprocess: true }],
-  ])("%s never leaves the job without its score and outcome on its way through the worker", async (label, taskType, flags) => {
-    const target = await job(`chain-${taskType.toLowerCase().replaceAll("_", "-")}`);
+    ["the forced re-gate an availability re-check queues", "forced-regate"],
+    ["a re-extraction the seed forces because the extractor version is stale", "stale-extractor"],
+  ])("%s never leaves the job without its score and outcome on its way through the worker", async (_label, key) => {
+    const target = await job(`chain-${key}`);
     await drain(target);
     const first = await stored(target);
     expect(first.score).not.toBeNull();
 
-    await enqueueRerun(target, taskType, flags);
+    if (key === "forced-regate") {
+      await enqueueRerun(target, "APPLY_HARD_GATES", { force_policy_recalculation: true, reassessment_reason: "AVAILABILITY_RECHECK:1" });
+    } else {
+      // The fixture's requirement set was made by an old extractor version: the real seed adds `reprocess`. A job past
+      // routing that cannot be re-matched directly goes back through the gate with that flag.
+      await s().db.query(`UPDATE canonical_jobs SET processing_state = 'ROUTING_DEFERRED', processing_status = 'ROUTING_DEFERRED' WHERE id = $1`, [target.canonicalJobId]);
+      await seedRecoverablePipelineTasks(s().db, {
+        context: s().ctx, taskTypes: ["EXTRACT_DETERMINISTIC_REQUIREMENTS"], jobVersionIds: [target.jobVersionId], includeTestFixtures: true,
+      });
+    }
+    let gateReset = false;
     const seen: unknown[] = [];
     for (let step = 0; step < 12; step += 1) {
       await runPipelineStageTaskWorker(s().db, {
@@ -338,12 +411,141 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", () => {
       });
       await s().publishEmbeddings();
       const now = await stored(target);
+      const pointers = await s().db.query<{ reset: boolean }>(`SELECT latest_match_run_id IS NULL AS reset FROM canonical_jobs WHERE id = $1`, [target.canonicalJobId]);
+      gateReset ||= pointers.rows[0]!.reset;
       seen.push({ score: now.score !== null, coverage: now.coverage !== null, outcome: now.outcome !== null });
     }
     expect(seen).toEqual(seen.map(() => ({ score: true, coverage: true, outcome: true })));
-    expect((await tasks(target)).some((task) => task.task_type === "APPLY_HARD_GATES")).toBe(true);
+    // The gate that ran was the forced one: it removed the match pointer.
+    const gate = await s().db.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM pipeline_tasks WHERE task_type = 'APPLY_HARD_GATES' AND payload->>'job_version_id' = $1`, [target.jobVersionId]);
+    expect(gate.rows.some((row) => row.payload.reprocess === true || row.payload.force_policy_recalculation === true)).toBe(true);
+    expect(gateReset).toBe(true);
     await drain(target, 2);
     expect((await stored(target)).score).not.toBeNull();
     await noFailures(target);
+  }, 120_000);
+
+  async function archive(target: StackJob, reason: string, basis: string): Promise<void> {
+    const run = await s().db.query<{ id: string }>(
+      `INSERT INTO job_archive_runs (run_started_at, cutoff_at, mode, status) VALUES (NOW(), NOW() - INTERVAL '1 second', 'APPLY', 'RUNNING') RETURNING id::text`,
+    );
+    await s().db.query(
+      `UPDATE canonical_jobs SET archived_at = NOW(), archive_reason = $2, archive_age_basis = $3,
+              archive_reference_at = NOW() - INTERVAL '200 days', archive_run_id = $4 WHERE id = $1`,
+      [target.canonicalJobId, reason, basis, run.rows[0]!.id],
+    );
+  }
+
+  const RESTORE_PATHS: Array<[string, (target: StackJob) => Promise<void>]> = [
+    ["the owner's manual restore", async (target) => {
+      await archive(target, "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS", "AUTHORITATIVE_PUBLICATION_DATE");
+      await restoreArchivedJob(s().db, { workspaceId: s().ctx.workspaceId, canonicalJobId: target.canonicalJobId, actor: "user:test", reason: "synthetic restore", context: s().ctx });
+    }],
+    ["the availability re-check seeing the posting open again", async (target) => {
+      await archiveJobsAsPostingNotConfirmable(s().db, {
+        workspaceId: s().ctx.workspaceId, canonicalJobIds: [target.canonicalJobId], actor: "test", details: { rule: AVAILABILITY_RECHECK_ARCHIVE_RULE },
+      });
+      await restoreAvailabilityArchivedJob(s().db, { workspaceId: s().ctx.workspaceId, canonicalJobId: target.canonicalJobId, context: s().ctx });
+    }],
+    ["the owner saving a hard-rejected job again", async (target) => {
+      await archive(target, "HARD_REJECTED_PERMANENT", "HARD_REJECTED_DECISION");
+      await restoreHardRejectedArchiveForOwnerSavedObservation(s().db, {
+        workspaceId: s().ctx.workspaceId, canonicalJobId: target.canonicalJobId, observationId: null, sourceName: "LINKEDIN_SAVED", context: s().ctx,
+      });
+    }],
+    ["a genuine repost", async (target) => {
+      await archive(target, "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS", "AUTHORITATIVE_PUBLICATION_DATE");
+      await reactivateGenuineRepost(s().db, {
+        workspaceId: s().ctx.workspaceId, canonicalJobId: target.canonicalJobId, actor: "test", repostedAt: new Date(),
+        repostEvidenceHash: "synthetic-repost", evidenceType: "GENUINE_REPOST_DATE", context: s().ctx,
+      });
+    }],
+  ];
+
+  /** One worker pass that claims only the decision: nothing else has to run first. */
+  const decidePass = (target: StackJob) => runPipelineStageTaskWorker(s().db, {
+    context: s().ctx, seed: false, includeTestFixtures: true, reconcileStalePending: false, heartbeatSeconds: 0,
+    minTimeToStartTaskMs: 0, maxTasks: 5, taskTypes: ["DECIDE_RECOMMENDATION"], jobVersionIds: [target.jobVersionId],
+  });
+
+  it.each(RESTORE_PATHS.flatMap(([label, restore]) => [
+    [label, "with a current match", restore] as const,
+    [label, "with no current match", restore] as const,
+  ]))("a job restored by %s, %s, is decided on the next worker pass", async (label, match, restore) => {
+    const target = await job(`restore-${randomUUID().slice(0, 8)}`);
+    await drain(target);
+    if (match === "with no current match") {
+      await s().db.query(`UPDATE canonical_jobs SET latest_match_run_id = NULL WHERE id = $1`, [target.canonicalJobId]);
+    }
+    const first = await stored(target);
+    await restore(target);
+    expect((await stored(target)).outcome, label).toBeNull();
+
+    expect(await decidePass(target)).toMatchObject({ completed: 1, failed: 0, blocked: 0 });
+    const after = await stored(target);
+    expect(after.outcome).not.toBeNull();
+    expect(after.score).toBe(first.score);
+    const decision = (await latestDecision(target))!;
+    expect(decision).toMatchObject({ decider_version: DECIDER_VERSION, outcome: after.outcome });
+    if (match === "with no current match") {
+      // Decided without a score: the policy's result, the stored score carried, and the job marked as waiting.
+      expect(decision.json.inputs).toMatchObject({ requirement_score: null });
+      expect(after.outcome).toBe("TRACK");
+      expect(await awaiting(target)).not.toBeNull();
+    }
+  }, 120_000);
+
+  it("a restored job that cannot be decided yet keeps its outcome instead of being left without one", async () => {
+    const target = await waitingJob("restore-undecidable", "REVIEW");
+    await s().db.query(`UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE id = $1`, [target.canonicalJobId]);
+    await RESTORE_PATHS[0]![1](target);
+    expect((await stored(target)).outcome).toBe("REVIEW");
+    expect(await decidePass(target)).toMatchObject({ completed: 1, failed: 0 });
+    expect((await stored(target)).outcome).toBe("REVIEW");
+  });
+
+  it.each([
+    ["the direct matcher and decider calls of the re-route script", "direct"],
+    ["the worker's match task", "worker"],
+  ])("after a profile import, a match with a missing profile embedding keeps the stored result: %s", async (_label, path) => {
+    const target = await job(`import-${path}`);
+    await drain(target);
+    await storeResult(target, "PRIORITY", "LANE_ROUTED");
+    const before = await stored(target);
+    // A newly imported profile whose facts have no embedding yet.
+    const profile = await s().db.query<{ id: string }>(
+      `INSERT INTO profile_versions (workspace_id, candidate_profile_id, version_number, schema_version, source_hash, status, effective_at)
+       SELECT workspace_id, candidate_profile_id, version_number + 10 + (SELECT COUNT(*) FROM profile_versions), schema_version, $1, 'DRAFT', NOW()
+         FROM profile_versions WHERE status = 'ACTIVE' LIMIT 1 RETURNING id`,
+      [`synthetic-import-${path}`],
+    );
+    await s().db.query(`UPDATE profile_versions SET status = 'RETIRED' WHERE status = 'ACTIVE'`);
+    await s().db.query(`UPDATE profile_versions SET status = 'ACTIVE' WHERE id = $1`, [profile.rows[0]!.id]);
+    await s().db.query(
+      `INSERT INTO profile_facts (workspace_id, profile_version_id, fact_key, fact_type, statement, structured_value, evidence_tier, verification_status)
+       VALUES ($1, $2, $3, 'SKILL', 'Synthetic unembedded skill for the import case', '{}'::jsonb, 'PROFESSIONAL_PRODUCTION', 'VERIFIED')`,
+      [s().ctx.workspaceId, profile.rows[0]!.id, `unembedded-${path}`],
+    );
+
+    if (path === "direct") {
+      const summary = await runDeterministicMatcher(s().db, { context: s().ctx, canonicalJobIds: [target.canonicalJobId] });
+      expect(summary).toMatchObject({ errors: 0, matchedJobs: 0, skippedJobs: 1 });
+      expect((await decide(target)).errors).toBe(0);
+    } else {
+      await seedRecoverablePipelineTasks(s().db, {
+        context: s().ctx, taskTypes: ["MATCH_PROFILE_EVIDENCE"], jobVersionIds: [target.jobVersionId], includeTestFixtures: true,
+      });
+      await runPipelineStageTaskWorker(s().db, {
+        context: s().ctx, seed: false, includeTestFixtures: true, reconcileStalePending: false, heartbeatSeconds: 0,
+        minTimeToStartTaskMs: 0, maxTasks: 1, taskTypes: ["MATCH_PROFILE_EVIDENCE"], jobVersionIds: [target.jobVersionId],
+      });
+    }
+    const run = await s().db.query<{ status: string; error_message: string }>(
+      `SELECT mr.status, mr.error_message FROM canonical_jobs c JOIN match_runs mr ON mr.id = c.latest_match_run_id WHERE c.id = $1`,
+      [target.canonicalJobId],
+    );
+    expect(run.rows[0]).toMatchObject({ status: "FAILED", error_message: "EMBEDDING_DEPENDENCY_INCOMPLETE" });
+    expect(await stored(target)).toMatchObject({ score: before.score, coverage: before.coverage, outcome: "PRIORITY", eligibility: "ELIGIBLE" });
   }, 120_000);
 });

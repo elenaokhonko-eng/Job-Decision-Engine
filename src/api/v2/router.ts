@@ -446,6 +446,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             s.recommendation_coverage_score,
             s.recommendation_evidence_completeness,
             s.recommendation_decided_at,
+            (awaiting.canonical_job_id IS NOT NULL) AS awaiting_rematch,
             awaiting.waiting_since AS awaiting_rematch_since,
             s.nd_friendly_score,
             s.politics_stress_score,

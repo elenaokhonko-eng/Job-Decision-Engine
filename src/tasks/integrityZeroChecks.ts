@@ -319,7 +319,7 @@ export async function staleStageResults(db: Queryable, workspaceId: string): Pro
  * right after a rule-version change until the reopen seeds have drained. The default, "post", is strict
  * and runs every check.
  */
-/** A job that has kept a stored result for longer than the limit without a re-match: nothing waits indefinitely. */
+/** A job that has waited for a re-match longer than the limit, counted from when it began to wait. */
 export async function jobsAwaitingRematchOverLimit(
   db: Queryable,
   workspaceId: string,

@@ -34,6 +34,7 @@ import {
   AWAITING_REMATCH_NOTE,
   STORED_SCORE_CARRIED_NOTE,
   keepStoredOutcome,
+  syncRematchWaits,
   type KeptResult,
 } from "../modules/decision/index.js";
 import { applyRoleShapePenalty, assessRoleShape, roleShapeFingerprint, ROLE_SHAPE_POLICY_VERSION } from "./roleShape.js";
@@ -1425,6 +1426,9 @@ export async function runRecommendationDecider(
         );
       }
     }
+
+    // A job this run found waiting starts its clock now; one that no longer waits loses it.
+    await syncRematchWaits(client, ctx.workspaceId, jobs.map((job) => job.canonical_job_id));
 
     console.log(`Recommendation Decider complete. Updated: ${updated}`);
     return {

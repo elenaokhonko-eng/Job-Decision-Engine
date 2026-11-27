@@ -10,3 +10,4 @@ export {
   type KeptOutcomeResult,
   type KeptResult,
 } from "./domain/keptOutcome.js";
+export { syncRematchWaits } from "./handlers/rematchWaits.js";

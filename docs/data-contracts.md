@@ -83,7 +83,8 @@ One shared resolver, `resolveEffectiveWorkabilityPolicy` (`src/pipeline/effectiv
 
 - A recompute without a requirement score or coverage carries the stored one; the decision records it in `outputs`, with `inputs` null and the trace note `stored_score_carried`.
 - A job without a current match keeps its stored eligibility and outcome, lowered only by facts that do not depend on the score. A carried result is never queued for AI.
-- `v_job_awaiting_rematch` marks waiting jobs. The zero check `awaiting_rematch_over_limit` flags a job waiting more than `AWAITING_REMATCH_LIMIT_DAYS` (7 days, `src/modules/decision/domain/keptOutcome.ts`).
+- A restore from the archive queues the job's decision at once.
+- `v_job_awaiting_rematch` marks waiting jobs. `job_rematch_waits` holds when each began to wait, never when it was last matched. The zero check `awaiting_rematch_over_limit` flags a job waiting from that start more than `AWAITING_REMATCH_LIMIT_DAYS` (7 days, `src/modules/decision/domain/keptOutcome.ts`).
 
 ## Task seeds and stale-stage zero checks
 
