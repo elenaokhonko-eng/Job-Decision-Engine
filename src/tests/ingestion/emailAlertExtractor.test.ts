@@ -108,12 +108,12 @@ describe("decodeGmailRawEmail", () => {
   });
 
   it("recovers the role heading when a card link only says Apply now", async () => {
-    const html = '<table><tr><td><h2>Director, AI Solution Architect</h2><p>Location: Singapore</p><a href="https://careers.example.com/job/1441267233">Apply now</a></td></tr></table>';
+    const html = '<table><tr><td><h2>Head of AI Engineering</h2><p>Location: Singapore</p><a href="https://careers.example.com/job/7000000001">Apply now</a></td></tr></table>';
     const cards = await extractEmailJobCards(gmailRaw(
       "MIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" + html
     ));
     expect(cards).toHaveLength(1);
-    expect(cards[0]?.title).toBe("Director, AI Solution Architect");
+    expect(cards[0]?.title).toBe("Head of AI Engineering");
     expect(cards[0]?.location).toBe("Singapore");
   });
 

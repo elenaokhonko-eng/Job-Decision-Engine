@@ -260,7 +260,7 @@ describe("Tier 1 lane pre-screen", () => {
   it("requires the role term in the title for title-only sources (Jobicy)", () => {
     const posting = {
       company_name: "Example Company",
-      title: "Alliances Leader",
+      title: "Partnerships Chief",
       description_raw: "Work with the data engineer and AI engineer teams on machine learning platform partnerships.",
       location_raw: "Remote",
       workplace_type_raw: "REMOTE",

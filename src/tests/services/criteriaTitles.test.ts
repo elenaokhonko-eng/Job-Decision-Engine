@@ -24,7 +24,7 @@ describe("Criteria Title Taxonomy & Exclusions", () => {
 
     it("excludes data infrastructure titles but keeps data platform, analytics and pipeline titles", () => {
       const excludedTitles = [
-        "Member of Technical Staff, Data Infrastructure",
+        "Member of Technical Staff (Telescope Data Infrastructure)",
         "Senior Data Infra Engineer",
         "Market Data Infrastructure Lead",
       ];

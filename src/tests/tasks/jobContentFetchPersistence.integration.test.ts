@@ -51,13 +51,13 @@ function response(url: URL, value: unknown): SafeHttpResponse {
   };
 }
 
-const postingId = "c3c8f47e-0c30-458b-a74f-53cd6dc09137";
-const postingTitle = "Data & AI - Technical Project Manager";
+const postingId = "0f1e2d3c-4b5a-4968-8776-655443322110";
+const postingTitle = "Technical Project Steward - Observatory Systems";
 const postingDescription = [
-  "This role leads data and AI consulting delivery for client organizations and coordinates complex technical programs.",
-  "Responsibilities: Set delivery plans, guide engineers, manage scope and commercial outcomes, and present to executive stakeholders.",
-  "Requirements: Demonstrated experience in data platforms, AI delivery, project management, client communication, and risk controls.",
-  "The successful candidate works with cross-functional teams, documents decisions, resolves delivery risks, and supports implementation.",
+  "Tide Hall is a public aquarium where animal records still live on clipboards beside each tank.",
+  "Requirements: you have turned a paper routine into software before, you write SQL, and you can plan a technical project around feeding times.",
+  "Responsibilities: pick which tank logs go digital first, try each screen with the night keepers, and publish what broke.",
+  "No diving ticket is needed. An interest in water chemistry sensors is welcome.",
 ].join(" ").repeat(4);
 
 function postingDependencies(): PostingFetcherDependencies {
@@ -66,13 +66,13 @@ function postingDependencies(): PostingFetcherDependencies {
     fetchOnce: async (url) => response(url, {
       id: postingId,
       text: postingTitle,
-      companyName: "CFGI",
-      hostedUrl: `https://jobs.lever.co/cfgi/${postingId}`,
-      applyUrl: `https://jobs.lever.co/cfgi/${postingId}/apply`,
+      companyName: "Quillmark",
+      hostedUrl: `https://jobs.lever.co/quillmark/${postingId}`,
+      applyUrl: `https://jobs.lever.co/quillmark/${postingId}/apply`,
       categories: { location: "United States", commitment: "Full-time" },
       workplaceType: "remote",
       createdAt: Date.parse("2025-08-01T12:00:00Z"),
-      salaryRange: { currency: "USD", interval: "yearly", min: 150000, max: 200000 },
+      salaryRange: { currency: "USD", interval: "yearly", min: 120000, max: 160000 },
       descriptionPlain: postingDescription,
     }),
     now: () => new Date("2026-10-28T00:00:00.000Z"),
@@ -114,7 +114,7 @@ async function insertGmailObservation(input: { title: string; url: string; messa
      ) VALUES ($1, $2, 'GMAIL_ALERT', $3, $4, NOW(), $9, $5, 'short Gmail alert snippet',
        $6::jsonb, $7, 'FETCH_PENDING', $8)`,
     [observationId, getContext().workspaceId, `gmail-${input.messageId}`, input.url, input.title,
-      JSON.stringify(rawPayload), rawPayloadHash, input.messageId, input.companyName ?? "CFGI"],
+      JSON.stringify(rawPayload), rawPayloadHash, input.messageId, input.companyName ?? "Quillmark"],
   );
   return observationId;
 }
@@ -293,7 +293,7 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
   });
 
   it("retries safely, persists the exact posting version, and runs deterministic requirements and gates", async () => {
-    const sourceUrl = `https://jobs.lever.co/cfgi/${postingId}`;
+    const sourceUrl = `https://jobs.lever.co/quillmark/${postingId}`;
     const observationId = await insertGmailObservation({
       title: postingTitle,
       url: sourceUrl,
@@ -330,7 +330,7 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
     const fetcher: PipelineStageWorkerDependencies["fetchJobContent"] = async (url, expected) => {
       const result = await fetchJobContent(url, expected, postingDependencies());
       if (result.kind !== "COMPLETE") {
-        throw new Error(`CFGI posting fixture fetch returned ${result.kind}: ${"reason" in result ? result.reason : "no reason"}`);
+        throw new Error(`Quillmark posting fixture fetch returned ${result.kind}: ${"reason" in result ? result.reason : "no reason"}`);
       }
       return result;
     };
@@ -345,7 +345,7 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
          WHERE task.workspace_id = $1 AND task.id = $2::uuid`,
         [getContext().workspaceId, taskId],
       );
-      throw new Error(`CFGI posting fetch did not complete: ${JSON.stringify({ fetchRun, errors: completed.errors, task: taskState.rows[0] ?? null })}`);
+      throw new Error(`Quillmark posting fetch did not complete: ${JSON.stringify({ fetchRun, errors: completed.errors, task: taskState.rows[0] ?? null })}`);
     }
     expect(completed.byType.NORMALIZE_OBSERVATION).toMatchObject({ claimed: 1, completed: 1 });
     const requirementsRun = completed.byType.EXTRACT_DETERMINISTIC_REQUIREMENTS;
@@ -377,7 +377,7 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
          ORDER BY task.created_at, task.id`,
         [getContext().workspaceId, observationId],
       );
-      throw new Error(`CFGI deterministic-requirements stage did not complete: ${JSON.stringify({ requirementsRun, errors: completed.errors, tasks: taskStates.rows })}`);
+      throw new Error(`Quillmark deterministic-requirements stage did not complete: ${JSON.stringify({ requirementsRun, errors: completed.errors, tasks: taskStates.rows })}`);
     }
     expect(completed.byType.APPLY_HARD_GATES).toMatchObject({ claimed: 1, completed: 1 });
 
@@ -407,7 +407,7 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
       derived_from_observation_id: observationId,
       description_raw: postingDescription,
       workplace_type_raw: "REMOTE",
-      compensation_raw: "USD 150000-200000 per year",
+      compensation_raw: "USD 120000-160000 per year",
     });
     expect(source.rows[0]?.raw_payload).toMatchObject({
       source_content_status: "COMPLETE",
@@ -494,7 +494,7 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
       `INSERT INTO raw_job_observations (
          id, workspace_id, source_name, company_name, title, description_raw,
          raw_payload_hash, derived_from_observation_id
-       ) VALUES ($1, $2::uuid, 'LEVER', 'CFGI', $3, $4, $5, $6::uuid)`,
+       ) VALUES ($1, $2::uuid, 'LEVER', 'Quillmark', $3, $4, $5, $6::uuid)`,
       [crossWorkspaceId, secondWorkspace.rows[0]?.id, postingTitle, postingDescription,
         createHash("sha256").update(crossWorkspaceId).digest("hex"), observationId],
     )).rejects.toMatchObject({ code: "23503" });
@@ -604,7 +604,7 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
     });
     const taskId = await enqueueFetch(observationId, `blocked-${randomUUID()}`);
     const generic = [
-      "CFGI is a global company with a diverse team and collaborative culture.",
+      "Quillmark is a global company with a diverse team and collaborative culture.",
       "We offer competitive benefits, professional development, flexible programs, and opportunities to make an impact.",
       "Our values include integrity, respect, inclusion, teamwork, innovation, and service to our customers.",
       "Join our talent community to learn about future opportunities and hear from our people.",
