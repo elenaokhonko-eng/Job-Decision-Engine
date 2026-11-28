@@ -1,6 +1,7 @@
 import {
   selectJobVersionIsLead,
   selectLeadCanonicalJobIds,
+  selectLeadCanonicalJobIdsFromDefinition,
   selectLeadReadModelAvailable,
   type CatalogQueryable,
 } from "../../../platform/persistence/catalog/index.js";
@@ -35,6 +36,27 @@ export const JOB_IS_LEAD_MESSAGE =
 export async function listLeadJobIds(db: CatalogQueryable, workspaceId: string): Promise<string[]> {
   if (!(await leadReadModelAvailable(db))) return [];
   return selectLeadCanonicalJobIds(db, workspaceId);
+}
+
+export interface LeadJobs {
+  readonly ids: string[];
+  /** The installed view, or the text of its migration when the view is not installed. */
+  readonly source: "READ_MODEL" | "MIGRATION_TEXT";
+}
+
+/**
+ * The leads for a read-only report on a database that may not have migration 123: never "no job is a lead" for want of
+ * the view. `migrationSql` is the text of the lead definition migration.
+ */
+export async function listLeadJobsByDefinition(
+  db: CatalogQueryable,
+  workspaceId: string,
+  migrationSql: string,
+): Promise<LeadJobs> {
+  if (await selectLeadReadModelAvailable(db)) {
+    return { ids: await selectLeadCanonicalJobIds(db, workspaceId), source: "READ_MODEL" };
+  }
+  return { ids: await selectLeadCanonicalJobIdsFromDefinition(db, workspaceId, migrationSql), source: "MIGRATION_TEXT" };
 }
 
 export async function isLeadJobVersion(

@@ -313,6 +313,25 @@ Worked example: fit 80, coverage 60, evidence 70, lane 100 gives (80 x 37.5 + 60
 - A latest policy that gives an AI term a weight is refused for that workspace: the materializer returns `policyError`, writes nothing, and the script exits non-zero.
 - Version rule: a snapshot is keyed by `ranking_policy_version`, and the read models join the latest policy version, so a new `ranking_policies` row makes the materializer write a new snapshot for every eligible job (no AI call). Until it runs, the Top 10 is empty. The previous version's snapshots stay as history. `src/pipeline/rankingPolicyComparison.ts` compares two policy versions read-only (Top 10 side by side, rated rows marked, lane confidence effect).
 
+### Review lists (a command, not a stage)
+
+`scripts/build_review_lists.ts` builds lists for the owner to rate, so that a proposed ordering can be tested before it changes anything. It reads a replay copy only, in one read-only transaction, and writes nothing to the database: no job state, decision, read model or table changes, and nothing is rejected. It makes no model call and reads no posting site.
+
+| Part | Where |
+|---|---|
+| Role-type and sector classifier, list building, blind sheet, pass rule | `src/modules/decision/domain/` (pure) |
+| Candidate loading | `src/modules/decision/handlers/reviewLists.ts` |
+| Queries | `src/platform/persistence/decision/index.ts` |
+| Read-only session | `src/platform/persistence/index.ts` |
+| Wiring, replay guard, files | `src/app/reviewLists.ts` |
+
+- **The ranking design is profile data.** Role types, statuses, sectors and employer lists are in `private/profile/ranking_design.json`, checked by a strict schema. The repository holds an invented example, `fixtures/ranking_design.example.json`. A missing or invalid design stops the command, and so does an employer override list that is not marked approved. A design that holds no such list overrides no employer.
+- **Sector** is the employer's industry: the design's lists, the industry tags of `config/companies.yml` that the design maps (never a tag that names a function), or words in the employer's name. A job's lane and its posting text do not decide it. Unknown is neutral.
+- **Role type** comes from the title, with the career track as a fallback. An unknown role stays in the pool. A "never" role type or sector is only left out of the lists.
+- **Candidates**: live, not a fixture, gate `PASS`, the full posting text (`v_job_content_state`, the rule under which no job is decided), with a link, not a lead (`v_job_lead_state`; on a database without migration 123 the same view bodies are read from the migration's text and run as query expressions, creating nothing), not known `CLOSED` (`v_job_availability_current`), and not rated in an earlier key file under `private/review/`. Records of one posting are collapsed; a posting rated, removed or known closed under any record (archived ones included) stays out, and one saved under any record is marked saved. An unknown employer decides nothing.
+- **Output** is only under `private/review/`. A build writes a job id file and a sealed draft; it writes the sheet and key only when the same-day availability check (`scripts/check_availability_now.ts`) has nothing left to read for the listed jobs. A job confirmed closed leaves the lists and the next one takes its place. A closure the check read from page wording alone (`check_by_hand`) is not confirmed: the job stays, as not verified, and is listed for the coordinator in `private/review/for_coordinator/`.
+- **The sheet is blind:** the stored posting text, in one layout, with no link, saved mark, list or rank. Every posting line is indented, so no posting can break out of its block or answer for the rater. Real links (a scheme, `www.`, short-link and form hosts, e-mail addresses, the job's own addresses and ids) and stored lines that are only job-board status wording are removed; no sentence is dropped. A posting that cleaning would leave empty or cut by more than a small share is left off and counted. The key keeps those encoded. `--reveal` shows links and saved marks for answered jobs only, writes only under `private/review/`, and records those answers so that a later change is warned about. `--score` prints nothing but the unanswered rows until every job is rated; then it applies the pass rule, saved jobs counted (the overall list includes them), and reports what the check dropped. 
+
 ## 10. Job states, decisions and status
 
 ### Job states
@@ -460,7 +479,7 @@ All four stop when the repository variable `WORKFLOW_KILL_SWITCH` is `true`.
 
 ## 14. As built
 
-Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `catalog`, `decision` and `evaluation` repositories; `src/modules/evaluation/` holds the owner's AI switch, the first domain module, `src/modules/catalog/` holds the lead questions and the employer and location comparison used to recognise one posting under two records, and `src/modules/decision/` holds the rule for the stored result of a job that waits for a re-match and the record of when the wait began. Nothing lives under `src/interfaces/` or `src/app/` yet.
+Most of the code predates the target layout. `src/platform/` holds the `config` and `llm` parts and the `catalog`, `decision` and `evaluation` repositories; `src/modules/evaluation/` holds the owner's AI switch, the first domain module, and `src/modules/catalog/` holds the lead questions and the employer and location comparison used to recognise one posting under two records. `src/modules/decision/` with its repository holds the rule for the stored result of a job that waits for a re-match, the record of when the wait began, and the review lists (section 9), whose wiring is the first file under `src/app/`. Nothing lives under `src/interfaces/` yet.
 
 | Area today | Holds | Goes to |
 |---|---|---|
