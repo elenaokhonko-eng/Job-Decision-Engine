@@ -17,6 +17,9 @@ export interface Candidate {
   /** Top-K capability score, 0 to 100; null when the match holds no similarity. */
   readonly topK: number | null;
   readonly classification: JobClassification;
+  /** The stored posting text. */
+  readonly description: string;
+  readonly workMode: "REMOTE" | "HYBRID" | "ONSITE" | null;
 }
 
 /** One stored record of a posting, as far as the lists need it. */
@@ -44,6 +47,8 @@ export interface CollapsedPool {
   /** The same before never roles and never sectors are left out. */
   readonly postings: PoolJob[];
   readonly dropped: { rated: number; dismissed: number; duplicate: number; neverRole: number; neverSector: number };
+  /** The candidate records of postings left out as removed or closed. */
+  readonly dismissedIds: string[];
 }
 
 /** Records that share any key are one posting (transitively). */
@@ -71,6 +76,7 @@ function groupByKeys(records: readonly PostingRecordEntry[]): PostingRecordEntry
 export function collapsePool(records: readonly PostingRecordEntry[]): CollapsedPool {
   const eligible: PoolJob[] = [];
   const postings: PoolJob[] = [];
+  const dismissedIds: string[] = [];
   const dropped = { rated: 0, dismissed: 0, duplicate: 0, neverRole: 0, neverSector: 0 };
   for (const group of groupByKeys(records)) {
     const candidates = group.filter((record) => record.candidate !== null);
@@ -81,6 +87,7 @@ export function collapsePool(records: readonly PostingRecordEntry[]): CollapsedP
     }
     if (group.some((record) => record.dismissed)) {
       dropped.dismissed += candidates.length;
+      dismissedIds.push(...candidates.map((record) => record.id));
       continue;
     }
     dropped.duplicate += candidates.length - 1;
@@ -100,7 +107,7 @@ export function collapsePool(records: readonly PostingRecordEntry[]): CollapsedP
     else if (job.classification.sector === "NEVER") dropped.neverSector += 1;
     else eligible.push(job);
   }
-  return { eligible, postings, dropped };
+  return { eligible, postings, dropped, dismissedIds };
 }
 
 export const seededHash = (seed: string, purpose: string, id: string): string =>
@@ -145,7 +152,8 @@ export interface ReviewLists {
 }
 
 export function buildReviewLists(design: RankingDesign, eligible: readonly PoolJob[]): ReviewLists {
-  const { size, overall_size, comparison_size, comparison_band, overall_from_unsaved_only, seed } = design.lists;
+  const { size, overall_size, comparison_size, comparison_unknown_role_size, comparison_band, overall_from_unsaved_only, seed } =
+    design.lists;
   const byType = [...design.role_types]
     .sort((a, b) => a.priority - b.priority)
     .map((type): RoleList => {
@@ -164,15 +172,18 @@ export function buildReviewLists(design: RankingDesign, eligible: readonly PoolJ
     }
   }
 
-  // The middle of the whole pool in the standard order. Listed jobs are not comparisons; saved jobs are not counted by
-  // the pass rule, so none is drawn.
+  // The comparison jobs: the design's band of the whole pool in the standard order, saved jobs included, listed jobs
+  // not. A set number has an unknown role type and the rest a known one; a short group is never filled from the other.
   const ranked = [...eligible].sort(standardOrder(seed));
   const listed = new Set(byType.flatMap((list) => list.jobs.map((job) => job.id)));
-  const comparison = ranked
+  const band = ranked
     .slice(Math.floor(ranked.length * comparison_band[0]), Math.ceil(ranked.length * comparison_band[1]))
-    .filter((job) => !listed.has(job.id) && !job.saved)
-    .sort((a, b) => seededHash(seed, "comparison", a.id).localeCompare(seededHash(seed, "comparison", b.id)))
-    .slice(0, comparison_size);
+    .filter((job) => !listed.has(job.id))
+    .sort((a, b) => seededHash(seed, "comparison", a.id).localeCompare(seededHash(seed, "comparison", b.id)));
+  const comparison = [
+    ...band.filter((job) => job.classification.roleType === null).slice(0, comparison_unknown_role_size),
+    ...band.filter((job) => job.classification.roleType !== null).slice(0, comparison_size - comparison_unknown_role_size),
+  ];
   return { byType, overall, comparison };
 }
 
@@ -181,4 +192,14 @@ export function sheetJobs(lists: ReviewLists, seed: string): PoolJob[] {
   const unique = new Map<string, PoolJob>();
   for (const job of [...lists.byType.flatMap((list) => list.jobs), ...lists.overall, ...lists.comparison]) unique.set(job.id, job);
   return [...unique.values()].sort((a, b) => seededHash(seed, "sheet", a.id).localeCompare(seededHash(seed, "sheet", b.id)));
+}
+
+/**
+ * The same jobs in an order of their own, for the availability check: its output names lines and why a link was left
+ * out, which must not point at rows of the sheet.
+ */
+export function jobIdOrder(lists: ReviewLists, seed: string): string[] {
+  return sheetJobs(lists, seed)
+    .map((job) => job.id)
+    .sort((a, b) => seededHash(seed, "job-ids", a).localeCompare(seededHash(seed, "job-ids", b)));
 }

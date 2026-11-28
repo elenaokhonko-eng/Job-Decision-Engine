@@ -19,6 +19,8 @@ export interface ReviewJobRow {
   test_fixture: boolean;
   content_complete: boolean;
   availability_state: string | null;
+  /** The closed state rests only on a manual check that read it from page wording and asked for it to be checked by hand. */
+  closed_by_page_wording_only: boolean;
   description: string | null;
   identity_hashes: Array<string | null> | null;
 }
@@ -42,6 +44,27 @@ export async function selectReviewJobs(
             job.is_test_fixture IS TRUE AS test_fixture,
             content.content_complete IS TRUE AS content_complete,
             availability.availability_state,
+            -- Only while the stored verdict is that check's own (same instant), no source expiry has passed, and no other
+            -- read of this version since it was last seen open confirmed the closure.
+            (availability.availability_state = 'CLOSED'
+              AND (availability.source_expires_at IS NULL OR availability.source_expires_at > NOW())
+              AND EXISTS (
+                SELECT 1 FROM job_availability_recheck_events by_hand
+                 WHERE by_hand.workspace_id = job.workspace_id AND by_hand.canonical_job_id = job.id
+                   AND by_hand.job_version_id = version.id AND by_hand.decision = 'MARK_CLOSED'
+                   AND by_hand.details->>'check_by_hand' = 'true'
+                   AND by_hand.occurred_at BETWEEN version.availability_verified_at - INTERVAL '1 second'
+                                               AND version.availability_verified_at + INTERVAL '1 second')
+              AND NOT EXISTS (
+                SELECT 1 FROM job_availability_recheck_events confirmed
+                 WHERE confirmed.workspace_id = job.workspace_id AND confirmed.canonical_job_id = job.id
+                   AND confirmed.job_version_id = version.id AND confirmed.decision = 'MARK_CLOSED'
+                   AND confirmed.details->>'check_by_hand' IS DISTINCT FROM 'true'
+                   AND confirmed.occurred_at > COALESCE((
+                     SELECT MAX(seen.occurred_at) FROM job_availability_recheck_events seen
+                      WHERE seen.workspace_id = job.workspace_id AND seen.canonical_job_id = job.id
+                        AND seen.job_version_id = version.id AND seen.decision = 'MARK_OPEN'), '-infinity'::timestamptz))
+            ) IS TRUE AS closed_by_page_wording_only,
             CASE WHEN job.archived_at IS NULL THEN version.description_text END AS description,
             (SELECT ARRAY_AGG(any_version.source_posting_identity_hash) FROM job_versions any_version
               WHERE any_version.workspace_id = job.workspace_id AND any_version.canonical_job_id = job.id) AS identity_hashes
@@ -133,4 +156,65 @@ export async function selectMatchSimilarities(db: DecisionQueryable, workspaceId
     [workspaceId],
   );
   return rows as SimilarityRow[];
+}
+
+export interface CheckStateRow {
+  job_id: string;
+  link: string | null;
+  /** The stored verdict is open and was verified on the day. */
+  open_today: boolean;
+  /** A manual check of this job version ran on the day. */
+  checked_today: boolean;
+}
+
+/** What the availability check would look at for each job: the same observation it reads the link from. */
+export async function selectCheckStates(
+  db: DecisionQueryable,
+  workspaceId: string,
+  jobIds: readonly string[],
+  now: Date,
+  timeZone: string,
+): Promise<CheckStateRow[]> {
+  const { rows } = await db.query(
+    `SELECT job.id::text AS job_id,
+            COALESCE(observation.source_url, observation.canonical_apply_url, job.canonical_url) AS link,
+            COALESCE(availability.availability_current
+              AND (availability.availability_verified_at AT TIME ZONE $4) ::date = ($3::timestamptz AT TIME ZONE $4)::date,
+              FALSE) AS open_today,
+            EXISTS (SELECT 1 FROM job_availability_recheck_events event
+                     WHERE event.workspace_id = job.workspace_id AND event.canonical_job_id = job.id
+                       AND event.job_version_id = job.latest_job_version_id AND event.details->>'trigger' = 'MANUAL'
+                       AND (event.occurred_at AT TIME ZONE $4)::date = ($3::timestamptz AT TIME ZONE $4)::date) AS checked_today
+       FROM canonical_jobs job
+       JOIN LATERAL (
+         SELECT seen.source_url, seen.canonical_apply_url
+           FROM raw_job_observations seen
+          WHERE seen.workspace_id = job.workspace_id AND seen.job_version_id = job.latest_job_version_id
+          ORDER BY (seen.source_name = 'GMAIL_ALERT') ASC, seen.retrieved_at DESC, seen.id ASC
+          LIMIT 1
+       ) observation ON TRUE
+       LEFT JOIN v_job_availability_current availability
+         ON availability.workspace_id = job.workspace_id AND availability.canonical_job_id = job.id
+        AND availability.job_version_id::text = job.latest_job_version_id::text
+      WHERE job.workspace_id = $1::uuid AND job.id::text = ANY($2::text[])`,
+    [workspaceId, [...jobIds], now, timeZone],
+  );
+  return rows as CheckStateRow[];
+}
+
+/** The links already read, and the sites that stopped answering, in the day's manual checks. */
+export async function selectChecksOfDay(
+  db: DecisionQueryable,
+  workspaceId: string,
+  now: Date,
+  timeZone: string,
+): Promise<Array<{ link_key: string | null; stopped_sites: unknown }>> {
+  const { rows } = await db.query(
+    `SELECT details->>'link_key' AS link_key, details->'stopped_sites' AS stopped_sites
+       FROM job_availability_recheck_events
+      WHERE workspace_id = $1::uuid AND details->>'trigger' = 'MANUAL'
+        AND (occurred_at AT TIME ZONE $3)::date = ($2::timestamptz AT TIME ZONE $3)::date`,
+    [workspaceId, now, timeZone],
+  );
+  return rows as Array<{ link_key: string | null; stopped_sites: unknown }>;
 }

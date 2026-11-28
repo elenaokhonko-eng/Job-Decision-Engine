@@ -5,10 +5,11 @@ import path from "node:path";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { loadLeadDefinitionSql, REVIEW_LIST_RULES, runReviewListsCommand } from "../../../app/reviewLists.js";
+import { loadLeadDefinitionSql, REVIEW_LIST_RULES, runReviewListsCommand, uncheckedJobCount } from "../../../app/reviewLists.js";
 import { runMigrations } from "../../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../../db/pgSsl.js";
 import { buildReviewListsFromStore, parseRankingDesign, type ReviewListResult } from "../../../modules/decision/index.js";
+import { planAvailabilityCheck } from "../../../tasks/manualAvailabilityCheck.js";
 import { selectReviewJobs } from "../../../platform/persistence/decision/index.js";
 import { withReadOnlySession, type SessionIdentity } from "../../../platform/persistence/index.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../../workspace/context.js";
@@ -102,6 +103,23 @@ const close = (name: string) =>
     [ids[name]],
   );
 
+/** A closure as a check stores it: the verdict on the version and the event that gave it. */
+async function closedByCheck(name: string, checkByHand: boolean): Promise<void> {
+  const at = new Date();
+  await pool.query(
+    `UPDATE job_versions SET availability_status = 'CLOSED', availability_verified_at = $2
+      WHERE id = (SELECT latest_job_version_id FROM canonical_jobs WHERE id = $1)`,
+    [ids[name], at],
+  );
+  await pool.query(
+    `INSERT INTO job_availability_recheck_events (workspace_id, canonical_job_id, job_version_id, occurred_at, read_kind,
+       outcome, decision, reason_code, consecutive_absent_reads_after, cannot_tell_attempts_after, details)
+     SELECT workspace_id, id, latest_job_version_id, $2, 'PAGE', 'CLOSED_BY_PAGE', 'MARK_CLOSED', 'PAGE_NO_LONGER_ACCEPTING', 0, 0, $3::jsonb
+       FROM canonical_jobs WHERE id = $1`,
+    [ids[name], at, JSON.stringify({ trigger: "MANUAL", ...(checkByHand ? { check_by_hand: true } : {}) })],
+  );
+}
+
 /** Replaces the job's only sighting and link (the fixture's employer-board one). */
 async function onlySeenOn(name: string, source: string, url: string): Promise<void> {
   await pool.query(
@@ -174,6 +192,38 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
     await archive("oldSaved");
     await seed("placeholder", { company: "Unknown Company", title: "glimmet data scientist" });
     await seed("unlisted", { company: "Example Unlisted Co", title: "brumble data scientist" });
+    // One job left out for incomplete content was saved; one listed posting keeps only a short extract.
+    await seed("incompleteSaved", { company: "Example Short Saved Co", title: "zorblat software engineer" });
+    await observe("incompleteSaved", "LINKEDIN_SAVED", "https://www.linkedin.com/jobs/view/4900000004");
+    await pool.query("UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE id = $1", [ids.incompleteSaved]);
+    await seed("blankText", { company: "Example Blank Co", title: "wibbet data scientist" });
+    await pool.query("UPDATE job_versions SET description_text = '   ' WHERE id = (SELECT latest_job_version_id FROM canonical_jobs WHERE id = $1)", [ids.blankText]);
+    await seed("checked", { company: "Example Checked Co", title: "zorblat software engineer" });
+    await pool.query(
+      `UPDATE job_versions SET availability_verified_at = NOW() WHERE id = (SELECT latest_job_version_id FROM canonical_jobs WHERE id = $1)`,
+      [ids.checked],
+    );
+    // Closed from page wording alone, with a live second record; confirmed closed; and by-hand ones that were confirmed since.
+    for (const name of ["byHand", "byHandAlone", "confirmed", "byHandThenSource", "byHandExpired"]) {
+      await seed(name, { company: `Example ${name} Co`, title: "zorblat software engineer" });
+    }
+    await seed("byHandTwin", { company: "Example byHand Co", title: "zorblat software engineer" });
+    await closedByCheck("byHand", true);
+    await closedByCheck("byHandAlone", true);
+    await closedByCheck("confirmed", false);
+    await closedByCheck("byHandThenSource", true);
+    // A later verdict that is not that check's: the source itself said closed.
+    await pool.query(
+      `UPDATE job_versions SET availability_verified_at = availability_verified_at + INTERVAL '2 hours'
+        WHERE id = (SELECT latest_job_version_id FROM canonical_jobs WHERE id = $1)`,
+      [ids.byHandThenSource],
+    );
+    await closedByCheck("byHandExpired", true);
+    await pool.query(
+      `UPDATE job_versions SET source_expires_at = NOW() - INTERVAL '1 day'
+        WHERE id = (SELECT latest_job_version_id FROM canonical_jobs WHERE id = $1)`,
+      [ids.byHandExpired],
+    );
   }, 240_000);
 
   afterAll(async () => {
@@ -187,8 +237,9 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
   it("lists only live, gate-passed, complete, open-or-unknown, non-lead, unrated postings", async () => {
     const result = await run([ids.rated!]);
     const software = result.lists.byType.find((list) => list.type.key === "ALPHA")!;
+    ids.byHandPosting = software.jobs.find((job) => job.id === ids.byHand || job.id === ids.byHandTwin)!.id;
     expect(software.jobs.map((job) => job.id).sort())
-      .toEqual(["best", "second", "noScore", "saved", "linkedIn", "oldSavedTwin"].map((name) => ids[name]).sort());
+      .toEqual(["best", "second", "noScore", "saved", "linkedIn", "oldSavedTwin", "checked", "byHandPosting", "byHandAlone"].map((name) => ids[name]).sort());
     // Preferred sector first, then top-K from the stored similarity, then no score.
     expect(software.jobs.slice(0, 2).map((job) => job.id)).toEqual([ids.best, ids.second]);
     expect(software.jobs.at(-1)!.id).toBe(ids.noScore);
@@ -200,10 +251,63 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
     expect(byId.get(ids.linkedIn!)).toMatchObject({ saved: false, linkedInOnly: true });
     expect(result.lists.overall.map((job) => job.id)).not.toContain(ids.saved);
 
-    expect(result.excluded).toMatchObject({ LEAD: 1, KNOWN_CLOSED: 2, NOT_GATE_PASSED: 1, AWAITING_CONTENT: 1 });
+    expect(result.excluded).toMatchObject({ LEAD: 1, KNOWN_CLOSED: 5, NOT_GATE_PASSED: 1, NO_FULL_TEXT: 3 });
     expect(result.dropped).toMatchObject({ rated: 2, neverSector: 1 });
     expect(result.lists.byType.find((list) => list.type.key === "BETA")!.jobs.map((job) => job.id).sort())
       .toEqual([ids.placeholder, ids.unlisted].sort());
+  });
+
+  it("leaves a job without the full posting text out and counts it by role type", async () => {
+    const result = await run();
+    // incomplete and incompleteSaved (not COMPLETE), and blankText, whose stored text is blank.
+    expect(result.excluded.NO_FULL_TEXT).toBe(3);
+    expect(result.withoutFullText).toEqual({ byRoleType: { ALPHA: 2, BETA: 1 }, saved: 1, unsaved: 2 });
+    for (const name of ["incomplete", "incompleteSaved", "blankText"]) expect(result.postings.map((job) => job.id)).not.toContain(ids[name]);
+    // Counted for the text, not for the gate that has not decided it.
+    expect(result.excluded.NOT_GATE_PASSED).toBe(1);
+  });
+
+  it("names the closed records, for the draft to report", async () => {
+    const result = await run();
+    expect(result.closedIds).toEqual(expect.arrayContaining([ids.closed, ids.shut, ids.shutTwin, ids.longGone, ids.longGoneTwin]));
+    expect(result.closedIds).not.toContain(ids.best);
+  });
+
+  it("keeps a job closed from page wording alone, as not verified, and drops a confirmed closure", async () => {
+    const result = await run();
+    const posting = result.postings.find((job) => job.id === ids.byHand || job.id === ids.byHandTwin);
+    // The posting with a live second record stays, and so does the one without: neither closure is confirmed.
+    expect(posting).toBeDefined();
+    expect(result.postings.find((job) => job.id === ids.byHandAlone)).toMatchObject({ availability: "UNKNOWN" });
+    expect([...result.checkByHandIds].sort()).toEqual([ids.byHand, ids.byHandAlone].sort());
+    expect(result.closedIds).not.toContain(ids.byHandAlone);
+    expect(result.closedIds).not.toContain(ids.byHand);
+    expect(result.closedIds).not.toContain(ids.byHandTwin);
+    const listed = result.postings.map((job) => job.id);
+    for (const name of ["confirmed", "byHandThenSource", "byHandExpired"]) {
+      expect(listed).not.toContain(ids[name]);
+      expect(result.closedIds).toContain(ids[name]);
+    }
+  });
+
+  it("counts as unchecked only what the check would still read today", async () => {
+    await withReadOnlySession(
+      { ...pgConnectionConfig(databaseUrl), options: `-c search_path=${schema},public` },
+      () => undefined,
+      async (db) => {
+        const count = (names: string[]) => uncheckedJobCount(db, workspace.workspaceId, names.map((name) => ids[name]!), new Date());
+        // The same answer as the check command's own plan, job by job and together.
+        const names = ["best", "second", "linkedIn", "lead", "checked", "saved", "noScore"];
+        for (const group of [...names.map((name) => [name]), names]) {
+          const plan = await planAvailabilityCheck(db as never, workspace, group.map((name) => ids[name]!), { now: new Date() });
+          expect(await count(group), group.join()).toBe(plan.reads.length);
+        }
+        expect(await count(["best", "second"])).toBe(2);
+        // A LinkedIn link and a job-board link are never read: they stay as not verified.
+        expect(await count(["linkedIn", "lead"])).toBe(0);
+        expect(await count(["checked"])).toBe(0);
+      },
+    );
   });
 
   it("does not bring a removed or known-closed posting back through its other record", async () => {
@@ -224,7 +328,7 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
     expect(result.lists.byType.find((list) => list.type.key === "BETA")!.jobs.map((job) => job.id))
       .toEqual(expect.arrayContaining([ids.placeholder, ids.unlisted]));
     expect(result.lists.byType.find((list) => list.type.key === "BETA")!.jobs).toHaveLength(3);
-    expect(result.dropped.duplicate).toBe(1);
+    expect(result.dropped.duplicate).toBe(2);
   });
 
   it("refuses a database that is not the approved replay branch, and writes nothing", async () => {

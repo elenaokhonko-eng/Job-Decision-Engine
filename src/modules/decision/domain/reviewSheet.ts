@@ -1,8 +1,11 @@
 /**
- * The blind sheet, its key and the pass rule. The sheet shows no list, rank, score or comparison marker. Everything from
- * a posting is untrusted text: it is escaped, and a link is shown only when it is plain http or https. Pure.
+ * The blind sheet, its key, the reveal and the pass rule. The owner rates from the posting text: the sheet shows no
+ * link, saved mark, list, rank or comparison marker. The key keeps those sealed (encoded, so opening it by accident
+ * shows nothing), and the reveal shows a link and the saved mark only for jobs already rated. Pure.
  */
-import { sheetJobs, type ReviewLists, type PoolJob } from "./reviewLists.js";
+import { headerLine, sheetCompany, sheetLocation, sheetPostingText, sheetWorkMode } from "./postingText.js";
+import type { DroppedJob } from "./reviewDraft.js";
+import { sheetJobs, type PoolJob, type ReviewLists } from "./reviewLists.js";
 
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
@@ -41,30 +44,42 @@ export function sheetText(value: string | null | undefined): string {
     });
 }
 
-function notes(job: PoolJob): string {
+const FENCE = "~~~~";
+const ANSWER_LABEL = "Answer (Y or N):";
+const COMMENT_LABEL = "Comment:";
+
+function sheetBlock(job: PoolJob, n: number, boardNames: ReadonlyMap<string, string>): string[] {
   return [
-    job.saved ? "saved" : null,
-    job.linkedInOnly ? "LinkedIn, not verified" : null,
-    job.availability === "UNKNOWN" ? "open not confirmed" : null,
-  ].filter(Boolean).join("; ");
+    `## Job ${n}`,
+    "",
+    `${ANSWER_LABEL} `,
+    `${COMMENT_LABEL} `,
+    "",
+    `${FENCE}text`,
+    `Title:     ${headerLine(job.title).toLowerCase()}`,
+    `Company:   ${sheetCompany(job.company, boardNames)}`,
+    `Location:  ${sheetLocation(job.location)}`,
+    `Work mode: ${sheetWorkMode(job.workMode)}`,
+    "",
+    sheetPostingText(job.description),
+    FENCE,
+    "",
+  ];
 }
 
-export function renderReviewSheet(lists: ReviewLists, seed: string): string {
-  const rows = sheetJobs(lists, seed).map((job, index) =>
-    `| ${index + 1} | ${sheetText(job.title)} | ${sheetText(job.company)} | ${sheetText(job.location)} | ${safePostingLink(job.link) ?? ""} | ${notes(job)} |  |  |`);
+export function renderReviewSheet(lists: ReviewLists, seed: string, boardNames: ReadonlyMap<string, string> = new Map()): string {
   return [
     "# Review sheet: would you apply?",
     "",
-    "For each job write **Y** (would apply), **N** (would not) or **closed** in the Apply column. Judge the role.",
+    `For each job, read the posting and write **Y** (would apply) or **N** (would not) after \`${ANSWER_LABEL}\`.`,
+    "A comment is optional. Do not change anything else. Links are shown only after you have answered.",
     "",
-    "| # | Title | Company | Location | Link | Notes | Apply? (Y/N/closed) | Comment |",
-    "|---|---|---|---|---|---|---|---|",
-    ...rows,
-    "",
+    ...sheetJobs(lists, seed).flatMap((job, index) => sheetBlock(job, index + 1, boardNames)),
   ].join("\n");
 }
 
-export interface ReviewKeyItem {
+/** What the key keeps from the reader until the reveal and the score. */
+export interface ReviewDetail {
   readonly n: number;
   readonly id: string;
   /** The role-type list that holds the job, and its rank there. */
@@ -81,22 +96,26 @@ export interface ReviewKeyItem {
   readonly reasons: readonly string[];
   readonly topK: number | null;
   readonly title: string;
+  readonly company: string;
+  readonly link: string;
 }
 
 export interface ReviewKey {
-  readonly schema_version: "review_lists_key_v1";
+  readonly schema_version: "review_lists_key_v2";
   readonly name: string;
   readonly created_at: string;
   readonly seed: string;
-  readonly overall_from_unsaved_only: boolean;
-  readonly items: ReviewKeyItem[];
+  /** Row number and job id only: later runs read these to keep rated jobs out. */
+  readonly items: ReadonlyArray<{ readonly n: number; readonly id: string }>;
+  /** The details, base64 encoded. */
+  readonly sealed: string;
 }
 
 export function buildReviewKey(
   lists: ReviewLists,
-  input: { name: string; createdAt: string; seed: string; overallFromUnsavedOnly: boolean },
+  input: { name: string; createdAt: string; seed: string; dropped?: readonly DroppedJob[] },
 ): ReviewKey {
-  const items = sheetJobs(lists, input.seed).map((job, index): ReviewKeyItem => {
+  const details = sheetJobs(lists, input.seed).map((job, index): ReviewDetail => {
     const list = lists.byType.find((entry) => entry.jobs.some((listed) => listed.id === job.id));
     const overall = lists.overall.findIndex((listed) => listed.id === job.id);
     return {
@@ -115,16 +134,31 @@ export function buildReviewKey(
       reasons: job.classification.reasons,
       topK: job.topK,
       title: job.title,
+      company: job.company,
+      link: job.link,
     };
   });
   return {
-    schema_version: "review_lists_key_v1",
+    schema_version: "review_lists_key_v2",
     name: input.name,
     created_at: input.createdAt,
     seed: input.seed,
-    overall_from_unsaved_only: input.overallFromUnsavedOnly,
-    items,
+    items: details.map(({ n, id }) => ({ n, id })),
+    sealed: Buffer.from(JSON.stringify({ details, dropped: input.dropped ?? [] }), "utf8").toString("base64"),
   };
+}
+
+export function openReviewKey(text: string): { details: ReviewDetail[]; dropped: DroppedJob[] } {
+  let key: Partial<ReviewKey>;
+  try {
+    key = JSON.parse(text.replace(/^\uFEFF/, "")) as Partial<ReviewKey>;
+  } catch {
+    throw new Error("Key file is not valid JSON.");
+  }
+  if (key.schema_version !== "review_lists_key_v2" || typeof key.sealed !== "string") {
+    throw new Error("Key file is not a review-lists key of this version.");
+  }
+  return JSON.parse(Buffer.from(key.sealed, "base64").toString("utf8")) as { details: ReviewDetail[]; dropped: DroppedJob[] };
 }
 
 /** The job ids of an earlier key file: any shape that has `items[].id`. A file without them fails. */
@@ -144,27 +178,116 @@ export function idsFromKeyText(text: string, fileName: string): string[] {
   });
 }
 
-export type SheetAnswer = "YES" | "NO" | "CLOSED" | null;
+export interface SheetEntry {
+  /** null when not answered. */
+  readonly answer: "YES" | "NO" | null;
+  readonly commented: boolean;
+}
 
-/** The answer of each numbered row of a filled sheet. An answer that is not Y, N or closed fails with its row number. */
-export function parseFilledSheet(markdown: string): Map<number, SheetAnswer> {
-  const answers = new Map<number, SheetAnswer>();
+/**
+ * The answer of each job of a filled sheet. Posting text sits inside fences and is never read. An answer that is not Y,
+ * N or empty fails with its job number.
+ */
+export function parseFilledSheet(markdown: string): Map<number, SheetEntry> {
+  const entries = new Map<number, { answer: SheetEntry["answer"]; commented: boolean; labelled: boolean }>();
   const invalid: number[] = [];
+  let fenced = false;
+  let current: number | null = null;
   for (const line of markdown.split(/\r?\n/)) {
-    // cells[0] is the text before the first bar; the answer is the seventh column.
-    const cells = line.split(/(?<!\\)\|/).map((cell) => cell.trim());
-    if (cells.length < 8 || !/^\d+$/.test(cells[1] ?? "")) continue;
-    const n = Number(cells[1]);
-    if (answers.has(n)) throw new Error(`The filled sheet has row ${n} twice.`);
-    const raw = (cells[7] ?? "").replace(/\*/g, "").trim().toLowerCase();
-    if (raw === "") answers.set(n, null);
-    else if (raw === "y" || raw === "yes") answers.set(n, "YES");
-    else if (raw === "n" || raw === "no") answers.set(n, "NO");
-    else if (raw === "closed") answers.set(n, "CLOSED");
-    else invalid.push(n);
+    if (line.startsWith(FENCE)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const heading = /^## Job (\d+)\s*$/.exec(line);
+    if (heading) {
+      current = Number(heading[1]);
+      if (entries.has(current)) throw new Error(`The filled sheet has job ${current} twice.`);
+      entries.set(current, { answer: null, commented: false, labelled: false });
+      continue;
+    }
+    const entry = current === null ? undefined : entries.get(current);
+    if (!entry) continue;
+    if (line.startsWith(ANSWER_LABEL)) {
+      const raw = line.slice(ANSWER_LABEL.length).replace(/\*/g, "").trim().toLowerCase();
+      entry.labelled = true;
+      if (raw === "y" || raw === "yes") entry.answer = "YES";
+      else if (raw === "n" || raw === "no") entry.answer = "NO";
+      else if (raw !== "") invalid.push(current!);
+    } else if (line.startsWith(COMMENT_LABEL)) {
+      entry.commented = line.slice(COMMENT_LABEL.length).trim() !== "";
+    }
   }
-  if (invalid.length) throw new Error(`Rows with an answer that is not Y, N or closed: ${invalid.join(", ")}.`);
-  return answers;
+  const unlabelled = [...entries].filter(([, entry]) => !entry.labelled).map(([n]) => n);
+  if (unlabelled.length) throw new Error(`The filled sheet has lost the answer line of: ${unlabelled.join(", ")}.`);
+  if (invalid.length) throw new Error(`Rows with an answer that is not Y or N: ${invalid.join(", ")}.`);
+  return new Map([...entries].map(([n, { answer, commented }]) => [n, { answer, commented }]));
+}
+
+function entriesFor(filledSheet: string, details: ReadonlyArray<{ n: number }>): Map<number, SheetEntry> {
+  const entries = parseFilledSheet(filledSheet);
+  const missing = details.filter((item) => !entries.has(item.n)).map((item) => item.n);
+  if (missing.length) throw new Error(`The filled sheet has no job: ${missing.join(", ")}.`);
+  if (entries.size !== details.length) throw new Error("The filled sheet has jobs that the key does not hold.");
+  return entries;
+}
+
+/** The "Link closed?" notes of an earlier reveal file, by job number. */
+export function closedNotes(revealed: string): Map<number, string> {
+  const notes = new Map<number, string>();
+  for (const line of revealed.split(/\r?\n/)) {
+    const cells = line.split(/(?<!\\)\|/).map((cell) => cell.trim());
+    if (/^\d+$/.test(cells[1] ?? "") && (cells[7] ?? "") !== "") notes.set(Number(cells[1]), cells[7]!);
+  }
+  return notes;
+}
+
+/**
+ * Links and saved marks of the answered jobs only. Notes already written about closed links are kept.
+ */
+export function renderReveal(filledSheet: string, details: readonly ReviewDetail[], earlier = ""): { text: string; shown: number } {
+  const entries = entriesFor(filledSheet, details);
+  const notes = closedNotes(earlier);
+  const rows = [...details]
+    .sort((a, b) => a.n - b.n)
+    .filter((item) => entries.get(item.n)!.answer !== null)
+    .map((item) => `| ${item.n} | ${sheetText(item.title)} | ${sheetText(item.company)} | ${entries.get(item.n)!.answer === "YES" ? "Y" : "N"} | ${safePostingLink(item.link) ?? ""} | ${item.saved ? "yes" : "no"} | ${notes.get(item.n) ?? ""} |`);
+  return {
+    shown: rows.length,
+    text: [
+      "# Shown after your answers",
+      "",
+      "Only jobs you have answered appear here. If a posting is closed, write **closed** in the last column. It is noted and",
+      "does not change the score; your Y or N stands.",
+      "",
+      "| # | Title | Company | Your answer | Link | Saved by you | Link closed? |",
+      "|---|---|---|---|---|---|---|",
+      ...rows,
+      "",
+    ].join("\n"),
+  };
+}
+
+/**
+ * The listed jobs whose closure is only read from page wording: for the coordinator to open, never for the rater before
+ * the rating. Written whether or not there is any, so the file itself says nothing.
+ */
+export function renderCheckByHand(lists: ReviewLists, ids: ReadonlySet<string>): string {
+  const listed = new Map<string, PoolJob>();
+  for (const job of [...lists.byType.flatMap((list) => list.jobs), ...lists.overall, ...lists.comparison]) listed.set(job.id, job);
+  return [
+    "# Check by hand (coordinator only: do not show the rater before the rating)",
+    "",
+    "The same-day check read these as closed from page wording alone. They stay in the lists as not verified.",
+    "",
+    "| Job id | Title | Company | Link |",
+    "|---|---|---|---|",
+    ...[...listed.values()]
+      .filter((job) => ids.has(job.id))
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((job) => `| ${job.id} | ${sheetText(job.title)} | ${sheetText(job.company)} | ${safePostingLink(job.link) ?? ""} |`),
+    "",
+  ].join("\n");
 }
 
 /** Fixed before labelling. */
@@ -182,42 +305,33 @@ export interface ReviewScore {
   /** Every listed job once: the role-type lists and the overall list. */
   readonly lists: Share;
   readonly comparison: Share;
+  readonly comparisonUnknownRole: Share;
+  readonly comparisonOtherRole: Share;
   readonly byRoleType: Array<{ type: string } & Share>;
-  readonly notCounted: { saved: number; linkedInClosed: number };
-  /** Marked closed but not LinkedIn-only: counted, and not a yes. */
-  readonly otherClosed: number;
-  /** Counted rows with no answer. */
+  /** Links noted as closed in the reveal file. Noted only: no answer is left out or changed. */
+  readonly closedNoted: number;
+  /** Rows with no answer. */
   readonly blank: number[];
 }
 
 /**
  * Pass: at least PASS_MIN_OVERALL_YES jobs of the overall list are a yes, AND the yes share of the listed jobs is at
- * least PASS_MIN_LEAD_POINTS percentage points above that of the comparison jobs. Saved jobs are not counted, nor is a
- * LinkedIn-only job marked closed.
+ * least PASS_MIN_LEAD_POINTS percentage points above that of the comparison jobs. Every rated job counts, saved or not,
+ * and a closed link changes nothing.
  */
-export function scoreReviewSheet(filledSheet: string, key: Pick<ReviewKey, "items">): ReviewScore {
-  const answers = parseFilledSheet(filledSheet);
-  const missing = key.items.filter((item) => !answers.has(item.n)).map((item) => item.n);
-  if (missing.length) throw new Error(`The filled sheet has no row for: ${missing.join(", ")}.`);
-  if (answers.size !== key.items.length) throw new Error("The filled sheet has rows that the key does not hold.");
-
-  const notCounted = { saved: 0, linkedInClosed: 0 };
-  const counted: ReviewKeyItem[] = [];
-  for (const item of key.items) {
-    if (item.saved) notCounted.saved += 1;
-    else if (item.linkedInOnly && answers.get(item.n) === "CLOSED") notCounted.linkedInClosed += 1;
-    else counted.push(item);
-  }
-  const share = (items: readonly ReviewKeyItem[]): Share => ({
-    yes: items.filter((item) => answers.get(item.n) === "YES").length,
+export function scoreReviewSheet(filledSheet: string, details: readonly ReviewDetail[], revealed = ""): ReviewScore {
+  const entries = entriesFor(filledSheet, details);
+  const share = (items: readonly ReviewDetail[]): Share => ({
+    yes: items.filter((item) => entries.get(item.n)!.answer === "YES").length,
     counted: items.length,
   });
-  const overall = share(counted.filter((item) => item.overallRank !== null));
-  const lists = share(counted.filter((item) => item.overallRank !== null || item.roleList !== null));
-  const comparison = share(counted.filter((item) => item.comparison));
-  const types = [...new Set(key.items.flatMap((item) => (item.roleList ? [item.roleList.type] : [])))].sort();
-  const byRoleType = types.map((type) => ({ type, ...share(counted.filter((item) => item.roleList?.type === type)) }));
-  const blank = counted.filter((item) => answers.get(item.n) === null).map((item) => item.n);
+  const overall = share(details.filter((item) => item.overallRank !== null));
+  const lists = share(details.filter((item) => item.overallRank !== null || item.roleList !== null));
+  const compared = details.filter((item) => item.comparison);
+  const comparison = share(compared);
+  const types = [...new Set(details.flatMap((item) => (item.roleList ? [item.roleList.type] : [])))].sort();
+  const byRoleType = types.map((type) => ({ type, ...share(details.filter((item) => item.roleList?.type === type)) }));
+  const blank = details.filter((item) => entries.get(item.n)!.answer === null).map((item) => item.n).sort((a, b) => a - b);
 
   // Integer arithmetic, so a lead of exactly the minimum passes.
   const leads = (lists.yes * comparison.counted - comparison.yes * lists.counted) * 100
@@ -226,8 +340,11 @@ export function scoreReviewSheet(filledSheet: string, key: Pick<ReviewKey, "item
     ? "INCOMPLETE"
     : overall.yes >= PASS_MIN_OVERALL_YES && leads ? "PASS" : "FAIL";
   return {
-    result, overall, lists, comparison, byRoleType, notCounted,
-    otherClosed: counted.filter((item) => answers.get(item.n) === "CLOSED").length,
+    result, overall, lists, comparison,
+    comparisonUnknownRole: share(compared.filter((item) => item.roleType === null)),
+    comparisonOtherRole: share(compared.filter((item) => item.roleType !== null)),
+    byRoleType,
+    closedNoted: [...closedNotes(revealed).values()].filter((note) => /closed/i.test(note)).length,
     blank,
   };
 }

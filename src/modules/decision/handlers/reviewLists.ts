@@ -1,8 +1,10 @@
 /**
  * Builds the review lists from the stored posting records. Reads only: no decision, state or table changes, and nothing
- * is rejected. A job is a candidate when it is live, passed the gates, has complete content and a link, is not a lead
+ * is rejected. A job is a candidate when it is live, passed the gates, has the full posting text (v_job_content_state,
+ * the rule under which no job is decided) and a link, is not a lead
  * (the catalog's lead definition, also before migration 123 is applied), is not known closed and was not rated before.
  * A posting rated, removed or known closed under any of its records stays out; one saved under any record is saved.
+ * Only a confirmed closure counts: one read from page wording alone (to be checked by hand) is not verified.
  */
 import {
   selectJobSightings,
@@ -14,7 +16,7 @@ import {
   type SimilarityRow,
 } from "../../../platform/persistence/decision/index.js";
 import { listLeadJobsByDefinition, normalizeJobIdentity, type LeadJobs } from "../../catalog/index.js";
-import { classifyJob, type CompanyIndustryTags, type KnownWorkMode } from "../domain/jobClassifier.js";
+import { classifyJob, roleKindOfTitle, type CompanyIndustryTags, type KnownWorkMode } from "../domain/jobClassifier.js";
 import { requireApprovedDesign, type RankingDesign, type RoleKind } from "../domain/rankingDesign.js";
 import {
   buildReviewLists,
@@ -54,13 +56,24 @@ export interface ReviewListInput {
   readonly leadDefinitionSql: string;
 }
 
+/** In the order they are tried. Missing text is tried before the gates: no job is decided without it. */
 export const REVIEW_EXCLUSIONS = [
-  "ARCHIVED_OR_FIXTURE", "MANUALLY_REMOVED_OR_REJECTED", "NOT_GATE_PASSED", "AWAITING_CONTENT", "NO_LINK", "LEAD",
-  "KNOWN_CLOSED",
+  "ARCHIVED_OR_FIXTURE", "MANUALLY_REMOVED_OR_REJECTED", "NO_LINK", "LEAD", "KNOWN_CLOSED", "NO_FULL_TEXT",
+  "NOT_GATE_PASSED",
 ] as const;
 export type ReviewExclusion = (typeof REVIEW_EXCLUSIONS)[number];
 
 export interface ReviewListResult {
+  /** Records left out only because the full posting text is not stored, by role type and by saved or not. */
+  readonly withoutFullText: {
+    readonly byRoleType: Readonly<Record<string, number>>;
+    readonly saved: number;
+    readonly unsaved: number;
+  };
+  /** Candidates stored as closed from page wording alone: listed as not verified, for the coordinator to open. */
+  readonly checkByHandIds: readonly string[];
+  /** Records confirmed closed, and those left out with a removed or closed record of their posting. */
+  readonly closedIds: readonly string[];
   readonly lists: ReviewLists;
   readonly eligible: number;
   readonly excluded: Record<ReviewExclusion, number>;
@@ -120,14 +133,18 @@ function postingKeys(record: PostingFacts, rules: ReviewListRules): string[] {
   return keys;
 }
 
+/** The stored availability, except that a closure read from page wording alone is not a confirmed one. */
+const availabilityOf = (job: ReviewJobRow): string | null =>
+  job.closed_by_page_wording_only ? "UNKNOWN" : job.availability_state;
+
 function exclusionOf(job: ReviewJobRow, leads: ReadonlySet<string>): ReviewExclusion | null {
   if (job.archived || job.test_fixture) return "ARCHIVED_OR_FIXTURE";
   if (job.processing_state === "MANUALLY_REMOVED" || job.processing_state === "HARD_REJECTED") return "MANUALLY_REMOVED_OR_REJECTED";
-  if (job.gate_decision !== "PASS") return "NOT_GATE_PASSED";
-  if (!job.content_complete) return "AWAITING_CONTENT";
   if (safePostingLink(job.canonical_url) === null) return "NO_LINK";
   if (leads.has(job.id)) return "LEAD";
-  if (job.availability_state === "CLOSED") return "KNOWN_CLOSED";
+  if (availabilityOf(job) === "CLOSED") return "KNOWN_CLOSED";
+  if (!job.content_complete || !job.description?.trim()) return "NO_FULL_TEXT";
+  if (job.gate_decision !== "PASS") return "NOT_GATE_PASSED";
   return null;
 }
 
@@ -187,10 +204,19 @@ export async function buildReviewListsFromStore(db: DecisionQueryable, input: Re
 
   const excluded = Object.fromEntries(REVIEW_EXCLUSIONS.map((reason) => [reason, 0])) as Record<ReviewExclusion, number>;
   let withoutTopK = 0;
+  const withoutFullText = { byRoleType: {} as Record<string, number>, saved: 0, unsaved: 0 };
   for (const job of jobs) {
     const own = seen.get(job.id) ?? [];
     const urls = [job.canonical_url, ...own.flatMap((s) => [s.source_url, s.canonical_apply_url])];
     const exclusion = exclusionOf(job, leadIds);
+    const savedRecord = own.some((s) => isSaved(s.source_name));
+    if (exclusion === "NO_FULL_TEXT" && !rated.has(job.id)) {
+      withoutFullText[savedRecord ? "saved" : "unsaved"] += 1;
+      // The role type comes from the title alone: there is no full text to read.
+      const kind = roleKindOfTitle(job.title ?? "") ?? rules.fallbackKind(job.title ?? "");
+      const type = design.role_types.find((entry) => kind !== null && entry.kinds.includes(kind))?.key ?? "UNKNOWN";
+      withoutFullText.byRoleType[type] = (withoutFullText.byRoleType[type] ?? 0) + 1;
+    }
     // Archived records are read to recognise their postings; only live and rated ones are counted.
     if (exclusion && (!job.archived || rated.has(job.id))) excluded[exclusion] += 1;
     let candidate: Candidate | null = null;
@@ -205,6 +231,8 @@ export async function buildReviewListsFromStore(db: DecisionQueryable, input: Re
         linkedInOnly: urls.filter((url): url is string => safePostingLink(url) !== null).every((url) => linkedInLink(url!)),
         availability: job.availability_state === "OPEN" ? "OPEN" : "UNKNOWN",
         topK: topK.get(job.id) ?? null,
+        description,
+        workMode: knownWorkMode(job.workplace_type),
         classification: classifyJob(design, input.companyTags, {
           title,
           company: job.company_name,
@@ -225,8 +253,8 @@ export async function buildReviewListsFromStore(db: DecisionQueryable, input: Re
         ...postingKeys({ company: job.company_name, title: job.title, location: job.location, urls, hashes: job.identity_hashes ?? [] }, rules),
       ],
       rated: rated.has(job.id),
-      dismissed: job.processing_state === "MANUALLY_REMOVED" || job.availability_state === "CLOSED",
-      saved: own.some((s) => isSaved(s.source_name)),
+      dismissed: job.processing_state === "MANUALLY_REMOVED" || availabilityOf(job) === "CLOSED",
+      saved: savedRecord,
       candidate,
     });
   }
@@ -234,6 +262,9 @@ export async function buildReviewListsFromStore(db: DecisionQueryable, input: Re
   const found = new Set(jobs.map((job) => job.id));
   const pool = collapsePool(records);
   return {
+    withoutFullText,
+    closedIds: [...jobs.filter((job) => availabilityOf(job) === "CLOSED").map((job) => job.id), ...pool.dismissedIds],
+    checkByHandIds: jobs.filter((job) => job.closed_by_page_wording_only).map((job) => job.id),
     lists: buildReviewLists(design, pool.eligible),
     eligible: pool.eligible.length,
     excluded,

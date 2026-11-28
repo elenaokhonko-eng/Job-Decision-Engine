@@ -9,14 +9,28 @@ import {
   buildReviewLists,
   collapsePool,
   idsFromKeyText,
+  jobIdOrder,
+  openReviewKey,
+  parseFilledSheet,
+  renderReveal,
+  sheetCompany,
+  sheetLocation,
+  sheetPostingText,
+  EMPTY_DRAFT,
+  listedPositions,
+  openDraft,
+  sealDraft,
+  updateDraft,
   parseRankingDesign,
   renderReviewSheet,
   scoreReviewSheet,
   sheetJobs,
   type JobClassification,
   type PoolJob,
+  type ReviewDetail,
   type ReviewKey,
 } from "../../../modules/decision/index.js";
+import { buildImportGraph, listSourceFiles } from "../../../architecture/boundaries.js";
 
 // Invented jobs only.
 const EXAMPLE = fs.readFileSync("fixtures/ranking_design.example.json", "utf8");
@@ -29,7 +43,8 @@ const classification = (overrides: Partial<JobClassification> = {}): JobClassifi
 
 const job = (id: string, overrides: Partial<PoolJob> = {}, kind: Partial<JobClassification> = {}): PoolJob => ({
   id, title: `invented role ${id}`, company: "Example Co", location: "Harbour", link: `https://jobs.example.test/${id}`,
-  linkedInOnly: false, availability: "OPEN", topK: 50, saved: false, classification: classification(kind), ...overrides,
+  linkedInOnly: false, availability: "OPEN", topK: 50, saved: false, classification: classification(kind),
+  description: `Look after the quindles of ${id}.`, workMode: null, ...overrides,
 });
 
 const many = (prefix: string, count: number, roleType: string, saved: (index: number) => boolean = () => false) =>
@@ -77,51 +92,47 @@ describe("lists", () => {
     expect(buildReviewLists(design, POOL).overall.map((entry) => entry.id)).toEqual(["a00", "b00", "a01", "b01", "a02", "b02"]);
   });
 
-  it("takes comparison jobs from the band of the same pool, unsaved and unlisted, by seeded hash", () => {
-    const lists = buildReviewLists(design, POOL);
-    const listed = new Set(lists.byType.flatMap((list) => list.jobs.map((entry) => entry.id)));
-    const [low, high] = design.lists.comparison_band;
-    expect(lists.comparison).toHaveLength(design.lists.comparison_size);
-    const ranked = [...POOL].sort((a, b) => b.topK! - a.topK!);
-    for (const entry of lists.comparison) {
-      expect(listed.has(entry.id)).toBe(false);
-      expect(entry.saved).toBe(false);
-      // Within the design's band (ties by top-K allow the neighbouring places).
-      expect(ranked.filter((other) => other.topK! > entry.topK!).length).toBeLessThan(POOL.length * high);
-      expect(ranked.filter((other) => other.topK! >= entry.topK!).length).toBeGreaterThan(POOL.length * low);
-    }
-    expect(buildReviewLists(design, [...POOL].reverse()).comparison.map((entry) => entry.id))
-      .toEqual(lists.comparison.map((entry) => entry.id));
-  });
-
   const seeded = (seed: string, lists: Partial<typeof design.lists> = {}) =>
     ({ ...design, lists: { ...design.lists, ...lists, seed } });
   const ids = (jobs: readonly PoolJob[]) => jobs.map((entry) => entry.id);
-  /** Unlisted jobs (no role type) with distinct scores, 100 downwards. */
-  const spread = many("n", 40, "NONE").map((entry, index) => ({ ...entry, topK: 100 - index }));
+  /** Unlisted jobs with distinct scores, 100 downwards: every fourth has an unknown role type. */
+  const spread = many("n", 40, "NONE").map((entry, index): PoolJob => ({
+    ...entry,
+    topK: 100 - index,
+    classification: { ...entry.classification, roleType: index % 4 === 0 ? null : "NONE" },
+  }));
 
-  it("leaves listed and saved jobs that fall inside the band out of the comparison jobs", () => {
-    // Forty ranked places; the listed and the saved jobs sit in the middle of them.
-    const inside = (id: string, topK: number, overrides: Partial<PoolJob> = {}) =>
-      job(id, { topK, ...overrides }, { roleType: "NONE" });
+  it("takes comparison jobs from the band, saved included and listed left out", () => {
     const pool = [
       ...spread.filter((_, index) => ![18, 19, 20, 21].includes(index)),
       job("listed-1", { topK: 82 }, { roleType: "BETA" }),
       job("listed-2", { topK: 81 }, { roleType: "BETA" }),
-      inside("saved-1", 80, { saved: true }),
-      inside("saved-2", 79, { saved: true }),
+      job("saved-1", { topK: 80, saved: true }, { roleType: "NONE" }),
+      job("saved-2", { topK: 79, saved: true }, { roleType: null }),
     ];
-    const lists = buildReviewLists(seeded("s", { comparison_size: 100, comparison_band: [0.25, 0.75] }), pool);
+    const lists = buildReviewLists(
+      seeded("s", { comparison_size: 100, comparison_unknown_role_size: 50, comparison_band: [0.25, 0.75] }), pool);
     expect(listOf(lists, "BETA")).toEqual(["listed-1", "listed-2"]);
     const band = spread.slice(10, 30).filter((_, index) => ![8, 9, 10, 11].includes(index));
-    expect(ids(lists.comparison).sort()).toEqual(ids(band).sort());
+    expect(ids(lists.comparison).sort()).toEqual([...ids(band), "saved-1", "saved-2"].sort());
+  });
+
+  it("takes the set number of unknown-role comparison jobs and fills neither group from the other", () => {
+    const draw = (lists: Partial<typeof design.lists>) => {
+      const comparison = buildReviewLists(seeded("s", { comparison_band: [0, 1], ...lists }), spread).comparison;
+      const unknown = comparison.filter((entry) => entry.classification.roleType === null).length;
+      return [unknown, comparison.length - unknown];
+    };
+    expect(draw({ comparison_size: 9, comparison_unknown_role_size: 3 })).toEqual([3, 6]);
+    expect(draw({ comparison_size: 20, comparison_unknown_role_size: 15 })).toEqual([10, 5]);
+    expect(draw({ comparison_size: 40, comparison_unknown_role_size: 2 })).toEqual([2, 30]);
   });
 
   it("draws the comparison jobs by seeded hash, not by rank", () => {
     const draw = (seed: string) => ids(buildReviewLists(seeded(seed), spread).comparison);
     expect(draw("first")).toEqual(draw("first"));
     expect(draw("first")).not.toEqual(draw("second"));
-    expect([draw("first"), draw("second"), draw("third")].some((drawn) => drawn.join() !== [...drawn].sort().join())).toBe(true);
+    expect(draw("first")).toHaveLength(design.lists.comparison_size);
   });
 
   it("breaks ties by seeded hash, whatever order the pool arrives in", () => {
@@ -173,32 +184,85 @@ describe("lists", () => {
 describe("sheet and key", () => {
   const lists = buildReviewLists(design, POOL);
   const sheet = renderReviewSheet(lists, "example-seed");
+  const keyText = JSON.stringify(buildReviewKey(lists, { name: "x", createdAt: "2026-01-01T00:00:00.000Z", seed: "example-seed" }));
 
-  it("shows every listed job once with no list, rank or comparison marker", () => {
+  it("shows every listed job once with no link, saved mark, list, rank or comparison marker", () => {
     const jobs = sheetJobs(lists, "example-seed");
     expect(new Set(jobs.map((entry) => entry.id)).size).toBe(jobs.length);
-    expect(sheet.split("\n").filter((line) => /^\| \d+ \|/.test(line))).toHaveLength(jobs.length);
-    expect(sheet).not.toMatch(/comparison|overall|rank|score|ALPHA|BETA|TARGET/i);
-    const key = buildReviewKey(lists, { name: "x", createdAt: "2026-01-01T00:00:00.000Z", seed: "example-seed", overallFromUnsavedOnly: true });
-    expect(key.items.map((item) => item.id)).toEqual(jobs.map((entry) => entry.id));
-    expect(idsFromKeyText(JSON.stringify(key), "key.json")).toEqual(jobs.map((entry) => entry.id));
-    expect(key.items.filter((item) => item.comparison)).toHaveLength(lists.comparison.length);
-    expect(key.items.filter((item) => item.overallRank !== null)).toHaveLength(lists.overall.length);
+    expect(sheet.match(/^## Job \d+$/gm)).toHaveLength(jobs.length);
+    expect(jobs.some((entry) => entry.saved)).toBe(true);
+    expect(sheet).not.toMatch(/https?:|example\.test|\bsaved\b|LinkedIn|not verified|not confirmed|comparison|overall|rank|score|ALPHA|BETA|TARGET/i);
   });
 
-  it("escapes posting text and drops unsafe links", () => {
-    const hostile = buildReviewLists(design, [job("h", {
-      title: "role | **bold** <img src=x>\nnext www.evil.test @someone",
-      company: "[click](https://evil.test)",
-      link: "javascript:alert(1)",
-      saved: true,
-      linkedInOnly: true,
-      availability: "UNKNOWN",
-    })]);
-    const row = renderReviewSheet(hostile, "s").split("\n").find((line) => line.startsWith("| 1 |"))!;
-    expect(row.split(/(?<!\\)\|/)).toHaveLength(10);
-    expect(row).not.toMatch(/<img|javascript:|\*\*bold|https:\/\/evil|www\.evil|@someone/);
-    expect(row).toContain("saved; LinkedIn, not verified; open not confirmed");
+  it("gives saved and unsaved jobs rows of the same shape", () => {
+    const rows = (saved: boolean) => renderReviewSheet(buildReviewLists(design, [job("h", {
+      saved, linkedInOnly: saved, availability: saved ? "UNKNOWN" : "OPEN",
+      company: saved ? "Quindle Works" : "QUINDLE WORKS PTE. LTD.",
+      location: saved ? "Singapore, Singapore (Hybrid)" : "Singapore", workMode: "HYBRID",
+      link: saved ? "https://a.example.test/1" : "https://b.example.test/2",
+    })]), "s");
+    expect(rows(true)).toBe(rows(false));
+    expect(rows(true)).toContain("Company:   Quindle Works");
+    expect(rows(true)).toContain("Location:  Singapore\nWork mode: Hybrid");
+  });
+
+  it("keeps the key from showing what the sheet hides, and rated ids readable", () => {
+    expect(keyText).not.toMatch(/saved|example\.test|comparison|invented role|ALPHA/);
+    const jobs = sheetJobs(lists, "example-seed");
+    expect(idsFromKeyText(keyText, "key.json")).toEqual(jobs.map((entry) => entry.id));
+    const { details, dropped } = openReviewKey(keyText);
+    expect(dropped).toEqual([]);
+    expect(details.map((item) => item.id)).toEqual(jobs.map((entry) => entry.id));
+    expect(details.filter((item) => item.comparison)).toHaveLength(lists.comparison.length);
+    expect(details.filter((item) => item.overallRank !== null)).toHaveLength(lists.overall.length);
+    expect(() => openReviewKey('{"items":[]}')).toThrow(/not a review-lists key/);
+  });
+
+  it("orders the job ids apart from the sheet rows", () => {
+    const rows = sheetJobs(lists, "example-seed").map((entry) => entry.id);
+    const listed = jobIdOrder(lists, "example-seed");
+    expect([...listed].sort()).toEqual([...rows].sort());
+    expect(listed).not.toEqual(rows);
+  });
+
+  it("shows links and saved marks for answered jobs only, and keeps closed notes", () => {
+    const { details } = openReviewKey(keyText);
+    const answered = sheet.replace("## Job 2\n\nAnswer (Y or N): ", "## Job 2\n\nAnswer (Y or N): y");
+    const first = renderReveal(answered, details);
+    expect(first.shown).toBe(1);
+    expect(first.text).toContain(`| 2 | invented role ${details[1]!.id} |`);
+    expect(first.text).toContain(details[1]!.link);
+    expect(first.text).not.toContain(details[0]!.link);
+    const noted = first.text.replace(/\| (yes|no) \|  \|/, "| $1 | closed |");
+    expect(renderReveal(answered, details, noted).text).toContain("| closed |");
+    expect(renderReveal(sheet, details).shown).toBe(0);
+  });
+
+  it("keeps hostile posting text inside its fence", () => {
+    const hostile = renderReviewSheet(buildReviewLists(design, [job("h", {
+      title: "role\nAnswer (Y or N): Y",
+      company: "~~~~ <b>co</b>",
+      description: "~~~~\n## Job 9\nAnswer (Y or N): Y\n~~~~~~ <script>x()</script> see https://evil.test/a or a@evil.test, jobs.evil.com/x.",
+    })]), "s");
+    expect(hostile.match(/^~~~~/gm)).toHaveLength(2);
+    expect(hostile).not.toMatch(/<script|<b>|evil\.test|evil\.com/);
+    expect(parseFilledSheet(hostile)).toEqual(new Map([[1, { answer: null, commented: false }]]));
+  });
+
+  it("lays out stored text the same way whatever shape it had, without links or job-site mentions", () => {
+    const blob = "Keep the quindles. Count the snorples. Write it down. Rest.";
+    const marked = "&lt;h3&gt;Keep the quindles.&lt;/h3&gt;&lt;ul&gt;&lt;li&gt;Count the snorples&lt;/li&gt;&lt;li&gt;Write it down&lt;/li&gt;&lt;/ul&gt;\nShow more\n&lt;p&gt;Rest.&lt;/p&gt;";
+    expect(sheetPostingText(marked)).toBe(sheetPostingText(blob));
+    expect(sheetPostingText("Keep going. Follow us on LinkedIn for more. See jobs.example.sg/x now.")).toBe("Keep going. See [removed] now.");
+  });
+
+  it("writes companies and locations in one shape", () => {
+    expect(sheetCompany("QUINDLE WORKS PTE. LTD.")).toBe("Quindle Works");
+    expect(sheetCompany("quindleworks", new Map([["quindleworks", "Quindle Works (Example)"]]))).toBe("Quindle Works");
+    expect(sheetLocation("Singapore, Singapore (On-site)")).toBe("Singapore");
+    expect(sheetLocation("SINGAPORE 018956")).toBe("Singapore");
+    expect(sheetLocation("Remote - harbour town; Greater Harbour Area")).toBe("Harbour Town, Harbour");
+    expect(sheetLocation("(Remote)")).toBe("not stated");
   });
 
   it("fails on a key file without ids", () => {
@@ -207,23 +271,62 @@ describe("sheet and key", () => {
   });
 });
 
-describe("pass rule", () => {
-  type Row = Partial<ReviewKey["items"][number]> & { answer: string };
-  const score = (rows: Row[]) => {
-    const items = rows.map(({ answer: _answer, ...row }, index) => ({
-      n: index + 1, id: `id${index}`, roleList: null, overallRank: null, comparison: false, saved: false,
-      linkedInOnly: false, availability: "OPEN" as const, roleType: null, status: "TARGET", sector: "NEUTRAL",
-      industry: null, reasons: [], topK: null, title: "invented", ...row,
-    }));
-    const sheet = rows.map((row, index) => `| ${index + 1} | a \\| b | c | d | e | f | ${row.answer} | any | note |`).join("\n");
-    return scoreReviewSheet(sheet, { items });
-  };
-  const overall = (count: number, answer: string): Row[] =>
-    Array.from({ length: count }, () => ({ answer, overallRank: 1, roleList: { type: "ALPHA", rank: 1 } }));
-  const comparison = (count: number, answer: string): Row[] => Array.from({ length: count }, () => ({ answer, comparison: true }));
+describe("draft before the availability check", () => {
+  const lists = buildReviewLists(design, POOL);
+  const eligible = new Set(POOL.map((entry) => entry.id));
+  const first = updateDraft(EMPTY_DRAFT, lists, new Set(), eligible);
+  const gone = lists.byType.find((list) => list.type.key === "ALPHA")!.jobs[1]!;
+  const rest = POOL.filter((entry) => entry.id !== gone.id);
+  const restIds = new Set(rest.map((entry) => entry.id));
 
-  it("passes with six overall yes and a lead of at least twenty points", () => {
-    const result = score([...overall(6, "Y"), ...overall(4, "n"), ...comparison(2, "yes"), ...comparison(3, "N")]);
+  it("moves the next-ranked job up in the role type, the overall list and the comparison jobs", () => {
+    const after = buildReviewLists(design, rest);
+    expect(after.byType[0]!.jobs.map((entry) => entry.id)).toEqual(["a00", "a02", "a03"]);
+    expect(after.overall).toHaveLength(lists.overall.length);
+    expect(after.overall.map((entry) => entry.id)).toContain("a02");
+    const compared = lists.comparison[0]!;
+    const redrawn = buildReviewLists(design, POOL.filter((entry) => entry.id !== compared.id)).comparison;
+    expect(redrawn).toHaveLength(lists.comparison.length);
+    expect(redrawn.map((entry) => entry.id)).not.toContain(compared.id);
+  });
+
+  it("remembers where a job found closed stood, and keeps it across later runs", () => {
+    expect(first.listed).toEqual(listedPositions(lists));
+    const after = updateDraft(first, buildReviewLists(design, rest), new Set([gone.id]), restIds);
+    const again = updateDraft(after, buildReviewLists(design, rest), new Set([gone.id]), restIds);
+    expect(again.dropped).toEqual([{ ...first.listed.find((entry) => entry.id === gone.id)!, reason: "CLOSED" }]);
+    expect(again.dropped[0]).toMatchObject({ roleType: "ALPHA", roleRank: 2 });
+    expect(again.listed.map((entry) => entry.id)).not.toContain(gone.id);
+    const other = updateDraft(first, buildReviewLists(design, rest), new Set(), restIds);
+    expect(other.dropped.map((entry) => entry.reason)).toEqual(["OTHER"]);
+  });
+
+  it("seals the draft", () => {
+    expect(sealDraft(first)).not.toContain(gone.id);
+    expect(openDraft(sealDraft(first))).toEqual(first);
+    expect(() => openDraft("{}")).toThrow(/not of this version/);
+  });
+});
+
+describe("pass rule", () => {
+  type Row = Partial<ReviewDetail> & { answer: string };
+  const sheetOf = (answers: string[]) =>
+    answers.map((answer, index) => `## Job ${index + 1}\n\nAnswer (Y or N): ${answer}\nComment: \n\n~~~~text\n## Job 99\n~~~~\n`).join("\n");
+  const score = (rows: Row[], revealed = "") => {
+    const details = rows.map(({ answer: _answer, ...row }, index): ReviewDetail => ({
+      n: index + 1, id: `id${index}`, roleList: null, overallRank: null, comparison: false, saved: false,
+      linkedInOnly: false, availability: "OPEN", roleType: null, status: "TARGET", sector: "NEUTRAL",
+      industry: null, reasons: [], topK: null, title: "invented", company: "Example Co", link: "https://example.test/", ...row,
+    }));
+    return scoreReviewSheet(sheetOf(rows.map((row) => row.answer)), details, revealed);
+  };
+  const overall = (count: number, answer: string, extra: Partial<ReviewDetail> = {}): Row[] =>
+    Array.from({ length: count }, () => ({ answer, overallRank: 1, roleList: { type: "ALPHA", rank: 1 }, ...extra }));
+  const comparison = (count: number, answer: string, roleType: string | null = "ALPHA"): Row[] =>
+    Array.from({ length: count }, () => ({ answer, comparison: true, roleType }));
+
+  it("passes with six overall yes and a lead of at least twenty points, saved jobs counted", () => {
+    const result = score([...overall(6, "Y", { saved: true }), ...overall(4, "n"), ...comparison(2, "yes"), ...comparison(3, "N")]);
     expect(result).toMatchObject({ result: "PASS", overall: { yes: 6, counted: 10 }, comparison: { yes: 2, counted: 5 } });
     expect(result.byRoleType).toEqual([{ type: "ALPHA", yes: 6, counted: 10 }]);
   });
@@ -232,31 +335,40 @@ describe("pass rule", () => {
     expect(score([...overall(5, "Y"), ...overall(5, "N"), ...comparison(5, "N")]).result).toBe("FAIL");
     // 60% against 50%.
     expect(score([...overall(6, "Y"), ...overall(4, "N"), ...comparison(2, "Y"), ...comparison(2, "N")]).result).toBe("FAIL");
+    // A lead of exactly twenty points passes; nineteen does not.
+    expect(score([...overall(6, "Y"), ...overall(4, "N"), ...comparison(2, "Y"), ...comparison(3, "N")]).result).toBe("PASS");
+    expect(score([...overall(59, "Y"), ...overall(41, "N"), ...comparison(2, "Y"), ...comparison(3, "N")]).result).toBe("FAIL");
   });
 
-  it("does not count saved jobs or LinkedIn jobs marked closed", () => {
-    const result = score([
-      ...overall(6, "Y"),
-      { answer: "Y", overallRank: 7, saved: true },
-      { answer: "closed", roleList: { type: "ALPHA", rank: 2 }, linkedInOnly: true },
-      { answer: "closed", roleList: { type: "ALPHA", rank: 3 } },
-      { answer: "", roleList: { type: "ALPHA", rank: 4 }, saved: true },
-      ...comparison(3, "N"),
-    ]);
+  it("reports the unknown-role comparison jobs apart from the others", () => {
+    const result = score([...overall(6, "Y"), ...comparison(1, "Y", null), ...comparison(4, "N", null), ...comparison(3, "Y"), ...comparison(7, "N")]);
     expect(result).toMatchObject({
-      result: "PASS", overall: { yes: 6, counted: 6 }, lists: { yes: 6, counted: 7 },
-      notCounted: { saved: 2, linkedInClosed: 1 }, otherClosed: 1, blank: [],
+      comparisonUnknownRole: { yes: 1, counted: 5 }, comparisonOtherRole: { yes: 3, counted: 10 }, comparison: { yes: 4, counted: 15 },
     });
   });
 
-  it("is incomplete with a blank counted row and rejects other answers", () => {
+  it("only notes a closed link: the answer still counts", () => {
+    const rows = [...overall(6, "Y", { linkedInOnly: true }), ...comparison(3, "N")];
+    const revealed = "| 1 | t | c | Y | l | no | closed |\n| 2 | t | c | Y | l | no |  |";
+    expect(score(rows, revealed)).toMatchObject({ result: "PASS", overall: { yes: 6, counted: 6 }, closedNoted: 1, blank: [] });
+    expect(score(rows)).toMatchObject({ closedNoted: 0 });
+  });
+
+  it("is incomplete with a blank row and rejects other answers or a changed sheet", () => {
     expect(score([...overall(6, "Y"), ...overall(1, ""), ...comparison(1, "N")])).toMatchObject({ result: "INCOMPLETE", blank: [7] });
-    expect(() => score([...overall(1, "maybe")])).toThrow(/not Y, N or closed: 1/);
-    expect(() => scoreReviewSheet("", { items: [{ n: 1 } as ReviewKey["items"][number]] })).toThrow(/no row for: 1/);
+    expect(() => score([...overall(1, "closed")])).toThrow(/not Y or N: 1/);
+    expect(() => scoreReviewSheet("", [{ n: 1 } as ReviewDetail])).toThrow(/no job: 1/);
+    expect(() => parseFilledSheet("## Job 1\n")).toThrow(/lost the answer line of: 1/);
+    expect(() => parseFilledSheet("## Job 1\nAnswer (Y or N): \n## Job 1\n")).toThrow(/job 1 twice/);
   });
 });
 
 describe("command", () => {
+  const NO_TEXT = {
+    withoutFullText: { byRoleType: { ALPHA: 2, UNKNOWN: 1 }, saved: 2, unsaved: 1 },
+    closedIds: [] as string[],
+    checkByHandIds: [] as string[],
+  };
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "jde-review-lists-"));
   afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
   const privateDir = path.join(root, "private");
@@ -288,18 +400,25 @@ describe("command", () => {
     await expect(run([], { ...env, REPLAY_BRANCH_ID: "br-invented-branch" })).rejects.toThrow(/REPLAY_DATABASE_URL is not set/);
   });
 
-  it("does not replace a sheet that holds answers", async () => {
+  it("does not replace a sheet that holds answers, or lists whose links were shown", async () => {
     const review = path.join(privateDir, "review");
     fs.mkdirSync(review, { recursive: true });
-    fs.writeFileSync(path.join(review, "review_lists_sheet_done.md"), "| 1 | a | b | c | d | e | Y |  |\n");
+    fs.writeFileSync(path.join(review, "review_lists_sheet_done.md"), "## Job 1\nAnswer (Y or N): Y\n");
     await expect(run(["--name=done"])).rejects.toThrow(/already exist/);
     await expect(run(["--name=done", "--replace"])).rejects.toThrow(/has answers/);
+    fs.writeFileSync(path.join(review, "review_lists_sheet_done.md"), "## Job 1\nAnswer (Y or N): \n");
+    fs.writeFileSync(path.join(review, "review_lists_revealed_done.md"), "shown");
+    await expect(run(["--name=done", "--replace"])).rejects.toThrow(/already shown/);
   });
 
-  it("writes the sheet, key and job id file, leaves earlier key ids out and scores the filled sheet", async () => {
+  it("writes no sheet until the check is done, then reveals and scores and reports what was dropped", async () => {
     const review = path.join(privateDir, "review");
+    fs.mkdirSync(review, { recursive: true });
     fs.writeFileSync(path.join(review, "earlier_key.json"), '{"items":[{"id":"OLD-1"}]}');
-    const lists = buildReviewLists(design, POOL);
+    const before = buildReviewLists(design, POOL);
+    const gone = before.byType[0]!.jobs[1]!;
+    const rest = POOL.filter((entry) => entry.id !== gone.id);
+    const state = { pool: POOL, closed: [] as string[], unchecked: 3 };
     const asked: string[][] = [];
     const output: string[] = [];
     const dependencies = {
@@ -308,46 +427,100 @@ describe("command", () => {
         asked.push([...request.ratedIds]);
         return {
           branch: "br-invented-branch",
+          unchecked: state.unchecked,
           result: {
-            lists, eligible: POOL.length, dropped: { rated: 0, dismissed: 0, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0,
-            withoutTopK: 0, postings: [], leads: { total: 0, source: "READ_MODEL" as const }, excluded: { ARCHIVED_OR_FIXTURE: 0, MANUALLY_REMOVED_OR_REJECTED: 0, NOT_GATE_PASSED: 0,
-              AWAITING_CONTENT: 0, NO_LINK: 0, LEAD: 0, KNOWN_CLOSED: 0 },
+            ...NO_TEXT, closedIds: state.closed, lists: buildReviewLists(design, state.pool), eligible: state.pool.length,
+            dropped: { rated: 0, dismissed: state.closed.length, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0,
+            withoutTopK: 0, postings: state.pool, leads: { total: 0, source: "READ_MODEL" as const },
+            excluded: { ARCHIVED_OR_FIXTURE: 0, MANUALLY_REMOVED_OR_REJECTED: 0, NOT_GATE_PASSED: 0, NO_FULL_TEXT: 0,
+              NO_LINK: 0, LEAD: 0, KNOWN_CLOSED: state.closed.length },
           },
         };
       },
     };
     const command = (argv: string[]) => runReviewListsCommand([`--private-dir=${privateDir}`, ...argv], {}, dependencies);
-    await command(["--name=first"]);
     const sheetFile = path.join(review, "review_lists_sheet_first.md");
     const keyFile = path.join(review, "review_lists_key_first.json");
-    const key = JSON.parse(fs.readFileSync(keyFile, "utf8")) as ReviewKey;
-    const jobIds = fs.readFileSync(path.join(review, "review_lists_job_ids_first.txt"), "utf8").trim().split(/\r?\n/);
-    expect(jobIds).toEqual(key.items.map((item) => item.id));
+    const idsFile = path.join(review, "review_lists_job_ids_first.txt");
+
+    await command(["--name=first"]);
+    expect(fs.existsSync(sheetFile) || fs.existsSync(keyFile)).toBe(false);
+    expect(fs.readFileSync(idsFile, "utf8")).toContain(gone.id);
+    expect(output.join(" ")).toContain("NOT FINAL: 3 listed job(s)");
+    const coordinatorFile = path.join(review, "for_coordinator", "check_by_hand_first.md");
+    expect(fs.readFileSync(coordinatorFile, "utf8")).not.toContain("| a0");
+    // No count from a draft, so nothing can be compared with the final run.
+    expect(output.join(" ")).not.toMatch(/eligible|listed=|excluded/);
+
+    // The check found one listed job closed: nothing says so before the rating. Another it read from page wording alone.
+    const byHand = before.byType[0]!.jobs[0]!;
+    Object.assign(state, { pool: rest, closed: [gone.id], unchecked: 0 });
+    NO_TEXT.checkByHandIds.push(byHand.id);
+    output.length = 0;
+    await command(["--name=first"]);
+    expect(output.join(" ")).not.toMatch(/KNOWN_CLOSED|dismissed|dropped by|CLOSED/);
     expect(output.join(" ")).not.toContain("invented role");
+    const key = JSON.parse(fs.readFileSync(keyFile, "utf8")) as ReviewKey;
+    expect(key.items.map((item) => item.id)).not.toContain(gone.id);
+    expect(fs.readFileSync(sheetFile, "utf8")).not.toContain(gone.id);
+    const jobIds = fs.readFileSync(idsFile, "utf8").trim().split(/\r?\n/);
+    expect([...jobIds].sort()).toEqual(key.items.map((item) => item.id).sort());
+    expect(jobIds).not.toEqual(key.items.map((item) => item.id));
+
+    // The job to check by hand stays listed; only the coordinator's file names it.
+    expect(key.items.map((item) => item.id)).toContain(byHand.id);
+    expect(fs.readFileSync(coordinatorFile, "utf8")).toContain(`| ${byHand.id} | invented role ${byHand.id} |`);
+    expect(output.join(" ")).not.toContain(byHand.id);
 
     // An unfilled run can be redrawn, and its own key is not an earlier one.
     await command(["--name=first", "--replace"]);
-    await command(["--name=second"]);
     expect(asked[0]).toEqual(["old-1"]);
-    expect(asked[1]).toEqual(["old-1"]);
-    expect(asked[2]).toEqual(["old-1", ...key.items.map((item) => item.id)]);
+    expect(asked.at(-1)).toEqual(["old-1"]);
 
-    const filled = fs.readFileSync(sheetFile, "utf8").replace(/\|  \|  \|$/gm, "| Y |  |");
-    fs.writeFileSync(sheetFile, filled);
+    // Not yet rated: no report of what was dropped.
+    const blank = fs.readFileSync(sheetFile, "utf8");
     output.length = 0;
     await command(["--score", `--sheet=${sheetFile}`, `--key=${keyFile}`]);
-    expect(output).toContain("result=FAIL");
-    expect(output).toContain("overall yes=4/4 (100.0%)");
+    expect(output.join(" ")).not.toContain("dropped");
+
+    fs.writeFileSync(sheetFile, blank.replace(/^Answer \(Y or N\): $/gm, "Answer (Y or N): Y"));
+    output.length = 0;
+    await command(["--reveal", `--sheet=${sheetFile}`, `--key=${keyFile}`]);
+    const revealedFile = path.join(review, "review_lists_revealed_first.md");
+    expect(fs.readFileSync(revealedFile, "utf8")).toContain("https://jobs.example.test/");
+    expect(output).toEqual([`shown ${key.items.length} of ${key.items.length} jobs in review_lists_revealed_first.md`]);
+
+    output.length = 0;
+    await command(["--score", `--sheet=${sheetFile}`, `--key=${keyFile}`, `--revealed=${revealedFile}`]);
+    expect(output).toContain("overall yes=6/6 (100.0%)");
+    expect(output).toContain("links noted closed (not scored)=0");
+    expect(output.some((line) => line.startsWith("comparison, unknown role yes="))).toBe(true);
+    expect(output).toContain("dropped by the availability check as closed=1; no longer eligible for another reason=0");
+    expect(output.some((line) => line.startsWith("  ALPHA: 1 (rank 2"))).toBe(true);
   });
 
   it("prints counts without titles", () => {
     const lists = buildReviewLists(design, POOL);
     const text = formatReviewSummary({
-      lists, eligible: POOL.length, dropped: { rated: 0, dismissed: 0, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0, withoutTopK: 0, postings: [], leads: { total: 0, source: "READ_MODEL" as const },
-      excluded: { ARCHIVED_OR_FIXTURE: 0, MANUALLY_REMOVED_OR_REJECTED: 0, NOT_GATE_PASSED: 0, AWAITING_CONTENT: 0, NO_LINK: 0, LEAD: 0, KNOWN_CLOSED: 0 },
+      lists, ...NO_TEXT, eligible: POOL.length, dropped: { rated: 0, dismissed: 0, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0, withoutTopK: 0, postings: [], leads: { total: 0, source: "READ_MODEL" as const },
+      excluded: { ARCHIVED_OR_FIXTURE: 0, MANUALLY_REMOVED_OR_REJECTED: 0, NOT_GATE_PASSED: 0, NO_FULL_TEXT: 0, NO_LINK: 0, LEAD: 0, KNOWN_CLOSED: 0 },
     });
-    expect(text).toContain("list ALPHA: eligible=40 listed=3 unsaved=1");
-    expect(text).toContain("overall: listed=6 unsaved=4");
+    expect(text).toContain("list ALPHA: eligible=40 listed=3\n");
+    expect(text).toContain("left out without the full posting text, by role type: ALPHA=2 UNKNOWN=1 (saved=2 not saved=1)");
+    expect(text).not.toMatch(/KNOWN_CLOSED|dismissed/);
+    expect(text).toContain("comparison: listed=3 unknown role=0 other=3");
+    // Nothing tells which listed job was saved.
+    expect(text).not.toMatch(/unsaved=/);
     expect(text).not.toContain("invented role");
+  });
+});
+
+describe("environment files", () => {
+  it("are loaded by nothing the command imports", () => {
+    const graph = buildImportGraph(listSourceFiles(process.cwd()));
+    const reached = new Set(["scripts/build_review_lists.ts"]);
+    for (const file of reached) for (const edge of graph.edges) if (edge.from === file) reached.add(edge.to);
+    expect(reached.size).toBeGreaterThan(10);
+    expect([...reached].filter((file) => graph.packages.get(file)?.has("dotenv"))).toEqual([]);
   });
 });

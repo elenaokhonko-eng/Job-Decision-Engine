@@ -1,7 +1,9 @@
 /**
- * Wiring of the review-lists command (scripts/build_review_lists.ts). Build reads a replay copy only
+ * Wiring of the review-lists command (scripts/build_review_lists.ts). A build writes no sheet while a listed job still
+ * awaits today's availability check (the check command's own plan says which). Build reads a replay copy only
  * (REPLAY_DATABASE_URL and REPLAY_BRANCH_ID, the connected branch checked, one READ ONLY transaction) and writes three
- * files under private/review/. Score reads two files. Only counts are printed: no title, employer, host or setting.
+ * files under private/review/. Reveal and score read the filled sheet and its key. Only counts are printed: no title,
+ * employer, host or setting, and nothing about which job was saved.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -15,21 +17,32 @@ import { isUnknownEmployerName, normalizePostingUrl } from "../ingestion/posting
 import {
   buildReviewKey,
   buildReviewListsFromStore,
+  countUncheckedJobs,
+  EMPTY_DRAFT,
   idsFromKeyText,
+  jobIdOrder,
+  listedPositions,
+  openDraft,
+  openReviewKey,
+  parseFilledSheet,
   parseRankingDesign,
+  renderCheckByHand,
+  renderReveal,
   renderReviewSheet,
   requireApprovedDesign,
   scoreReviewSheet,
-  sheetJobs,
+  sealDraft,
+  updateDraft,
   type CompanyIndustryTags,
   type RankingDesign,
-  type ReviewKey,
   type ReviewListResult,
   type ReviewListRules,
   type RoleKind,
 } from "../modules/decision/index.js";
-import { withReadOnlySession } from "../platform/persistence/index.js";
+import { withReadOnlySession, type SessionQueryable } from "../platform/persistence/index.js";
 import { classifyCareerTrack } from "../pipeline/careerTrack.js";
+import { blockedLinkReason, loadJobBoardHosts } from "../ingestion/availabilityCheckLinks.js";
+import { postingRequestUrl } from "../ingestion/jobContentFetcher.js";
 import { detectCustomerFacingDelivery, detectPeopleManagementCore } from "../pipeline/roleShape.js";
 import { topKCapabilityScore } from "../pipeline/scoringPolicy.js";
 import { requireApprovedReplayTarget, requireReplayDatabaseUrl } from "../reporting/replayGuard.js";
@@ -82,7 +95,7 @@ export async function loadCompanyIndustryTags(file = configPath("companies.yml")
 }
 
 export interface CommandArguments {
-  readonly mode: "build" | "score";
+  readonly mode: "build" | "reveal" | "score";
   readonly privateDir: string;
   readonly designPath: string;
   readonly name: string;
@@ -90,6 +103,7 @@ export interface CommandArguments {
   readonly replace: boolean;
   readonly sheetPath: string | null;
   readonly keyPath: string | null;
+  readonly revealedPath: string | null;
 }
 
 const singaporeDate = (value: Date): string =>
@@ -100,8 +114,8 @@ export function parseReviewListArguments(argv: readonly string[], now: Date): Co
   const flags = new Set<string>();
   for (const argument of argv) {
     const [, key, value] = /^--([a-z-]+)(?:=(.*))?$/.exec(argument) ?? [];
-    if (key && value === undefined && (key === "replace" || key === "score")) flags.add(key);
-    else if (key && value && ["private-dir", "design", "name", "seed", "sheet", "key"].includes(key)) values.set(key, value);
+    if (key && value === undefined && (key === "replace" || key === "score" || key === "reveal")) flags.add(key);
+    else if (key && value && ["private-dir", "design", "name", "seed", "sheet", "key", "revealed"].includes(key)) values.set(key, value);
     else throw new ReviewListsRefusal(`Unknown or empty argument: --${key ?? "?"}`);
   }
   const privateDir = path.resolve(values.get("private-dir") ?? "private");
@@ -111,9 +125,10 @@ export function parseReviewListArguments(argv: readonly string[], now: Date): Co
   }
   const name = values.get("name") ?? singaporeDate(now);
   if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new ReviewListsRefusal("--name may hold letters, digits, - and _ only.");
-  const mode = flags.has("score") ? "score" : "build";
-  if (mode === "score" && !(values.has("sheet") && values.has("key"))) {
-    throw new ReviewListsRefusal("--score needs --sheet=<filled sheet> and --key=<key file>.");
+  if (flags.has("score") && flags.has("reveal")) throw new ReviewListsRefusal("Give --reveal or --score, not both.");
+  const mode = flags.has("score") ? "score" : flags.has("reveal") ? "reveal" : "build";
+  if (mode !== "build" && !(values.has("sheet") && values.has("key"))) {
+    throw new ReviewListsRefusal(`--${mode} needs --sheet=<filled sheet> and --key=<key file>.`);
   }
   return {
     mode,
@@ -124,6 +139,7 @@ export function parseReviewListArguments(argv: readonly string[], now: Date): Co
     replace: flags.has("replace"),
     sheetPath: values.get("sheet") ?? null,
     keyPath: values.get("key") ?? null,
+    revealedPath: values.get("revealed") ?? null,
   };
 }
 
@@ -134,6 +150,9 @@ export function reviewListFiles(privateDir: string, name: string) {
     sheet: path.join(directory, `review_lists_sheet_${name}.md`),
     key: path.join(directory, `review_lists_key_${name}.json`),
     jobIds: path.join(directory, `review_lists_job_ids_${name}.txt`),
+    revealed: path.join(directory, `review_lists_revealed_${name}.md`),
+    draft: path.join(directory, `review_lists_draft_${name}.json`),
+    checkByHand: path.join(directory, "for_coordinator", `check_by_hand_${name}.md`),
   };
 }
 
@@ -146,32 +165,35 @@ export function ratedIdsFromReviewFolder(directory: string, ownKey: string): { i
   return { ids: [...new Set(ids)], files: files.length };
 }
 
-/** An existing output is replaced only on request, and a sheet with anything written in its answer columns never. */
+/** An existing output is replaced only on request; a sheet with anything written in it, or already revealed, never. */
 function requireWritable(files: ReturnType<typeof reviewListFiles>, replace: boolean): void {
-  const existing = [files.sheet, files.key, files.jobIds].filter((file) => fs.existsSync(file));
+  // A draft run leaves only the job id file and the draft, so it can simply be run again.
+  const existing = [files.sheet, files.key].filter((file) => fs.existsSync(file));
   if (existing.length === 0) return;
   if (!replace) throw new ReviewListsRefusal("These lists already exist. Use another --name, or --replace for an unfilled sheet.");
+  if (fs.existsSync(files.revealed)) {
+    throw new ReviewListsRefusal("Refusing to replace lists whose links were already shown. Use another --name.");
+  }
   if (!fs.existsSync(files.sheet)) return;
-  const filled = fs.readFileSync(files.sheet, "utf8").split(/\r?\n/).some((line) => {
-    const cells = line.split(/(?<!\\)\|/).map((cell) => cell.trim());
-    return /^\d+$/.test(cells[1] ?? "") && cells.slice(7).some((cell) => cell !== "");
-  });
+  const filled = [...parseFilledSheet(fs.readFileSync(files.sheet, "utf8")).values()]
+    .some((entry) => entry.answer !== null || entry.commented);
   if (filled) throw new ReviewListsRefusal("Refusing to replace a sheet that has answers in it. Use another --name.");
 }
 
 export function formatReviewSummary(result: ReviewListResult): string {
-  const unsaved = (jobs: ReadonlyArray<{ saved: boolean }>) => jobs.filter((job) => !job.saved).length;
-  const { lists } = result;
-  const counts = (record: Record<string, number>) => Object.entries(record).map(([key, value]) => `${key}=${value}`).join(" ");
+  const { lists, withoutFullText } = result;
+  const counts = (record: Readonly<Record<string, number | undefined>>) =>
+    Object.entries(record).filter(([, value]) => value !== undefined).map(([key, value]) => `${key}=${value}`).join(" ");
   return [
     `leads in the workspace=${result.leads.total} (definition: ${result.leads.source})`,
-    `excluded: ${counts(result.excluded)}`,
-    `dropped: ${counts(result.dropped)}`,
+    // Nothing here tells what the availability check dropped: closed counts are left out until the rating is scored.
+    `excluded: ${counts({ ...result.excluded, KNOWN_CLOSED: undefined })}`,
+    `dropped: ${counts({ ...result.dropped, dismissed: undefined })}`,
     `eligible postings=${result.eligible} candidate records without top-K=${result.withoutTopK} rated ids not found=${result.ratedNotFound}`,
-    ...lists.byType.map((list) =>
-      `list ${list.type.key}: eligible=${list.eligible} listed=${list.jobs.length} unsaved=${unsaved(list.jobs)}`),
-    `overall: listed=${lists.overall.length} unsaved=${unsaved(lists.overall)}`,
-    `comparison: listed=${lists.comparison.length}`,
+    `left out without the full posting text, by role type: ${counts(withoutFullText.byRoleType) || "none"} (saved=${withoutFullText.saved} not saved=${withoutFullText.unsaved})`,
+    ...lists.byType.map((list) => `list ${list.type.key}: eligible=${list.eligible} listed=${list.jobs.length}`),
+    `overall: listed=${lists.overall.length}`,
+    `comparison: listed=${lists.comparison.length} unknown role=${lists.comparison.filter((job) => job.classification.roleType === null).length} other=${lists.comparison.filter((job) => job.classification.roleType !== null).length}`,
   ].join("\n");
 }
 
@@ -181,18 +203,42 @@ export interface StoreRequest {
   readonly ratedIds: readonly string[];
 }
 
+export interface StoreResult {
+  readonly branch: string;
+  readonly result: ReviewListResult;
+  /** Listed jobs whose link the availability check would still read today. */
+  readonly unchecked: number;
+}
+
 export interface CommandDependencies {
   readonly log?: (line: string) => void;
   readonly now?: Date;
   /** Reads the lists from the store; the default is the guarded read-only replay session. */
-  readonly read?: (request: StoreRequest, env: NodeJS.ProcessEnv) => Promise<{ branch: string; result: ReviewListResult }>;
+  readonly read?: (request: StoreRequest, env: NodeJS.ProcessEnv) => Promise<StoreResult>;
 }
 
-async function readFromReplay(request: StoreRequest, env: NodeJS.ProcessEnv): Promise<{ branch: string; result: ReviewListResult }> {
+/**
+ * How many of the jobs the check command would still read today, with the check's own link rules. The check itself is
+ * not imported: its modules load environment files, which this command never does.
+ */
+export async function uncheckedJobCount(
+  db: SessionQueryable,
+  workspaceId: string,
+  jobIds: readonly string[],
+  now: Date,
+): Promise<number> {
+  const jobBoardHosts = await loadJobBoardHosts();
+  return countUncheckedJobs(db, workspaceId, jobIds, now, {
+    readable: (link) => blockedLinkReason(link, jobBoardHosts) === null,
+    requestHost: (link) => postingRequestUrl(link).hostname,
+  });
+}
+
+async function readFromReplay(request: StoreRequest, env: NodeJS.ProcessEnv): Promise<StoreResult> {
   const branch = env.REPLAY_BRANCH_ID?.trim();
   if (!branch) throw new ReviewListsRefusal("REPLAY_BRANCH_ID is not set.");
   const url = requireReplayDatabaseUrl(env.REPLAY_DATABASE_URL);
-  const result = await withReadOnlySession(
+  const read = await withReadOnlySession(
     pgConnectionConfig(url),
     (identity) => {
       try {
@@ -204,15 +250,17 @@ async function readFromReplay(request: StoreRequest, env: NodeJS.ProcessEnv): Pr
     },
     async (db) => {
       const workspace = await resolveWorkspaceContext(db as never);
-      return buildReviewListsFromStore(db, {
+      const result = await buildReviewListsFromStore(db, {
         ...request,
         workspaceId: workspace.workspaceId,
         rules: REVIEW_LIST_RULES,
         leadDefinitionSql: loadLeadDefinitionSql(),
       });
+      const listed = listedPositions(result.lists).map((position) => position.id);
+      return { result, unchecked: await uncheckedJobCount(db, workspace.workspaceId, listed, new Date()) };
     },
   );
-  return { branch, result };
+  return { branch, ...read };
 }
 
 async function build(args: CommandArguments, env: NodeJS.ProcessEnv, dependencies: CommandDependencies): Promise<void> {
@@ -225,45 +273,87 @@ async function build(args: CommandArguments, env: NodeJS.ProcessEnv, dependencie
   const files = reviewListFiles(args.privateDir, args.name);
   requireWritable(files, args.replace);
   const rated = ratedIdsFromReviewFolder(files.directory, files.key);
-  const { branch, result } = await (dependencies.read ?? readFromReplay)(
-    { design, companyTags: await loadCompanyIndustryTags(), ratedIds: rated.ids },
+  const companyTags = await loadCompanyIndustryTags();
+  const { branch, result, unchecked } = await (dependencies.read ?? readFromReplay)(
+    { design, companyTags, ratedIds: rated.ids },
     env,
   );
 
   const { lists } = result;
-  const key = buildReviewKey(lists, {
-    name: args.name,
-    createdAt: now.toISOString(),
-    seed: design.lists.seed,
-    overallFromUnsavedOnly: design.lists.overall_from_unsaved_only,
-  });
+  const draft = updateDraft(
+    fs.existsSync(files.draft) ? openDraft(fs.readFileSync(files.draft, "utf8")) : EMPTY_DRAFT,
+    lists,
+    new Set(result.closedIds),
+    new Set(result.postings.map((job) => job.id)),
+  );
   fs.mkdirSync(files.directory, { recursive: true });
-  fs.writeFileSync(files.sheet, renderReviewSheet(lists, design.lists.seed), "utf8");
-  fs.writeFileSync(files.key, `${JSON.stringify(key, null, 2)}\n`, "utf8");
-  // Sheet order, so line n of this file is row n of the sheet.
-  fs.writeFileSync(files.jobIds, sheetJobs(lists, design.lists.seed).map((job) => `${job.id}\n`).join(""), "utf8");
+  fs.writeFileSync(files.draft, sealDraft(draft), "utf8");
+  fs.mkdirSync(path.dirname(files.checkByHand), { recursive: true });
+  fs.writeFileSync(files.checkByHand, renderCheckByHand(lists, new Set(result.checkByHandIds)), "utf8");
+  fs.writeFileSync(files.jobIds, jobIdOrder(lists, design.lists.seed).map((id) => `${id}\n`).join(""), "utf8");
 
   log(`branch=${branch} earlier key files=${rated.files} rated ids=${rated.ids.length}`);
+  if (unchecked > 0) {
+    // A sheet from an earlier, unfilled run would be of other lists.
+    for (const stale of [files.sheet, files.key]) fs.rmSync(stale, { force: true });
+    log(`NOT FINAL: ${unchecked} listed job(s) await today's availability check. No sheet was written.`);
+    log(`Run the check on review_lists_job_ids_${args.name}.txt (do not show its output to the rater), then run this again.`);
+    return;
+  }
+  // Counts are printed for final lists only: a draft's counts beside the final ones would show how many were dropped.
   log(`employer override list: ${design.employer_override ? "approved" : "none in this design"}`);
   log(formatReviewSummary(result));
   log(`overall list from unsaved jobs only: ${design.lists.overall_from_unsaved_only}`);
-  log(`wrote ${key.items.length} jobs: review_lists_{sheet,key,job_ids}_${args.name} under private/review/`);
+  const key = buildReviewKey(lists, { name: args.name, createdAt: now.toISOString(), seed: design.lists.seed, dropped: draft.dropped });
+  // A board stores its slug as the company: the sheet writes the employer's name, as other records do.
+  const boardNames = new Map(companyTags.flatMap((company) => company.names.slice(1).map((slug) => [slug.toLowerCase(), company.names[0]!] as const)));
+  fs.writeFileSync(files.sheet, renderReviewSheet(lists, design.lists.seed, boardNames), "utf8");
+  fs.writeFileSync(files.key, `${JSON.stringify(key, null, 2)}\n`, "utf8");
+  log(`wrote ${key.items.length} jobs: review_lists_{sheet,key}_${args.name} under private/review/`);
+}
+
+/** Writes the links and saved marks of the answered jobs beside the filled sheet. */
+function reveal(args: CommandArguments, log: (line: string) => void): void {
+  const { details } = openReviewKey(fs.readFileSync(args.keyPath!, "utf8"));
+  const name = /^review_lists_key_([A-Za-z0-9_-]+)\.json$/.exec(path.basename(args.keyPath!))?.[1];
+  if (!name) throw new ReviewListsRefusal("--key must be a review_lists_key_<name>.json file.");
+  // Beside the key, which is already inside private/.
+  const target = path.join(path.dirname(path.resolve(args.keyPath!)), `review_lists_revealed_${name}.md`);
+  const earlier = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : "";
+  const shown = renderReveal(fs.readFileSync(args.sheetPath!, "utf8"), details, earlier);
+  fs.writeFileSync(target, shown.text, "utf8");
+  log(`shown ${shown.shown} of ${details.length} jobs in review_lists_revealed_${name}.md`);
 }
 
 function score(args: CommandArguments, log: (line: string) => void): void {
-  const key = JSON.parse(fs.readFileSync(args.keyPath!, "utf8")) as ReviewKey;
-  if (key.schema_version !== "review_lists_key_v1") throw new ReviewListsRefusal("The key file is not a review-lists key.");
-  const result = scoreReviewSheet(fs.readFileSync(args.sheetPath!, "utf8"), key);
+  const { details, dropped } = openReviewKey(fs.readFileSync(args.keyPath!, "utf8"));
+  const revealed = args.revealedPath ? fs.readFileSync(args.revealedPath, "utf8") : "";
+  const result = scoreReviewSheet(fs.readFileSync(args.sheetPath!, "utf8"), details, revealed);
   const share = (value: { yes: number; counted: number }) =>
     `${value.yes}/${value.counted}${value.counted ? ` (${((100 * value.yes) / value.counted).toFixed(1)}%)` : ""}`;
   log(`result=${result.result}`);
   log(`overall yes=${share(result.overall)}`);
   log(`listed yes=${share(result.lists)}`);
   log(`comparison yes=${share(result.comparison)}`);
+  log(`comparison, unknown role yes=${share(result.comparisonUnknownRole)}`);
+  log(`comparison, other roles yes=${share(result.comparisonOtherRole)}`);
   for (const type of result.byRoleType) log(`${type.type} yes=${share(type)}`);
-  log(`not counted: saved=${result.notCounted.saved} linkedin closed=${result.notCounted.linkedInClosed}`);
-  log(`counted as not yes because closed=${result.otherClosed}`);
-  if (result.blank.length) log(`unanswered rows: ${result.blank.join(", ")}`);
+  log(args.revealedPath ? `links noted closed (not scored)=${result.closedNoted}` : "links noted closed: no --revealed file given");
+  if (result.blank.length) {
+    log(`unanswered rows: ${result.blank.join(", ")}`);
+    return;
+  }
+  // Only now that every job is rated: what the availability check dropped, and where it stood.
+  const closed = dropped.filter((job) => job.reason === "CLOSED");
+  log(`dropped by the availability check as closed=${closed.length}; no longer eligible for another reason=${dropped.length - closed.length}`);
+  for (const type of [...new Set(closed.map((job) => job.roleType ?? "UNKNOWN"))].sort()) {
+    const places = closed.filter((job) => (job.roleType ?? "UNKNOWN") === type).map((job) => [
+      job.roleRank === null ? null : `rank ${job.roleRank}`,
+      job.overallRank === null ? null : `overall ${job.overallRank}`,
+      job.comparison ? "comparison" : null,
+    ].filter(Boolean).join(" "));
+    log(`  ${type}: ${places.length} (${places.join(", ")})`);
+  }
 }
 
 export async function runReviewListsCommand(
@@ -272,6 +362,8 @@ export async function runReviewListsCommand(
   dependencies: CommandDependencies = {},
 ): Promise<void> {
   const args = parseReviewListArguments(argv, dependencies.now ?? new Date());
-  if (args.mode === "score") score(args, dependencies.log ?? console.log);
+  const log = dependencies.log ?? console.log;
+  if (args.mode === "score") score(args, log);
+  else if (args.mode === "reveal") reveal(args, log);
   else await build(args, env, dependencies);
 }

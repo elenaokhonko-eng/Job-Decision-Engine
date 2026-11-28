@@ -1,10 +1,14 @@
 /**
- * Builds the next review lists from a replay copy, read only, and scores a filled sheet. No environment file is loaded.
+ * Builds the next review lists from a replay copy, read only, then reveals and scores a filled sheet. No environment file
+ * is loaded.
  * Rules: src/modules/decision/. Wiring and guard: src/app/reviewLists.ts.
  *
  *   npx tsx scripts/build_review_lists.ts [--private-dir=<dir named private>] [--design=<file>] [--name=<label>]
  *     [--seed=<text>] [--replace]              # needs REPLAY_DATABASE_URL and REPLAY_BRANCH_ID
- *   npx tsx scripts/build_review_lists.ts --score --sheet=<filled sheet> --key=<key file>
+ *   (no sheet is written while a listed job awaits today's check: run scripts/check_availability_now.ts on the job id
+ *   file, then run the same command again)
+ *   npx tsx scripts/build_review_lists.ts --reveal --sheet=<filled sheet> --key=<key file>   # answered jobs only
+ *   npx tsx scripts/build_review_lists.ts --score --sheet=<filled sheet> --key=<key file> [--revealed=<file>]
  */
 import { ReviewListsRefusal, runReviewListsCommand } from "../src/app/reviewLists.js";
 import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
