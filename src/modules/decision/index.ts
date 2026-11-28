@@ -8,7 +8,13 @@ export {
   type RoleKind,
 } from "./domain/rankingDesign.js";
 export { buildReviewLists, collapsePool, jobIdOrder, sheetJobs, type PoolJob, type ReviewLists } from "./domain/reviewLists.js";
-export { sheetCompany, sheetLocation, sheetPostingText } from "./domain/postingText.js";
+export {
+  MAX_REMOVED_SHARE,
+  postingCanBeShown,
+  sheetCompany,
+  sheetLocation,
+  sheetPosting,
+} from "./domain/postingText.js";
 export {
   EMPTY_DRAFT,
   listedPositions,

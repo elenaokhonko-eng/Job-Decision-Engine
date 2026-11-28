@@ -19,6 +19,8 @@ export interface Candidate {
   readonly classification: JobClassification;
   /** The stored posting text. */
   readonly description: string;
+  /** Every address the job was seen at: taken out of the text before the rating. */
+  readonly sourceLinks: ReadonlyArray<string | null>;
   readonly workMode: "REMOTE" | "HYBRID" | "ONSITE" | null;
 }
 

@@ -25,6 +25,7 @@ import {
   idsFromKeyText,
   jobIdOrder,
   listedPositions,
+  MAX_REMOVED_SHARE,
   openDraft,
   openReviewKey,
   parseFilledSheet,
@@ -196,7 +197,7 @@ export function unfinishedDrafts(directory: string): string[] {
 }
 
 export function formatReviewSummary(result: ReviewListResult): string {
-  const { lists, withoutFullText } = result;
+  const { lists, withoutFullText, textNotShown } = result;
   const counts = (record: Readonly<Record<string, number | undefined>>) =>
     Object.entries(record).filter(([, value]) => value !== undefined).map(([key, value]) => `${key}=${value}`).join(" ");
   return [
@@ -206,6 +207,7 @@ export function formatReviewSummary(result: ReviewListResult): string {
     `dropped: ${counts({ ...result.dropped, dismissed: undefined })}`,
     `eligible postings=${result.eligible} candidate records without top-K=${result.withoutTopK} rated ids not found=${result.ratedNotFound}`,
     `left out without the full posting text, by role type: ${counts(withoutFullText.byRoleType) || "none"} (saved=${withoutFullText.saved} not saved=${withoutFullText.unsaved})`,
+    `left out because the sheet cannot show the text (empty after cleaning, or over ${MAX_REMOVED_SHARE * 100}% removed), by role type: ${counts(textNotShown.byRoleType) || "none"} (saved=${textNotShown.saved} not saved=${textNotShown.unsaved})`,
     ...lists.byType.map((list) => `list ${list.type.key}: eligible=${list.eligible} listed=${list.jobs.length}`),
     `overall: listed=${lists.overall.length}`,
     `comparison: listed=${lists.comparison.length} unknown role=${lists.comparison.filter((job) => job.classification.roleType === null).length} other=${lists.comparison.filter((job) => job.classification.roleType !== null).length}`,

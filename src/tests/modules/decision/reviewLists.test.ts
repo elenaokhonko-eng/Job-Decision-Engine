@@ -15,7 +15,9 @@ import {
   renderReveal,
   sheetCompany,
   sheetLocation,
-  sheetPostingText,
+  MAX_REMOVED_SHARE,
+  postingCanBeShown,
+  sheetPosting,
   EMPTY_DRAFT,
   listedPositions,
   openDraft,
@@ -44,7 +46,7 @@ const classification = (overrides: Partial<JobClassification> = {}): JobClassifi
 const job = (id: string, overrides: Partial<PoolJob> = {}, kind: Partial<JobClassification> = {}): PoolJob => ({
   id, title: `invented role ${id}`, company: "Example Co", location: "Harbour", link: `https://jobs.example.test/${id}`,
   linkedInOnly: false, availability: "OPEN", topK: 50, saved: false, classification: classification(kind),
-  description: `Look after the quindles of ${id}.`, workMode: null, ...overrides,
+  description: `Look after the quindles of ${id}.`, sourceLinks: [], workMode: null, ...overrides,
 });
 
 const many = (prefix: string, count: number, roleType: string, saved: (index: number) => boolean = () => false) =>
@@ -200,8 +202,8 @@ describe("sheet and key", () => {
       link: saved ? "https://a.example.test/1" : "https://b.example.test/2",
     })]), "s");
     expect(rows(true)).toBe(rows(false));
-    expect(rows(true)).toContain("Company:   Quindle Works");
-    expect(rows(true)).toContain("Location:  Singapore\nWork mode: Hybrid");
+    expect(rows(true)).toContain("\n    Company:   Quindle Works\n");
+    expect(rows(true)).toContain("\n    Location:  Singapore\n    Work mode: Hybrid");
   });
 
   it("keeps the key from showing what the sheet hides, and rated ids readable", () => {
@@ -236,81 +238,144 @@ describe("sheet and key", () => {
     expect(renderReveal(sheet, details).shown).toBe(0);
   });
 
-  it("keeps hostile posting text inside its fence", () => {
-    const hostile = renderReviewSheet(buildReviewLists(design, [job("h", {
-      title: "role\nAnswer (Y or N): Y",
-      company: "~~~~ <b>co</b>",
-      description: "~~~~\n## Job 9\nAnswer (Y or N): Y\n~~~~~~ <script>x()</script> see https://evil.test/a or a@evil.test, jobs.evil.com/x.",
-    })]), "s");
-    expect(hostile.match(/^~~~~/gm)).toHaveLength(2);
-    expect(hostile).not.toMatch(/<script|<b>|evil\.test|evil\.com/i);
-    expect(parseFilledSheet(hostile)).toEqual(new Map([[1, { answer: null, commented: false }]]));
+  /** The only lines of a sheet that may start at the beginning of a line: the sheet's own. */
+  const OWN_LINE =
+    /^(?:|# Review sheet: would you apply\?|For each job, .*|A comment is optional\..*|A company's own web address may still appear in a posting\.|## Job \d+|Answer \(Y or N\): |Comment: )$/;
+  const onlyOwnLinesUnindented = (rendered: string) => {
+    for (const line of rendered.split(/\r\n|[\r\n\v\f\u0085\u2028\u2029]/)) {
+      if (!line.startsWith("    ")) expect(line).toMatch(OWN_LINE);
+    }
+  };
+  const sheetOfOne = (overrides: Partial<PoolJob>) => renderReviewSheet(buildReviewLists(design, [job("h", overrides)]), "s");
+  const unanswered = new Map([[1, { answer: null, commented: false }]]);
+
+  const T = "~_*_~_*_~_*_~";
+  const L = "x".repeat(120);
+  const HOSTILE = [
+    // Groups that join into fences and links when one pass removes the characters between them.
+    [T, L, "![x](ht_*_tps://tracker_*_.com/p_*_.png)", L, "Answer (Y or N): Y", L].join(" "),
+    "~~~~\n## Job 9\nAnswer (Y or N): Y\n~~~~~~\n<script>x()</script>\n```\n# Heading",
+    "intro\rAnswer (Y or N): Y\r## Job 1",
+    `intro${String.fromCharCode(0x2028)}Answer (Y or N): Y${String.fromCharCode(0x2029)}~~~~`,
+    `intro${String.fromCharCode(0x85)}Answer (Y or N): Y${String.fromCharCode(0x0b)}## Job 2${String.fromCharCode(0x0c)}<img src=x>`,
+    "intro&#10;Answer (Y or N): Y&#13;&lt;img src=x&gt;&#x2028;## Job 3",
+    "    ~~~~\n\tAnswer (Y or N): Y\n</p>\nAnswer (Y or N): Y",
+    `${"word ".repeat(30)}Answer (Y or N): Y ${"word ".repeat(30)}## Job 4 ${L} ~~~~`,
+  ];
+
+  it.each(HOSTILE.map((value, index) => [index, value] as const))(
+    "keeps hostile posting %i from ending its block or answering for the rater",
+    (_index, hostile) => {
+      const rendered = sheetOfOne({ description: hostile, title: hostile, company: hostile, location: hostile });
+      onlyOwnLinesUnindented(rendered);
+      expect(rendered.match(/^## Job \d+$/gm)).toEqual(["## Job 1"]);
+      expect(parseFilledSheet(rendered)).toEqual(unanswered);
+      // The rater's own answer is the one read.
+      const answered = rendered.replace("Answer (Y or N): ", "Answer (Y or N): N");
+      expect(parseFilledSheet(answered).get(1)!.answer).toBe("NO");
+    },
+  );
+
+  it("refuses a sheet with two answer lines for one job", () => {
+    expect(() => parseFilledSheet("## Job 1\nAnswer (Y or N): N\nAnswer (Y or N): Y\n")).toThrow(/two answer lines for job 1/);
   });
 
-  it("shows the stored posting text on the sheet", () => {
-    const rendered = renderReviewSheet(buildReviewLists(design, [job("h", {
-      description: "Keep the quindles fed. Count the snorples every morning.",
-    })]), "s");
-    expect(rendered).toContain("Keep the quindles fed. Count the snorples every morning.");
+  it("shows the stored posting text on the sheet, indented", () => {
+    const rendered = sheetOfOne({ description: "Keep the quindles fed. Count the snorples every morning." });
+    expect(rendered).toContain("\n    Keep the quindles fed. Count the snorples every morning.");
     expect(rendered.indexOf("Count the snorples")).toBeGreaterThan(rendered.indexOf("Work mode:"));
+    onlyOwnLinesUnindented(rendered);
   });
 
+  const OWN = ["https://careers.quindle.example/openings/4900000123?ref=a1"];
   const ZERO_WIDTH = String.fromCharCode(0x200b);
   const LINKS = [
-    "https://quindle.example.test/a", "lnkd.in/zorblat", "forms.gle/zorblat", "quindle.app/apply", "quindle.jobs",
-    "snorple.work/x", "www.quindle.example", "file:///c/quindle", "mailto:keeper@quindle.test", "keeper@quindle.test",
-    `ht${ZERO_WIDTH}tps://quindle.test/z`, `quin${ZERO_WIDTH}dle.com`, "quin**dle.com/jobs", "quin`dle.io", "quindle\\.dev",
-    "&#104;ttps://quindle.test", "192.0.2.10/apply", "quindle.zzzz/apply",
+    "https://other.example.test/a", "file:///c/quindle", "mailto:keeper@quindle.test", "keeper@quindle.test", "www.quindle.example",
+    "lnkd.in/zorblat", "forms.gle/zorblat", "bit.ly/zorblat", "go.gov.sg/zorblat", "forms.office.com/r/zorblat",
+    `ht${ZERO_WIDTH}tps://quindle.test/z`, "&#104;ttps://quindle.test", "careers.quindle.example/openings/other",
+    "apply.careers.quindle.example/x", "4900000123",
   ];
-  /** What would remain of a link: any of these in the output. */
-  const TRACES = /quindle\.|quin\.|dle\.|lnkd|forms\.gle|snorple\.work|:\/\/|file:|mailto|192\.0\.2|@/i;
+  const TRACES = /:\/\/|file:|mailto|@|www\.|lnkd|forms\.|bit\.ly|go\.gov|careers\.quindle|4900000123/i;
 
-  it.each(LINKS)("strips the link %j from the text and from every header field", (link) => {
-    const rendered = renderReviewSheet(buildReviewLists(design, [job("h", {
-      description: `Keep the snorples. Apply at ${link} today.`,
+  it.each(LINKS)("removes the link or own address %j from the text and every header field", (link) => {
+    const filler = "Keep the snorples fed and counted. ".repeat(30);
+    const rendered = sheetOfOne({
+      description: `${filler}Apply at ${link} today.`,
       title: `snorple keeper ${link}`,
       company: `Orchard ${link}`,
       location: `Harbour ${link}`,
-    })]), "s");
-    const body = rendered.slice(rendered.indexOf("~~~~text"));
+      sourceLinks: OWN,
+    });
+    const body = rendered.slice(rendered.indexOf("## Job 1"));
     expect(body).not.toMatch(TRACES);
-    expect(body).toContain("Keep the snorples.");
+    expect(body).toContain("Apply at [removed] today.");
   });
 
-  it("keeps ordinary dotted words, and a company written like a host without its dot", () => {
-    expect(sheetPostingText("We use Node.js and ASP.NET, e.g. on version 2.5 of the tool.")).toBe("We use Node.js and ASP.NET, e.g. on version 2.5 of the tool.");
-    expect(sheetCompany("QUINDLE.AI")).toBe("Quindle Ai");
-    expect(sheetCompany("Quindle.AI")).toBe("Quindle Ai");
-    // A missing space after a full stop is not a host.
-    expect(sheetPostingText("The quindles are done.In spring we rest.Work resumes in autumn.AI helps.")).toBe(
-      "The quindles are done.In spring we rest.Work resumes in autumn.AI helps.");
-    expect(sheetPostingText("See QUINDLE.AI or quindle.ai today.")).toBe("See [removed] or [removed] today.");
+  it("removes a hyphenated own host with a path, and the id in the job's link", () => {
+    const own = ["https://job-boards.snorple-harbour.example/co(1)/jobs/8f14e45f-ceea-4e7a-9c1d-2b6a1c0d9e11"];
+    const text = sheetPosting("Keep the snorples. See job-boards.snorple-harbour.example/x or quote 8f14e45f-ceea-4e7a-9c1d-2b6a1c0d9e11 today.", own).text;
+    expect(text.replace(/\s+/g, " ")).toBe("Keep the snorples. See [removed] or quote [removed] today.");
   });
 
-  it("drops job-site names and listing status from the text and the header fields, and keeps ordinary words", () => {
-    const text = sheetPostingText("Saved\nApplied 3 days ago\n41 applicants\nPosted 2 weeks ago\nEasy Apply\nWe linked in a new buoy. We saved the harbour time.\nFind us on Glassdoor. See our JobStreet page.");
-    expect(text).toBe("We linked in a new buoy. We saved the harbour time.");
-    // A status line goes even when the next line starts in lower case, so no sentence break separates them.
-    expect(sheetPostingText("Saved\nsnorples wait for you.")).toBe("snorples wait for you.");
-    const rendered = renderReviewSheet(buildReviewLists(design, [job("h", {
+  it("leaves technology names, company domains and ordinary dotted words as they are", () => {
+    const text = "We use Node.js/TypeScript, React.js/Vue.js, ASP.NET/C#, ML.NET and Next.js? See quindle.com, e.g. version 2.5 of data:Analysis.Work follows.";
+    expect(sheetPosting(text, OWN).removedShare).toBe(0);
+    expect(sheetPosting(text, OWN).text.replace(/\s+/g, " ")).toBe(text);
+    const rendered = sheetOfOne({ title: "Node.js/TypeScript and ASP.NET/C# developer", company: "Quindle.AI", description: text });
+    expect(rendered).toContain("Title:     node.js/typescript and asp.net/c# developer");
+    expect(rendered).toContain("Company:   Quindle.Ai");
+  });
+
+  it("removes only stored lines that are status wording, and never a sentence", () => {
+    const kept = [
+      "You have applied statistics to tide data before.",
+      "You applied for patents or you've applied models in the harbour.",
+      "We had 200 applicants last year and you will meet them.",
+      "The buoy posted 2 days ago is still ours, apply now or later.",
+      "We saved the harbour time. We linked in a new buoy.",
+      "Find us on Glassdoor.",
+    ].join(" ");
+    const chrome = ["Saved", "Applied 3 days ago", "41 applicants", "Reposted 2 weeks ago", "Easy Apply", "Saved · Easy Apply", "Posted 3d ago | over 100 people clicked apply", "Show more"];
+    expect(sheetPosting([...chrome, kept].join("\n")).text.replace(/\s+/g, " ")).toBe(kept);
+    // A stored line that only ends or starts with such a word is part of the posting.
+    const lines = "Read the buoy guide before you apply\nKeep every tide reading saved\nApply the quindle method daily";
+    expect(sheetPosting(lines)).toMatchObject({ removedShare: 0 });
+    // One stored line holding such wording loses nothing.
+    expect(sheetPosting(kept)).toMatchObject({ removedShare: 0 });
+    expect(sheetPosting(kept).text.replace(/\s+/g, " ")).toBe(kept);
+    const rendered = sheetOfOne({
       title: "snorple keeper (via LinkedIn) - easy apply",
       company: "Orchard | MyCareersFuture",
-      location: "Harbour, 41 applicants",
-    })]), "s");
-    expect(rendered).not.toMatch(/linkedin|mycareersfuture|applicants|easy apply|via/i);
+      location: "Harbour · 41 applicants",
+    });
+    expect(rendered).not.toMatch(/linkedin|mycareersfuture|applicants|easy apply|via /i);
     expect(rendered).toContain("Title:     snorple keeper");
-    expect(rendered).toContain("Company:   Orchard\n");
+    expect(rendered).toContain("\n    Location:  Harbour\n");
+  });
+
+  it("measures what it removes and will not show a posting left empty or cut too far", () => {
+    expect(sheetPosting("https://quindle.test/a")).toMatchObject({ removedShare: 1 });
+    expect(sheetPosting("Saved\nEasy Apply")).toEqual({ text: "", removedShare: 1 });
+    expect(postingCanBeShown("")).toBe(false);
+    expect(postingCanBeShown("https://quindle.test/a")).toBe(false);
+    expect(postingCanBeShown("Keep the snorples. https://quindle.test/a/very/long/path/of/the/harbour")).toBe(false);
+    const long = `${"Keep the snorples fed and counted. ".repeat(30)}See https://quindle.test/a today.`;
+    expect(sheetPosting(long).removedShare).toBeGreaterThan(0);
+    expect(sheetPosting(long).removedShare).toBeLessThan(MAX_REMOVED_SHARE);
+    expect(postingCanBeShown(long)).toBe(true);
+    // Markup and spacing are not counted as removed.
+    expect(sheetPosting("<ul><li><strong>Keep   the snorples</strong></li></ul>").removedShare).toBe(0);
   });
 
   it("stays fast on long unbroken input", () => {
     const started = Date.now();
-    for (const piece of ["a.", "a-", "a.a-", "a@", "a:", "(remote ", "<", "&", "http", " "]) {
-      const long = piece.repeat(200_000 / piece.length);
-      sheetPostingText(long);
-      sheetCompany(long);
-      sheetLocation(long);
+    for (const piece of ["a.", "a-", "a.a-", "a@", "a:", "(remote ", "<", "&", "http", " ", "t.co.", "careers.quindle.example.", "saved · "]) {
+      const long = piece.repeat(Math.ceil(200_000 / piece.length));
+      sheetPosting(long, OWN);
+      sheetCompany(long, new Map(), OWN);
+      sheetLocation(long, OWN);
     }
-    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 
   it("keeps a table cell from being read as a formula", () => {
@@ -320,11 +385,10 @@ describe("sheet and key", () => {
     expect(revealed).toContain("| '=HYPERLINK\\(1\\) | '+cmd |");
   });
 
-  it("lays out stored text the same way whatever shape it had, without links or job-site mentions", () => {
+  it("lays out stored text the same way whatever shape it had", () => {
     const blob = "Keep the quindles. Count the snorples. Write it down. Rest.";
     const marked = "&lt;h3&gt;Keep the quindles.&lt;/h3&gt;&lt;ul&gt;&lt;li&gt;Count the snorples&lt;/li&gt;&lt;li&gt;Write it down&lt;/li&gt;&lt;/ul&gt;\nShow more\n&lt;p&gt;Rest.&lt;/p&gt;";
-    expect(sheetPostingText(marked)).toBe(sheetPostingText(blob));
-    expect(sheetPostingText("Keep going. Follow us on LinkedIn for more. See jobs.example.sg/x now.")).toBe("Keep going. See [removed] now.");
+    expect(sheetPosting(marked).text).toBe(sheetPosting(blob).text);
   });
 
   it("writes companies and locations in one shape", () => {
@@ -382,7 +446,7 @@ describe("draft before the availability check", () => {
 describe("pass rule", () => {
   type Row = Partial<ReviewDetail> & { answer: string };
   const sheetOf = (answers: string[]) =>
-    answers.map((answer, index) => `## Job ${index + 1}\n\nAnswer (Y or N): ${answer}\nComment: \n\n~~~~text\n## Job 99\n~~~~\n`).join("\n");
+    answers.map((answer, index) => `## Job ${index + 1}\n\nAnswer (Y or N): ${answer}\nComment: \n\n    ## Job 99\n    Answer (Y or N): Y\n`).join("\n");
   const score = (rows: Row[], revealed = "") => {
     const details = rows.map(({ answer: _answer, ...row }, index): ReviewDetail => ({
       n: index + 1, id: `id${index}`, roleList: null, overallRank: null, comparison: false, saved: false,
@@ -436,6 +500,7 @@ describe("pass rule", () => {
 
 describe("command", () => {
   const NO_TEXT = {
+    textNotShown: { byRoleType: { BETA: 1 }, saved: 0, unsaved: 1 },
     withoutFullText: { byRoleType: { ALPHA: 2, UNKNOWN: 1 }, saved: 2, unsaved: 1 },
     closedIds: [] as string[],
     checkByHandIds: [] as string[],
@@ -504,7 +569,7 @@ describe("command", () => {
             dropped: { rated: 0, dismissed: state.closed.length, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0,
             withoutTopK: 0, postings: state.pool, leads: { total: 0, source: "READ_MODEL" as const },
             excluded: { ARCHIVED_OR_FIXTURE: 0, MANUALLY_REMOVED_OR_REJECTED: 0, NOT_GATE_PASSED: 0, NO_FULL_TEXT: 0,
-              NO_LINK: 0, LEAD: 0, KNOWN_CLOSED: state.closed.length },
+              NO_LINK: 0, LEAD: 0, KNOWN_CLOSED: state.closed.length, TEXT_CANNOT_BE_SHOWN: 0 },
           },
         };
       },
@@ -597,10 +662,11 @@ describe("command", () => {
     const lists = buildReviewLists(design, POOL);
     const text = formatReviewSummary({
       lists, ...NO_TEXT, eligible: POOL.length, dropped: { rated: 0, dismissed: 0, duplicate: 0, neverRole: 0, neverSector: 0 }, ratedNotFound: 0, withoutTopK: 0, postings: [], leads: { total: 0, source: "READ_MODEL" as const },
-      excluded: { ARCHIVED_OR_FIXTURE: 0, MANUALLY_REMOVED_OR_REJECTED: 0, NOT_GATE_PASSED: 0, NO_FULL_TEXT: 0, NO_LINK: 0, LEAD: 0, KNOWN_CLOSED: 0 },
+      excluded: { ARCHIVED_OR_FIXTURE: 0, MANUALLY_REMOVED_OR_REJECTED: 0, NOT_GATE_PASSED: 0, NO_FULL_TEXT: 0, NO_LINK: 0, LEAD: 0, KNOWN_CLOSED: 0, TEXT_CANNOT_BE_SHOWN: 0 },
     });
     expect(text).toContain("list ALPHA: eligible=40 listed=3\n");
     expect(text).toContain("left out without the full posting text, by role type: ALPHA=2 UNKNOWN=1 (saved=2 not saved=1)");
+    expect(text).toContain("over 10% removed), by role type: BETA=1 (saved=0 not saved=1)");
     expect(text).not.toMatch(/KNOWN_CLOSED|dismissed/);
     expect(text).toContain("comparison: listed=3 unknown role=0 other=3");
     // Nothing tells which listed job was saved.

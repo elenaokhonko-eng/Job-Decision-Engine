@@ -246,6 +246,11 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
         WHERE id = (SELECT latest_job_version_id FROM canonical_jobs WHERE id = $1)`,
       [ids.byHandExpired],
     );
+    // The full text is stored, and almost all of it is a link: the sheet could not show this posting.
+    await seed("mostlyLink", {
+      company: "Example Link Only Co", title: "tovrik data scientist",
+      description: `Apply: https://quindle.example.test/${"a/".repeat(200)}`,
+    });
   }, 240_000);
 
   afterAll(async () => {
@@ -287,6 +292,14 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
     for (const name of ["incomplete", "incompleteSaved", "blankText"]) expect(result.postings.map((job) => job.id)).not.toContain(ids[name]);
     // Counted for the text, not for the gate that has not decided it.
     expect(result.excluded.NOT_GATE_PASSED).toBe(1);
+  });
+
+  it("leaves a posting off when the sheet could not show its text, and counts it", async () => {
+    const result = await run();
+    expect(result.excluded.TEXT_CANNOT_BE_SHOWN).toBe(1);
+    expect(result.textNotShown).toEqual({ byRoleType: { BETA: 1 }, saved: 0, unsaved: 1 });
+    expect(result.postings.map((job) => job.id)).not.toContain(ids.mostlyLink);
+    expect(result.postings.find((job) => job.id === ids.best)!.sourceLinks.length).toBeGreaterThan(0);
   });
 
   it("names the closed records, for the draft to report", async () => {

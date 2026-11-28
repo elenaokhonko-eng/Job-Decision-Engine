@@ -26,6 +26,7 @@ import {
   type PostingRecordEntry,
   type ReviewLists,
 } from "../domain/reviewLists.js";
+import { postingCanBeShown } from "../domain/postingText.js";
 import { safePostingLink } from "../domain/reviewSheet.js";
 
 export interface RankingEvidence {
@@ -59,17 +60,21 @@ export interface ReviewListInput {
 /** In the order they are tried. Missing text is tried before the gates: no job is decided without it. */
 export const REVIEW_EXCLUSIONS = [
   "ARCHIVED_OR_FIXTURE", "MANUALLY_REMOVED_OR_REJECTED", "NO_LINK", "LEAD", "KNOWN_CLOSED", "NO_FULL_TEXT",
-  "NOT_GATE_PASSED",
+  "NOT_GATE_PASSED", "TEXT_CANNOT_BE_SHOWN",
 ] as const;
 export type ReviewExclusion = (typeof REVIEW_EXCLUSIONS)[number];
 
+export interface LeftOutForText {
+  readonly byRoleType: Readonly<Record<string, number>>;
+  readonly saved: number;
+  readonly unsaved: number;
+}
+
 export interface ReviewListResult {
   /** Records left out only because the full posting text is not stored, by role type and by saved or not. */
-  readonly withoutFullText: {
-    readonly byRoleType: Readonly<Record<string, number>>;
-    readonly saved: number;
-    readonly unsaved: number;
-  };
+  readonly withoutFullText: LeftOutForText;
+  /** Records left out because the sheet could not show their text: cleaning would leave it empty or cut too much. */
+  readonly textNotShown: LeftOutForText;
   /** Candidates stored as closed from page wording alone: listed as not verified, for the coordinator to open. */
   readonly checkByHandIds: readonly string[];
   /** Records confirmed closed, and those left out with a removed or closed record of their posting. */
@@ -205,20 +210,26 @@ export async function buildReviewListsFromStore(db: DecisionQueryable, input: Re
   const excluded = Object.fromEntries(REVIEW_EXCLUSIONS.map((reason) => [reason, 0])) as Record<ReviewExclusion, number>;
   let withoutTopK = 0;
   const withoutFullText = { byRoleType: {} as Record<string, number>, saved: 0, unsaved: 0 };
+  const textNotShown = { byRoleType: {} as Record<string, number>, saved: 0, unsaved: 0 };
+  // The role type of a job left out for its text comes from the title alone.
+  const count = (tally: typeof withoutFullText, title: string, saved: boolean) => {
+    tally[saved ? "saved" : "unsaved"] += 1;
+    const kind = roleKindOfTitle(title) ?? rules.fallbackKind(title);
+    const type = design.role_types.find((entry) => kind !== null && entry.kinds.includes(kind))?.key ?? "UNKNOWN";
+    tally.byRoleType[type] = (tally.byRoleType[type] ?? 0) + 1;
+  };
   for (const job of jobs) {
     const own = seen.get(job.id) ?? [];
     const urls = [job.canonical_url, ...own.flatMap((s) => [s.source_url, s.canonical_apply_url])];
-    const exclusion = exclusionOf(job, leadIds);
     const savedRecord = own.some((s) => isSaved(s.source_name));
-    if (exclusion === "NO_FULL_TEXT" && !rated.has(job.id)) {
-      withoutFullText[savedRecord ? "saved" : "unsaved"] += 1;
-      // The role type comes from the title alone: there is no full text to read.
-      const kind = roleKindOfTitle(job.title ?? "") ?? rules.fallbackKind(job.title ?? "");
-      const type = design.role_types.find((entry) => kind !== null && entry.kinds.includes(kind))?.key ?? "UNKNOWN";
-      withoutFullText.byRoleType[type] = (withoutFullText.byRoleType[type] ?? 0) + 1;
-    }
+    const exclusion = exclusionOf(job, leadIds)
+      ?? (postingCanBeShown(job.description, urls) ? null : "TEXT_CANNOT_BE_SHOWN");
     // Archived records are read to recognise their postings; only live and rated ones are counted.
     if (exclusion && (!job.archived || rated.has(job.id))) excluded[exclusion] += 1;
+    if (!rated.has(job.id)) {
+      if (exclusion === "NO_FULL_TEXT") count(withoutFullText, job.title ?? "", savedRecord);
+      if (exclusion === "TEXT_CANNOT_BE_SHOWN") count(textNotShown, job.title ?? "", savedRecord);
+    }
     let candidate: Candidate | null = null;
     if (!exclusion) {
       const title = job.title ?? "";
@@ -232,6 +243,7 @@ export async function buildReviewListsFromStore(db: DecisionQueryable, input: Re
         availability: job.availability_state === "OPEN" ? "OPEN" : "UNKNOWN",
         topK: topK.get(job.id) ?? null,
         description,
+        sourceLinks: urls,
         workMode: knownWorkMode(job.workplace_type),
         classification: classifyJob(design, input.companyTags, {
           title,
@@ -263,6 +275,7 @@ export async function buildReviewListsFromStore(db: DecisionQueryable, input: Re
   const pool = collapsePool(records);
   return {
     withoutFullText,
+    textNotShown,
     closedIds: [...jobs.filter((job) => availabilityOf(job) === "CLOSED").map((job) => job.id), ...pool.dismissedIds],
     checkByHandIds: jobs.filter((job) => job.closed_by_page_wording_only).map((job) => job.id),
     lists: buildReviewLists(design, pool.eligible),

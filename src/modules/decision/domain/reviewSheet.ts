@@ -3,7 +3,7 @@
  * link, saved mark, list, rank or comparison marker. The key keeps those sealed (encoded, so opening it by accident
  * shows nothing), and the reveal shows a link and the saved mark only for jobs already rated. Pure.
  */
-import { headerLine, sheetCompany, sheetLocation, sheetPostingText, sheetWorkMode } from "./postingText.js";
+import { headerLine, sheetCompany, sheetLocation, sheetPosting, sheetWorkMode } from "./postingText.js";
 import type { DroppedJob } from "./reviewDraft.js";
 import { sheetJobs, type PoolJob, type ReviewLists } from "./reviewLists.js";
 
@@ -48,25 +48,32 @@ export function sheetText(value: string | null | undefined): string {
   return /^[=+-]/.test(cell) ? `'${cell}` : cell;
 }
 
-const FENCE = "~~~~";
 const ANSWER_LABEL = "Answer (Y or N):";
 const COMMENT_LABEL = "Comment:";
+/**
+ * Every line that holds posting content starts with this. Markdown reads it as a code block and the answer parser skips
+ * it, so no posting can open or close anything, or answer for the rater, whatever it contains.
+ */
+const POSTING_INDENT = "    ";
 
 function sheetBlock(job: PoolJob, n: number, boardNames: ReadonlyMap<string, string>): string[] {
+  const links = job.sourceLinks;
+  const content = [
+    `Title:     ${headerLine(job.title, links).toLowerCase()}`,
+    `Company:   ${sheetCompany(job.company, boardNames, links)}`,
+    `Location:  ${sheetLocation(job.location, links)}`,
+    `Work mode: ${sheetWorkMode(job.workMode)}`,
+    "",
+    sheetPosting(job.description, links).text,
+  ];
   return [
     `## Job ${n}`,
     "",
     `${ANSWER_LABEL} `,
     `${COMMENT_LABEL} `,
     "",
-    `${FENCE}text`,
-    `Title:     ${headerLine(job.title).toLowerCase()}`,
-    `Company:   ${sheetCompany(job.company, boardNames)}`,
-    `Location:  ${sheetLocation(job.location)}`,
-    `Work mode: ${sheetWorkMode(job.workMode)}`,
-    "",
-    sheetPostingText(job.description),
-    FENCE,
+    // Split on every kind of line break before indenting, so none of them can start a line of its own.
+    ...content.join("\n").split(/\r\n|[\r\n\v\f\u0085\u2028\u2029]/).map((line) => `${POSTING_INDENT}${line}`),
     "",
   ];
 }
@@ -76,7 +83,8 @@ export function renderReviewSheet(lists: ReviewLists, seed: string, boardNames: 
     "# Review sheet: would you apply?",
     "",
     `For each job, read the posting and write **Y** (would apply) or **N** (would not) after \`${ANSWER_LABEL}\`.`,
-    "A comment is optional. Do not change anything else. Links are shown only after you have answered.",
+    "A comment is optional. Do not change anything else. Links to the posting are shown only after you have answered.",
+    "A company's own web address may still appear in a posting.",
     "",
     ...sheetJobs(lists, seed).flatMap((job, index) => sheetBlock(job, index + 1, boardNames)),
   ].join("\n");
@@ -189,20 +197,14 @@ export interface SheetEntry {
 }
 
 /**
- * The answer of each job of a filled sheet. Posting text sits inside fences and is never read. An answer that is not Y,
- * N or empty fails with its job number.
+ * The answer of each job of a filled sheet. Only lines at the start of a line are read, which is where the sheet writes
+ * its own; indented posting content never is. An answer that is not Y, N or empty fails with its job number.
  */
 export function parseFilledSheet(markdown: string): Map<number, SheetEntry> {
   const entries = new Map<number, { answer: SheetEntry["answer"]; commented: boolean; labelled: boolean }>();
   const invalid: number[] = [];
-  let fenced = false;
   let current: number | null = null;
-  for (const line of markdown.split(/\r?\n/)) {
-    if (line.startsWith(FENCE)) {
-      fenced = !fenced;
-      continue;
-    }
-    if (fenced) continue;
+  for (const line of markdown.split(/\r\n|\r|\n/)) {
     const heading = /^## Job (\d+)\s*$/.exec(line);
     if (heading) {
       current = Number(heading[1]);
@@ -213,6 +215,7 @@ export function parseFilledSheet(markdown: string): Map<number, SheetEntry> {
     const entry = current === null ? undefined : entries.get(current);
     if (!entry) continue;
     if (line.startsWith(ANSWER_LABEL)) {
+      if (entry.labelled) throw new Error(`The filled sheet has two answer lines for job ${current}.`);
       const raw = line.slice(ANSWER_LABEL.length).replace(/\*/g, "").trim().toLowerCase();
       entry.labelled = true;
       if (raw === "y" || raw === "yes") entry.answer = "YES";
