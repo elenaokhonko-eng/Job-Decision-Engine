@@ -1,0 +1,58 @@
+{
+  "schema_version": "ranking_design_v1",
+  "industries": {
+    "preferred": ["ORCHARDS", "LIGHTHOUSES"],
+    "neutral": ["BAKERIES"],
+    "never": ["FIREWORKS"]
+  },
+  "company_tag_industries": {
+    "SOCIAL_IMPACT_MULTILATERAL": "ORCHARDS"
+  },
+  "employers": [
+    { "industry": "ORCHARDS", "names": ["Example Orchard", "ExampleOrchard"] },
+    { "industry": "LIGHTHOUSES", "names": ["Example Beacon Works"] },
+    { "industry": "FIREWORKS", "names": ["Example Sparkler"] }
+  ],
+  "employer_name_words": [
+    { "industry": "LIGHTHOUSES", "words": ["lighthouse"] },
+    { "industry": "FIREWORKS", "words": ["pyrotechnics"] }
+  ],
+  "employer_override": {
+    "approved": false,
+    "industry": "BAKERIES",
+    "employers": ["Example Loaf"]
+  },
+  "consulting": {
+    "employers": ["Example Advisers"],
+    "employer_name_words": ["consulting"]
+  },
+  "top_technology_employers": ["Example Robotics"],
+  "never_role_title_phrases": ["night watch", "door to door"],
+  "management_without_hands_on": "KEEP",
+  "role_types": [
+    { "key": "ALPHA", "label": "Alpha", "priority": 1, "status": "NEUTRAL", "kinds": ["SOFTWARE", "AI_STRATEGY_LEADERSHIP"], "ordering": "LOAD_AWARE" },
+    {
+      "key": "BETA", "label": "Beta", "priority": 2, "status": "TARGET", "kinds": ["DATA_ML"], "ordering": "STANDARD",
+      "requires": { "work_modes": ["ONSITE"] }
+    },
+    { "key": "GAMMA", "label": "Gamma", "priority": 3, "status": "TRANSITION", "kinds": ["PRODUCT", "FORWARD_DEPLOYED"], "ordering": "STANDARD" },
+    {
+      "key": "DELTA", "label": "Delta", "priority": 4, "status": "TARGET", "kinds": ["ARCHITECTURE", "ENGINEERING_MANAGEMENT"], "ordering": "STANDARD",
+      "status_when": { "external_client_facing": "TARGET", "consulting_employer": "TRANSITION", "in_house": "NEVER" }
+    },
+    {
+      "key": "EPSILON", "label": "Epsilon", "priority": 5, "status": "NEUTRAL",
+      "kinds": ["AI_ENGINEERING", "RESEARCH_ENGINEERING", "DELIVERY_MANAGEMENT"], "ordering": "STANDARD"
+    }
+  ],
+  "unknown_role_status": "TARGET",
+  "stakeholder_heavy_min_mentions": 3,
+  "lists": {
+    "size": 3,
+    "overall_size": 7,
+    "comparison_size": 4,
+    "comparison_unknown_role_size": 1,
+    "comparison_band": [0.1, 0.8],
+    "seed": "example-seed"
+  }
+}
