@@ -81,8 +81,11 @@ export const RankingDesignSchema = z.object({
     /** How many of the comparison jobs have an unknown role type; the rest have a known one. */
     comparison_unknown_role_size: z.number().int().nonnegative(),
     comparison_band: z.tuple([z.number().min(0).max(1), z.number().min(0).max(1)]),
-    /** The overall list takes unsaved jobs only; saved jobs stay in the per-type lists. */
-    overall_from_unsaved_only: z.boolean().default(true),
+    /**
+     * No longer a choice: the overall list always takes saved jobs. `false` is still accepted from a design that states
+     * it; `true` is refused.
+     */
+    overall_from_unsaved_only: z.literal(false).optional(),
     seed: Name,
   }).strict(),
 }).strict().superRefine((design, context) => {

@@ -20,6 +20,10 @@ export {
 } from "./domain/reviewDraft.js";
 export {
   buildReviewKey,
+  changedAfterShown,
+  openShownAnswers,
+  sealShownAnswers,
+  type ShownAnswers,
   idsFromKeyText,
   openReviewKey,
   parseFilledSheet,

@@ -52,7 +52,6 @@ const many = (prefix: string, count: number, roleType: string, saved: (index: nu
     job(`${prefix}${String(index).padStart(2, "0")}`, { topK: 90 - index, saved: saved(index) }, { roleType }));
 
 const POOL = [...many("a", 40, "ALPHA", (i) => i < 2), ...many("b", 20, "BETA"), ...many("u", 10, "NONE")];
-const unsavedOnly = { ...design, lists: { ...design.lists, overall_from_unsaved_only: true } };
 
 describe("lists", () => {
   const fourOf = { ...design, lists: { ...design.lists, size: 6 } };
@@ -84,12 +83,11 @@ describe("lists", () => {
     expect(listOf(lists, "ALPHA")).toEqual(["preferred-remote", "preferred-onsite", "neutral", "no-hands", "heavy"]);
   });
 
-  it("draws the overall list round-robin from unsaved list members, or from all with the switch off", () => {
-    // a00 and a01 are saved: they stay in the type list and leave the overall list.
-    const lists = buildReviewLists(unsavedOnly, POOL);
+  it("draws the overall list round-robin from the role-type lists, saved jobs included", () => {
+    const lists = buildReviewLists(design, POOL);
     expect(listOf(lists, "ALPHA")).toEqual(["a00", "a01", "a02"]);
-    expect(lists.overall.map((entry) => entry.id)).toEqual(["a02", "b00", "b01", "b02"]);
-    expect(buildReviewLists(design, POOL).overall.map((entry) => entry.id)).toEqual(["a00", "b00", "a01", "b01", "a02", "b02"]);
+    expect(lists.overall.map((entry) => entry.id)).toEqual(["a00", "b00", "a01", "b01", "a02", "b02"]);
+    expect(lists.overall.some((entry) => entry.saved)).toBe(true);
   });
 
   const seeded = (seed: string, lists: Partial<typeof design.lists> = {}) =>
@@ -247,6 +245,79 @@ describe("sheet and key", () => {
     expect(hostile.match(/^~~~~/gm)).toHaveLength(2);
     expect(hostile).not.toMatch(/<script|<b>|evil\.test|evil\.com/i);
     expect(parseFilledSheet(hostile)).toEqual(new Map([[1, { answer: null, commented: false }]]));
+  });
+
+  it("shows the stored posting text on the sheet", () => {
+    const rendered = renderReviewSheet(buildReviewLists(design, [job("h", {
+      description: "Keep the quindles fed. Count the snorples every morning.",
+    })]), "s");
+    expect(rendered).toContain("Keep the quindles fed. Count the snorples every morning.");
+    expect(rendered.indexOf("Count the snorples")).toBeGreaterThan(rendered.indexOf("Work mode:"));
+  });
+
+  const ZERO_WIDTH = String.fromCharCode(0x200b);
+  const LINKS = [
+    "https://quindle.example.test/a", "lnkd.in/zorblat", "forms.gle/zorblat", "quindle.app/apply", "quindle.jobs",
+    "snorple.work/x", "www.quindle.example", "file:///c/quindle", "mailto:keeper@quindle.test", "keeper@quindle.test",
+    `ht${ZERO_WIDTH}tps://quindle.test/z`, `quin${ZERO_WIDTH}dle.com`, "quin**dle.com/jobs", "quin`dle.io", "quindle\\.dev",
+    "&#104;ttps://quindle.test", "192.0.2.10/apply", "quindle.zzzz/apply",
+  ];
+  /** What would remain of a link: any of these in the output. */
+  const TRACES = /quindle\.|quin\.|dle\.|lnkd|forms\.gle|snorple\.work|:\/\/|file:|mailto|192\.0\.2|@/i;
+
+  it.each(LINKS)("strips the link %j from the text and from every header field", (link) => {
+    const rendered = renderReviewSheet(buildReviewLists(design, [job("h", {
+      description: `Keep the snorples. Apply at ${link} today.`,
+      title: `snorple keeper ${link}`,
+      company: `Orchard ${link}`,
+      location: `Harbour ${link}`,
+    })]), "s");
+    const body = rendered.slice(rendered.indexOf("~~~~text"));
+    expect(body).not.toMatch(TRACES);
+    expect(body).toContain("Keep the snorples.");
+  });
+
+  it("keeps ordinary dotted words, and a company written like a host without its dot", () => {
+    expect(sheetPostingText("We use Node.js and ASP.NET, e.g. on version 2.5 of the tool.")).toBe("We use Node.js and ASP.NET, e.g. on version 2.5 of the tool.");
+    expect(sheetCompany("QUINDLE.AI")).toBe("Quindle Ai");
+    expect(sheetCompany("Quindle.AI")).toBe("Quindle Ai");
+    // A missing space after a full stop is not a host.
+    expect(sheetPostingText("The quindles are done.In spring we rest.Work resumes in autumn.AI helps.")).toBe(
+      "The quindles are done.In spring we rest.Work resumes in autumn.AI helps.");
+    expect(sheetPostingText("See QUINDLE.AI or quindle.ai today.")).toBe("See [removed] or [removed] today.");
+  });
+
+  it("drops job-site names and listing status from the text and the header fields, and keeps ordinary words", () => {
+    const text = sheetPostingText("Saved\nApplied 3 days ago\n41 applicants\nPosted 2 weeks ago\nEasy Apply\nWe linked in a new buoy. We saved the harbour time.\nFind us on Glassdoor. See our JobStreet page.");
+    expect(text).toBe("We linked in a new buoy. We saved the harbour time.");
+    // A status line goes even when the next line starts in lower case, so no sentence break separates them.
+    expect(sheetPostingText("Saved\nsnorples wait for you.")).toBe("snorples wait for you.");
+    const rendered = renderReviewSheet(buildReviewLists(design, [job("h", {
+      title: "snorple keeper (via LinkedIn) - easy apply",
+      company: "Orchard | MyCareersFuture",
+      location: "Harbour, 41 applicants",
+    })]), "s");
+    expect(rendered).not.toMatch(/linkedin|mycareersfuture|applicants|easy apply|via/i);
+    expect(rendered).toContain("Title:     snorple keeper");
+    expect(rendered).toContain("Company:   Orchard\n");
+  });
+
+  it("stays fast on long unbroken input", () => {
+    const started = Date.now();
+    for (const piece of ["a.", "a-", "a.a-", "a@", "a:", "(remote ", "<", "&", "http", " "]) {
+      const long = piece.repeat(200_000 / piece.length);
+      sheetPostingText(long);
+      sheetCompany(long);
+      sheetLocation(long);
+    }
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("keeps a table cell from being read as a formula", () => {
+    const revealed = renderReveal("## Job 1\nAnswer (Y or N): Y\n", [
+      { n: 1, id: "x", title: "=HYPERLINK(1)", company: "+cmd", link: "https://example.test/", saved: false } as ReviewDetail,
+    ]).text;
+    expect(revealed).toContain("| '=HYPERLINK\\(1\\) | '+cmd |");
   });
 
   it("lays out stored text the same way whatever shape it had, without links or job-site mentions", () => {
@@ -446,7 +517,10 @@ describe("command", () => {
     await command(["--name=first"]);
     expect(fs.existsSync(sheetFile) || fs.existsSync(keyFile)).toBe(false);
     expect(fs.readFileSync(idsFile, "utf8")).toContain(gone.id);
-    expect(output.join(" ")).toContain("NOT FINAL: 3 listed job(s)");
+    expect(output.join(" ")).toContain("NOT FINAL: listed jobs await");
+    // No number, and a later day without --name does not silently start again.
+    expect(output.join(" ")).not.toMatch(/\b3\b/);
+    await expect(command([])).rejects.toThrow(/--name=first/);
     const coordinatorFile = path.join(review, "for_coordinator", "check_by_hand_first.md");
     expect(fs.readFileSync(coordinatorFile, "utf8")).not.toContain("| a0");
     // No count from a draft, so nothing can be compared with the final run.
@@ -477,18 +551,27 @@ describe("command", () => {
     expect(asked[0]).toEqual(["old-1"]);
     expect(asked.at(-1)).toEqual(["old-1"]);
 
-    // Not yet rated: no report of what was dropped.
+    // Not yet rated: only the unanswered rows, so nothing shows which list a rated job is in.
     const blank = fs.readFileSync(sheetFile, "utf8");
+    fs.writeFileSync(sheetFile, blank.replace(/^Answer \(Y or N\): $/m, "Answer (Y or N): Y"));
     output.length = 0;
     await command(["--score", `--sheet=${sheetFile}`, `--key=${keyFile}`]);
-    expect(output.join(" ")).not.toContain("dropped");
+    expect(output).toHaveLength(2);
+    expect(output[0]).toBe("result=INCOMPLETE");
+    expect(output[1]).toMatch(/^unanswered rows: 2, 3/);
 
+    // The reveal writes under private/review even when the key is somewhere else.
     fs.writeFileSync(sheetFile, blank.replace(/^Answer \(Y or N\): $/gm, "Answer (Y or N): Y"));
+    const elsewhere = path.join(root, "elsewhere");
+    fs.mkdirSync(elsewhere, { recursive: true });
+    const strayKey = path.join(elsewhere, "review_lists_key_first.json");
+    fs.copyFileSync(keyFile, strayKey);
     output.length = 0;
-    await command(["--reveal", `--sheet=${sheetFile}`, `--key=${keyFile}`]);
+    await command(["--reveal", `--sheet=${sheetFile}`, `--key=${strayKey}`]);
+    expect(fs.readdirSync(elsewhere)).toEqual(["review_lists_key_first.json"]);
     const revealedFile = path.join(review, "review_lists_revealed_first.md");
     expect(fs.readFileSync(revealedFile, "utf8")).toContain("https://jobs.example.test/");
-    expect(output).toEqual([`shown ${key.items.length} of ${key.items.length} jobs in review_lists_revealed_first.md`]);
+    expect(output).toEqual([`shown ${key.items.length} of ${key.items.length} jobs in review_lists_revealed_first.md under private/review/`]);
 
     output.length = 0;
     await command(["--score", `--sheet=${sheetFile}`, `--key=${keyFile}`, `--revealed=${revealedFile}`]);
@@ -497,6 +580,17 @@ describe("command", () => {
     expect(output.some((line) => line.startsWith("comparison, unknown role yes="))).toBe(true);
     expect(output).toContain("dropped by the availability check as closed=1; no longer eligible for another reason=0");
     expect(output.some((line) => line.startsWith("  ALPHA: 1 (rank 2"))).toBe(true);
+    expect(output.join(" ")).not.toContain("WARNING");
+
+    // An answer changed after its link was shown is warned about, by the score and by the next reveal.
+    fs.writeFileSync(sheetFile, fs.readFileSync(sheetFile, "utf8").replace("Answer (Y or N): Y", "Answer (Y or N): N"));
+    output.length = 0;
+    await command(["--score", `--sheet=${sheetFile}`, `--key=${keyFile}`]);
+    expect(output).toContain("WARNING: answers changed after their link was shown, rows: 1");
+    output.length = 0;
+    await command(["--reveal", `--sheet=${sheetFile}`, `--key=${keyFile}`]);
+    expect(output).toContain("WARNING: answers changed after their link was shown, rows: 1");
+    expect(fs.readFileSync(revealedFile, "utf8")).toMatch(/\| 1 \|[^\n]*\| Y \|/);
   });
 
   it("prints counts without titles", () => {

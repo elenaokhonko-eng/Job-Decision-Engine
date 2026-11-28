@@ -17,6 +17,9 @@ import { isUnknownEmployerName, normalizePostingUrl } from "../ingestion/posting
 import {
   buildReviewKey,
   buildReviewListsFromStore,
+  changedAfterShown,
+  openShownAnswers,
+  sealShownAnswers,
   countUncheckedJobs,
   EMPTY_DRAFT,
   idsFromKeyText,
@@ -99,6 +102,7 @@ export interface CommandArguments {
   readonly privateDir: string;
   readonly designPath: string;
   readonly name: string;
+  readonly nameGiven: boolean;
   readonly seed: string | null;
   readonly replace: boolean;
   readonly sheetPath: string | null;
@@ -135,6 +139,7 @@ export function parseReviewListArguments(argv: readonly string[], now: Date): Co
     privateDir,
     designPath: path.resolve(values.get("design") ?? path.join(privateDir, "profile", "ranking_design.json")),
     name,
+    nameGiven: values.has("name"),
     seed: values.get("seed") ?? null,
     replace: flags.has("replace"),
     sheetPath: values.get("sheet") ?? null,
@@ -152,6 +157,7 @@ export function reviewListFiles(privateDir: string, name: string) {
     jobIds: path.join(directory, `review_lists_job_ids_${name}.txt`),
     revealed: path.join(directory, `review_lists_revealed_${name}.md`),
     draft: path.join(directory, `review_lists_draft_${name}.json`),
+    shown: path.join(directory, `review_lists_shown_${name}.json`),
     checkByHand: path.join(directory, "for_coordinator", `check_by_hand_${name}.md`),
   };
 }
@@ -178,6 +184,15 @@ function requireWritable(files: ReturnType<typeof reviewListFiles>, replace: boo
   const filled = [...parseFilledSheet(fs.readFileSync(files.sheet, "utf8")).values()]
     .some((entry) => entry.answer !== null || entry.commented);
   if (filled) throw new ReviewListsRefusal("Refusing to replace a sheet that has answers in it. Use another --name.");
+}
+
+/** The names of drafts whose lists never became final. */
+export function unfinishedDrafts(directory: string): string[] {
+  const files = fs.existsSync(directory) ? fs.readdirSync(directory) : [];
+  return files
+    .flatMap((file) => /^review_lists_draft_([A-Za-z0-9_-]+)\.json$/.exec(file)?.[1] ?? [])
+    .filter((name) => !files.includes(`review_lists_sheet_${name}.md`))
+    .sort();
 }
 
 export function formatReviewSummary(result: ReviewListResult): string {
@@ -215,6 +230,8 @@ export interface CommandDependencies {
   readonly now?: Date;
   /** Reads the lists from the store; the default is the guarded read-only replay session. */
   readonly read?: (request: StoreRequest, env: NodeJS.ProcessEnv) => Promise<StoreResult>;
+  /** Replaces the replay-branch check of the real read, so that a test can run it on its own database. */
+  readonly approve?: (url: string, identity: Parameters<typeof requireApprovedReplayTarget>[1], branch: string) => void;
 }
 
 /**
@@ -234,7 +251,11 @@ export async function uncheckedJobCount(
   });
 }
 
-async function readFromReplay(request: StoreRequest, env: NodeJS.ProcessEnv): Promise<StoreResult> {
+async function readFromReplay(
+  request: StoreRequest,
+  env: NodeJS.ProcessEnv,
+  approve: NonNullable<CommandDependencies["approve"]> = requireApprovedReplayTarget,
+): Promise<StoreResult> {
   const branch = env.REPLAY_BRANCH_ID?.trim();
   if (!branch) throw new ReviewListsRefusal("REPLAY_BRANCH_ID is not set.");
   const url = requireReplayDatabaseUrl(env.REPLAY_DATABASE_URL);
@@ -242,7 +263,7 @@ async function readFromReplay(request: StoreRequest, env: NodeJS.ProcessEnv): Pr
     pgConnectionConfig(url),
     (identity) => {
       try {
-        requireApprovedReplayTarget(url, identity, branch);
+        approve(url, identity, branch);
       } catch {
         // The guard's own message names the database host, which this command does not print.
         throw new ReviewListsRefusal("Refusing to run: REPLAY_DATABASE_URL is not the approved replay branch.");
@@ -271,13 +292,18 @@ async function build(args: CommandArguments, env: NodeJS.ProcessEnv, dependencie
   const design = args.seed ? { ...parsed, lists: { ...parsed.lists, seed: args.seed } } : parsed;
   requireApprovedDesign(design);
   const files = reviewListFiles(args.privateDir, args.name);
+  // A draft holds what the check has dropped so far. A run on a later day must not silently start another.
+  const unfinished = unfinishedDrafts(files.directory);
+  if (!args.nameGiven && unfinished.length && !unfinished.includes(args.name)) {
+    throw new ReviewListsRefusal(`Refusing to start new lists: pass --name=${unfinished.at(-1)} to continue the unfinished draft, or another --name.`);
+  }
   requireWritable(files, args.replace);
   const rated = ratedIdsFromReviewFolder(files.directory, files.key);
   const companyTags = await loadCompanyIndustryTags();
-  const { branch, result, unchecked } = await (dependencies.read ?? readFromReplay)(
-    { design, companyTags, ratedIds: rated.ids },
-    env,
-  );
+  const request: StoreRequest = { design, companyTags, ratedIds: rated.ids };
+  const { branch, result, unchecked } = dependencies.read
+    ? await dependencies.read(request, env)
+    : await readFromReplay(request, env, dependencies.approve);
 
   const { lists } = result;
   const draft = updateDraft(
@@ -296,14 +322,14 @@ async function build(args: CommandArguments, env: NodeJS.ProcessEnv, dependencie
   if (unchecked > 0) {
     // A sheet from an earlier, unfilled run would be of other lists.
     for (const stale of [files.sheet, files.key]) fs.rmSync(stale, { force: true });
-    log(`NOT FINAL: ${unchecked} listed job(s) await today's availability check. No sheet was written.`);
-    log(`Run the check on review_lists_job_ids_${args.name}.txt (do not show its output to the rater), then run this again.`);
+    // No number: after a drop it would say how many replacements came in.
+    log("NOT FINAL: listed jobs await today's availability check. No sheet was written.");
+    log(`Run the check on review_lists_job_ids_${args.name}.txt (do not show its output to the rater), then run this again with --name=${args.name}.`);
     return;
   }
   // Counts are printed for final lists only: a draft's counts beside the final ones would show how many were dropped.
   log(`employer override list: ${design.employer_override ? "approved" : "none in this design"}`);
   log(formatReviewSummary(result));
-  log(`overall list from unsaved jobs only: ${design.lists.overall_from_unsaved_only}`);
   const key = buildReviewKey(lists, { name: args.name, createdAt: now.toISOString(), seed: design.lists.seed, dropped: draft.dropped });
   // A board stores its slug as the company: the sheet writes the employer's name, as other records do.
   const boardNames = new Map(companyTags.flatMap((company) => company.names.slice(1).map((slug) => [slug.toLowerCase(), company.names[0]!] as const)));
@@ -312,23 +338,44 @@ async function build(args: CommandArguments, env: NodeJS.ProcessEnv, dependencie
   log(`wrote ${key.items.length} jobs: review_lists_{sheet,key}_${args.name} under private/review/`);
 }
 
-/** Writes the links and saved marks of the answered jobs beside the filled sheet. */
-function reveal(args: CommandArguments, log: (line: string) => void): void {
-  const { details } = openReviewKey(fs.readFileSync(args.keyPath!, "utf8"));
+/** The run a key file belongs to, and that run's files under the private directory: nothing is written anywhere else. */
+function filesOfKey(args: CommandArguments) {
   const name = /^review_lists_key_([A-Za-z0-9_-]+)\.json$/.exec(path.basename(args.keyPath!))?.[1];
   if (!name) throw new ReviewListsRefusal("--key must be a review_lists_key_<name>.json file.");
-  // Beside the key, which is already inside private/.
-  const target = path.join(path.dirname(path.resolve(args.keyPath!)), `review_lists_revealed_${name}.md`);
-  const earlier = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : "";
-  const shown = renderReveal(fs.readFileSync(args.sheetPath!, "utf8"), details, earlier);
-  fs.writeFileSync(target, shown.text, "utf8");
-  log(`shown ${shown.shown} of ${details.length} jobs in review_lists_revealed_${name}.md`);
+  return { name, files: reviewListFiles(args.privateDir, name) };
+}
+
+const readIfThere = (file: string): string => (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "");
+
+/** Writes the links and saved marks of the answered jobs, under <private-dir>/review whatever folder the key is in. */
+function reveal(args: CommandArguments, log: (line: string) => void): void {
+  const { details } = openReviewKey(fs.readFileSync(args.keyPath!, "utf8"));
+  const { name, files } = filesOfKey(args);
+  const sheet = fs.readFileSync(args.sheetPath!, "utf8");
+  const record = readIfThere(files.shown);
+  const shown = renderReveal(sheet, details, readIfThere(files.revealed), record ? openShownAnswers(record) : {});
+  fs.mkdirSync(files.directory, { recursive: true });
+  fs.writeFileSync(files.revealed, shown.text, "utf8");
+  fs.writeFileSync(files.shown, sealShownAnswers(shown.answers), "utf8");
+  log(`shown ${shown.shown} of ${details.length} jobs in review_lists_revealed_${name}.md under private/review/`);
+  const changed = changedAfterShown(sheet, shown.answers);
+  if (changed.length) log(`WARNING: answers changed after their link was shown, rows: ${changed.join(", ")}`);
 }
 
 function score(args: CommandArguments, log: (line: string) => void): void {
   const { details, dropped } = openReviewKey(fs.readFileSync(args.keyPath!, "utf8"));
   const revealed = args.revealedPath ? fs.readFileSync(args.revealedPath, "utf8") : "";
-  const result = scoreReviewSheet(fs.readFileSync(args.sheetPath!, "utf8"), details, revealed);
+  const sheet = fs.readFileSync(args.sheetPath!, "utf8");
+  const result = scoreReviewSheet(sheet, details, revealed);
+  // Until every job is rated, nothing else: a share would show which list a rated job is in.
+  if (result.blank.length) {
+    log(`result=${result.result}`);
+    log(`unanswered rows: ${result.blank.join(", ")}`);
+    return;
+  }
+  const record = readIfThere(filesOfKey(args).files.shown);
+  const changed = record ? changedAfterShown(sheet, openShownAnswers(record)) : [];
+  if (changed.length) log(`WARNING: answers changed after their link was shown, rows: ${changed.join(", ")}`);
   const share = (value: { yes: number; counted: number }) =>
     `${value.yes}/${value.counted}${value.counted ? ` (${((100 * value.yes) / value.counted).toFixed(1)}%)` : ""}`;
   log(`result=${result.result}`);
@@ -339,10 +386,6 @@ function score(args: CommandArguments, log: (line: string) => void): void {
   log(`comparison, other roles yes=${share(result.comparisonOtherRole)}`);
   for (const type of result.byRoleType) log(`${type.type} yes=${share(type)}`);
   log(args.revealedPath ? `links noted closed (not scored)=${result.closedNoted}` : "links noted closed: no --revealed file given");
-  if (result.blank.length) {
-    log(`unanswered rows: ${result.blank.join(", ")}`);
-    return;
-  }
   // Only now that every job is rated: what the availability check dropped, and where it stood.
   const closed = dropped.filter((job) => job.reason === "CLOSED");
   log(`dropped by the availability check as closed=${closed.length}; no longer eligible for another reason=${dropped.length - closed.length}`);

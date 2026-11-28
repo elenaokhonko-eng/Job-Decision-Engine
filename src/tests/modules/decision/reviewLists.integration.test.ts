@@ -28,7 +28,6 @@ raw.employer_override.approved = true;
 // This file tests candidacy and identity, not a design: long lists and no requirement.
 raw.lists.size = 20;
 raw.lists.overall_size = 20;
-raw.lists.overall_from_unsaved_only = true;
 delete raw.role_types[1].requires;
 const design = parseRankingDesign(JSON.stringify(raw));
 
@@ -102,6 +101,20 @@ const close = (name: string) =>
     `UPDATE job_versions SET availability_status = 'CLOSED' WHERE id = (SELECT latest_job_version_id FROM canonical_jobs WHERE id = $1)`,
     [ids[name]],
   );
+
+let eventClock = Date.now() - 3_600_000;
+
+/** One stored read of a job's current version, later than every earlier one. */
+async function checkEvent(name: string, decision: "MARK_CLOSED" | "MARK_OPEN", details: object): Promise<void> {
+  eventClock += 1_000;
+  await pool.query(
+    `INSERT INTO job_availability_recheck_events (workspace_id, canonical_job_id, job_version_id, occurred_at, read_kind,
+       outcome, decision, reason_code, consecutive_absent_reads_after, cannot_tell_attempts_after, details)
+     SELECT workspace_id, id, latest_job_version_id, $2, 'PAGE', $4, $5, 'INVENTED', 0, 0, $3::jsonb
+       FROM canonical_jobs WHERE id = $1`,
+    [ids[name], new Date(eventClock), JSON.stringify(details), decision === "MARK_OPEN" ? "OPEN" : "CLOSED_BY_PAGE", decision],
+  );
+}
 
 /** A closure as a check stores it: the verdict on the version and the event that gave it. */
 async function closedByCheck(name: string, checkByHand: boolean): Promise<void> {
@@ -204,13 +217,22 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
       [ids.checked],
     );
     // Closed from page wording alone, with a live second record; confirmed closed; and by-hand ones that were confirmed since.
-    for (const name of ["byHand", "byHandAlone", "confirmed", "byHandThenSource", "byHandExpired"]) {
+    for (const name of ["byHand", "byHandAlone", "confirmed", "byHandThenSource", "byHandExpired", "byHandThenRead", "readThenByHand", "reopened"]) {
       await seed(name, { company: `Example ${name} Co`, title: "zorblat software engineer" });
     }
     await seed("byHandTwin", { company: "Example byHand Co", title: "zorblat software engineer" });
     await closedByCheck("byHand", true);
     await closedByCheck("byHandAlone", true);
     await closedByCheck("confirmed", false);
+    // Closed from page wording, then a read that confirms it without a new verdict; and the other way round.
+    await closedByCheck("byHandThenRead", true);
+    await checkEvent("byHandThenRead", "MARK_CLOSED", {});
+    await checkEvent("readThenByHand", "MARK_CLOSED", {});
+    await closedByCheck("readThenByHand", true);
+    // Confirmed closed, seen open again, then closed from page wording only: the confirmation no longer counts.
+    await checkEvent("reopened", "MARK_CLOSED", {});
+    await checkEvent("reopened", "MARK_OPEN", {});
+    await closedByCheck("reopened", true);
     await closedByCheck("byHandThenSource", true);
     // A later verdict that is not that check's: the source itself said closed.
     await pool.query(
@@ -239,7 +261,7 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
     const software = result.lists.byType.find((list) => list.type.key === "ALPHA")!;
     ids.byHandPosting = software.jobs.find((job) => job.id === ids.byHand || job.id === ids.byHandTwin)!.id;
     expect(software.jobs.map((job) => job.id).sort())
-      .toEqual(["best", "second", "noScore", "saved", "linkedIn", "oldSavedTwin", "checked", "byHandPosting", "byHandAlone"].map((name) => ids[name]).sort());
+      .toEqual(["best", "second", "noScore", "saved", "linkedIn", "oldSavedTwin", "checked", "byHandPosting", "byHandAlone", "reopened"].map((name) => ids[name]).sort());
     // Preferred sector first, then top-K from the stored similarity, then no score.
     expect(software.jobs.slice(0, 2).map((job) => job.id)).toEqual([ids.best, ids.second]);
     expect(software.jobs.at(-1)!.id).toBe(ids.noScore);
@@ -249,9 +271,9 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
     const byId = new Map(software.jobs.map((job) => [job.id, job]));
     expect(byId.get(ids.saved!)).toMatchObject({ saved: true, linkedInOnly: false });
     expect(byId.get(ids.linkedIn!)).toMatchObject({ saved: false, linkedInOnly: true });
-    expect(result.lists.overall.map((job) => job.id)).not.toContain(ids.saved);
+    expect(result.lists.overall.map((job) => job.id)).toContain(ids.saved);
 
-    expect(result.excluded).toMatchObject({ LEAD: 1, KNOWN_CLOSED: 5, NOT_GATE_PASSED: 1, NO_FULL_TEXT: 3 });
+    expect(result.excluded).toMatchObject({ LEAD: 1, KNOWN_CLOSED: 7, NOT_GATE_PASSED: 1, NO_FULL_TEXT: 3 });
     expect(result.dropped).toMatchObject({ rated: 2, neverSector: 1 });
     expect(result.lists.byType.find((list) => list.type.key === "BETA")!.jobs.map((job) => job.id).sort())
       .toEqual([ids.placeholder, ids.unlisted].sort());
@@ -279,12 +301,12 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
     // The posting with a live second record stays, and so does the one without: neither closure is confirmed.
     expect(posting).toBeDefined();
     expect(result.postings.find((job) => job.id === ids.byHandAlone)).toMatchObject({ availability: "UNKNOWN" });
-    expect([...result.checkByHandIds].sort()).toEqual([ids.byHand, ids.byHandAlone].sort());
+    expect([...result.checkByHandIds].sort()).toEqual([ids.byHand, ids.byHandAlone, ids.reopened].sort());
     expect(result.closedIds).not.toContain(ids.byHandAlone);
     expect(result.closedIds).not.toContain(ids.byHand);
     expect(result.closedIds).not.toContain(ids.byHandTwin);
     const listed = result.postings.map((job) => job.id);
-    for (const name of ["confirmed", "byHandThenSource", "byHandExpired"]) {
+    for (const name of ["confirmed", "byHandThenSource", "byHandExpired", "byHandThenRead", "readThenByHand"]) {
       expect(listed).not.toContain(ids[name]);
       expect(result.closedIds).toContain(ids[name]);
     }
@@ -320,7 +342,7 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
   it("marks the live copy of a posting saved under an archived record", async () => {
     const result = await run();
     expect(result.postings.find((job) => job.id === ids.oldSavedTwin)).toMatchObject({ saved: true });
-    expect(result.lists.overall.map((job) => job.id)).not.toContain(ids.oldSavedTwin);
+    expect(result.lists.overall.map((job) => job.id)).toContain(ids.oldSavedTwin);
   });
 
   it("collapses the two records of one posting when neither was rated", async () => {
@@ -442,6 +464,55 @@ describe.skipIf(skipReal)("review lists on the read models", () => {
     } finally {
       await client.query("ROLLBACK");
       client.release();
+    }
+  });
+
+  it("writes no sheet while a listed job awaits the check, and removes an earlier one (the real read)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "jde-review-real-"));
+    try {
+      const privateDir = path.join(root, "private");
+      const designFile = path.join(privateDir, "ranking_design.json");
+      fs.mkdirSync(privateDir, { recursive: true });
+      fs.writeFileSync(designFile, JSON.stringify(raw));
+      const url = new URL(databaseUrl);
+      url.searchParams.set("options", `-c search_path=${schema},public`);
+      const output: string[] = [];
+      const command = (argv: string[]) => runReviewListsCommand(
+        [`--private-dir=${privateDir}`, `--design=${designFile}`, "--name=real", ...argv],
+        { REPLAY_DATABASE_URL: url.toString(), REPLAY_BRANCH_ID: "br-invented-branch" },
+        // The replay-branch check is replaced for this local database only; it has its own test above.
+        { log: (line) => output.push(line), approve: () => undefined },
+      );
+      const sheet = path.join(privateDir, "review", "review_lists_sheet_real.md");
+      const key = path.join(privateDir, "review", "review_lists_key_real.json");
+      const setVerified = (when: string) => pool.query(
+        `UPDATE job_versions SET availability_verified_at = ${when} WHERE availability_status = 'OPEN'`,
+      );
+
+      await command([]);
+      expect(output.join(" ")).toContain("NOT FINAL");
+      expect(fs.existsSync(sheet) || fs.existsSync(key)).toBe(false);
+
+      await setVerified("NOW()");
+      output.length = 0;
+      await command([]);
+      expect(output.join(" ")).not.toContain("NOT FINAL");
+      expect(fs.readFileSync(sheet, "utf8")).toContain("Responsibilities: Design data services");
+      expect(fs.existsSync(key)).toBe(true);
+
+      // One listed job is unchecked again: the earlier, unfilled sheet and key go.
+      await pool.query(
+        `UPDATE job_versions SET availability_verified_at = NOW() - INTERVAL '3 days'
+          WHERE id = (SELECT latest_job_version_id FROM canonical_jobs WHERE id = $1)`,
+        [ids.second],
+      );
+      output.length = 0;
+      await command(["--replace"]);
+      expect(output.join(" ")).toContain("NOT FINAL");
+      expect(fs.existsSync(sheet)).toBe(false);
+      expect(fs.existsSync(key)).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
     }
   });
 });

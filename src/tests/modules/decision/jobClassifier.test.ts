@@ -44,10 +44,14 @@ const designWith = (change: (raw: any) => void) => parseRankingDesign(changed(ch
 const strictManagement = designWith((raw) => { raw.management_without_hands_on = "NEVER"; });
 
 describe("ranking design", () => {
-  it("accepts the invented example and defaults the overall list to unsaved jobs", () => {
+  it("accepts the invented example", () => {
     expect(design.schema_version).toBe("ranking_design_v1");
-    const without = parseRankingDesign(changed((raw) => delete raw.lists.overall_from_unsaved_only));
-    expect(without.lists.overall_from_unsaved_only).toBe(true);
+  });
+
+  it("has no way to leave saved jobs out of the overall list", () => {
+    expect(design.lists.overall_from_unsaved_only).toBeUndefined();
+    expect(parseRankingDesign(changed((raw) => { raw.lists.overall_from_unsaved_only = false; })).lists.overall_from_unsaved_only).toBe(false);
+    expect(() => parseRankingDesign(changed((raw) => { raw.lists.overall_from_unsaved_only = true; }))).toThrow(/overall_from_unsaved_only/);
   });
 
   it.each([

@@ -24,9 +24,12 @@ export function safePostingLink(value: string | null | undefined): string | null
   return url.href.replace(/[\s|<>()[\]`"'\\]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
 }
 
-/** Untrusted text as one line of plain text in a Markdown table cell: no line breaks, format characters, Markdown or HTML. */
+/**
+ * Untrusted text as one line of plain text in a Markdown table cell: no line breaks, format characters, Markdown or HTML,
+ * and no leading character a spreadsheet reads as a formula.
+ */
 export function sheetText(value: string | null | undefined): string {
-  return (value ?? "")
+  const cell = (value ?? "")
     .replace(/[\p{Cc}\u2028\u2029]+/gu, " ")
     .replace(/\p{Cf}+/gu, "")
     .replace(/\s+/g, " ")
@@ -42,6 +45,7 @@ export function sheetText(value: string | null | undefined): string {
       if (match === "#") return "&#35;";
       return `\\${match}`;
     });
+  return /^[=+-]/.test(cell) ? `'${cell}` : cell;
 }
 
 const FENCE = "~~~~";
@@ -242,18 +246,50 @@ export function closedNotes(revealed: string): Map<number, string> {
   return notes;
 }
 
+/** The answer each job had when its link was first shown, by job number. */
+export type ShownAnswers = Readonly<Record<string, "YES" | "NO">>;
+
+export const sealShownAnswers = (answers: ShownAnswers): string =>
+  `${JSON.stringify({ schema_version: "review_lists_shown_v1", sealed: Buffer.from(JSON.stringify(answers), "utf8").toString("base64") })}\n`;
+
+export function openShownAnswers(text: string): ShownAnswers {
+  const stored = JSON.parse(text) as { schema_version?: string; sealed?: string };
+  if (stored.schema_version !== "review_lists_shown_v1" || typeof stored.sealed !== "string") {
+    throw new Error("Key file or record of shown answers is not of this version.");
+  }
+  return JSON.parse(Buffer.from(stored.sealed, "base64").toString("utf8")) as ShownAnswers;
+}
+
+/** The jobs whose answer is no longer the one given before their link was shown. */
+export function changedAfterShown(filledSheet: string, shown: ShownAnswers): number[] {
+  const entries = parseFilledSheet(filledSheet);
+  return Object.entries(shown)
+    .filter(([n, answer]) => entries.get(Number(n))?.answer !== answer)
+    .map(([n]) => Number(n))
+    .sort((a, b) => a - b);
+}
+
 /**
- * Links and saved marks of the answered jobs only. Notes already written about closed links are kept.
+ * Links and saved marks of the answered jobs only. Notes already written about closed links are kept, and so is the
+ * answer each job had when its link was first shown.
  */
-export function renderReveal(filledSheet: string, details: readonly ReviewDetail[], earlier = ""): { text: string; shown: number } {
+export function renderReveal(
+  filledSheet: string,
+  details: readonly ReviewDetail[],
+  earlier = "",
+  before: ShownAnswers = {},
+): { text: string; shown: number; answers: ShownAnswers } {
   const entries = entriesFor(filledSheet, details);
+  const answers: Record<string, "YES" | "NO"> = { ...before };
+  for (const [n, entry] of entries) if (entry.answer !== null) answers[String(n)] ??= entry.answer;
   const notes = closedNotes(earlier);
   const rows = [...details]
     .sort((a, b) => a.n - b.n)
-    .filter((item) => entries.get(item.n)!.answer !== null)
-    .map((item) => `| ${item.n} | ${sheetText(item.title)} | ${sheetText(item.company)} | ${entries.get(item.n)!.answer === "YES" ? "Y" : "N"} | ${safePostingLink(item.link) ?? ""} | ${item.saved ? "yes" : "no"} | ${notes.get(item.n) ?? ""} |`);
+    .filter((item) => answers[String(item.n)] !== undefined)
+    .map((item) => `| ${item.n} | ${sheetText(item.title)} | ${sheetText(item.company)} | ${answers[String(item.n)] === "YES" ? "Y" : "N"} | ${safePostingLink(item.link) ?? ""} | ${item.saved ? "yes" : "no"} | ${notes.get(item.n) ?? ""} |`);
   return {
     shown: rows.length,
+    answers,
     text: [
       "# Shown after your answers",
       "",

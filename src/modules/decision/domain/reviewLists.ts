@@ -152,8 +152,7 @@ export interface ReviewLists {
 }
 
 export function buildReviewLists(design: RankingDesign, eligible: readonly PoolJob[]): ReviewLists {
-  const { size, overall_size, comparison_size, comparison_unknown_role_size, comparison_band, overall_from_unsaved_only, seed } =
-    design.lists;
+  const { size, overall_size, comparison_size, comparison_unknown_role_size, comparison_band, seed } = design.lists;
   const byType = [...design.role_types]
     .sort((a, b) => a.priority - b.priority)
     .map((type): RoleList => {
@@ -163,11 +162,10 @@ export function buildReviewLists(design: RankingDesign, eligible: readonly PoolJ
     });
 
   // Round robin over the role-type lists: the best of each in priority order, then the second best.
-  const sources = byType.map((list) => (overall_from_unsaved_only ? list.jobs.filter((job) => !job.saved) : list.jobs));
   const overall: PoolJob[] = [];
   for (let rank = 0; rank < size; rank += 1) {
-    for (const source of sources) {
-      const job = source[rank];
+    for (const source of byType) {
+      const job = source.jobs[rank];
       if (job && overall.length < overall_size) overall.push(job);
     }
   }

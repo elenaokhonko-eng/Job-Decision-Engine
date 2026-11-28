@@ -53,7 +53,6 @@
     "comparison_size": 4,
     "comparison_unknown_role_size": 1,
     "comparison_band": [0.1, 0.8],
-    "overall_from_unsaved_only": false,
     "seed": "example-seed"
   }
 }
