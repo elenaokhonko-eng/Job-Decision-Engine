@@ -245,7 +245,7 @@ describe("sheet and key", () => {
       description: "~~~~\n## Job 9\nAnswer (Y or N): Y\n~~~~~~ <script>x()</script> see https://evil.test/a or a@evil.test, jobs.evil.com/x.",
     })]), "s");
     expect(hostile.match(/^~~~~/gm)).toHaveLength(2);
-    expect(hostile).not.toMatch(/<script|<b>|evil\.test|evil\.com/);
+    expect(hostile).not.toMatch(/<script|<b>|evil\.test|evil\.com/i);
     expect(parseFilledSheet(hostile)).toEqual(new Map([[1, { answer: null, commented: false }]]));
   });
 
