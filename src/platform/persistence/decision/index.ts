@@ -16,6 +16,8 @@ export async function insertNewRematchWaits(
        FROM v_job_awaiting_rematch waiting
       WHERE waiting.workspace_id = $1::uuid AND waiting.waiting_since IS NULL
         AND ($2::uuid[] IS NULL OR waiting.canonical_job_id = ANY($2::uuid[]))
+      -- One lock order for every sync, so a whole-workspace sync and a multi-job sync cannot deadlock.
+      ORDER BY waiting.canonical_job_id
      ON CONFLICT (workspace_id, canonical_job_id) DO NOTHING`,
     [workspaceId, canonicalJobIds],
   );

@@ -1,12 +1,15 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { isLocalPostgresConnectionString } from "../../db/pgSsl.js";
+import { buildJobSourceEvidence } from "../../ingestion/jobSourceEvidence.js";
 import { AWAITING_REMATCH_LIMIT_DAYS } from "../../modules/decision/index.js";
 import { DECIDER_VERSION } from "../../pipeline/deciderVersion.js";
 import { runDeterministicMatcher } from "../../pipeline/deterministicMatcher.js";
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
 import { runHardGates } from "../../pipeline/hardGate.js";
+import { runNormalization } from "../../pipeline/normalize.js";
+import { carriedScoreDecisionSql, restoredAwaitingRematchSql } from "../../pipeline/profileMatchCurrency.js";
 import { runRecommendationDecider } from "../../pipeline/recommendationDecider.js";
 import { saveWorkspacePreferenceRevision } from "../../policy/workspacePreferenceRegistry.js";
 import { STAGE3_SCHEMA_VERSION } from "../../policy/stage3Contracts.js";
@@ -177,6 +180,25 @@ async function enqueueRerun(target: StackJob, taskType: "APPLY_HARD_GATES" | "EX
     producer: "rerunKeepsResultsTest", requestId: taskKey, mode: "FORCE_RECOMPUTE", payload,
   });
   await enqueuePipelineTask({ taskType, taskKey, payload, maxAttempts: 8, intent }, s().db, { context: s().ctx });
+}
+
+/** The decider's own test of "restored and not re-matched". */
+async function restoredAwaiting(target: StackJob): Promise<boolean> {
+  const { rows } = await s().db.query<{ waiting: boolean }>(
+    `SELECT ${restoredAwaitingRematchSql("c")} AS waiting FROM canonical_jobs c WHERE c.workspace_id = $1 AND c.id = $2`,
+    [s().ctx.workspaceId, target.canonicalJobId],
+  );
+  return rows[0]!.waiting;
+}
+
+async function matchesSinceRestore(target: StackJob): Promise<number> {
+  const { rows } = await s().db.query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM match_runs m
+      WHERE m.canonical_job_id = $1 AND m.status = 'COMPLETED'
+        AND m.started_at > (SELECT MAX(event_at) FROM job_archive_events WHERE canonical_job_id = $1 AND action <> 'ARCHIVED')`,
+    [target.canonicalJobId],
+  );
+  return rows[0]!.n;
 }
 
 const noFailures = async (target: StackJob) =>
@@ -550,7 +572,14 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     }
     const first = await stored(target);
     await restore(target);
-    expect(await stored(target), label).toMatchObject({ outcome: first.outcome, eligibility: first.eligibility, score: first.score, decision: first.decision });
+    // The result is the old one; the decision from before the archive is no longer current, so nothing can act on it.
+    expect(await stored(target), label).toMatchObject({ outcome: first.outcome, eligibility: first.eligibility, score: first.score, decision: null });
+    const readiness = await s().db.query<{ decision: string | null }>(
+      `SELECT deterministic_decision_id AS decision FROM v_application_readiness_current WHERE canonical_job_id = $1`, [target.canonicalJobId]);
+    expect(readiness.rows[0]?.decision ?? null).toBeNull();
+    // Marked as waiting at once, also where the match from before the archive still looks current.
+    expect(await restoredAwaiting(target)).toBe(true);
+    expect(await listedAsWaiting(target)).toBe(true);
 
     expect(await decidePass(target)).toMatchObject({ completed: 1, failed: 0, blocked: 0 });
     const after = await stored(target);
@@ -559,6 +588,9 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     expect(decision).toMatchObject({ decider_version: DECIDER_VERSION, outcome: after.outcome });
     expect(decision.json.inputs).toMatchObject({ requirement_score: null });
     expect(decision.json.trace.notes).toEqual(expect.arrayContaining(["awaiting_rematch", "restored_from_archive"]));
+    // The decider recorded the start of the wait.
+    expect(await listedAsWaiting(target)).toBe(true);
+    expect(await awaiting(target)).not.toBeNull();
   });
 
   it.each(RESTORE_PATHS.flatMap(([label, restore]) => [
@@ -581,18 +613,118 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     await drain(target, 3, ["APPLY_HARD_GATES", "PUBLISH_EMBEDDING", "ROUTE_LANE", "DECIDE_RECOMMENDATION"]);
     expect((await decide(target)).errors).toBe(0);
     expect(await stored(target)).toMatchObject({ eligibility: "INELIGIBLE", outcome: "SKIP" });
+    // A skipped job without a score is marked too while it waits.
+    expect(await listedAsWaiting(target)).toBe(await restoredAwaiting(target));
   });
 
-  it("the re-match after a restore gives a fresh result", async () => {
-    const target = await job("restore-rematch");
+  it.each(RESTORE_PATHS)("the re-match after a restore gives a fresh result: %s", async (_label, restore) => {
+    const target = await job(`restore-rematch-${randomUUID().slice(0, 8)}`);
     await drain(target);
     await storeResult(target, "SKIP");
     await s().db.query(`UPDATE canonical_jobs SET recommendation_eligibility = 'INELIGIBLE' WHERE id = $1`, [target.canonicalJobId]);
-    await RESTORE_PATHS[0]![1](target);
+    await restore(target);
+    expect(await listedAsWaiting(target)).toBe(true);
+    expect(await matchesSinceRestore(target)).toBe(0);
+
     await drain(target);
+    expect(await matchesSinceRestore(target)).toBeGreaterThanOrEqual(1);
+    expect(await restoredAwaiting(target)).toBe(false);
+    expect(await listedAsWaiting(target)).toBe(false);
     expect(await stored(target)).toMatchObject({ eligibility: "ELIGIBLE" });
     expect((await latestDecision(target))!.json.trace.notes).not.toContain("restored_from_archive");
     await noFailures(target);
+  }, 120_000);
+
+  it("a repost of unchanged content, driven through the normalizer, is re-matched", async () => {
+    const key = randomUUID().slice(0, 8);
+    const url = `https://example.test/zebra-repost-${key}`;
+    const description = [
+      `About the role: zebra telemetry platform engineer (${key}) at a synthetic fixture employer.`,
+      "Responsibilities: build and operate zebra telemetry ingestion services, review designs and support releases.",
+      "Requirements: five years of production platform engineering experience with streaming telemetry systems.",
+    ].join(" ").repeat(2);
+    const observe = async (payload: Record<string, unknown>) => {
+      const id = randomUUID();
+      const retrievedAt = new Date().toISOString();
+      const hash = createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+      const evidence = buildJobSourceEvidence({
+        sourceName: "GREENHOUSE", sourcePluginKey: "greenhouse", sourcePluginRevisionId: null, sourceExternalId: key,
+        sourceUrl: url, canonicalApplyUrl: url, retrievedAt, rawPayloadHash: hash, rawPayload: payload,
+        companyName: "Synthetic Zebra Repost Employer", title: "Zebra Telemetry Platform Engineer", locationRaw: "Singapore",
+        workplaceTypeRaw: "REMOTE", employmentTypeRaw: "FULL_TIME", compensationRaw: "UNKNOWN", descriptionText: description,
+      });
+      await s().db.query(
+        `INSERT INTO raw_job_observations (
+           id, workspace_id, source_name, source_external_id, source_url, retrieved_at, company_name, title, description_raw,
+           location_raw, workplace_type_raw, employment_type_raw, raw_payload, raw_payload_hash, processing_status,
+           normalized_evidence, evidence_schema_version
+         ) VALUES ($1, $2, 'GREENHOUSE', $3, $4, $5, 'Synthetic Zebra Repost Employer', 'Zebra Telemetry Platform Engineer', $6,
+                   'Singapore', 'REMOTE', 'FULL_TIME', $7::jsonb, $8, 'PENDING', $9::jsonb, $9::jsonb->>'schema_version')`,
+        [id, s().ctx.workspaceId, key, url, retrievedAt, description, JSON.stringify(payload), hash, JSON.stringify(evidence)],
+      );
+      const summary = await runNormalization(s().db, { context: s().ctx, observationIds: [id], limit: 1 });
+      expect(summary.totalProcessed).toBe(1);
+      return summary.details[0]!;
+    };
+    const daysAgo = (days: number) => new Date(Date.now() - days * 24 * 3_600_000).toISOString();
+
+    const first = await observe({ posted_at: daysAgo(20), updated_at: daysAgo(20) });
+    const target: StackJob = { canonicalJobId: first.canonicalJobId!, jobVersionId: first.versionId!, requirementSetId: "", contentHash: "" };
+    await drain(target, 6, STAGES);
+    const matched = await stored(target);
+    expect(matched.score).not.toBeNull();
+    await archive(target, "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS", "AUTHORITATIVE_PUBLICATION_DATE");
+
+    const repost = await observe({ posted_at: daysAgo(20), reposted_at: daysAgo(1) });
+    expect(repost.versionId).toBe(first.versionId);
+    const events = await s().db.query<{ action: string }>(
+      `SELECT action FROM job_archive_events WHERE canonical_job_id = $1 ORDER BY event_at DESC, id DESC LIMIT 1`, [target.canonicalJobId]);
+    expect(events.rows[0]).toMatchObject({ action: "REPOST_REACTIVATED" });
+    expect(await stored(target)).toMatchObject({ outcome: matched.outcome, score: matched.score });
+    expect(await restoredAwaiting(target)).toBe(true);
+    expect(await listedAsWaiting(target)).toBe(true);
+
+    await drain(target, 6, STAGES);
+    expect(await matchesSinceRestore(target)).toBeGreaterThanOrEqual(1);
+    expect(await restoredAwaiting(target)).toBe(false);
+    expect(await listedAsWaiting(target)).toBe(false);
+    expect((await latestDecision(target))!.json.trace.notes).not.toContain("restored_from_archive");
+    await noFailures(target);
+  }, 180_000);
+
+  it("a restore recorded before restores queued a re-match is not treated as waiting", async () => {
+    const target = await job("restore-before-flag");
+    await drain(target);
+    await s().db.query(
+      `INSERT INTO job_archive_events (workspace_id, canonical_job_id, action, actor, reason, details)
+       VALUES ($1, $2, 'REPOST_REACTIVATED', 'test', 'synthetic earlier repost', '{}'::jsonb)`,
+      [s().ctx.workspaceId, target.canonicalJobId],
+    );
+    expect(await restoredAwaiting(target)).toBe(false);
+    expect(await listedAsWaiting(target)).toBe(false);
+    expect((await decide(target)).errors).toBe(0);
+    expect((await latestDecision(target))!.json.trace.notes).not.toContain("restored_from_archive");
+  });
+
+  it.each([["SKIP", "INELIGIBLE"], ["REVIEW", "VERIFY"]])(
+    "a restored job with an outcome %s and no stored eligibility keeps the outcome, as %s", async (outcome, eligibility) => {
+      const target = await waitingJob(`restore-no-eligibility-${outcome.toLowerCase()}`, outcome);
+      await s().db.query(`UPDATE canonical_jobs SET recommendation_eligibility = NULL WHERE id = $1`, [target.canonicalJobId]);
+      await RESTORE_PATHS[0]![1](target);
+      expect((await decide(target)).errors).toBe(0);
+      expect(await stored(target)).toMatchObject({ outcome, eligibility, score: 0.9 });
+    });
+
+  it("a decision marked only as waiting for a re-match is also kept from AI", async () => {
+    const { rows } = await s().db.query<{ note: string; blocked: boolean }>(
+      `SELECT d.note, ${carriedScoreDecisionSql("d")} AS blocked
+         FROM (VALUES ('awaiting_rematch', '{"trace":{"notes":["awaiting_rematch"]}}'::jsonb),
+                      ('stored_score_carried', '{"trace":{"notes":["stored_score_carried"]}}'::jsonb),
+                      ('other', '{"trace":{"notes":["career_track:synthetic"]}}'::jsonb)) AS d(note, decision_json)`,
+    );
+    expect(Object.fromEntries(rows.map((row) => [row.note, row.blocked]))).toEqual({
+      awaiting_rematch: true, stored_score_carried: true, other: false,
+    });
   });
 
   it("a restored job is not sent to AI on its old result, before or after its decision", async () => {
@@ -607,8 +739,12 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     // Positive control: as it stands, with its match current, the job is queued.
     expect(await offer()).toBe(1);
 
+    const before = (await stored(target)).decision;
     await RESTORE_PATHS[0]![1](target);
-    expect(await stored(target)).toMatchObject({ eligibility: "ELIGIBLE", outcome: "PRIORITY" });
+    expect(await stored(target)).toMatchObject({ eligibility: "ELIGIBLE", outcome: "PRIORITY", decision: null });
+    expect(await offer()).toBe(0);
+    // Also if the earlier decision were named again: the queue itself leaves a restored job out.
+    await s().db.query(`UPDATE canonical_jobs SET latest_deterministic_decision_id = $2 WHERE id = $1`, [target.canonicalJobId, before]);
     expect(await offer()).toBe(0);
     expect(await decidePass(target)).toMatchObject({ completed: 1, failed: 0 });
     expect(await stored(target)).toMatchObject({ eligibility: "ELIGIBLE", outcome: "PRIORITY" });
@@ -683,8 +819,16 @@ describe.skipIf(skipReal)("a kept outcome and the owner's pay floor (PostgreSQL)
   }, 180_000);
   afterAll(async () => { await stack?.close(); });
 
-  it("pay below the floor ends at Skip, whatever the disposition, and keeps the score", async () => {
-    const target = await waitingJob("pay-below");
+  const floor = (disposition: string) => saveWorkspacePreferenceRevision(s().db, s().ctx, {
+    preferenceDomain: "stage3",
+    schemaVersion: STAGE3_SCHEMA_VERSION,
+    preferenceValue: { compensation: { target_salary_basis: "GROSS", commercial_min_annual_sgd: 240000, university_research_min_annual_sgd: 240000, disposition_below_floor: disposition } },
+    activate: true,
+  });
+
+  it.each(["HARD_REJECT", "PREVENT_APPLY_NOW", "WARN"])("pay below the floor ends at Skip with the disposition %s, and keeps the score", async (disposition) => {
+    await floor(disposition);
+    const target = await waitingJob(`pay-below-${disposition.toLowerCase().replaceAll("_", "-")}`);
     // An employer whose category is known, so the floor can be confirmed as missed.
     await s().db.query(`UPDATE canonical_jobs SET company_name = 'Synthetic Zebra University' WHERE id = $1`, [target.canonicalJobId]);
     await s().db.query(
@@ -696,6 +840,7 @@ describe.skipIf(skipReal)("a kept outcome and the owner's pay floor (PostgreSQL)
   });
 
   it("pay that cannot be confirmed lowers a kept top priority to review", async () => {
+    await floor("PREVENT_APPLY_NOW");
     const target = await waitingJob("pay-unverified");
     // A synthetic range that straddles the floor: neither below it nor confirmed above it.
     await s().db.query(

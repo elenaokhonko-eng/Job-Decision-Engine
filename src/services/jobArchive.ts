@@ -1594,7 +1594,9 @@ async function insertArchiveRestoreEvent(
        workspace_id, canonical_job_id, action, actor, reason, reference_at, details
      ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) RETURNING id::text`,
     [input.workspaceId, input.canonicalJobId, input.action, input.actor,
-      input.reason, input.referenceAt, JSON.stringify(input.details)],
+      input.reason, input.referenceAt,
+      // Every restore written here queues a re-match; the flag tells the decider and the waiting view to wait for it.
+      JSON.stringify({ ...input.details, rematch_required: true })],
   );
   const eventId = result.rows[0]?.id;
   if (!eventId) throw new Error("Archive restore event was not persisted.");
@@ -1661,6 +1663,8 @@ async function enqueueRestoreReassessment(
 /**
  * Takes a restored job back among the live jobs. A restore never clears or replaces a result: the job gets the outcome,
  * eligibility and scores it had, and keeps them until a re-match (the decider lowers them only for a real override).
+ * Only the pointer to the decision from before the archive is dropped, so nothing treats that decision as current
+ * (an application list, a handoff, document generation) before the restore's own decision exists.
  */
 async function clearArchiveFields(client: pg.PoolClient, workspaceId: string, canonicalJobId: string): Promise<void> {
   await client.query(
@@ -1670,6 +1674,7 @@ async function clearArchiveFields(client: pg.PoolClient, workspaceId: string, ca
          archive_age_basis = NULL,
          archive_reference_at = NULL,
          archive_run_id = NULL,
+         latest_deterministic_decision_id = NULL,
          updated_at = NOW()
      WHERE workspace_id = $1 AND id = $2`,
     [workspaceId, canonicalJobId],
@@ -1859,13 +1864,16 @@ export async function reactivateGenuineRepost(
   await clearArchiveFields(client, input.workspaceId, input.canonicalJobId);
   await addRestoreAssessmentHold(client, input.workspaceId, input.canonicalJobId, input.actor, eventId);
   if (row.latest_job_version_id !== null) {
-    await enqueueRestoreDecision(client, {
+    const restored = {
       workspaceId: input.workspaceId,
       canonicalJobId: input.canonicalJobId,
       jobVersionId: row.latest_job_version_id,
       eventId,
       context: input.context,
-    });
+    };
+    // The same forced re-gate as every other restore: without it a repost of unchanged content is never re-matched.
+    await enqueueRestoreReassessment(client, restored);
+    await enqueueRestoreDecision(client, restored);
   }
   return eventId;
 }

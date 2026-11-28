@@ -529,15 +529,16 @@ describe.skipIf(skipReal)("manual same-day availability check (PostgreSQL)", () 
       return job;
     };
     const stored = async (job: Fixture) => (await db().query(
-      `SELECT recommendation_requirement_score::float AS score, recommendation_outcome AS outcome
+      `SELECT recommendation_requirement_score::float AS score, recommendation_outcome AS outcome,
+              recommendation_eligibility AS eligibility, latest_deterministic_decision_id IS NOT NULL AS decided
          FROM canonical_jobs WHERE id = $1`, [job.id])).rows[0];
 
     const open = await withScore();
     expect(await check(open, (url) => openPage(url, open.board))).toMatchObject([{ visible: true }]);
-    expect(await stored(open)).toEqual({ score: 0.75, outcome: "REVIEW" });
+    expect(await stored(open)).toEqual({ score: 0.75, outcome: "REVIEW", eligibility: "ELIGIBLE", decided: true });
     const closed = await withScore();
     expect(await check(closed, (url) => page(url, 404))).toMatchObject([{ visible: true }]);
-    expect(await stored(closed)).toEqual({ score: 0.75, outcome: "SKIP" });
+    expect(await stored(closed)).toEqual({ score: 0.75, outcome: "SKIP", eligibility: "INELIGIBLE", decided: true });
   });
 
   it("a manual cannot-tell between automatic reads neither forks the retry chain nor brings the archive closer", async () => {

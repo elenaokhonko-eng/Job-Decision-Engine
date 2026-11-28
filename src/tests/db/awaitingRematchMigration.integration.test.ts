@@ -6,6 +6,7 @@ import pg from "pg";
 
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
+import { syncRematchWaits } from "../../modules/decision/index.js";
 
 // Migration 124 on real PostgreSQL, in its own schema; invented rows only.
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
@@ -57,6 +58,28 @@ describe.skipIf(skipReal)("migration 124: waits for a re-match (PostgreSQL)", { 
     await expect(insert(other)).rejects.toMatchObject({ code: "23503" });
     await insert(own.workspace_id);
     expect((await client.query(`SELECT 1 FROM job_rematch_waits`)).rows).toHaveLength(1);
+  });
+
+  it("records waits in job id order, so two syncs take their locks the same way", async () => {
+    const ids = ["f", "d", "b", "e", "c", "a"].map((digit) => `${digit}0000000-0000-4000-8000-000000000000`);
+    for (const id of ids) {
+      await client.query(
+        `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_state, processing_status,
+                                     recommendation_requirement_score)
+         VALUES ($1::uuid, 'Synthetic Order Fixture', 'synthetic role', 'https://example.test/order/' || $1::text, 'MATCHED', 'MATCHED', 0.5)`,
+        [id],
+      );
+    }
+    const workspace = (await client.query<{ workspace_id: string }>(`SELECT workspace_id FROM canonical_jobs WHERE id = $1`, [ids[0]])).rows[0]!;
+    // Without index scans the rows would arrive in the order they were stored, which is not id order.
+    const planner = ["enable_indexscan", "enable_indexonlyscan", "enable_bitmapscan", "enable_mergejoin"];
+    for (const setting of planner) await client.query(`SET ${setting} = off`);
+    await syncRematchWaits(client, workspace.workspace_id);
+    for (const setting of planner) await client.query(`RESET ${setting}`);
+    // The physical order of a fresh set of rows is the order they were inserted, which is the order they were locked.
+    const inserted = await client.query<{ canonical_job_id: string }>(
+      `SELECT canonical_job_id::text FROM job_rematch_waits WHERE canonical_job_id = ANY($1::uuid[]) ORDER BY ctid`, [ids]);
+    expect(inserted.rows.map((row) => row.canonical_job_id)).toEqual([...ids].sort());
   });
 
   it("is undone by the documented statements, after which the runner applies it again", async () => {

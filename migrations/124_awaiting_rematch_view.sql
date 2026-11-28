@@ -7,9 +7,12 @@
 --   DROP TABLE IF EXISTS job_rematch_waits;
 --   DELETE FROM schema_migrations WHERE version = '124_awaiting_rematch_view.sql';
 --
--- A job "awaits a re-match" when it holds a stored score and its profile match is not current: it keeps that score
--- and outcome, and every list marks it. The current-match test is the decider's. Jobs already settled without a score
--- (ineligible, or no matching lane) are not waiting.
+-- A job "awaits a re-match" for one of the decider's two reasons: it keeps its stored result, and every list marks it.
+--   1. It holds a stored score and its profile match is not current (the current-match test is the decider's). Jobs
+--      already settled (ineligible, or no matching lane) are not waiting for this reason.
+--   2. It was restored from the archive, holds a result (with or without a score), and no match has completed since
+--      the restore, even where the match from before the archive still looks current. This is the condition of
+--      restoredAwaitingRematchSql (src/pipeline/profileMatchCurrency.ts).
 --
 -- job_rematch_waits (owner: the decision module) records WHEN a job started waiting, and nothing else. A row is
 -- inserted the first time the job is found waiting, is never moved by a later pass, and is deleted when the job no
@@ -55,18 +58,35 @@ LEFT JOIN job_rematch_waits recorded
 WHERE job.archived_at IS NULL
   AND job.is_test_fixture IS NOT TRUE
   AND COALESCE(job.processing_state, job.processing_status) IS DISTINCT FROM 'MANUALLY_REMOVED'
-  AND (job.recommendation_requirement_score IS NOT NULL OR job.recommendation_coverage_score IS NOT NULL)
-  AND job.recommendation_eligibility IS DISTINCT FROM 'INELIGIBLE'
-  AND job.routing_disposition IS DISTINCT FROM 'POLICY_NO_MATCH'
-  AND NOT COALESCE(
-    run.status = 'COMPLETED'
-    AND run.canonical_job_id = job.id
-    AND run.job_version_id = job.latest_job_version_id
-    AND run.profile_version_id = active_profile.id
-    AND run.requirement_set_id = version.active_requirement_set_id
-    AND run.job_content_hash = version.content_hash
-    AND run.context_fingerprint IS NOT NULL,
-    FALSE);
+  AND (
+    (
+      (job.recommendation_requirement_score IS NOT NULL OR job.recommendation_coverage_score IS NOT NULL)
+      AND job.recommendation_eligibility IS DISTINCT FROM 'INELIGIBLE'
+      AND job.routing_disposition IS DISTINCT FROM 'POLICY_NO_MATCH'
+      AND NOT COALESCE(
+        run.status = 'COMPLETED'
+        AND run.canonical_job_id = job.id
+        AND run.job_version_id = job.latest_job_version_id
+        AND run.profile_version_id = active_profile.id
+        AND run.requirement_set_id = version.active_requirement_set_id
+        AND run.job_content_hash = version.content_hash
+        AND run.context_fingerprint IS NOT NULL,
+        FALSE)
+    )
+    OR (
+      (job.recommendation_outcome IS NOT NULL OR job.recommendation_eligibility IS NOT NULL
+        OR job.recommendation_requirement_score IS NOT NULL)
+      AND EXISTS (
+        SELECT 1 FROM job_archive_events restore_event
+         WHERE restore_event.workspace_id = job.workspace_id AND restore_event.canonical_job_id = job.id
+           AND restore_event.action IN ('RESTORED', 'REPOST_REACTIVATED')
+           AND restore_event.details->>'rematch_required' = 'true'
+           AND NOT EXISTS (
+             SELECT 1 FROM match_runs rematch
+              WHERE rematch.workspace_id = job.workspace_id AND rematch.canonical_job_id = job.id
+                AND rematch.status = 'COMPLETED' AND rematch.started_at > restore_event.event_at))
+    )
+  );
 
 COMMENT ON VIEW v_job_awaiting_rematch IS
-  'Live jobs holding a stored score with no current profile match, and since when. Read by the lists and by the zero check awaiting_rematch_over_limit.';
+  'Live jobs keeping a stored result until a re-match (no current profile match, or restored and not re-matched), and since when. Read by the lists and by the zero check awaiting_rematch_over_limit.';

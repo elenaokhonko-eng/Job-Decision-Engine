@@ -246,6 +246,7 @@ export function carriedScoreDecisionSql(decisionAlias: string): string {
 
 /**
  * SQL predicate: the job (alias `c` = canonical_jobs) was restored from the archive and no match has completed since.
+ * The view v_job_awaiting_rematch (migration 124) states the same condition; a test compares them.
  * Until then it keeps the result it had before, whatever match run is still on record, and is never sent to AI.
  */
 export function restoredAwaitingRematchSql(canonicalAlias: string): string {
@@ -254,6 +255,8 @@ export function restoredAwaitingRematchSql(canonicalAlias: string): string {
     SELECT 1 FROM job_archive_events restore_event
      WHERE restore_event.workspace_id = ${c}.workspace_id AND restore_event.canonical_job_id = ${c}.id
        AND restore_event.action IN ('RESTORED', 'REPOST_REACTIVATED')
+       -- Only restores that queued a re-match carry the flag. Earlier ones are judged by their match run alone.
+       AND restore_event.details->>'rematch_required' = 'true'
        AND NOT EXISTS (
          SELECT 1 FROM match_runs rematch
           WHERE rematch.workspace_id = ${c}.workspace_id AND rematch.canonical_job_id = ${c}.id
