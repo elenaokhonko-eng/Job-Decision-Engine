@@ -3,5 +3,5 @@ pytest==9.1.1
 ruff==0.17.1
 python-docx>=1.1.0
 fpdf2>=2.7.9
-streamlit>=1.63.0
+streamlit>=1.67.0
 jsonschema>=4.23.0
