@@ -1,3 +1,6 @@
+import { readAiWorkSettings } from "../../platform/config/index.js";
+import { isLeadJobVersion } from "../../modules/catalog/index.js";
+import { describeAiWork } from "../../modules/evaluation/index.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import crypto from "crypto";
 import fs from "fs";
@@ -1041,8 +1044,66 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
         expect(await taskRows(job)).toEqual([expect.objectContaining({ status: "COMPLETED" })]);
         expect(await activeQueueRows(job)).toHaveLength(1);
       }
+
+      // A job that became a lead while its task waited does not block on the cut-off: the task completes, nothing
+      // is queued, and the task is not counted as waiting for the owner.
+      openSwitch("0.95");
+      const waitingTasks = async () => (await describeAiWork(db(), ctx().workspaceId, ["REVIEW"], readAiWorkSettings()))
+        .waitingExplanationTasks;
+      const waitingBefore = await waitingTasks();
+      await db().query(
+        `UPDATE raw_job_observations SET source_name = 'HIMALAYAS', source_url = 'https://himalayas.app/jobs/invented'
+          WHERE workspace_id = $1 AND job_version_id = $2`,
+        [ctx().workspaceId, higher.jobVersionId],
+      );
+      await db().query(
+        `UPDATE canonical_jobs SET canonical_url = 'https://himalayas.app/jobs/invented' WHERE workspace_id = $1 AND id = $2`,
+        [ctx().workspaceId, higher.canonicalJobId],
+      );
+      expect(await isLeadJobVersion(db(), ctx().workspaceId, higher.jobVersionId)).toBe(true);
+      expect(await waitingTasks()).toBe(waitingBefore - 1);
+      const asLead = await run(higher, ["ENQUEUE_EXPLANATION"]);
+      expect(asLead).toMatchObject({ claimed: 1, completed: 1, blocked: 0, failed: 0 });
+      expect(await taskRows(higher)).toEqual([expect.objectContaining({ status: "COMPLETED", blocked_on: null })]);
+      expect(await activeQueueRows(higher)).toEqual([]);
     } finally {
       openSwitch("0");
     }
   }, 180_000);
+
+  // The successor path (a decision made by a task), which no seed filter covers.
+  it("a decision made for a lead creates no AI enqueue task", async () => {
+    const lead = await seedRoutableJob("successor-lead", ["Zebra telemetry platform engineering experience"]);
+    const control = await seedRoutableJob("successor-control", ["Zebra telemetry platform engineering experience"]);
+    await publishEmbeddings();
+    await runLaneRouter(db(), { context: ctx(), jobVersionIds: [lead.jobVersionId, control.jobVersionId] });
+    const board = "https://himalayas.app/jobs/invented-successor";
+    await db().query(
+      `UPDATE raw_job_observations SET source_name = 'HIMALAYAS', source_url = $3
+        WHERE workspace_id = $1 AND job_version_id = $2`,
+      [ctx().workspaceId, lead.jobVersionId, board],
+    );
+    await db().query(`UPDATE canonical_jobs SET canonical_url = $3 WHERE workspace_id = $1 AND id = $2`,
+      [ctx().workspaceId, lead.canonicalJobId, board]);
+    expect(await isLeadJobVersion(db(), ctx().workspaceId, lead.jobVersionId)).toBe(true);
+
+    for (const job of [control, lead]) {
+      await enqueuePipelineTask({
+        taskType: "MATCH_PROFILE_EVIDENCE",
+        taskKey: `MATCH_PROFILE_EVIDENCE:${job.jobVersionId}:successor-fixture`,
+        payload: { canonical_job_id: job.canonicalJobId, job_version_id: job.jobVersionId, profile_version_id: profileV2 },
+      }, db(), { context: ctx() });
+      const summary = await runPipelineStageTaskWorker(db(), {
+        ...workerOptions,
+        context: ctx(),
+        taskTypes: ["MATCH_PROFILE_EVIDENCE", "DECIDE_RECOMMENDATION"],
+        jobVersionIds: [job.jobVersionId],
+        maxTasks: 5,
+      });
+      expect(summary).toMatchObject({ failed: 0, errors: [] });
+      expect((await jobState(job)).recommendation_outcome).toBe("REVIEW");
+    }
+    expect(await tasksFor(control, "ENQUEUE_EXPLANATION")).toHaveLength(1);
+    expect(await tasksFor(lead, "ENQUEUE_EXPLANATION")).toEqual([]);
+  }, 120_000);
 });

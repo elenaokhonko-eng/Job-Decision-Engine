@@ -28,7 +28,7 @@ const poolOf = (size: number): BlindReviewPool => ({
 
 const eligible: BlindReviewFacts = {
   archived: false, testFixture: false, gatePassed: true, manuallyRemoved: false, savedByUser: false, hasApplication: false,
-  labelled: false, samePostingAsTaken: false, linkedIn: false, contentComplete: true, hasPostingLink: true, currentTopKMatch: true,
+  labelled: false, samePostingAsTaken: false, linkedIn: false, lead: false, contentComplete: true, hasPostingLink: true, currentTopKMatch: true,
   awaitingRecompute: false, confirmedClosed: false, availabilityCurrent: true, availabilityVerifiedAt: new Date("2026-11-26T02:00:00Z"),
 };
 
@@ -44,7 +44,7 @@ describe("blind review rules", () => {
     ["ARCHIVED", { archived: true }], ["TEST_FIXTURE", { testFixture: true }], ["NOT_GATE_PASSED", { gatePassed: false }],
     ["MANUALLY_REMOVED", { manuallyRemoved: true }], ["SAVED_BY_USER", { savedByUser: true }], ["HAS_APPLICATION", { hasApplication: true }],
     ["ALREADY_LABELLED", { labelled: true }], ["SAME_POSTING_AS_SAVED_APPLIED_OR_LABELLED", { samePostingAsTaken: true }],
-    ["LINKEDIN", { linkedIn: true }], ["AWAITING_CONTENT", { contentComplete: false }], ["NO_POSTING_LINK", { hasPostingLink: false }],
+    ["LINKEDIN", { linkedIn: true }], ["LEAD_JOB_BOARD_OR_AGGREGATOR", { lead: true }], ["AWAITING_CONTENT", { contentComplete: false }], ["NO_POSTING_LINK", { hasPostingLink: false }],
     ["NO_CURRENT_TOPK_MATCH", { currentTopKMatch: false }], ["AWAITING_RECOMPUTE", { awaitingRecompute: true }],
     ["CONFIRMED_CLOSED", { confirmedClosed: true, availabilityCurrent: false }],
     ["NOT_VERIFIED_OPEN_ON_DRAW_DATE", { availabilityCurrent: false }],

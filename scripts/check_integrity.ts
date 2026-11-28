@@ -1,4 +1,4 @@
-import { runZeroChecks } from "../src/tasks/integrityZeroChecks.js";
+import { describeZeroCheck, runZeroChecks } from "../src/tasks/integrityZeroChecks.js";
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
@@ -15,6 +15,7 @@ const pool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 async function runIntegrityChecks() {
   console.log("Running Data Integrity Checks...");
   let errors = 0;
+  let notEvaluated = 0;
 
   try {
     const ctx = await resolveWorkspaceContext(pool as any);
@@ -181,16 +182,22 @@ async function runIntegrityChecks() {
 
     // Checks 10 to 15: the must-be-zero set (src/tasks/integrityZeroChecks.ts).
     for (const check of await runZeroChecks(pool, ctx.workspaceId)) {
-      if (check.total > 0) {
-        console.error(`Found ${check.total} for ${check.name}; first ids: ${check.sample.join(", ")}`);
+      const { status, line } = describeZeroCheck(check);
+      if (status === "FAILED") {
+        console.error(line);
         errors++;
+      } else if (status === "NOT_EVALUATED") {
+        console.warn(line);
+        notEvaluated++;
       } else {
-        console.log(`OK: ${check.name} is zero.`);
+        console.log(line);
       }
     }
 
     if (errors === 0) {
-      console.log("All integrity checks passed.");
+      console.log(notEvaluated === 0
+        ? "All integrity checks passed."
+        : `All evaluated integrity checks passed; ${notEvaluated} check(s) not evaluated.`);
     } else {
       console.log(`Finished with ${errors} integrity check failure(s).`);
     }

@@ -200,7 +200,8 @@ describe.skipIf(skipReal)("blind review pool (PostgreSQL)", () => {
     await seedJob({ gate: "HARD_REJECT", state: "HARD_REJECTED", outcome: null });
     await seedJob({ state: "MANUALLY_REMOVED" });
     await seedJob({ quality: "INCOMPLETE" });
-    await seedJob({ url: "https://himalayas.app/jobs/0123456789abcdef0123" });
+    // A broken board link on a job the employer also posted: not a lead, and still not a link to open.
+    await observe(await seedJob({ url: "https://himalayas.app/jobs/0123456789abcdef0123" }), { source: "GREENHOUSE", url: "https://boards.example.test/himalayas-twin" });
     await seedJob({ url: "javascript:alert(1)" });
     await seedJob({ policy: null });
     await seedJob({ policy: "deterministic_v3_other_policy" });
@@ -388,6 +389,26 @@ describe.skipIf(skipReal)("blind review pool (PostgreSQL)", () => {
     const applyLink = await seedJob();
     await observe(applyLink, { source: "HIMALAYAS", applyUrl: "https://lnkd.in/abc" });
     await expectOnly(good, { LINKEDIN: 5 });
+  });
+
+  it("leaves out job-board and aggregator leads under their own reason, before availability", async () => {
+    const good = await seedJob();
+    await seedJob({ url: "https://jobicy.com/jobs/invented-1" }); // board posting link
+    // Known from a board only, though its stored link is the employer's page.
+    await observe(await seedJob(), { source: "HIMALAYAS", url: "https://himalayas.app/companies/x/jobs/invented-2" });
+    await observe(await seedJob(), { source: "GMAIL_ALERT", url: "https://sg.indeed.com/viewjob?jk=invented" });
+    // An unverified lead is not counted as a posting that confirming would add.
+    await seedJob({ url: "https://remotive.com/remote-jobs/invented-3", verifiedAt: new Date(Date.now() - 3 * DAY) });
+    await expectOnly(good, { LEAD_JOB_BOARD_OR_AGGREGATOR: 4 });
+  });
+
+  it("draws a board job again once the employer's own posting is observed", async () => {
+    const job = await seedJob({ url: "https://jobicy.com/jobs/invented-4" });
+    expect((await load()).excluded.LEAD_JOB_BOARD_OR_AGGREGATOR).toBe(1);
+    await observe(job, { source: "GREENHOUSE", url: "https://boards.example.test/invented-4" });
+    const result = await load();
+    expect(result.rows.map((row) => row.id)).toEqual([job.jobId]);
+    expect(result.excluded).toEqual(counts({}));
   });
 
   it("draws 15 top and 15 middle from a pool of 100 read from the database", async () => {

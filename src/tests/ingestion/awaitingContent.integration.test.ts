@@ -266,6 +266,8 @@ describe.skipIf(skipReal)("awaiting content: read models and reconciliation (Pos
     const start = text.indexOf("CREATE OR REPLACE VIEW v_canonical_shortlist_scoped AS");
     const end = text.indexOf("AND canonical.archived_at IS NULL;", start) + "AND canonical.archived_at IS NULL;".length;
     await database.query(text.slice(start, end));
+    // Migration 123 reads v_job_content_state, so its views are rolled back first.
+    await database.query("DROP VIEW IF EXISTS v_job_leads_scoped");
     await database.query("DROP VIEW IF EXISTS v_job_awaiting_content_counts_scoped");
     await database.query("DROP VIEW IF EXISTS v_job_awaiting_content_scoped");
     await database.query("DROP VIEW IF EXISTS v_job_content_state");

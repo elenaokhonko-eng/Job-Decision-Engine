@@ -1,8 +1,8 @@
 /**
  * Blind review set (read-only, replay branch): 30 jobs scored under the top-K policy, 15 from the top of the ranking and 15
  * from the middle, shuffled, with no scores or ranks shown. Eligibility is in src/reporting/blindReviewRules.ts: confirmed
- * open on the draw date (Asia/Singapore), LinkedIn left out, and no saved, applied-to or previously labelled job
- * (--exclude=<earlier key.json>, repeatable). The count left out for each reason is printed. The sheet goes to the user; the
+ * open on the draw date (Asia/Singapore), LinkedIn and job-board or aggregator leads left out, and no saved, applied-to or
+ * previously labelled job (--exclude=<earlier key.json>, repeatable). The count left out for each reason is printed. The sheet goes to the user; the
  * key stays in a separate file so the labels can be scored afterwards.
  *
  *   SCORING_POLICY is not needed: this reads the scores the replay already wrote.

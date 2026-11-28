@@ -20,6 +20,8 @@ import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicEx
 import { LANE_ROUTER_RULE_VERSION, runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/laneRoutingCurrency.js";
+import { isLeadJobVersion, listLeadJobIds } from "../modules/catalog/index.js";
+import { LEAD_QUEUE_NOTE, supersedeLeadEvaluationQueueRows } from "../pipeline/evaluationQueueLineage.js";
 import {
   AI_EVALUATION_OUTCOMES,
   AI_EVALUATION_OUTCOMES_SQL,
@@ -80,6 +82,7 @@ import {
   heartbeatPipelineTask,
   releasePipelineTaskForRetry,
   type ClaimedPipelineTask,
+  JOB_IS_LEAD_NO_OP_REPAIR_ACTION,
 } from "./pipelineTasks.js";
 import {
   diffProviderCalls,
@@ -364,8 +367,10 @@ function incrementSeed(
   summary: SeedPipelineTasksSummary,
   taskType: PipelineStageTaskType,
   inserted: boolean,
-  skippedReason?: "JOB_ARCHIVED" | "AI_WORK_HELD",
+  skippedReason?: "JOB_ARCHIVED" | "JOB_IS_LEAD" | "AI_WORK_HELD",
 ): void {
+  // A lead's AI enqueue task is not created: neither inserted nor existing.
+  if (skippedReason === "JOB_IS_LEAD") return;
   // Held AI work is neither inserted nor existing; the worker summary's aiWork counts it.
   if (skippedReason === "AI_WORK_HELD") return;
   summary.byType[taskType] ??= { inserted: 0, existing: 0 };
@@ -638,6 +643,11 @@ async function enqueueStageTaskResult(
     mode?: "ENSURE_CURRENT" | "FORCE_RECOMPUTE";
   },
 ) {
+  // A lead never reaches the AI queue. No task is created, so none is left completed to suppress the enqueue once
+  // the job has the employer's or the owner's posting and stops being a lead.
+  if (taskType === AI_WORK_TASK_TYPE && (await isLeadJobVersion(clientOrPool, context.workspaceId, id))) {
+    return { taskId: "", inserted: false, reactivated: false, skippedReason: "JOB_IS_LEAD" as const };
+  }
   // The one place every AI enqueue task is created (successors, re-route and seed): nothing is created while the
   // owner's switch is closed or for a job not above the cut-off. The job keeps its state; the seed finds it later.
   if (taskType === AI_WORK_TASK_TYPE &&
@@ -975,6 +985,9 @@ export async function seedRecoverablePipelineTasks(
         )`
       : "FALSE";
 
+    // Leads are filtered before the cap, so they take no seed slot.
+    const leadIds = await listLeadJobIds(client as any, ctx.workspaceId);
+
     const aiWork = readAiWorkSettings();
     // Seed AI enqueue first. Jobs matched and decided outside the task chain (rematch and replay
     // scripts) reach the AI queue only through this seed, and it is the last stage before Apply Now.
@@ -987,7 +1000,8 @@ export async function seedRecoverablePipelineTasks(
       "ENQUEUE_EXPLANATION",
       `SELECT c.id AS canonical_job_id,
               COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
-              last_deferral.budget_run_id::text AS deferred_budget_run_id
+              last_deferral.budget_run_id::text AS deferred_budget_run_id,
+              last_lead_row.id::text AS lead_superseded_queue_id
        FROM canonical_jobs c
        LEFT JOIN LATERAL (
          SELECT id
@@ -1005,6 +1019,17 @@ export async function seedRecoverablePipelineTasks(
          ORDER BY deferral.created_at DESC, deferral.id DESC
          LIMIT 1
        ) last_deferral ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT queue.id
+         FROM evaluation_queue queue
+         WHERE queue.workspace_id = c.workspace_id
+           AND queue.canonical_job_id = c.id
+           AND queue.job_version_id = COALESCE(c.latest_job_version_id, jv.id)
+           AND queue.status = 'SUPERSEDED'
+           AND strpos(queue.last_error, $6::text) > 0
+         ORDER BY queue.enqueued_at DESC, queue.id DESC
+         LIMIT 1
+       ) last_lead_row ON TRUE
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET')
          AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
@@ -1012,6 +1037,7 @@ export async function seedRecoverablePipelineTasks(
          AND c.recommendation_outcome IN (${AI_EVALUATION_OUTCOMES_SQL})
          AND c.recommendation_requirement_score > $3::numeric
          AND c.recommendation_score_policy = $4::text
+         AND NOT (c.id = ANY($5::uuid[]))
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
          AND EXISTS (
            SELECT 1
@@ -1064,6 +1090,8 @@ export async function seedRecoverablePipelineTasks(
         ctx.workspaceId,
         maxPerType,
         ...(aiWork.mode === "OPEN" ? [aiWork.scoreCutoff, aiWork.scorePolicy] : [null, null]),
+        leadIds,
+        LEAD_QUEUE_NOTE,
       ],
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
@@ -1079,6 +1107,10 @@ export async function seedRecoverablePipelineTasks(
           // task. The enqueuer still applies the lane budget to that attempt.
           ...(typeof row.deferred_budget_run_id === "string" && row.deferred_budget_run_id !== ""
             ? { queue_budget_run_id: row.deferred_budget_run_id }
+            : {}),
+          // A queue row superseded because the job was a lead: once it is not one, the same context must run again.
+          ...(typeof row.lead_superseded_queue_id === "string"
+            ? { lead_superseded_queue_id: row.lead_superseded_queue_id }
             : {}),
         },
       }),
@@ -4065,6 +4097,11 @@ async function executeStageTask(
   if (taskType === "ENQUEUE_EXPLANATION") {
     await requireCurrentLaneRouting(jobVersionId, clientOrPool, ctx);
     await requireCurrentProfileMatchAndDecision(jobVersionId, clientOrPool, ctx);
+    // A task created before its job became a lead completes without queueing: a lead waits for no cut-off approval.
+    if (await isLeadJobVersion(clientOrPool, ctx.workspaceId, jobVersionId)) {
+      onDesignedNoOp(JOB_IS_LEAD_NO_OP_REPAIR_ACTION);
+      return;
+    }
     // A task created before the cut-off applied waits, visibly, instead of completing without queueing anything.
     if (!(await jobVersionMayReceiveAiWork(clientOrPool, ctx.workspaceId, jobVersionId, readAiWorkSettings()))) {
       throw new PipelineTaskDependencyBlockedError(
@@ -4682,6 +4719,14 @@ export async function runPipelineStageTaskWorker(
     const stageLimitsReached = claimTypes.length > 0 && claimTypes.every((taskType) =>
       (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks))
     );
+    // A lead's unstarted queue row is not waiting AI work: it is superseded here whether or not the owner's switch
+    // is open, because the enqueuer and the evaluation worker, which also do this, do not run while it is closed.
+    if (taskTypes.includes(AI_WORK_TASK_TYPE)) {
+      const supersededLeadRows = await supersedeLeadEvaluationQueueRows(client, { workspaceId: ctx.workspaceId });
+      if (supersededLeadRows > 0) {
+        console.log(`[pipeline-worker] superseded ${supersededLeadRows} evaluation queue row(s) of leads.`);
+      }
+    }
     summary.durationMs = durationMs;
     summary.providerCalls = summarizeProviderCalls(diffProviderCalls(providerCallsAtStart, snapshotProviderCalls()));
     if (summary.providerCalls.total_calls > 0) {
