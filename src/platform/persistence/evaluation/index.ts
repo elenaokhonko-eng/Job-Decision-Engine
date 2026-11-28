@@ -38,6 +38,25 @@ export async function selectJobVersionQualifies(
   return rows.length > 0;
 }
 
+/** The job versions of this list that are above the approved cut-off under the approved score policy. */
+export async function selectQualifyingJobVersions(
+  db: EvaluationQueryable,
+  workspaceId: string,
+  jobVersionIds: readonly string[],
+  approval: AiScoreApproval,
+): Promise<string[]> {
+  const { rows } = await db.query(
+    `SELECT v.id::text AS id
+       FROM job_versions v
+       JOIN canonical_jobs c ON c.workspace_id = v.workspace_id AND c.id = v.canonical_job_id
+      WHERE v.workspace_id = $1::uuid AND v.id = ANY($2::uuid[])
+        AND c.recommendation_requirement_score > $3::numeric
+        AND c.recommendation_score_policy = $4::text`,
+    [workspaceId, [...jobVersionIds], approval.scoreCutoff, approval.scorePolicy],
+  );
+  return rows.map((row) => row.id);
+}
+
 export async function selectHeldAiWorkCounts(
   db: EvaluationQueryable,
   workspaceId: string,

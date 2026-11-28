@@ -3,6 +3,7 @@ import pg from "pg";
 import { z } from "zod";
 import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import { insertPendingPipelineTasks, selectPipelineTaskStates, type PendingPipelineTaskRow } from "../platform/orchestration/index.js";
 import { archivedJobForPipelineTask, pipelineTaskTargetsArchivedJobSql } from "./jobArchiveGuard.js";
 import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
 import { OUTCOME_CONFLICT_REPAIR_ACTION, deciderReachableSql } from "./seedQueryScope.js";
@@ -111,6 +112,148 @@ export interface ReplayDeadLetterPipelineTaskResult {
  */
 export const JOB_IS_LEAD_NO_OP_REPAIR_ACTION = "SKIPPED_JOB_IS_LEAD";
 
+async function reopenBlockedOrSupersededTasks(client: QueryClient, workspaceId: string, taskIds: readonly string[]): Promise<number> {
+  if (taskIds.length === 0) return 0;
+  const reopened = await client.query<{ id: string }>(
+    `
+      UPDATE pipeline_tasks
+      SET status = 'PENDING',
+          available_at = NOW(),
+          lease_id = NULL,
+          lease_expires_at = NULL,
+          heartbeat_at = NULL,
+          claimed_by = NULL,
+          -- Skipping a lead is not a failed attempt, however often the job turns into one.
+          attempt_count = CASE WHEN repair_action = '${JOB_IS_LEAD_NO_OP_REPAIR_ACTION}' THEN 0 ELSE attempt_count END,
+          last_error = NULL,
+          blocked_on = NULL,
+          blocked_reason = NULL,
+          repair_action = NULL,
+          completed_at = NULL,
+          updated_at = NOW()
+      WHERE workspace_id = $1
+        AND id = ANY($2::uuid[])
+        AND (status = 'BLOCKED_DEPENDENCY'
+             OR (status = 'COMPLETED'
+                 AND repair_action IN ('SUPERSEDED_BY_GATE_OUTCOME', '${JOB_IS_LEAD_NO_OP_REPAIR_ACTION}')))
+      RETURNING id
+    `,
+    [workspaceId, [...taskIds]],
+  );
+  return reopened.rows.length;
+}
+
+/**
+ * A decider-version reassessment that completed WITHOUT stamping a decision under the current decider version is a lost
+ * result, not a discharged obligation: the same task identity would otherwise keep the closed row forever. Reopen it,
+ * but only for a job the DECIDE seed and handler can stamp (deciderReachableSql: one predicate with the seed and the
+ * zero check) and never an outcome conflict closed under this same decider version (it would conflict again; a version
+ * bump or reopenOutcomeConflictTasks resolves it). Idempotent: a reopened row is PENDING, so a repeat enqueue is a no-op.
+ */
+async function reopenUnstampedDeciderReassessments(client: QueryClient, workspaceId: string, taskIds: readonly string[]): Promise<number> {
+  if (taskIds.length === 0) return 0;
+  const reopened = await client.query<{ id: string }>(
+    `
+      UPDATE pipeline_tasks t
+      SET status = 'PENDING',
+          available_at = NOW(),
+          lease_id = NULL,
+          lease_expires_at = NULL,
+          heartbeat_at = NULL,
+          claimed_by = NULL,
+          attempt_count = 0,
+          last_error = NULL,
+          blocked_on = NULL,
+          blocked_reason = NULL,
+          repair_action = NULL,
+          completed_at = NULL,
+          updated_at = NOW()
+      WHERE t.workspace_id = $1
+        AND t.id = ANY($2::uuid[])
+        AND t.status = 'COMPLETED'
+        AND t.task_type = 'DECIDE_RECOMMENDATION'
+        AND LEFT(COALESCE(t.payload->>'reassessment_reason', ''), 16) = 'DECIDER_VERSION:'
+        AND NOT (COALESCE(t.repair_action, '') = '${OUTCOME_CONFLICT_REPAIR_ACTION}'
+                 AND COALESCE(t.payload->'outcome_conflict'->>'decider_version', '') = $3)
+        AND NOT EXISTS (
+          SELECT 1 FROM deterministic_decisions stamped
+           WHERE stamped.workspace_id = t.workspace_id AND stamped.job_version_id::text = t.payload->>'job_version_id'
+             AND stamped.decider_version = $3)
+        AND EXISTS (
+          SELECT 1 FROM canonical_jobs c
+           WHERE c.workspace_id = t.workspace_id AND c.latest_job_version_id::text = t.payload->>'job_version_id'
+             AND c.archived_at IS NULL AND c.is_test_fixture IS NOT TRUE
+             AND ${deciderReachableSql("c")})
+      RETURNING t.id
+    `,
+    [workspaceId, [...taskIds], DECIDER_VERSION],
+  );
+  return reopened.rows.length;
+}
+
+/** Validates an enqueue request and returns the row it would write: the one definition of a task's stored identity. */
+function preparePipelineTask(input: EnqueuePipelineTaskInput, ctx: WorkspaceContext) {
+  const availableAt = input.availableAt ? input.availableAt.toISOString() : null;
+  let taskPayload: unknown = input.payload;
+  let contextFingerprint = input.contextFingerprint ?? "legacy_pipeline_context_v1";
+  const intentRequested = input.intent !== undefined || input.producer !== undefined || input.stageVersion !== undefined;
+  if (intentRequested) {
+    const payload = parseTaskPayloadRecord(input.payload);
+    if (!payload) throw new Error("TaskIntentV2 requires an object payload.");
+    if (payload.task_intent !== undefined) throw new Error("Task payload already contains a task_intent.");
+
+    let intent = input.intent;
+    if (!intent) {
+      if (!input.producer || !input.stageVersion) {
+        throw new Error("TaskIntentV2 requires both producer and stageVersion.");
+      }
+      intent = createTaskIntentV2({
+        workspaceId: ctx.workspaceId,
+        taskType: input.taskType,
+        stageVersion: input.stageVersion,
+        producer: input.producer,
+        requestId: input.requestId ?? input.taskKey,
+        mode: input.mode,
+        triggerRevisionId: input.triggerRevisionId,
+        payload,
+      });
+    }
+
+    const parsedIntent = TaskIntentV2Schema.parse(intent);
+    const payloadForcesRecompute = payload.reprocess === true ||
+      payload.force_policy_recalculation === true ||
+      payload.reprocess_existing_state === true ||
+      taskPayloadString(payload, "verification_answer_revision_id") !== null;
+    if ((parsedIntent.mode === "FORCE_RECOMPUTE") !== payloadForcesRecompute) {
+      throw new Error("TaskIntentV2 mode must match explicit payload rerun flags.");
+    }
+    if (parsedIntent.taskType !== input.taskType || parsedIntent.target.workspaceId !== ctx.workspaceId) {
+      throw new Error("TaskIntentV2 type or workspace does not match the enqueue request.");
+    }
+    const targetMatchesPayload =
+      parsedIntent.target.canonicalJobId === taskPayloadString(payload, "canonical_job_id") &&
+      parsedIntent.target.jobVersionId === taskPayloadString(payload, "job_version_id") &&
+      parsedIntent.target.observationId === taskPayloadString(payload, "observation_id");
+    if (!targetMatchesPayload) throw new Error("TaskIntentV2 target does not match the enqueue payload.");
+
+    const payloadWithIntent = { ...payload, task_intent: parsedIntent };
+    const expectedFingerprint = buildPipelineTaskContextFingerprint({
+      workspaceId: ctx.workspaceId,
+      taskType: input.taskType,
+      taskVersion: parsedIntent.stageVersion,
+      payload: payloadWithIntent,
+    });
+    if (parsedIntent.contextFingerprint !== expectedFingerprint ||
+        (input.contextFingerprint !== undefined && input.contextFingerprint !== expectedFingerprint)) {
+      throw new Error("TaskIntentV2 context fingerprint does not match the enqueue payload.");
+    }
+    taskPayload = payloadWithIntent;
+    contextFingerprint = expectedFingerprint;
+  }
+  const maxAttempts = input.maxAttempts ?? 8;
+  return { availableAt, taskPayload, contextFingerprint, maxAttempts };
+}
+
 export async function enqueuePipelineTask(
   input: EnqueuePipelineTaskInput,
   clientOrPool: pg.Pool | pg.PoolClient,
@@ -127,64 +270,7 @@ export async function enqueuePipelineTask(
     if (archivedJob) {
       return { taskId: "", inserted: false, reactivated: false, skippedReason: "JOB_ARCHIVED" };
     }
-    const availableAt = input.availableAt ? input.availableAt.toISOString() : null;
-    let taskPayload: unknown = input.payload;
-    let contextFingerprint = input.contextFingerprint ?? "legacy_pipeline_context_v1";
-    const intentRequested = input.intent !== undefined || input.producer !== undefined || input.stageVersion !== undefined;
-    if (intentRequested) {
-      const payload = parseTaskPayloadRecord(input.payload);
-      if (!payload) throw new Error("TaskIntentV2 requires an object payload.");
-      if (payload.task_intent !== undefined) throw new Error("Task payload already contains a task_intent.");
-
-      let intent = input.intent;
-      if (!intent) {
-        if (!input.producer || !input.stageVersion) {
-          throw new Error("TaskIntentV2 requires both producer and stageVersion.");
-        }
-        intent = createTaskIntentV2({
-          workspaceId: ctx.workspaceId,
-          taskType: input.taskType,
-          stageVersion: input.stageVersion,
-          producer: input.producer,
-          requestId: input.requestId ?? input.taskKey,
-          mode: input.mode,
-          triggerRevisionId: input.triggerRevisionId,
-          payload,
-        });
-      }
-
-      const parsedIntent = TaskIntentV2Schema.parse(intent);
-      const payloadForcesRecompute = payload.reprocess === true ||
-        payload.force_policy_recalculation === true ||
-        payload.reprocess_existing_state === true ||
-        taskPayloadString(payload, "verification_answer_revision_id") !== null;
-      if ((parsedIntent.mode === "FORCE_RECOMPUTE") !== payloadForcesRecompute) {
-        throw new Error("TaskIntentV2 mode must match explicit payload rerun flags.");
-      }
-      if (parsedIntent.taskType !== input.taskType || parsedIntent.target.workspaceId !== ctx.workspaceId) {
-        throw new Error("TaskIntentV2 type or workspace does not match the enqueue request.");
-      }
-      const targetMatchesPayload =
-        parsedIntent.target.canonicalJobId === taskPayloadString(payload, "canonical_job_id") &&
-        parsedIntent.target.jobVersionId === taskPayloadString(payload, "job_version_id") &&
-        parsedIntent.target.observationId === taskPayloadString(payload, "observation_id");
-      if (!targetMatchesPayload) throw new Error("TaskIntentV2 target does not match the enqueue payload.");
-
-      const payloadWithIntent = { ...payload, task_intent: parsedIntent };
-      const expectedFingerprint = buildPipelineTaskContextFingerprint({
-        workspaceId: ctx.workspaceId,
-        taskType: input.taskType,
-        taskVersion: parsedIntent.stageVersion,
-        payload: payloadWithIntent,
-      });
-      if (parsedIntent.contextFingerprint !== expectedFingerprint ||
-          (input.contextFingerprint !== undefined && input.contextFingerprint !== expectedFingerprint)) {
-        throw new Error("TaskIntentV2 context fingerprint does not match the enqueue payload.");
-      }
-      taskPayload = payloadWithIntent;
-      contextFingerprint = expectedFingerprint;
-    }
-    const maxAttempts = input.maxAttempts ?? 8;
+    const { availableAt, taskPayload, contextFingerprint, maxAttempts } = preparePipelineTask(input, ctx);
 
     const inserted = await (client as QueryClient).query<{ id: string }>(
       `
@@ -242,84 +328,17 @@ export async function enqueuePipelineTask(
       [ctx.workspaceId, existing.rows[0].id]
     )).rows.length > 0;
     if (existing.rows[0].status === "BLOCKED_DEPENDENCY" || supersededByGate) {
-      const reactivated = await (client as QueryClient).query<{ id: string }>(
-        `
-          UPDATE pipeline_tasks
-          SET status = 'PENDING',
-              available_at = NOW(),
-              lease_id = NULL,
-              lease_expires_at = NULL,
-              heartbeat_at = NULL,
-              claimed_by = NULL,
-              -- Skipping a lead is not a failed attempt, however often the job turns into one.
-              attempt_count = CASE WHEN repair_action = '${JOB_IS_LEAD_NO_OP_REPAIR_ACTION}' THEN 0 ELSE attempt_count END,
-              last_error = NULL,
-              blocked_on = NULL,
-              blocked_reason = NULL,
-              repair_action = NULL,
-              completed_at = NULL,
-              updated_at = NOW()
-          WHERE workspace_id = $1
-            AND id = $2
-            AND (status = 'BLOCKED_DEPENDENCY'
-                 OR (status = 'COMPLETED'
-                     AND repair_action IN ('SUPERSEDED_BY_GATE_OUTCOME', '${JOB_IS_LEAD_NO_OP_REPAIR_ACTION}')))
-          RETURNING id
-        `,
-        [ctx.workspaceId, existing.rows[0].id]
-      );
+      const reactivated = await reopenBlockedOrSupersededTasks(client as QueryClient, ctx.workspaceId, [existing.rows[0].id]);
       return {
         taskId: existing.rows[0].id,
         inserted: false,
-        reactivated: reactivated.rows.length > 0,
+        reactivated: reactivated > 0,
       };
     }
 
-    // A decider-version reassessment that completed WITHOUT stamping a decision under the current decider version is a lost
-    // result, not a discharged obligation: the same task identity would otherwise keep the closed row forever. Reopen it,
-    // but only for a job the DECIDE seed and handler can stamp (deciderReachableSql: one predicate with the seed and the
-    // zero check) and never an outcome conflict closed under this same decider version (it would conflict again; a version
-    // bump or reopenOutcomeConflictTasks resolves it). Idempotent: a reopened row is PENDING, so a repeat enqueue is a no-op.
-    if (existing.rows[0].status === "COMPLETED" && input.taskType === "DECIDE_RECOMMENDATION") {
-      const reopened = await (client as QueryClient).query<{ id: string }>(
-        `
-          UPDATE pipeline_tasks t
-          SET status = 'PENDING',
-              available_at = NOW(),
-              lease_id = NULL,
-              lease_expires_at = NULL,
-              heartbeat_at = NULL,
-              claimed_by = NULL,
-              attempt_count = 0,
-              last_error = NULL,
-              blocked_on = NULL,
-              blocked_reason = NULL,
-              repair_action = NULL,
-              completed_at = NULL,
-              updated_at = NOW()
-          WHERE t.workspace_id = $1
-            AND t.id = $2
-            AND t.status = 'COMPLETED'
-            AND t.task_type = 'DECIDE_RECOMMENDATION'
-            AND LEFT(COALESCE(t.payload->>'reassessment_reason', ''), 16) = 'DECIDER_VERSION:'
-            AND NOT (COALESCE(t.repair_action, '') = '${OUTCOME_CONFLICT_REPAIR_ACTION}'
-                     AND COALESCE(t.payload->'outcome_conflict'->>'decider_version', '') = $3)
-            AND NOT EXISTS (
-              SELECT 1 FROM deterministic_decisions stamped
-               WHERE stamped.workspace_id = t.workspace_id AND stamped.job_version_id::text = t.payload->>'job_version_id'
-                 AND stamped.decider_version = $3)
-            AND EXISTS (
-              SELECT 1 FROM canonical_jobs c
-               WHERE c.workspace_id = t.workspace_id AND c.latest_job_version_id::text = t.payload->>'job_version_id'
-                 AND c.archived_at IS NULL AND c.is_test_fixture IS NOT TRUE
-                 AND ${deciderReachableSql("c")})
-          RETURNING t.id
-        `,
-        [ctx.workspaceId, existing.rows[0].id, DECIDER_VERSION]
-      );
-      if (reopened.rows.length > 0) {
-        return { taskId: existing.rows[0].id, inserted: false, reactivated: true };
-      }
+    if (existing.rows[0].status === "COMPLETED" && input.taskType === "DECIDE_RECOMMENDATION" &&
+        await reopenUnstampedDeciderReassessments(client as QueryClient, ctx.workspaceId, [existing.rows[0].id]) > 0) {
+      return { taskId: existing.rows[0].id, inserted: false, reactivated: true };
     }
 
     return { taskId: existing.rows[0].id, inserted: false, reactivated: false };
@@ -328,6 +347,66 @@ export async function enqueuePipelineTask(
       (client as any).release();
     }
   }
+}
+
+/**
+ * The seed's form of `enqueuePipelineTask`: a fixed number of round trips for the whole list. Work already stored under
+ * the same identity does not take a slot of `limit`; the same reopen paths apply (blocked, superseded by a gate
+ * outcome, skipped as a job lead, unstamped decider reassessment) and a reopened task does take one. Inputs are taken in order. The caller has
+ * excluded archived jobs. `existing` counts the stored tasks met before the limit was filled, `reopened` those of them
+ * that were put back to PENDING.
+ */
+export async function enqueuePipelineTasks(
+  inputs: readonly EnqueuePipelineTaskInput[],
+  client: pg.Pool | pg.PoolClient,
+  options: { context: WorkspaceContext; limit: number },
+): Promise<{ inserted: number; reopened: number; existing: number }> {
+  if (inputs.length === 0) return { inserted: 0, reopened: 0, existing: 0 };
+  const ctx = options.context;
+  const prepared = inputs.map((input) => ({ input, ...preparePipelineTask(input, ctx) }));
+  const identity = (taskKey: string, fingerprint: string) => JSON.stringify([taskKey, fingerprint]);
+  const stored = new Map(
+    (await selectPipelineTaskStates(client, ctx.workspaceId, prepared.map((task) => task.input.taskKey)))
+      .map((state) => [identity(state.taskKey, state.contextFingerprint), state]),
+  );
+
+  const fresh: PendingPipelineTaskRow[] = [];
+  const blockedOrSuperseded: string[] = [];
+  const deciderReassessments: string[] = [];
+  const seen = new Set<string>();
+  let existing = 0;
+  for (const task of prepared) {
+    if (fresh.length + blockedOrSuperseded.length + deciderReassessments.length >= options.limit) break;
+    const key = identity(task.input.taskKey, task.contextFingerprint);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const state = stored.get(key);
+    if (!state) {
+      fresh.push({
+        taskType: task.input.taskType,
+        taskKey: task.input.taskKey,
+        payload: task.taskPayload,
+        contextFingerprint: task.contextFingerprint,
+        maxAttempts: task.maxAttempts,
+        availableAt: task.availableAt,
+      });
+      continue;
+    }
+    existing += 1;
+    if (state.status === "BLOCKED_DEPENDENCY" || (state.status === "COMPLETED" &&
+        (state.repairAction === "SUPERSEDED_BY_GATE_OUTCOME" || state.repairAction === JOB_IS_LEAD_NO_OP_REPAIR_ACTION))) {
+      blockedOrSuperseded.push(state.id);
+    } else if (state.status === "COMPLETED" && task.input.taskType === "DECIDE_RECOMMENDATION" &&
+        state.reassessmentReason?.startsWith("DECIDER_VERSION:")) {
+      deciderReassessments.push(state.id);
+    }
+  }
+
+  const inserted = await insertPendingPipelineTasks(client, ctx.workspaceId, fresh);
+  const reopened =
+    await reopenBlockedOrSupersededTasks(client as QueryClient, ctx.workspaceId, blockedOrSuperseded) +
+    await reopenUnstampedDeciderReassessments(client as QueryClient, ctx.workspaceId, deciderReassessments);
+  return { inserted, reopened, existing: existing + fresh.length - inserted };
 }
 
 /**
