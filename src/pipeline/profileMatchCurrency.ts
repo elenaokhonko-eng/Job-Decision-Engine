@@ -262,3 +262,43 @@ export function restoredAwaitingRematchSql(canonicalAlias: string): string {
           WHERE rematch.workspace_id = ${c}.workspace_id AND rematch.canonical_job_id = ${c}.id
             AND rematch.status = 'COMPLETED' AND rematch.started_at > restore_event.event_at))`;
 }
+
+/**
+ * SQL scalar: the id of the gate decision that lifted the job (alias `c` = canonical_jobs) out of a hard reject and has had
+ * no completed match since, or NULL. gate_decisions is append-only, so this also covers re-gates made before the rule.
+ */
+export function liftingGateDecisionSql(canonicalAlias: string): string {
+  const c = alias(canonicalAlias, "canonical alias");
+  return `(
+    SELECT lifted.id FROM gate_decisions lifted
+     WHERE lifted.workspace_id = ${c}.workspace_id AND lifted.canonical_job_id = ${c}.id AND lifted.decision <> 'HARD_REJECT'
+       -- The decision just before this one rejected the job, and none after it has.
+       AND (SELECT earlier.decision FROM gate_decisions earlier
+             WHERE earlier.workspace_id = lifted.workspace_id AND earlier.canonical_job_id = lifted.canonical_job_id
+               AND (earlier.created_at, earlier.id) < (lifted.created_at, lifted.id)
+             ORDER BY earlier.created_at DESC, earlier.id DESC LIMIT 1) = 'HARD_REJECT'
+       AND NOT EXISTS (
+         SELECT 1 FROM gate_decisions again
+          WHERE again.workspace_id = lifted.workspace_id AND again.canonical_job_id = lifted.canonical_job_id
+            AND again.decision = 'HARD_REJECT' AND (again.created_at, again.id) > (lifted.created_at, lifted.id))
+       AND NOT EXISTS (
+         SELECT 1 FROM match_runs rematch
+          WHERE rematch.workspace_id = lifted.workspace_id AND rematch.canonical_job_id = lifted.canonical_job_id
+            AND rematch.status = 'COMPLETED' AND rematch.started_at > lifted.created_at)
+     ORDER BY lifted.created_at DESC, lifted.id DESC LIMIT 1)`;
+}
+
+/**
+ * SQL predicate: a re-gate lifted the job (alias `c`) out of rejection and it has not been re-matched. It keeps what it
+ * holds and is never sent to AI meanwhile. "No matching lane" ends the wait: that is the router's result.
+ * The view v_job_awaiting_rematch (migration 124) states the same condition; a test compares them.
+ */
+export function liftedAwaitingRematchSql(canonicalAlias: string): string {
+  const c = alias(canonicalAlias, "canonical alias");
+  return `(
+    ${c}.gate_decision IS DISTINCT FROM 'HARD_REJECT'
+    AND COALESCE(${c}.processing_state, ${c}.processing_status) IS DISTINCT FROM 'HARD_REJECTED'
+    AND NOT COALESCE(COALESCE(${c}.processing_state, ${c}.processing_status) = 'UNMATCHED'
+                     AND ${c}.routing_disposition = 'POLICY_NO_MATCH', FALSE)
+    AND ${liftingGateDecisionSql(c)} IS NOT NULL)`;
+}

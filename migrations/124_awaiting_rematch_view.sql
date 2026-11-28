@@ -7,12 +7,15 @@
 --   DROP TABLE IF EXISTS job_rematch_waits;
 --   DELETE FROM schema_migrations WHERE version = '124_awaiting_rematch_view.sql';
 --
--- A job "awaits a re-match" for one of the decider's two reasons: it keeps its stored result, and every list marks it.
+-- A job "awaits a re-match" for one of the decider's three reasons: it keeps its stored result until then. Only the
+-- lists that read this view mark it.
 --   1. It holds a stored score and its profile match is not current (the current-match test is the decider's). Jobs
 --      already settled (ineligible, or no matching lane) are not waiting for this reason.
 --   2. It was restored from the archive, holds a result (with or without a score), and no match has completed since
 --      the restore, even where the match from before the archive still looks current. This is the condition of
 --      restoredAwaitingRematchSql (src/pipeline/profileMatchCurrency.ts).
+--   3. A re-gate lifted it out of rejection (the gate decision before was HARD_REJECT, per gate_decisions), it holds a
+--      result, and no match has completed since. This is the condition of liftedAwaitingRematchSql (same file).
 --
 -- job_rematch_waits (owner: the decision module) records WHEN a job started waiting, and nothing else. A row is
 -- inserted the first time the job is found waiting, is never moved by a later pass, and is deleted when the job no
@@ -86,7 +89,31 @@ WHERE job.archived_at IS NULL
               WHERE rematch.workspace_id = job.workspace_id AND rematch.canonical_job_id = job.id
                 AND rematch.status = 'COMPLETED' AND rematch.started_at > restore_event.event_at))
     )
+    OR (
+      -- A re-gate lifted the job out of rejection (gate_decisions) and no match has completed since.
+      (job.recommendation_outcome IS NOT NULL OR job.recommendation_eligibility IS NOT NULL
+        OR job.recommendation_requirement_score IS NOT NULL)
+      AND job.gate_decision IS DISTINCT FROM 'HARD_REJECT'
+      AND COALESCE(job.processing_state, job.processing_status) IS DISTINCT FROM 'HARD_REJECTED'
+      AND NOT COALESCE(COALESCE(job.processing_state, job.processing_status) = 'UNMATCHED'
+                       AND job.routing_disposition = 'POLICY_NO_MATCH', FALSE)
+      AND EXISTS (
+        SELECT 1 FROM gate_decisions lifted
+         WHERE lifted.workspace_id = job.workspace_id AND lifted.canonical_job_id = job.id AND lifted.decision <> 'HARD_REJECT'
+           AND (SELECT earlier.decision FROM gate_decisions earlier
+                 WHERE earlier.workspace_id = lifted.workspace_id AND earlier.canonical_job_id = lifted.canonical_job_id
+                   AND (earlier.created_at, earlier.id) < (lifted.created_at, lifted.id)
+                 ORDER BY earlier.created_at DESC, earlier.id DESC LIMIT 1) = 'HARD_REJECT'
+           AND NOT EXISTS (
+             SELECT 1 FROM gate_decisions again
+              WHERE again.workspace_id = lifted.workspace_id AND again.canonical_job_id = lifted.canonical_job_id
+                AND again.decision = 'HARD_REJECT' AND (again.created_at, again.id) > (lifted.created_at, lifted.id))
+           AND NOT EXISTS (
+             SELECT 1 FROM match_runs rematch
+              WHERE rematch.workspace_id = lifted.workspace_id AND rematch.canonical_job_id = lifted.canonical_job_id
+                AND rematch.status = 'COMPLETED' AND rematch.started_at > lifted.created_at))
+    )
   );
 
 COMMENT ON VIEW v_job_awaiting_rematch IS
-  'Live jobs keeping a stored result until a re-match (no current profile match, or restored and not re-matched), and since when. Read by the lists and by the zero check awaiting_rematch_over_limit.';
+  'Live jobs keeping a stored result until a re-match (no current profile match, restored, or lifted out of rejection, and not re-matched), and since when. Read by the lists and by the zero check awaiting_rematch_over_limit.';

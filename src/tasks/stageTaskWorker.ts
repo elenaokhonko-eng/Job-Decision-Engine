@@ -26,6 +26,8 @@ import {
   AI_EVALUATION_OUTCOMES,
   AI_EVALUATION_OUTCOMES_SQL,
   carriedScoreDecisionSql,
+  liftedAwaitingRematchSql,
+  liftingGateDecisionSql,
   PROFILE_REMATCH_OUTCOMES,
   currentMatcherPolicySql,
   currentProfileMatchSql,
@@ -1607,6 +1609,51 @@ export async function seedRecoverablePipelineTasks(
     seedScope,
     maxPerType,
     );
+
+    // A job a re-gate lifted out of rejection gets the step the gate handler would have queued. A re-gate run by a script
+    // queues nothing, and the tasks of the job's earlier run can suppress the ordinary seeds, so the identity carries the
+    // lifting gate decision: once per lift, and not while any task of the job version is still open.
+    const liftedNextSteps: Array<[PipelineStageTaskType, string]> = [
+      ["PUBLISH_EMBEDDING", `(COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED' OR ${ROUTABLE_VERIFICATION_SQL})`],
+      ["DECIDE_RECOMMENDATION", `(COALESCE(c.processing_state, c.processing_status) = 'NEEDS_VERIFICATION' AND NOT COALESCE(${ROUTABLE_VERIFICATION_SQL}, FALSE))`],
+    ];
+    for (const [taskType, stateSql] of liftedNextSteps) {
+      await selectAndEnqueue(
+        client as any,
+        ctx,
+        summary,
+        taskType,
+        `SELECT c.id AS canonical_job_id, jv.id AS job_version_id, ${liftingGateDecisionSql("c")} AS lifted_gate_decision_id
+         FROM canonical_jobs c
+         JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
+         WHERE c.workspace_id = $1
+           AND ${stateSql}
+           AND ${liftedAwaitingRematchSql("c")}
+           AND NOT EXISTS (
+             SELECT 1 FROM pipeline_tasks open_task
+              WHERE open_task.workspace_id = c.workspace_id
+                AND open_task.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+                AND open_task.payload->>'job_version_id' = jv.id::text)
+           AND ${notBlockedOnJobContentSql(taskType)}
+         ORDER BY jv.observed_at ASC
+         LIMIT $2`,
+        [ctx.workspaceId, maxPerType],
+        (row) => ({
+          id: requiredSeedValue(row, "job_version_id"),
+          payload: {
+            canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+            job_version_id: requiredSeedValue(row, "job_version_id"),
+            reprocess_existing_state: true,
+            repair_existing_state: true,
+            repair_generation: `GATE_LIFT:${requiredSeedValue(row, "lifted_gate_decision_id")}`,
+          },
+        }),
+        enabledTypes,
+        includeTestFixtures,
+        seedScope,
+        maxPerType,
+      );
+    }
 
     await selectAndEnqueue(
       client as any,

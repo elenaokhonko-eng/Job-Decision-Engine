@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { regateJobIds } from "../../../scripts/regate_job_ids.js";
 import { isLocalPostgresConnectionString } from "../../db/pgSsl.js";
 import { buildJobSourceEvidence } from "../../ingestion/jobSourceEvidence.js";
 import { AWAITING_REMATCH_LIMIT_DAYS } from "../../modules/decision/index.js";
@@ -9,7 +10,7 @@ import { runDeterministicMatcher } from "../../pipeline/deterministicMatcher.js"
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
 import { runHardGates } from "../../pipeline/hardGate.js";
 import { runNormalization } from "../../pipeline/normalize.js";
-import { carriedScoreDecisionSql, restoredAwaitingRematchSql } from "../../pipeline/profileMatchCurrency.js";
+import { carriedScoreDecisionSql, liftedAwaitingRematchSql, restoredAwaitingRematchSql } from "../../pipeline/profileMatchCurrency.js";
 import { runRecommendationDecider } from "../../pipeline/recommendationDecider.js";
 import { saveWorkspacePreferenceRevision } from "../../policy/workspacePreferenceRegistry.js";
 import { STAGE3_SCHEMA_VERSION } from "../../policy/stage3Contracts.js";
@@ -616,6 +617,171 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     // A skipped job without a score is marked too while it waits.
     expect(await listedAsWaiting(target)).toBe(await restoredAwaiting(target));
   });
+
+  // "A result is never cleared": a re-gate that lifts a job out of rejection keeps what it holds, marks it as waiting
+  // and gives it its next step.
+  const place = (target: StackJob, mode: string, where: string) => s().db.query(
+    `UPDATE canonical_jobs SET workplace_type = $2, location = $3, location_summary = $3 WHERE id = $1`,
+    [target.canonicalJobId, mode, where]);
+
+  /** A job that was matched, then really rejected by the gate, and still holds a stored score and outcome. */
+  async function rejectedHoldingAResult(result: "stored" | "nothing" = "stored"): Promise<StackJob> {
+    const target = await job(`lift-${randomUUID().slice(0, 8)}`);
+    await drain(target);
+    await place(target, "ONSITE", "London");
+    expect(await runHardGates(s().db, { context: s().ctx, canonicalJobIds: [target.canonicalJobId], reprocess: true }))
+      .toMatchObject({ errors: 0, hardRejected: 1 });
+    if (result === "stored") {
+      await storeResult(target, "SKIP", "HARD_REJECTED");
+      await s().db.query(`UPDATE canonical_jobs SET recommendation_eligibility = 'INELIGIBLE' WHERE id = $1`, [target.canonicalJobId]);
+    } else {
+      await s().db.query(`UPDATE canonical_jobs SET recommendation_eligibility = NULL, recommendation_outcome = NULL WHERE id = $1`,
+        [target.canonicalJobId]);
+    }
+    return target;
+  }
+
+  const pass = (target: StackJob, taskTypes: readonly string[]) => runPipelineStageTaskWorker(s().db, {
+    context: s().ctx, seed: true, includeTestFixtures: true, reconcileStalePending: false, heartbeatSeconds: 0,
+    minTimeToStartTaskMs: 0, maxTasks: 30, taskTypes: [...taskTypes] as never, jobVersionIds: [target.jobVersionId],
+  });
+
+  const REGATES: Array<[string, (target: StackJob) => Promise<void>]> = [
+    ["the forced re-gate (scripts/regate_job_ids.ts)", async (target) => {
+      expect(await regateJobIds(s().db, s().ctx, [target.canonicalJobId])).toMatchObject({ ok: true, regated: 1 });
+    }],
+    ["the seeded gate refresh", async (target) => {
+      await s().db.query(`UPDATE gate_decisions SET gate_version = 'gate-2000.1' WHERE canonical_job_id = $1`, [target.canonicalJobId]);
+      await pass(target, ["APPLY_HARD_GATES"]);
+    }],
+  ];
+
+  const latestGate = async (target: StackJob) => (await s().db.query<{ decision: string; created_at: Date }>(
+    `SELECT decision, created_at FROM gate_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+    [target.canonicalJobId])).rows[0]!;
+
+  /** The decider's own test of "lifted and not re-matched". */
+  const liftedAwaiting = async (target: StackJob) => (await s().db.query<{ waiting: boolean }>(
+    `SELECT ${liftedAwaitingRematchSql("c")} AS waiting FROM canonical_jobs c WHERE c.id = $1`,
+    [target.canonicalJobId])).rows[0]!.waiting;
+
+  const matchedSince = async (target: StackJob, since: Date) => (await s().db.query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM match_runs WHERE canonical_job_id = $1 AND status = 'COMPLETED' AND started_at > $2`,
+    [target.canonicalJobId, since])).rows[0]!.n;
+
+  const LIFTS = [
+    // The case seen on a real re-gate: the work mode is unknown, so the job needs verification and is still routable.
+    ["rejected -> NEEDS_VERIFICATION (unknown work mode)", "UNKNOWN", "NEEDS_VERIFICATION"],
+    ["rejected -> pass", "REMOTE", "PASS"],
+  ] as const;
+
+  it.each(LIFTS.flatMap(([lift, mode, decision]) => REGATES.map(([path, regate]) => [lift, path, mode, decision, regate] as const)))(
+    "%s by %s keeps the stored result, marks the job as waiting and runs its next step", async (_lift, _path, mode, decision, regate) => {
+      const target = await rejectedHoldingAResult();
+      const held = { score: 0.9, coverage: 0.8, eligibility: "INELIGIBLE", outcome: "SKIP" };
+
+      // The first run of the job queued it for AI once: only what the lifted job adds counts below.
+      const queuedBefore = await queued(target);
+      await place(target, mode, "Singapore");
+      await regate(target);
+      const gate = await latestGate(target);
+      expect(gate.decision).toBe(decision);
+      // The gate task queues its own successor in the pass that ran it. A script re-gate runs outside a pass and queues
+      // nothing: the seed of the next pass does.
+      const open = (await tasks(target)).filter((task) => task.status === "PENDING").map((task) => task.task_type);
+      if (_path === "the seeded gate refresh") expect(open).toContain("PUBLISH_EMBEDDING");
+      else expect(open).toEqual([]);
+
+      // 1. The stored result is kept, by the re-gate and by a decision made before the re-match.
+      expect(await stored(target)).toMatchObject(held);
+      expect((await decide(target)).errors).toBe(0);
+      expect(await stored(target)).toMatchObject(held);
+      // 2. The job is marked as waiting, and nothing of it goes to AI.
+      expect(await listedAsWaiting(target)).toBe(true);
+      expect(await liftedAwaiting(target)).toBe(true);
+      await runExplanationQueueEnqueuer(s().db, { context: s().ctx });
+      expect(await queued(target)).toBe(queuedBefore);
+      expect(await matchedSince(target, gate.created_at)).toBe(0);
+
+      // 3. One seeded pass queues the next step and runs it through to a fresh match.
+      await pass(target, STAGES);
+      expect(await matchedSince(target, gate.created_at)).toBeGreaterThanOrEqual(1);
+      expect(await listedAsWaiting(target)).toBe(false);
+      expect((await stored(target)).eligibility).not.toBe("INELIGIBLE");
+      await noFailures(target);
+    }, 180_000);
+
+  it.each(REGATES)("a lifted job with nothing stored still gets its next step, by %s", async (_path, regate) => {
+    const target = await rejectedHoldingAResult("nothing");
+    await place(target, "REMOTE", "Singapore");
+    await regate(target);
+    const gate = await latestGate(target);
+    expect(await listedAsWaiting(target)).toBe(false);
+    await pass(target, STAGES);
+    expect(await matchedSince(target, gate.created_at)).toBeGreaterThanOrEqual(1);
+    await noFailures(target);
+  }, 180_000);
+
+  // The usual history: the real reject cleared the score and its decision left Skip. That Skip is kept until the re-match.
+  it.each(REGATES)("the Skip a real rejection left is kept and marked until the re-match, after a lift by %s", async (_path, regate) => {
+    const target = await job(`lift-skip-${randomUUID().slice(0, 8)}`);
+    await drain(target);
+    await place(target, "ONSITE", "London");
+    await runHardGates(s().db, { context: s().ctx, canonicalJobIds: [target.canonicalJobId], reprocess: true });
+    expect((await decide(target)).errors).toBe(0);
+    const held = { score: null, coverage: null, eligibility: "INELIGIBLE", outcome: "SKIP" };
+    expect(await stored(target)).toMatchObject(held);
+
+    await place(target, "REMOTE", "Singapore");
+    await regate(target);
+    const gate = await latestGate(target);
+    expect(gate.decision).toBe("PASS");
+    expect((await decide(target)).errors).toBe(0);
+    expect(await stored(target)).toMatchObject(held);
+    expect((await latestDecision(target))!.json.trace.notes).toEqual(expect.arrayContaining(["awaiting_rematch", "lifted_from_rejection"]));
+    expect(await listedAsWaiting(target)).toBe(true);
+
+    await pass(target, STAGES);
+    expect(await matchedSince(target, gate.created_at)).toBeGreaterThanOrEqual(1);
+    expect(await listedAsWaiting(target)).toBe(false);
+    expect(await stored(target)).toMatchObject({ eligibility: "ELIGIBLE" });
+    await noFailures(target);
+  }, 180_000);
+
+  // The tasks of an earlier lift are complete, under the identities the ordinary seeds use.
+  it("a job lifted a second time still gets its next step", async () => {
+    const target = await job(`lift-twice-${randomUUID().slice(0, 8)}`);
+    await drain(target);
+    for (let round = 1; round <= 2; round += 1) {
+      await place(target, "ONSITE", "London");
+      await runHardGates(s().db, { context: s().ctx, canonicalJobIds: [target.canonicalJobId], reprocess: true });
+      await place(target, "REMOTE", "Singapore");
+      await REGATES[0]![1](target);
+      const gate = await latestGate(target);
+      await pass(target, STAGES);
+      expect(await matchedSince(target, gate.created_at), `lift ${round}`).toBeGreaterThanOrEqual(1);
+      expect(await liftedAwaiting(target)).toBe(false);
+    }
+    await noFailures(target);
+  }, 180_000);
+
+  // No re-match can be queued here: routing this verification code would change a routing rule.
+  it("a lifted job whose verification cannot be routed gets its decision, keeps its result and stays marked", async () => {
+    const target = await rejectedHoldingAResult();
+    await place(target, "UNKNOWN", "Singapore");
+    await REGATES[0]![1](target);
+    await s().db.query(
+      `UPDATE canonical_jobs SET rejection_reason = 'NEEDS_VERIFICATION_WORK_AUTHORIZATION, NEEDS_VERIFICATION' WHERE id = $1`,
+      [target.canonicalJobId]);
+    const gate = await latestGate(target);
+    await pass(target, STAGES);
+    expect(await latestDecision(target)).toMatchObject({ eligibility: "INELIGIBLE", outcome: "SKIP" });
+    expect((await latestDecision(target))!.json.trace.notes).toContain("lifted_from_rejection");
+    expect(await stored(target)).toMatchObject({ score: 0.9, eligibility: "INELIGIBLE", outcome: "SKIP" });
+    expect(await matchedSince(target, gate.created_at)).toBe(0);
+    expect(await listedAsWaiting(target)).toBe(true);
+    await noFailures(target);
+  }, 180_000);
 
   it.each(RESTORE_PATHS)("the re-match after a restore gives a fresh result: %s", async (_label, restore) => {
     const target = await job(`restore-rematch-${randomUUID().slice(0, 8)}`);
