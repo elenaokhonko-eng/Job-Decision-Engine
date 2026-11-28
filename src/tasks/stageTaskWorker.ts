@@ -3281,7 +3281,7 @@ async function maybeEnqueueAfterTask(
 
   const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
   // The re-gate of a restored job re-runs the same job version too. Without its own successor identities the completed
-  // tasks of the first run suppress them, and the restored job (outcome cleared) would never be decided again.
+  // tasks of the first run suppress them, and the restored job would never be re-matched.
   const restoreReason = taskType === "APPLY_HARD_GATES" && typeof payload.reassessment_reason === "string"
     && payload.reassessment_reason.startsWith("ARCHIVE_RESTORE:")
     ? payload.reassessment_reason
@@ -4100,11 +4100,11 @@ async function executeStageTask(
       return;
     }
     const decidePayload = (task.payload || {}) as Record<string, unknown>;
-    // A restored job has lost its verdict: it is decided now, whatever stage it is in and with or without a current
-    // match (the decider then gives it a result without a score, or carries the stored one).
+    // A restored job is decided now, whatever stage it is in and with or without a current match. It has its old result
+    // back and the decider keeps it until a re-match, lowered only by a real override.
     const restored = typeof decidePayload.reassessment_reason === "string" && decidePayload.reassessment_reason.startsWith("ARCHIVE_RESTORE:");
     if (restored && !(await jobVersionIsDecidable(clientOrPool, ctx, jobVersionId))) {
-      // Its restore kept the outcome it had; the stages that complete the content queue the next decision.
+      // It keeps the result it had; the stages that complete the content queue the next decision.
       onDesignedNoOp(decisionNotStampable("AWAITING_CONTENT_NOT_DECIDABLE"));
       return;
     }

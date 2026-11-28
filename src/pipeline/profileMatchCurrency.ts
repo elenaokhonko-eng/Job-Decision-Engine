@@ -1,4 +1,4 @@
-import { STORED_SCORE_CARRIED_NOTE } from "../modules/decision/index.js";
+import { AWAITING_REMATCH_NOTE, STORED_SCORE_CARRIED_NOTE } from "../modules/decision/index.js";
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 import { activeScoringPolicy, matcherPolicyVersionFor } from "./scoringPolicy.js";
 
@@ -241,5 +241,21 @@ export function decisionOnLatestMatchSql(canonicalAlias: string, decisionAlias: 
  */
 export function carriedScoreDecisionSql(decisionAlias: string): string {
   const dd = alias(decisionAlias, "decision alias");
-  return `COALESCE(${dd}.decision_json->'trace'->'notes' ? '${STORED_SCORE_CARRIED_NOTE}', FALSE)`;
+  return `COALESCE(${dd}.decision_json->'trace'->'notes' ?| ARRAY['${STORED_SCORE_CARRIED_NOTE}', '${AWAITING_REMATCH_NOTE}'], FALSE)`;
+}
+
+/**
+ * SQL predicate: the job (alias `c` = canonical_jobs) was restored from the archive and no match has completed since.
+ * Until then it keeps the result it had before, whatever match run is still on record, and is never sent to AI.
+ */
+export function restoredAwaitingRematchSql(canonicalAlias: string): string {
+  const c = alias(canonicalAlias, "canonical alias");
+  return `EXISTS (
+    SELECT 1 FROM job_archive_events restore_event
+     WHERE restore_event.workspace_id = ${c}.workspace_id AND restore_event.canonical_job_id = ${c}.id
+       AND restore_event.action IN ('RESTORED', 'REPOST_REACTIVATED')
+       AND NOT EXISTS (
+         SELECT 1 FROM match_runs rematch
+          WHERE rematch.workspace_id = ${c}.workspace_id AND rematch.canonical_job_id = ${c}.id
+            AND rematch.status = 'COMPLETED' AND rematch.started_at > restore_event.event_at))`;
 }

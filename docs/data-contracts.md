@@ -84,8 +84,9 @@ One shared resolver, `resolveEffectiveWorkabilityPolicy` (`src/pipeline/effectiv
 ## A re-run never clears a result
 
 - A recompute without a requirement score or coverage carries the stored one; the decision records it in `outputs`, with `inputs` null and the trace note `stored_score_carried`.
-- A job without a current match keeps its stored eligibility and outcome, lowered only by facts that do not depend on the score. A carried result is never queued for AI.
-- A restore from the archive queues the job's decision at once.
+- A job without a current match keeps its stored eligibility and outcome, lowered only by real overrides: hard reject, closed posting, pay below the floor, a fact needing verification, no matching lane (and the career-track cap). A carried result is never queued for AI.
+- A restore from the archive never clears or replaces a result. It queues the job's decision at once, and until a match completes after the restore the job keeps its old result and is not queued for AI.
+- A real hard reject by the gate clears the stored recommendation, score and coverage included. Pay below the floor ends at Skip.
 - `v_job_awaiting_rematch` marks waiting jobs. `job_rematch_waits` holds when each began to wait, never when it was last matched. The zero check `awaiting_rematch_over_limit` flags a job waiting from that start more than `AWAITING_REMATCH_LIMIT_DAYS` (7 days, `src/modules/decision/domain/keptOutcome.ts`).
 
 ## Task seeds and stale-stage zero checks

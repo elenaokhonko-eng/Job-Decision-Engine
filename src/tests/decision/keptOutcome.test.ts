@@ -19,7 +19,8 @@ describe("the stored result of a job that waits for a re-match", () => {
     ["a hard reject", { gateDecision: "HARD_REJECT" as const }, "INELIGIBLE", "SKIP"],
     ["a closed posting or other blocked readiness", { readinessBlocked: true }, "INELIGIBLE", "SKIP"],
     ["pay below the floor, rejected", { pay: "BELOW_FLOOR_REJECT" as const }, "INELIGIBLE", "SKIP"],
-    ["pay below the floor, held back", { pay: "BELOW_FLOOR_HOLD" as const }, "ELIGIBLE", "TRACK"],
+    // The rule alone. In the decider, pay below the floor also blocks readiness, so such a job ends at Skip.
+    ["pay below the floor, held back, taken by itself", { pay: "BELOW_FLOOR_HOLD" as const }, "ELIGIBLE", "TRACK"],
     ["pay that needs verification", { pay: "UNVERIFIED" as const }, "ELIGIBLE", "REVIEW"],
     ["a fact that needs verification", { gateDecision: "NEEDS_VERIFICATION" as const }, "VERIFY", "REVIEW"],
     ["no matching lane", { noMatchingLane: true }, "ELIGIBLE", "SKIP"],

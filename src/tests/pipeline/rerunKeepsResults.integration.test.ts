@@ -6,6 +6,7 @@ import { AWAITING_REMATCH_LIMIT_DAYS } from "../../modules/decision/index.js";
 import { DECIDER_VERSION } from "../../pipeline/deciderVersion.js";
 import { runDeterministicMatcher } from "../../pipeline/deterministicMatcher.js";
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
+import { runHardGates } from "../../pipeline/hardGate.js";
 import { runRecommendationDecider } from "../../pipeline/recommendationDecider.js";
 import { saveWorkspacePreferenceRevision } from "../../policy/workspacePreferenceRegistry.js";
 import { STAGE3_SCHEMA_VERSION } from "../../policy/stage3Contracts.js";
@@ -206,7 +207,6 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
 
   it.each([
     ["a closed posting", `UPDATE job_versions SET availability_status = 'CLOSED' WHERE canonical_job_id = $1`, "INELIGIBLE", "SKIP"],
-    ["a hard reject", `UPDATE canonical_jobs SET gate_decision = 'HARD_REJECT' WHERE id = $1`, "INELIGIBLE", "SKIP"],
     ["a fact needing verification", `UPDATE canonical_jobs SET gate_decision = 'NEEDS_VERIFICATION' WHERE id = $1`, "VERIFY", "REVIEW"],
     ["no matching lane", `UPDATE canonical_jobs SET routing_disposition = 'POLICY_NO_MATCH' WHERE id = $1`, "ELIGIBLE", "SKIP"],
   ])("%s is still written to a waiting job, and the score stays", async (label, change, eligibility, outcome) => {
@@ -215,6 +215,17 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     expect((await decide(target)).errors).toBe(0);
     expect(await stored(target)).toMatchObject({ score: 0.9, coverage: 0.8, eligibility, outcome });
     expect(await latestDecision(target)).toMatchObject({ decider_version: DECIDER_VERSION, eligibility, outcome });
+  });
+
+  it("a real hard reject by the gate clears the stored score and ends at Skip", async () => {
+    const target = await waitingJob("hard-reject");
+    await s().db.query(`UPDATE canonical_jobs SET workplace_type = 'ONSITE', location = 'London', location_summary = 'London' WHERE id = $1`,
+      [target.canonicalJobId]);
+    expect(await runHardGates(s().db, { context: s().ctx, canonicalJobIds: [target.canonicalJobId], reprocess: true }))
+      .toMatchObject({ errors: 0, hardRejected: 1 });
+    expect(await stored(target)).toMatchObject({ score: null, coverage: null, completeness: null, outcome: null, eligibility: null });
+    expect((await decide(target)).errors).toBe(0);
+    expect(await stored(target)).toMatchObject({ score: null, coverage: null, eligibility: "INELIGIBLE", outcome: "SKIP" });
   });
 
   it("an old match score is never used for a new decision, whatever the gate says", async () => {
@@ -409,7 +420,7 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     expect(await restoreAvailabilityArchivedJob(s().db, {
       workspaceId: s().ctx.workspaceId, canonicalJobId: target.canonicalJobId, context: s().ctx,
     })).toMatchObject({ restored: true });
-    expect((await stored(target)).outcome).toBeNull();
+    expect(await stored(target)).toMatchObject({ outcome: first.outcome, eligibility: first.eligibility, score: first.score });
     await drain(target);
     const after = await stored(target);
     expect(after.outcome).not.toBeNull();
@@ -531,7 +542,7 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
   it.each(RESTORE_PATHS.flatMap(([label, restore]) => [
     [label, "with a current match", restore] as const,
     [label, "with no current match", restore] as const,
-  ]))("a job restored by %s, %s, is decided on the next worker pass", async (label, match, restore) => {
+  ]))("a job restored by %s, %s, gets its old result back and is decided on the next worker pass", async (label, match, restore) => {
     const target = await job(`restore-${randomUUID().slice(0, 8)}`);
     await drain(target);
     if (match === "with no current match") {
@@ -539,45 +550,79 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     }
     const first = await stored(target);
     await restore(target);
-    expect((await stored(target)).outcome, label).toBeNull();
+    expect(await stored(target), label).toMatchObject({ outcome: first.outcome, eligibility: first.eligibility, score: first.score, decision: first.decision });
 
     expect(await decidePass(target)).toMatchObject({ completed: 1, failed: 0, blocked: 0 });
     const after = await stored(target);
-    expect(after.outcome).not.toBeNull();
-    expect(after.score).toBe(first.score);
+    expect(after).toMatchObject({ outcome: first.outcome, eligibility: first.eligibility, score: first.score, coverage: first.coverage });
     const decision = (await latestDecision(target))!;
     expect(decision).toMatchObject({ decider_version: DECIDER_VERSION, outcome: after.outcome });
-    if (match === "with no current match") {
-      // Decided without a score: the policy's result, the stored score carried, and the job marked as waiting.
-      expect(decision.json.inputs).toMatchObject({ requirement_score: null });
-      expect(after.outcome).toBe("TRACK");
-      expect(await awaiting(target)).not.toBeNull();
-    }
-  }, 120_000);
-
-  it("the decision of a restored job queues no AI step, although its outcome would qualify", async () => {
-    const target = await job("restore-no-ai");
-    await drain(target, 5, ["APPLY_HARD_GATES", "PUBLISH_EMBEDDING", "ROUTE_LANE", "MATCH_PROFILE_EVIDENCE"]);
-    await s().db.query(`UPDATE canonical_jobs SET deterministic_match_score = 95, deterministic_match_coverage = 100, profile_match_status = 'POSITIVE_MATCH' WHERE id = $1`,
-      [target.canonicalJobId]);
-    // Only the restore's own decision is left to run.
-    await s().db.query(`DELETE FROM pipeline_tasks WHERE task_type = 'DECIDE_RECOMMENDATION' AND payload->>'job_version_id' = $1`, [target.jobVersionId]);
-    await RESTORE_PATHS[0]![1](target);
-
-    expect(await decidePass(target)).toMatchObject({ completed: 1, failed: 0 });
-    const after = await stored(target);
-    expect(after.eligibility).toBe("ELIGIBLE");
-    expect(["PRIORITY", "REVIEW"]).toContain(after.outcome);
-    expect((await tasks(target)).filter((task) => task.task_type === "ENQUEUE_EXPLANATION")).toEqual([]);
+    expect(decision.json.inputs).toMatchObject({ requirement_score: null });
+    expect(decision.json.trace.notes).toEqual(expect.arrayContaining(["awaiting_rematch", "restored_from_archive"]));
   });
 
-  it("a restored job that cannot be decided yet keeps its outcome instead of being left without one", async () => {
+  it.each(RESTORE_PATHS.flatMap(([label, restore]) => [
+    [label, "with a score", restore] as const,
+    [label, "with no score", restore] as const,
+  ]))("a skipped, ineligible job restored by %s, %s, does not come back as Track before it is re-matched", async (_label, score, restore) => {
+    const target = await job(`restore-skip-${randomUUID().slice(0, 8)}`);
+    await drain(target);
+    await storeResult(target, "SKIP");
+    await s().db.query(`UPDATE canonical_jobs SET recommendation_eligibility = 'INELIGIBLE' WHERE id = $1`, [target.canonicalJobId]);
+    if (score === "with no score") {
+      await s().db.query(
+        `UPDATE canonical_jobs SET recommendation_requirement_score = NULL, recommendation_coverage_score = NULL, recommendation_score_policy = NULL WHERE id = $1`,
+        [target.canonicalJobId]);
+    }
+    await restore(target);
+    expect(await decidePass(target)).toMatchObject({ completed: 1, failed: 0 });
+    expect(await stored(target)).toMatchObject({ eligibility: "INELIGIBLE", outcome: "SKIP" });
+    // The stages after the restore, short of the re-match, and every decision on the way leave it as it was.
+    await drain(target, 3, ["APPLY_HARD_GATES", "PUBLISH_EMBEDDING", "ROUTE_LANE", "DECIDE_RECOMMENDATION"]);
+    expect((await decide(target)).errors).toBe(0);
+    expect(await stored(target)).toMatchObject({ eligibility: "INELIGIBLE", outcome: "SKIP" });
+  });
+
+  it("the re-match after a restore gives a fresh result", async () => {
+    const target = await job("restore-rematch");
+    await drain(target);
+    await storeResult(target, "SKIP");
+    await s().db.query(`UPDATE canonical_jobs SET recommendation_eligibility = 'INELIGIBLE' WHERE id = $1`, [target.canonicalJobId]);
+    await RESTORE_PATHS[0]![1](target);
+    await drain(target);
+    expect(await stored(target)).toMatchObject({ eligibility: "ELIGIBLE" });
+    expect((await latestDecision(target))!.json.trace.notes).not.toContain("restored_from_archive");
+    await noFailures(target);
+  });
+
+  it("a restored job is not sent to AI on its old result, before or after its decision", async () => {
+    const target = await job("restore-no-ai");
+    await drain(target);
+    await storeResult(target, "PRIORITY");
+    const offer = async () => {
+      await s().db.query(`DELETE FROM evaluation_queue WHERE canonical_job_id = $1`, [target.canonicalJobId]);
+      await runExplanationQueueEnqueuer(s().db, { context: s().ctx, jobVersionIds: [target.jobVersionId] });
+      return queued(target);
+    };
+    // Positive control: as it stands, with its match current, the job is queued.
+    expect(await offer()).toBe(1);
+
+    await RESTORE_PATHS[0]![1](target);
+    expect(await stored(target)).toMatchObject({ eligibility: "ELIGIBLE", outcome: "PRIORITY" });
+    expect(await offer()).toBe(0);
+    expect(await decidePass(target)).toMatchObject({ completed: 1, failed: 0 });
+    expect(await stored(target)).toMatchObject({ eligibility: "ELIGIBLE", outcome: "PRIORITY" });
+    expect(await offer()).toBe(0);
+  });
+
+  it("a restored job that cannot be decided yet keeps its result and queues no AI step", async () => {
     const target = await waitingJob("restore-undecidable", "REVIEW");
     await s().db.query(`UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE id = $1`, [target.canonicalJobId]);
     await RESTORE_PATHS[0]![1](target);
     expect((await stored(target)).outcome).toBe("REVIEW");
     expect(await decidePass(target)).toMatchObject({ completed: 1, failed: 0 });
     expect((await stored(target)).outcome).toBe("REVIEW");
+    expect((await tasks(target)).filter((task) => task.task_type === "ENQUEUE_EXPLANATION")).toEqual([]);
   });
 
   it.each([
@@ -632,11 +677,23 @@ describe.skipIf(skipReal)("a kept outcome and the owner's pay floor (PostgreSQL)
     await saveWorkspacePreferenceRevision(s().db, s().ctx, {
       preferenceDomain: "stage3",
       schemaVersion: STAGE3_SCHEMA_VERSION,
-      preferenceValue: { compensation: { target_salary_basis: "GROSS", commercial_min_annual_sgd: 240000, disposition_below_floor: "PREVENT_APPLY_NOW" } },
+      preferenceValue: { compensation: { target_salary_basis: "GROSS", commercial_min_annual_sgd: 240000, university_research_min_annual_sgd: 240000, disposition_below_floor: "PREVENT_APPLY_NOW" } },
       activate: true,
     });
   }, 180_000);
   afterAll(async () => { await stack?.close(); });
+
+  it("pay below the floor ends at Skip, whatever the disposition, and keeps the score", async () => {
+    const target = await waitingJob("pay-below");
+    // An employer whose category is known, so the floor can be confirmed as missed.
+    await s().db.query(`UPDATE canonical_jobs SET company_name = 'Synthetic Zebra University' WHERE id = $1`, [target.canonicalJobId]);
+    await s().db.query(
+      `UPDATE raw_job_observations SET compensation_raw = 'SGD 5,000 - 6,000 per month gross base salary' WHERE job_version_id = $1`,
+      [target.jobVersionId],
+    );
+    expect((await decide(target)).errors).toBe(0);
+    expect(await stored(target)).toMatchObject({ score: 0.9, eligibility: "INELIGIBLE", outcome: "SKIP" });
+  });
 
   it("pay that cannot be confirmed lowers a kept top priority to review", async () => {
     const target = await waitingJob("pay-unverified");

@@ -27,7 +27,8 @@ export interface KeptOutcomeFacts {
   readonly noMatchingLane: boolean;
   readonly careerTrackCap: "REVIEW" | "SKIP" | null;
   /**
-   * BELOW_FLOOR_REJECT and BELOW_FLOOR_HOLD: pay below the owner's floor, with the disposition she set.
+   * BELOW_FLOOR_REJECT and BELOW_FLOOR_HOLD: pay below the owner's floor, with the disposition she set. The decider
+   * also blocks the compensation readiness check for pay below the floor, so such a job ends at Skip either way.
    * UNVERIFIED: the posting's pay cannot be confirmed (a fact needing verification).
    */
   readonly pay: "BELOW_FLOOR_REJECT" | "BELOW_FLOOR_HOLD" | "UNVERIFIED" | null;

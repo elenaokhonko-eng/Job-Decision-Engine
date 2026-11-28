@@ -36,7 +36,6 @@ import {
 } from "./jobArchiveHardRejectedPolicy.js";
 import { enqueuePipelineTask } from "../tasks/pipelineTasks.js";
 import { pipelineTaskStageVersion } from "../tasks/pipelineTaskCurrentness.js";
-import { decidableJobVersionSql } from "../tasks/completedWithoutResult.js";
 import { createTaskIntentV2 } from "../tasks/taskIntent.js";
 import type { WorkspaceContext } from "../workspace/context.js";
 
@@ -1660,17 +1659,10 @@ async function enqueueRestoreReassessment(
 }
 
 /**
- * Takes a restored job back among the live jobs. Its old verdict is cleared only when a decision can be made for it
- * at once; a job that cannot be decided yet keeps its outcome, so a restore never leaves a job without one.
+ * Takes a restored job back among the live jobs. A restore never clears or replaces a result: the job gets the outcome,
+ * eligibility and scores it had, and keeps them until a re-match (the decider lowers them only for a real override).
  */
 async function clearArchiveFields(client: pg.PoolClient, workspaceId: string, canonicalJobId: string): Promise<void> {
-  const decidable = await client.query<{ decidable: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1 FROM canonical_jobs c
-         JOIN job_versions v ON v.workspace_id = c.workspace_id AND v.id = c.latest_job_version_id
-        WHERE c.workspace_id = $1 AND c.id = $2 AND ${decidableJobVersionSql("c", "v")}) AS decidable`,
-    [workspaceId, canonicalJobId],
-  );
   await client.query(
     `UPDATE canonical_jobs
      SET archived_at = NULL,
@@ -1678,11 +1670,9 @@ async function clearArchiveFields(client: pg.PoolClient, workspaceId: string, ca
          archive_age_basis = NULL,
          archive_reference_at = NULL,
          archive_run_id = NULL,
-         latest_deterministic_decision_id = CASE WHEN $3::boolean THEN NULL ELSE latest_deterministic_decision_id END,
-         recommendation_outcome = CASE WHEN $3::boolean THEN NULL ELSE recommendation_outcome END,
          updated_at = NOW()
      WHERE workspace_id = $1 AND id = $2`,
-    [workspaceId, canonicalJobId, decidable.rows[0]?.decidable === true],
+    [workspaceId, canonicalJobId],
   );
 }
 

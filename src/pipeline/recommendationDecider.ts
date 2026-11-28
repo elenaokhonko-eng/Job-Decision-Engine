@@ -26,6 +26,7 @@ import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
 import { resolveEffectiveWorkabilityPolicy } from "./effectiveWorkabilityPolicy.js";
 import { findOnsiteException } from "./onsiteExceptions.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
+import { restoredAwaitingRematchSql } from "./profileMatchCurrency.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import { isRepostFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
 import { MIN_CONFIRMED_REQUIREMENTS } from "../requirements/requirementKinds.js";
@@ -451,6 +452,7 @@ export async function runRecommendationDecider(
       recommendation_role_signals: unknown;
       recommendation_evidence_confidence: string | null;
       recommendation_decided_at: Date | null;
+      restored_awaiting_rematch: boolean;
       latest_deterministic_decision_id: string | null;
       company_name: string;
       normalized_title: string;
@@ -511,6 +513,7 @@ export async function runRecommendationDecider(
         c.recommendation_role_signals,
         c.recommendation_evidence_confidence,
         c.recommendation_decided_at,
+        ${restoredAwaitingRematchSql("c")} AS restored_awaiting_rematch,
         c.latest_deterministic_decision_id,
         c.company_name,
         c.normalized_title,
@@ -645,7 +648,13 @@ export async function runRecommendationDecider(
           normalizeGateDecision(job.gate_decision) ??
           inferGateDecisionFromProcessingState(job.processing_state);
 
+        // A restored job gets its old result back: until a match completes after the restore it waits for a re-match,
+        // even where the match from before the archive still looks current.
+        const restoredWaiting = job.restored_awaiting_rematch === true
+          && (job.recommendation_outcome !== null || job.recommendation_eligibility !== null
+            || job.recommendation_requirement_score !== null);
         const currentMatch =
+          !restoredWaiting &&
           job.canonical_latest_job_version_id !== null &&
           job.canonical_latest_job_version_id === job.job_version_id &&
           job.match_status === "COMPLETED" &&
@@ -687,10 +696,12 @@ export async function runRecommendationDecider(
         const storedCoverage = asNumber(job.recommendation_coverage_score);
         const carriesScore = (requirementScore === null && storedScore !== null)
           || (coverageScore === null && storedCoverage !== null);
-        const keptFrom: KeptResult | null = !currentMatch && (storedScore !== null || storedCoverage !== null)
-          && job.recommendation_eligibility !== null && job.recommendation_outcome !== null
+        // A restored job keeps its old outcome also when it never had a score (a skipped or ineligible job).
+        const keptFrom: KeptResult | null = !currentMatch && (storedScore !== null || storedCoverage !== null || restoredWaiting)
+          && (job.recommendation_eligibility !== null || restoredWaiting) && job.recommendation_outcome !== null
           ? {
-              eligibility: job.recommendation_eligibility as KeptResult["eligibility"],
+              eligibility: (job.recommendation_eligibility
+                ?? (job.recommendation_outcome === "SKIP" ? "INELIGIBLE" : "VERIFY")) as KeptResult["eligibility"],
               outcome: job.recommendation_outcome as KeptResult["outcome"],
             }
           : null;
@@ -1158,6 +1169,7 @@ export async function runRecommendationDecider(
             AWAITING_REMATCH_NOTE,
             "current_match_required_but_missing_or_stale",
             `kept_outcome:${keptFrom.outcome}`,
+            ...(restoredWaiting ? ["restored_from_archive"] : []),
             `career_track:${careerTrack.track}:${careerTrack.level}${careerTrack.fit ? `:${careerTrack.fit}` : ""}`,
             ...kept.overrides.map((override) => `kept_outcome_override:${override}`),
           ];
