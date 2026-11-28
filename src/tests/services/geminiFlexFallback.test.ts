@@ -34,7 +34,7 @@ vi.mock('@google/genai', async () => {
 });
 
 vi.mock('../../modelRoutes/registry.js', () => routeRegistryMock);
-vi.mock('../../services/fetchDispatcherTimeouts.js', () => dispatcherMock);
+vi.mock('../../platform/llm/fetchDispatcherTimeouts.js', () => dispatcherMock);
 
 import { ApiError } from '@google/genai';
 

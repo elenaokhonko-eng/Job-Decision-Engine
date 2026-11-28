@@ -1,7 +1,7 @@
 {
   "note": "Known boundary violations. First recorded on 19 November 2026; re-recorded on 23 November 2026 when the check was merged. Entries may only be removed: ARCH_BASELINE=prune npx vitest run src/tests/architecture/boundaries.test.ts. Adding an entry is a hand edit and an exception: list it with its reason at the top of the pull request description. See docs/architecture.md, section 6.",
   "limits": {
-    "src/services/agent.ts": 2557
+    "src/services/agent.ts": 2088
   },
   "violations": [
     "F1|src/services/agent.ts <-> src/services/llmFallback.ts",
