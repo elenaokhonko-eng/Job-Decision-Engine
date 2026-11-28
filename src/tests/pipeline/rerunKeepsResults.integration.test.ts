@@ -178,7 +178,8 @@ async function enqueueRerun(target: StackJob, taskType: "APPLY_HARD_GATES" | "EX
   const taskKey = `${taskType}:${target.jobVersionId}:rerun:${randomUUID()}`;
   const intent = createTaskIntentV2({
     workspaceId: s().ctx.workspaceId, taskType, stageVersion: pipelineTaskStageVersion(taskType)!,
-    producer: "rerunKeepsResultsTest", requestId: taskKey, mode: "FORCE_RECOMPUTE", payload,
+    producer: "rerunKeepsResultsTest", requestId: taskKey,
+    mode: flags.version_refresh === true ? "ENSURE_CURRENT" : "FORCE_RECOMPUTE", payload,
   });
   await enqueuePipelineTask({ taskType, taskKey, payload, maxAttempts: 8, intent }, s().db, { context: s().ctx });
 }
@@ -646,6 +647,48 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     minTimeToStartTaskMs: 0, maxTasks: 30, taskTypes: [...taskTypes] as never, jobVersionIds: [target.jobVersionId],
   });
 
+  const openTasks = async (target: StackJob) =>
+    (await tasks(target)).filter((task) => task.status === "PENDING").map((task) => task.task_type);
+
+  /** A worker pass that seeds nothing: only what is already queued can run. */
+  const unseededPass = (target: StackJob, taskTypes: readonly string[]) => runPipelineStageTaskWorker(s().db, {
+    context: s().ctx, seed: false, includeTestFixtures: true, reconcileStalePending: false, heartbeatSeconds: 0,
+    minTimeToStartTaskMs: 0, maxTasks: 30, taskTypes: [...taskTypes] as never, jobVersionIds: [target.jobVersionId],
+  });
+
+  it("the script's own queued step takes the job through its re-match, without any seeding", async () => {
+    const target = await rejectedHoldingAResult();
+    await place(target, "REMOTE", "Singapore");
+    expect(await regateJobIds(s().db, s().ctx, [target.canonicalJobId])).toMatchObject({ ok: true, nextStepsQueued: 1 });
+    const gate = await latestGate(target);
+    await unseededPass(target, STAGES);
+    expect(await matchedSince(target, gate.created_at)).toBeGreaterThanOrEqual(1);
+    expect(await listedAsWaiting(target)).toBe(false);
+    await noFailures(target);
+  }, 180_000);
+
+  // The job already has completed successors from an earlier lift, under the identity a plain gate task would reuse.
+  it.each([
+    ["a forced recalculation", { force_policy_recalculation: true, reprocess: true }],
+    ["a gate version refresh", { version_refresh: true }],
+  ] as const)("the gate task of %s queues the re-match in its own pass, also after an earlier lift", async (_label, flags) => {
+    const target = await job(`lift-gate-task-${randomUUID().slice(0, 8)}`);
+    await drain(target);
+    for (let round = 1; round <= 2; round += 1) {
+      await place(target, "ONSITE", "London");
+      await runHardGates(s().db, { context: s().ctx, canonicalJobIds: [target.canonicalJobId], reprocess: true });
+      await place(target, "REMOTE", "Singapore");
+      await enqueueRerun(target, "APPLY_HARD_GATES", { ...flags });
+      await unseededPass(target, ["APPLY_HARD_GATES"]);
+      const gate = await latestGate(target);
+      expect(gate.decision, `lift ${round}`).toBe("PASS");
+      expect(await openTasks(target), `lift ${round}`).toContain("PUBLISH_EMBEDDING");
+      await unseededPass(target, STAGES);
+      expect(await matchedSince(target, gate.created_at), `lift ${round}`).toBeGreaterThanOrEqual(1);
+    }
+    await noFailures(target);
+  }, 180_000);
+
   const REGATES: Array<[string, (target: StackJob) => Promise<void>]> = [
     ["the forced re-gate (scripts/regate_job_ids.ts)", async (target) => {
       expect(await regateJobIds(s().db, s().ctx, [target.canonicalJobId])).toMatchObject({ ok: true, regated: 1 });
@@ -686,11 +729,9 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
       await regate(target);
       const gate = await latestGate(target);
       expect(gate.decision).toBe(decision);
-      // The gate task queues its own successor in the pass that ran it. A script re-gate runs outside a pass and queues
-      // nothing: the seed of the next pass does.
-      const open = (await tasks(target)).filter((task) => task.status === "PENDING").map((task) => task.task_type);
-      if (_path === "the seeded gate refresh") expect(open).toContain("PUBLISH_EMBEDDING");
-      else expect(open).toEqual([]);
+      // The re-match is queued by whatever changed the gate outcome, before any further seeding: the gate task in its own
+      // pass, or the script itself right after its re-gate.
+      expect(await openTasks(target), _path).toContain("PUBLISH_EMBEDDING");
 
       // 1. The stored result is kept, by the re-gate and by a decision made before the re-match.
       expect(await stored(target)).toMatchObject(held);
@@ -748,15 +789,16 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     await noFailures(target);
   }, 180_000);
 
-  // The tasks of an earlier lift are complete, under the identities the ordinary seeds use.
-  it("a job lifted a second time still gets its next step", async () => {
+  // Other re-gate scripts call runHardGates directly and queue nothing. The tasks of an earlier lift are complete, under
+  // the identities the ordinary seeds use.
+  it("a job lifted a second time by a re-gate that queues nothing gets its next step from the seed", async () => {
     const target = await job(`lift-twice-${randomUUID().slice(0, 8)}`);
     await drain(target);
     for (let round = 1; round <= 2; round += 1) {
       await place(target, "ONSITE", "London");
       await runHardGates(s().db, { context: s().ctx, canonicalJobIds: [target.canonicalJobId], reprocess: true });
       await place(target, "REMOTE", "Singapore");
-      await REGATES[0]![1](target);
+      await runHardGates(s().db, { context: s().ctx, canonicalJobIds: [target.canonicalJobId], reprocess: true });
       const gate = await latestGate(target);
       await pass(target, STAGES);
       expect(await matchedSince(target, gate.created_at), `lift ${round}`).toBeGreaterThanOrEqual(1);
@@ -765,21 +807,30 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     await noFailures(target);
   }, 180_000);
 
-  // No re-match can be queued here: routing this verification code would change a routing rule.
-  it("a lifted job whose verification cannot be routed gets its decision, keeps its result and stays marked", async () => {
+  // No re-match can be queued here: routing this verification code would change a routing rule. The job waits for the
+  // owner's answer.
+  it("a job waiting on an unanswered check keeps its result and stays marked until the check is answered", async () => {
     const target = await rejectedHoldingAResult();
     await place(target, "UNKNOWN", "Singapore");
-    await REGATES[0]![1](target);
+    await runHardGates(s().db, { context: s().ctx, canonicalJobIds: [target.canonicalJobId], reprocess: true });
     await s().db.query(
       `UPDATE canonical_jobs SET rejection_reason = 'NEEDS_VERIFICATION_WORK_AUTHORIZATION, NEEDS_VERIFICATION' WHERE id = $1`,
       [target.canonicalJobId]);
     const gate = await latestGate(target);
-    await pass(target, STAGES);
+    for (let run = 0; run < 3; run += 1) await pass(target, STAGES);
     expect(await latestDecision(target)).toMatchObject({ eligibility: "INELIGIBLE", outcome: "SKIP" });
     expect((await latestDecision(target))!.json.trace.notes).toContain("lifted_from_rejection");
     expect(await stored(target)).toMatchObject({ score: 0.9, eligibility: "INELIGIBLE", outcome: "SKIP" });
     expect(await matchedSince(target, gate.created_at)).toBe(0);
     expect(await listedAsWaiting(target)).toBe(true);
+    await noFailures(target);
+
+    // The answer settles the fact and the job is gated again: now it is re-matched and the mark goes.
+    await place(target, "REMOTE", "Singapore");
+    await runHardGates(s().db, { context: s().ctx, canonicalJobIds: [target.canonicalJobId], reprocess: true });
+    await pass(target, STAGES);
+    expect(await matchedSince(target, gate.created_at)).toBeGreaterThanOrEqual(1);
+    expect(await listedAsWaiting(target)).toBe(false);
     await noFailures(target);
   }, 180_000);
 
