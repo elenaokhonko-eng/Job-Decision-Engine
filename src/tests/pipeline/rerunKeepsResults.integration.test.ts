@@ -635,7 +635,7 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     await noFailures(target);
   }, 120_000);
 
-  it("a repost of unchanged content, driven through the normalizer, is re-matched", async () => {
+  it("a reposted job with unchanged content gets its old result back, is marked as waiting, and is re-matched on the next pass", async () => {
     const key = randomUUID().slice(0, 8);
     const url = `https://example.test/zebra-repost-${key}`;
     const description = [
@@ -680,11 +680,18 @@ describe.skipIf(skipReal)("a re-run never clears a result (PostgreSQL)", { timeo
     const events = await s().db.query<{ action: string }>(
       `SELECT action FROM job_archive_events WHERE canonical_job_id = $1 ORDER BY event_at DESC, id DESC LIMIT 1`, [target.canonicalJobId]);
     expect(events.rows[0]).toMatchObject({ action: "REPOST_REACTIVATED" });
-    expect(await stored(target)).toMatchObject({ outcome: matched.outcome, score: matched.score });
+    // 1. The old result is back: every stored result column, with only the pre-archive decision pointer dropped.
+    expect(await stored(target)).toEqual({ ...matched, decision: null });
+    // 2. It is marked as waiting, although its match from before the archive still looks current.
     expect(await restoredAwaiting(target)).toBe(true);
     expect(await listedAsWaiting(target)).toBe(true);
+    expect(await matchesSinceRestore(target)).toBe(0);
 
-    await drain(target, 6, STAGES);
+    // 3. One seeded worker pass, as a scheduled run makes it, re-matches it.
+    await runPipelineStageTaskWorker(s().db, {
+      context: s().ctx, seed: true, includeTestFixtures: true, reconcileStalePending: false, heartbeatSeconds: 0,
+      minTimeToStartTaskMs: 0, maxTasks: 30, taskTypes: [...STAGES] as never, jobVersionIds: [target.jobVersionId],
+    });
     expect(await matchesSinceRestore(target)).toBeGreaterThanOrEqual(1);
     expect(await restoredAwaiting(target)).toBe(false);
     expect(await listedAsWaiting(target)).toBe(false);
