@@ -240,6 +240,39 @@ describe.skipIf(skipReal)('Pipeline Stage: Deterministic Matcher (real PostgreSQ
     expect(matches.rows).toEqual([{ match_type: 'UNKNOWN', semantic_ready: false }]);
   });
 
+  it('a re-match with an incomplete embedding cohort keeps the stored scores, outcome and decision pointer', async () => {
+    if (!context) throw new Error('Integration test fixture context is not initialized.');
+    const stored = `SELECT deterministic_match_score::float AS match_score, deterministic_match_coverage::float AS match_coverage,
+                           recommendation_requirement_score::float AS score, recommendation_coverage_score::float AS coverage,
+                           recommendation_evidence_completeness::float AS completeness, recommendation_outcome AS outcome,
+                           recommendation_eligibility AS eligibility
+                      FROM canonical_jobs WHERE id = $1`;
+    await query(
+      `UPDATE canonical_jobs
+          SET processing_state = 'LANE_ROUTED', processing_status = 'LANE_ROUTED', deterministic_match_score = 70,
+              deterministic_match_coverage = 55, recommendation_requirement_score = 0.7, recommendation_coverage_score = 0.55,
+              recommendation_evidence_completeness = 0.9, recommendation_outcome = 'REVIEW', recommendation_eligibility = 'ELIGIBLE'
+        WHERE id = $1`,
+      [canonicalJobId]
+    );
+
+    const summary = await runDeterministicMatcher(getClient(), { context, canonicalJobIds: [canonicalJobId] });
+    expect(summary).toMatchObject({ matchedJobs: 0, skippedJobs: 1, errors: 0 });
+
+    expect((await query(stored, [canonicalJobId])).rows[0]).toEqual({
+      match_score: 70, match_coverage: 55, score: 0.7, coverage: 0.55, completeness: 0.9, outcome: 'REVIEW', eligibility: 'ELIGIBLE',
+    });
+    // Back to a job with no stored result, for the scenarios that follow.
+    await query(
+      `UPDATE canonical_jobs
+          SET deterministic_match_score = NULL, deterministic_match_coverage = NULL, recommendation_requirement_score = NULL,
+              recommendation_coverage_score = NULL, recommendation_evidence_completeness = NULL, recommendation_outcome = NULL,
+              recommendation_eligibility = NULL
+        WHERE id = $1`,
+      [canonicalJobId]
+    );
+  });
+
   it('keeps the canonical job retryable when no active embedding space is configured', async () => {
     if (!context) throw new Error('Integration test fixture context is not initialized.');
 

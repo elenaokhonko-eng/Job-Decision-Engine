@@ -200,6 +200,8 @@ export const sampleEvaluatedShortlistRow: ShortlistRow = {
   recommendation_coverage_score: 0.667,
   recommendation_evidence_completeness: 0.25,
   recommendation_decided_at: "2026-08-28T12:30:00.000Z",
+  awaiting_rematch: false,
+  awaiting_rematch_since: null,
   nd_friendly_score: 75,
   politics_stress_score: 35,
   sensory_overload_index: 30,

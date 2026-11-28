@@ -481,6 +481,47 @@ describe.skipIf(skipReal)("RECHECK_AVAILABILITY (PostgreSQL)", () => {
     expect(await availabilityState(login)).toBe("UNKNOWN");
   });
 
+  it("fault 4: the automatic re-check writes a closing posting of a waiting job through the worker, and keeps the score", async () => {
+    const withScore = async (board: string) => {
+      const job = await createJob({ windowEndedDaysAgo: 1, board });
+      await db().query(
+        `UPDATE canonical_jobs SET gate_decision = 'PASS', processing_state = 'MATCHED', processing_status = 'MATCHED',
+                recommendation_requirement_score = 0.75, recommendation_coverage_score = 0.6, recommendation_evidence_completeness = 0.5,
+                recommendation_outcome = 'PRIORITY', recommendation_eligibility = 'ELIGIBLE'
+          WHERE id = $1`, [job.canonicalJobId]);
+      return job;
+    };
+    const stored = async (job: Fixture) => (await db().query(
+      `SELECT recommendation_requirement_score::float AS score, recommendation_coverage_score::float AS coverage,
+              recommendation_outcome AS outcome, recommendation_eligibility AS eligibility,
+              latest_deterministic_decision_id IS NOT NULL AS decided
+         FROM canonical_jobs WHERE id = $1`, [job.canonicalJobId])).rows[0];
+    const run = async (job: Fixture, read: () => Promise<JobContentResult>) => {
+      const summary = await runPipelineStageTaskWorker(db(), {
+        context: ctx(), taskTypes: ["RECHECK_AVAILABILITY"], jobVersionIds: [job.jobVersionId], seed: true,
+        maxTasks: 1, reconcileStalePending: false, wallClockMs: 60_000, minTimeToStartTaskMs: 1,
+      }, { availabilityRecheck: deps({ now: new Date(), fetchJobContent: read }) } as unknown as PipelineStageWorkerDependencies);
+      expect(summary).toMatchObject({ completed: 1, failed: 0 });
+    };
+
+    const closed = await withScore("kept-page-board");
+    await run(closed, async () => ({ kind: "UNAVAILABLE", reason: "The exact posting URL returned HTTP 404.", evidence: {} as never }));
+    expect(await availabilityState(closed)).toBe("CLOSED");
+    expect(await stored(closed)).toEqual({ score: 0.75, coverage: 0.6, outcome: "SKIP", eligibility: "INELIGIBLE", decided: true });
+
+    const open = await withScore("kept-page-board");
+    await run(open, async () => pageComplete("OPEN"));
+    expect(await stored(open)).toEqual({ score: 0.75, coverage: 0.6, outcome: "PRIORITY", eligibility: "ELIGIBLE", decided: true });
+
+    const feed = await withScore("recheck-board");
+    stubFeed([feed.record]);
+    const refreshed = await refreshCanonicalJobSourceEvidence(db(), {
+      canonicalJobId: feed.canonicalJobId, jobVersionId: feed.jobVersionId, observationId: feed.observationId,
+    }, { adapter: createFeedAdapterForPosting("greenhouse", feed.postingUrl), context: ctx(), now: () => new Date() });
+    expect(refreshed).toMatchObject({ status: "REFRESHED", readinessRecomputed: true });
+    expect(await stored(feed)).toEqual({ score: 0.75, coverage: 0.6, outcome: "PRIORITY", eligibility: "ELIGIBLE", decided: true });
+  });
+
   it("restores a job this rule archived when the posting is seen open again, and leaves other archives alone", async () => {
     const job = await createJob({ windowEndedDaysAgo: 1, board: "restore-board" });
     const cycle = at(0);

@@ -48,3 +48,15 @@ export {
   type ReviewListRules,
 } from "./handlers/reviewLists.js";
 export { CHECK_TIME_ZONE, countUncheckedJobs, type CheckLinkRules } from "./handlers/uncheckedJobs.js";
+export {
+  AWAITING_REMATCH_LIMIT_DAYS,
+  AWAITING_REMATCH_NOTE,
+  STORED_SCORE_CARRIED_NOTE,
+  keepStoredOutcome,
+  type KeptEligibility,
+  type KeptOutcome,
+  type KeptOutcomeFacts,
+  type KeptOutcomeResult,
+  type KeptResult,
+} from "./domain/keptOutcome.js";
+export { syncRematchWaits } from "./handlers/rematchWaits.js";

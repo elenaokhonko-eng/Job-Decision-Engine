@@ -220,3 +220,18 @@ def test_role_signal_labels_parse_a_json_string_array():
     text = '[{"code": "DEGREE_GAP_FLAGGED", "penalty": 0.06}, {"code": "CONTRACT_EMPLOYMENT"}, 7]'
     assert role_signal_labels({"role_signals": text}) == ["degree gap", "contract role"]
     assert role_signal_labels({"role_signals": []}) == []
+
+
+def test_the_app_marks_a_waiting_job_wherever_its_outcome_is_shown():
+    source = APP_PATH.read_text(encoding="utf-8")
+    assert "FROM v_job_awaiting_rematch" in source
+    # Top 10 list, the job card of every category, the application tracker and the document job picker.
+    for shown in (
+        "awaiting_mark(ranked_job)",
+        "awaiting_mark(job)",
+        "awaiting_mark(record)",
+        "awaiting_mark(selected_job)",
+    ):
+        assert shown in source, shown
+    # The "still processing" placeholder must not replace the stored result of a waiting job.
+    assert 'in awaiting_rematch and job.get("recommendation_outcome")' in source

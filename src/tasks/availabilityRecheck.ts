@@ -16,7 +16,8 @@
  * A MANUAL check (src/tasks/manualAvailabilityCheck.ts) reads the posting page once and stores availability
  * evidence only. It never queues a retry or a re-gate, changes no job fact, never archives, adds nothing to the
  * cannot-tell or absence counters, and its events are ignored by the archive gate and by the task-key sequence.
- * It never lets the decision recompute replace a stored requirement score with none.
+ *
+ * No read, manual or automatic, clears a stored result: the decision recompute carries a stored score forward.
  *
  * Reads are rate-limited per host, using the source plugin manifest's requests_per_minute when the
  * source has one. A job whose work mode or territory changed is queued for a forced re-gate through
@@ -474,8 +475,7 @@ async function storeVerdict(
   target: { canonicalJobId: string; jobVersionId: string; observation: RecheckObservation },
   verdict: { status: "OPEN" | "CLOSED"; reasonCode: string; method: z.infer<typeof AvailabilityEvidenceSchema>["verification_method"] },
   now: Date,
-  options: { readonly keepStoredScore?: boolean } = {},
-): Promise<{ readinessRecomputed: boolean; readinessError: string | null; scoreKept: boolean }> {
+): Promise<{ readinessRecomputed: boolean; readinessError: string | null }> {
   const availability = evidenceNow(verdict.status, now, verdict.reasonCode, verdict.method);
   const current = await client.query<{ job_source_evidence: unknown }>(
     `SELECT job_source_evidence
@@ -543,17 +543,14 @@ async function storeVerdict(
       context,
       canonicalJobIds: [target.canonicalJobId],
       jobVersionIds: [target.jobVersionId],
-      keepStoredScore: options.keepStoredScore,
     });
-    const scoreKept = (readiness.scoresKept ?? 0) > 0;
     return {
-      readinessRecomputed: readiness.errors === 0 && !scoreKept,
+      readinessRecomputed: readiness.errors === 0,
       readinessError: readiness.errors === 0 ? null : `The recommendation decider reported ${readiness.errors} error(s).`,
-      scoreKept,
     };
   } catch (error) {
     // Not swallowed: the public error summary goes on the event, and the stale readiness is visible as such.
-    return { readinessRecomputed: false, readinessError: publicErrorSummary(error, "pipeline"), scoreKept: false };
+    return { readinessRecomputed: false, readinessError: publicErrorSummary(error, "pipeline") };
   }
 }
 
@@ -977,9 +974,8 @@ export async function runAvailabilityRecheck(
     // Availability evidence only: no job fact is filled and no re-gate follows from a manual check.
     const stored = await storeVerdict(client, context, identity, {
       status: "OPEN", reasonCode: decision.reasonCode, method: "VERIFIED_POSTING_RETRIEVAL",
-    }, now, { keepStoredScore: true });
+    }, now);
     details.readiness_recomputed = stored.readinessRecomputed;
-    if (stored.scoreKept) details.readiness_recompute_skipped = "WOULD_LOSE_STORED_SCORE";
     if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
   } else if (decision.action === "MARK_OPEN") {
     if (read.page !== null) {
@@ -1077,9 +1073,8 @@ export async function runAvailabilityRecheck(
       status: "CLOSED",
       reasonCode: decision.reasonCode,
       method: outcome.kind === "CLOSED_BY_PAGE" ? "EXPLICIT_SOURCE_STATUS" : "EMPLOYER_ATS_LISTING",
-    }, now, { keepStoredScore: manual });
+    }, now);
     details.readiness_recomputed = stored.readinessRecomputed;
-    if (stored.scoreKept) details.readiness_recompute_skipped = "WOULD_LOSE_STORED_SCORE";
       if (stored.readinessError !== null) details.readiness_error = stored.readinessError;
   } else if (decision.action === "ARCHIVE_NOT_CONFIRMABLE") {
     // Protection is read INSIDE the write transaction with the job row locked, so a save, application or hold

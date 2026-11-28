@@ -100,6 +100,7 @@
     "decision": [
       "deterministic_decisions",
       "job_ranking_snapshots",
+      "job_rematch_waits",
       "ranking_policies"
     ],
     "evaluation": [

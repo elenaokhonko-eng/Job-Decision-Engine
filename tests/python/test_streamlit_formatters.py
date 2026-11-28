@@ -1,8 +1,10 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 from streamlit_formatters import (
     as_number,
+    awaiting_rematch_label,
     format_career_track,
     format_percent,
     format_score,
@@ -119,3 +121,13 @@ def test_safe_http_url_accepts_well_formed_http_links(url):
 )
 def test_safe_http_url_rejects_unsafe_or_malformed_links(url):
     assert safe_http_url(url) is None
+
+
+def test_awaiting_rematch_label_marks_only_a_waiting_job():
+    assert awaiting_rematch_label(False) == ""
+    assert (
+        awaiting_rematch_label(True) == "Awaiting re-match (stored score and outcome)"
+    )
+    assert awaiting_rematch_label(True, datetime(2026, 1, 5, 12, tzinfo=UTC)) == (
+        "Awaiting re-match since 2026-01-05 (stored score and outcome)"
+    )

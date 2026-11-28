@@ -32,6 +32,7 @@ import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import { runHardGates } from "../src/pipeline/hardGate.js";
 import { sourceContentEvidencePredicate } from "../src/pipeline/descriptionQuality.js";
+import { queueLiftedNextSteps } from "../src/tasks/stageTaskWorker.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -59,6 +60,8 @@ export interface RegateOutcome {
   readonly skipped: RegateEligibility["skipped"];
   /** Jobs that were eligible but not processed (runHardGates selected fewer than expected). */
   readonly unprocessed: number;
+  /** Next steps queued for jobs the re-gate lifted out of rejection. */
+  readonly nextStepsQueued: number;
   readonly ok: boolean;
 }
 
@@ -139,7 +142,8 @@ export function summarizeSkips(skipped: RegateEligibility["skipped"]): Record<st
 
 /**
  * Re-gate eligible ids in batches and verify that runHardGates processed every one.
- * Writes: appends gate_decisions rows through runHardGates.
+ * Writes: appends gate_decisions rows through runHardGates, and queues the next pipeline task of every job the re-gate
+ * lifted out of rejection (a re-gate here runs outside a worker pass).
  */
 export async function regateJobIds(
   db: pg.Pool | pg.PoolClient,
@@ -152,6 +156,7 @@ export async function regateJobIds(
   let regated = 0;
   let errors = 0;
   let unprocessed = 0;
+  let nextStepsQueued = 0;
   const skipped: Array<{ id: string; reasons: readonly RegateSkipReason[] }> = [];
   for (let index = 0; index < ids.length; index += batchSize) {
     const batch = ids.slice(index, index + batchSize);
@@ -160,6 +165,7 @@ export async function regateJobIds(
     eligibleTotal += eligibility.eligible.length;
     if (eligibility.eligible.length === 0) continue;
     const summary = await runHardGates(db, { context, canonicalJobIds: [...eligibility.eligible], reprocess: true });
+    nextStepsQueued += await queueLiftedNextSteps(db, context, eligibility.eligible);
     const processed = summary.passed + summary.hardRejected + summary.needsVerification;
     regated += processed;
     errors += summary.errors;
@@ -170,12 +176,13 @@ export async function regateJobIds(
     }
   }
   const ok = errors === 0 && unprocessed === 0 && regated === eligibleTotal;
-  return { requested: ids.length, eligible: eligibleTotal, regated, errors, skipped, unprocessed, ok };
+  return { requested: ids.length, eligible: eligibleTotal, regated, errors, skipped, unprocessed, nextStepsQueued, ok };
 }
 
 export function printRegateOutcome(outcome: RegateOutcome): void {
   console.log(`Requested: ${outcome.requested}  eligible: ${outcome.eligible}  re-gated: ${outcome.regated}  errors: ${outcome.errors}  unprocessed: ${outcome.unprocessed}`);
   console.log(`Skipped: ${outcome.skipped.length} ${JSON.stringify(summarizeSkips(outcome.skipped))}`);
+  console.log(`Next steps queued for jobs lifted out of rejection: ${outcome.nextStepsQueued}`);
   for (const entry of outcome.skipped) console.log(`  - skipped ${entry.id}: ${entry.reasons.join(", ")}`);
 }
 

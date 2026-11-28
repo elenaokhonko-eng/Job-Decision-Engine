@@ -25,6 +25,8 @@ import { LEAD_QUEUE_NOTE, supersedeLeadEvaluationQueueRows } from "../pipeline/e
 import {
   AI_EVALUATION_OUTCOMES,
   AI_EVALUATION_OUTCOMES_SQL,
+  carriedScoreDecisionSql,
+  liftedAwaitingRematchSql,
   PROFILE_REMATCH_OUTCOMES,
   currentMatcherPolicySql,
   currentProfileMatchSql,
@@ -65,6 +67,7 @@ import {
 import { DECIDER_VERSION } from "../pipeline/deciderVersion.js";
 import { OUTCOME_CONFLICT_REPAIR_ACTION, applyLiveJobScope, deciderSeedableSql, scopeSeedQuery, seedPastQueuedWork, withSeedLimit } from "./seedQueryScope.js";
 import { decidableJobVersionSql } from "./completedWithoutResult.js";
+import { syncRematchWaits } from "../modules/decision/index.js";
 import { decisionNotStampable, matchNotApplicable } from "./designedNoOps.js";
 import { deciderVersionReassessmentReason, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import {
@@ -1002,6 +1005,107 @@ async function selectAndEnqueue(
   summary.skippedArchived += skippedArchived;
 }
 
+/** The identity of the work that follows a lift: one per gate decision since it, so a later answer or re-gate is new work. */
+function liftGenerationSql(): string {
+  return `(SELECT 'GATE_LIFT:' || latest.id::text FROM gate_decisions latest
+            WHERE latest.workspace_id = c.workspace_id AND latest.canonical_job_id = c.id
+            ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)`;
+}
+
+/** The generation a gate task gives its successors when the job waits because a re-gate lifted it; otherwise null. */
+async function liftedRepairGeneration(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<string | null> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ generation: string | null }>(
+    `SELECT ${liftGenerationSql()} AS generation
+       FROM canonical_jobs c
+      WHERE c.workspace_id = $1 AND c.latest_job_version_id = $2::uuid AND ${liftedAwaitingRematchSql("c")}`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return rows[0]?.generation ?? null;
+}
+
+/**
+ * A job a re-gate lifted out of rejection gets the step the gate task would have queued. The tasks of its earlier run can
+ * suppress the ordinary seeds, so the identity is the lift's own. Not while any task of the job version is still open.
+ */
+async function seedLiftedNextSteps(
+  client: QueryClient,
+  ctx: WorkspaceContext,
+  summary: SeedPipelineTasksSummary,
+  options: {
+    canonicalJobIds: readonly string[] | null;
+    maxPerType: number;
+    enabledTypes?: Set<PipelineStageTaskType>;
+    includeTestFixtures?: boolean;
+    seedScope?: { jobVersionIds?: readonly string[]; observationIds?: readonly string[] };
+  },
+): Promise<void> {
+  const steps: Array<[PipelineStageTaskType, string]> = [
+    ["PUBLISH_EMBEDDING", `(COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED' OR ${ROUTABLE_VERIFICATION_SQL})`],
+    ["DECIDE_RECOMMENDATION", `(COALESCE(c.processing_state, c.processing_status) = 'NEEDS_VERIFICATION' AND NOT COALESCE(${ROUTABLE_VERIFICATION_SQL}, FALSE))`],
+  ];
+  for (const [taskType, stateSql] of steps) {
+    await selectAndEnqueue(
+      client,
+      ctx,
+      summary,
+      taskType,
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id, ${liftGenerationSql()} AS generation
+       FROM canonical_jobs c
+       JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
+       WHERE c.workspace_id = $1
+         AND ($3::uuid[] IS NULL OR c.id = ANY($3::uuid[]))
+         AND ${stateSql}
+         AND ${liftedAwaitingRematchSql("c")}
+         AND NOT EXISTS (
+           SELECT 1 FROM pipeline_tasks open_task
+            WHERE open_task.workspace_id = c.workspace_id
+              AND open_task.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+              AND open_task.payload->>'job_version_id' = jv.id::text)
+         AND ${notBlockedOnJobContentSql(taskType)}
+       ORDER BY jv.observed_at ASC
+       LIMIT $2`,
+      [ctx.workspaceId, options.maxPerType, options.canonicalJobIds],
+      (row) => ({
+        id: requiredSeedValue(row, "job_version_id"),
+        payload: {
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
+          reprocess_existing_state: true,
+          repair_existing_state: true,
+          repair_generation: requiredSeedValue(row, "generation"),
+        },
+      }),
+      options.enabledTypes,
+      options.includeTestFixtures,
+      options.seedScope,
+      options.maxPerType,
+    );
+  }
+}
+
+/**
+ * For a re-gate run outside a worker pass (scripts/regate_job_ids.ts): queues the next step of those of the given jobs the
+ * re-gate lifted out of rejection. Returns how many tasks were queued.
+ */
+export async function queueLiftedNextSteps(
+  db: pg.Pool | pg.PoolClient,
+  context: WorkspaceContext,
+  canonicalJobIds: readonly string[],
+): Promise<number> {
+  if (canonicalJobIds.length === 0) return 0;
+  const summary: SeedPipelineTasksSummary = {
+    inserted: 0, existing: 0, deferredByBudget: 0, timeBudgetExceeded: false, byType: {}, skippedArchived: 0,
+  };
+  await seedLiftedNextSteps(db as unknown as QueryClient, context, summary, {
+    canonicalJobIds, maxPerType: canonicalJobIds.length,
+  });
+  return summary.inserted;
+}
+
 export async function seedRecoverablePipelineTasks(
   clientOrPool?: pg.Pool | pg.PoolClient,
   options: {
@@ -1605,6 +1709,10 @@ export async function seedRecoverablePipelineTasks(
     seedScope,
     maxPerType,
     );
+
+    await seedLiftedNextSteps(client as any, ctx, summary, {
+      canonicalJobIds: null, maxPerType, enabledTypes, includeTestFixtures, seedScope,
+    });
 
     await selectAndEnqueue(
       client as any,
@@ -3167,6 +3275,21 @@ async function markTaskTargetProcessingError(
   );
 }
 
+async function latestDecisionCarriesStoredScore(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<boolean> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ carried: boolean }>(
+    `SELECT ${carriedScoreDecisionSql("dd")} AS carried
+       FROM canonical_jobs c
+       JOIN deterministic_decisions dd ON dd.workspace_id = c.workspace_id AND dd.id = c.latest_deterministic_decision_id
+      WHERE c.workspace_id = $1 AND c.latest_job_version_id = $2::uuid`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return rows[0]?.carried === true;
+}
+
 async function maybeEnqueueAfterTask(
   taskType: PipelineStageTaskType,
   task: ClaimedPipelineTask,
@@ -3263,15 +3386,26 @@ async function maybeEnqueueAfterTask(
   }
 
   const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
+  // The re-gate of a restored job re-runs the same job version too. Without its own successor identities the completed
+  // tasks of the first run suppress them, and the restored job would never be re-matched.
+  const restoreReason = taskType === "APPLY_HARD_GATES" && typeof payload.reassessment_reason === "string"
+    && payload.reassessment_reason.startsWith("ARCHIVE_RESTORE:")
+    ? payload.reassessment_reason
+    : null;
+  // A gate task that left a job lifted out of rejection gives its successors the lift's identity, so completed tasks of
+  // an earlier run cannot suppress them and the re-match is queued in the pass that changed the gate outcome.
+  const liftGeneration = taskType === "APPLY_HARD_GATES" && restoreReason === null
+    ? await liftedRepairGeneration(clientOrPool, ctx, jobVersionId)
+    : null;
   const stagePayload = {
     canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
     job_version_id: jobVersionId,
     // A gate-version refresh whose outcome changed re-runs the downstream stages for the SAME job version: its successors need
     // repair-variant task keys, or the completed tasks of the first run would suppress them and the job would wait forever.
-    ...(payload.reprocess_existing_state === true || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
+    ...(payload.reprocess_existing_state === true || restoreReason !== null || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
       ? { reprocess_existing_state: true }
       : {}),
-    ...(payload.repair_existing_state === true || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
+    ...(payload.repair_existing_state === true || restoreReason !== null || (taskType === "APPLY_HARD_GATES" && payload.version_refresh === true)
       ? { repair_existing_state: true }
       : {}),
     ...(typeof payload.repair_dependency === "string" ? { repair_dependency: payload.repair_dependency } : {}),
@@ -3282,6 +3416,10 @@ async function maybeEnqueueAfterTask(
     // repair_generation is whitelisted into the task context and propagates down the chain.
     ...(taskType === "APPLY_HARD_GATES" && payload.version_refresh === true
       ? { repair_generation: typeof payload.gate_rule_version === "string" && payload.gate_rule_version.trim() !== "" ? payload.gate_rule_version.trim() : GATE_VERSION }
+      : {}),
+    ...(restoreReason !== null ? { repair_generation: restoreReason } : {}),
+    ...(liftGeneration !== null
+      ? { reprocess_existing_state: true, repair_existing_state: true, repair_generation: liftGeneration }
       : {}),
   };
 
@@ -3373,8 +3511,12 @@ async function maybeEnqueueAfterTask(
 
   if (
     taskType === "DECIDE_RECOMMENDATION" &&
+    // A restored job is still to be re-gated; the decide at the end of that chain queues it for AI.
+    !String(payload.reassessment_reason ?? "").startsWith("ARCHIVE_RESTORE:") &&
     state.recommendationEligibility === "ELIGIBLE" &&
-    isAiEvaluationOutcome(state.recommendationOutcome)
+    isAiEvaluationOutcome(state.recommendationOutcome) &&
+    // An old score never sends a job to AI: a kept result waits for its re-match, whose own decide queues it.
+    !(await latestDecisionCarriesStoredScore(clientOrPool, ctx, jobVersionId))
   ) {
     await enqueueSuccessor("ENQUEUE_EXPLANATION", jobVersionId, stagePayload);
   }
@@ -4071,7 +4213,16 @@ async function executeStageTask(
       // own context-specific task identity.
       return;
     }
-    if (["RAW_STAGED", "PREQUALIFIED"].includes(decisionState.processingState || "")) {
+    const decidePayload = (task.payload || {}) as Record<string, unknown>;
+    // A restored job is decided now, whatever stage it is in and with or without a current match. It has its old result
+    // back and the decider keeps it until a re-match, lowered only by a real override.
+    const restored = typeof decidePayload.reassessment_reason === "string" && decidePayload.reassessment_reason.startsWith("ARCHIVE_RESTORE:");
+    if (restored && !(await jobVersionIsDecidable(clientOrPool, ctx, jobVersionId))) {
+      // It keeps the result it had; the stages that complete the content queue the next decision.
+      onDesignedNoOp(decisionNotStampable("AWAITING_CONTENT_NOT_DECIDABLE"));
+      return;
+    }
+    if (!restored && ["RAW_STAGED", "PREQUALIFIED"].includes(decisionState.processingState || "")) {
       // Recommendation decisions are downstream of lane routing. A stale
       // decision task can survive a retry or historical replay while the job
       // is still in the pre-lane funnel; it is not a dependency failure and
@@ -4084,12 +4235,11 @@ async function executeStageTask(
       onDesignedNoOp(decisionNotStampable("JOB_REMOVED"));
       return;
     }
-    const decidePayload = (task.payload || {}) as Record<string, unknown>;
     // Only a decider-version reassessment bypasses the terminal no-op: other enqueuers (a rematch successor, a readiness
     // refresh) set reprocess_existing_state too and must not re-run the decider on a terminal job that already has a decision.
     const reassessment = typeof decidePayload.reassessment_reason === "string" && decidePayload.reassessment_reason.startsWith("DECIDER_VERSION:");
     let terminalWithOutcome = false;
-    if (decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) {
+    if (!restored && decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) {
       // A terminal job with a recorded outcome needs no decision run, but only when a decision row already exists for this
       // version (the "completed without result" check expects one) and the task is not a reassessment: a decider-version or
       // readiness reassessment must stamp a decision under the current decider_version. The decider never changes the job's
@@ -4111,6 +4261,7 @@ async function executeStageTask(
     const isRoutingDeferred = decisionState.processingState === "ROUTING_DEFERRED";
     const isUnmatched = decisionState.processingState === "UNMATCHED";
     const requiresCurrentMatch =
+      !restored &&
       !isRoutingDeferred &&
       !isUnmatched &&
       (decisionState.gateDecision === "PASS" || matchDependentStates.has(decisionState.processingState || ""));
@@ -4480,6 +4631,8 @@ export async function runPipelineStageTaskWorker(
 
   try {
     throwIfWorkerCancelled(options.abortSignal);
+    // Waits for a re-match that began between runs (a new profile, for example) start their clock here.
+    await syncRematchWaits(client, ctx.workspaceId);
 
     if (options.seed !== false) {
       summary.seeded = await seedRecoverablePipelineTasks(client as any, {
@@ -4841,6 +4994,8 @@ export async function runPipelineStageTaskWorker(
       }
     }
 
+    // Waits that began or ended during this run.
+    await syncRematchWaits(client, ctx.workspaceId);
     return summary;
   } finally {
     if (ownsClient && typeof (client as any).release === "function") {

@@ -210,7 +210,6 @@
     "F6|recommendation_outcome|src/pipeline/hardGate.ts",
     "F6|recommendation_outcome|src/pipeline/laneRouter.ts",
     "F6|recommendation_outcome|src/pipeline/recommendationDecider.ts",
-    "F6|recommendation_outcome|src/services/jobArchive.ts",
     "F6|routing_disposition|src/pipeline/laneRouter.ts",
     "F7|ai_evaluation_budget_runs|src/pipeline",
     "F7|ai_evaluation_budget_usage|src/pipeline",

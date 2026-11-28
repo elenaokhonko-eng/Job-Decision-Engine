@@ -628,6 +628,7 @@ export async function runNormalization(
               repostedAt: reactivationDate,
               repostEvidenceHash: evidenceRevisionHash ?? freshnessEvidence.postingIdentityHash ?? String(obs.raw_payload_hash),
               evidenceType: reactivationEvidenceType,
+              context: ctx,
             });
           }
         }

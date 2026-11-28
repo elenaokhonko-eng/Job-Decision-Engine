@@ -705,7 +705,9 @@ describe.skipIf(skipReal)("daily job archiving PostgreSQL integration", () => {
       [context.workspaceId, job.canonicalJobId],
     );
     expect(refreshed.rows[0]?.latest_deterministic_decision_id).toBeNull();
-    expect(refreshed.rows[0]?.recommendation_outcome).toBeNull();
+    // A restore never clears or replaces a result: the job has the outcome it had (the other restore paths and the
+    // decision that follows are covered in rerunKeepsResults.integration.test.ts).
+    expect(refreshed.rows[0]?.recommendation_outcome).toBe("REVIEW");
     const restoreTask = await pool.query<{ count: number }>(
       `SELECT COUNT(*)::int AS count FROM pipeline_tasks
        WHERE workspace_id = $1 AND task_type = 'APPLY_HARD_GATES'

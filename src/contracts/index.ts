@@ -626,6 +626,8 @@ export const ShortlistRowSchema = z.object({
   recommendation_coverage_score: z.number().min(0).max(1).nullable().default(null),
   recommendation_evidence_completeness: z.number().min(0).max(1).nullable().default(null),
   recommendation_decided_at: z.string().datetime().nullable().default(null),
+  awaiting_rematch: z.boolean().default(false),
+  awaiting_rematch_since: z.string().datetime().nullable().default(null),
   nd_friendly_score: z.number().int().min(0).max(100).nullable().default(null),
   politics_stress_score: z.number().int().min(0).max(100).nullable().default(null),
   sensory_overload_index: z.number().int().min(0).max(100).nullable().default(null),

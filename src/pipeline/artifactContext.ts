@@ -65,6 +65,7 @@ const CONTEXT_PAYLOAD_KEYS = [
   "embedding_repair_seq",
   "repair_match_run_id",
   "reassessment_reason",
+  "carried_result_hash",
   "verification_answer_revision_id",
   "queue_budget_run_id",
   "lead_superseded_queue_id",

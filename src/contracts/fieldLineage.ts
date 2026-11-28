@@ -230,6 +230,22 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     nullable: true
   },
   {
+    field: "awaiting_rematch",
+    sourceTable: "v_job_awaiting_rematch",
+    sourceColumn: "canonical_job_id",
+    producerStage: "124_awaiting_rematch_view.sql",
+    transformation: "True while the job holds a stored score with no current profile match",
+    nullable: false
+  },
+  {
+    field: "awaiting_rematch_since",
+    sourceTable: "v_job_awaiting_rematch",
+    sourceColumn: "waiting_since",
+    producerStage: "recommendationDecider.ts",
+    transformation: "When the job began to wait (job_rematch_waits); null when it is not waiting or not yet recorded",
+    nullable: true
+  },
+  {
     field: "nd_friendly_score",
     sourceTable: "ai_evaluations",
     sourceColumn: "nd_friendly_score",

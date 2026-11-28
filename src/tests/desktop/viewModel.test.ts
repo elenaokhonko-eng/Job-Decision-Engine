@@ -35,6 +35,8 @@ const baseJob: ShortlistRow = {
   recommendation_coverage_score: null,
   recommendation_evidence_completeness: null,
   recommendation_decided_at: null,
+  awaiting_rematch: false,
+  awaiting_rematch_since: null,
   nd_friendly_score: null,
   politics_stress_score: null,
   sensory_overload_index: null,

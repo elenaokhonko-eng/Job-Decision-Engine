@@ -217,8 +217,6 @@ export interface CheckedJob {
   readonly detail: string;
   /** OPEN and CLOSED only: the read model shows the stored verdict (for OPEN: current, verified today). */
   readonly visible: boolean | null;
-  /** The decision was not recomputed because that would have removed the stored requirement score. */
-  readonly scoreKept?: boolean;
   /** CLOSED from page wording alone: the owner should open the posting. */
   readonly checkByHand?: boolean;
   /** Position of the job in the chosen list. */
@@ -262,7 +260,7 @@ export async function applyAvailabilityCheck(
   for (const read of plan.reads) {
     const startedAt = now();
     const report = (checked: CheckedJob) => {
-      options.log?.(`line ${read.line} ${read.site} ${checked.result} ${checked.detail}${checked.visible === false ? " NOT_VISIBLE_IN_READ_MODEL" : ""}${checked.scoreKept ? " DECISION_NOT_RECOMPUTED" : ""}${checked.checkByHand ? " CHECK_BY_HAND" : ""}`);
+      options.log?.(`line ${read.line} ${read.site} ${checked.result} ${checked.detail}${checked.visible === false ? " NOT_VISIBLE_IN_READ_MODEL" : ""}${checked.checkByHand ? " CHECK_BY_HAND" : ""}`);
       results.push({ ...checked, line: read.line });
     };
     const skip = (detail: string) => report({ canonicalJobId: read.canonicalJobId, result: "SKIPPED", detail, visible: null });
@@ -335,18 +333,12 @@ export async function applyAvailabilityCheck(
         checked = { canonicalJobId: read.canonicalJobId, result: "SKIPPED", detail: outcome.reason, visible: null };
       } else {
         const result = outcome.outcome === "OPEN" ? "OPEN" : outcome.outcome === "CLOSED_BY_PAGE" ? "CLOSED" : "CANNOT_TELL";
-        const { rows } = await client.query<{ kept: boolean }>(
-          `SELECT COALESCE(details ? 'readiness_recompute_skipped', FALSE) AS kept FROM job_availability_recheck_events
-            WHERE workspace_id = $1::uuid AND canonical_job_id = $2::uuid ORDER BY id DESC LIMIT 1`,
-          [context.workspaceId, read.canonicalJobId],
-        );
         checked = {
           canonicalJobId: read.canonicalJobId,
           result,
           detail: downgradeReason ? `${outcome.reasonCode} ${downgradeReason}` : outcome.reasonCode,
           checkByHand: checkByHand && result === "CLOSED",
           visible: result === "CANNOT_TELL" ? null : await verdictVisible(client, context.workspaceId, read.canonicalJobId, result === "OPEN", startedAt),
-          scoreKept: rows[0]?.kept === true,
         };
       }
     } catch (error) {
@@ -499,7 +491,7 @@ export async function runAvailabilityCheckCommand(
     }
     const results = await (dependencies.apply ?? applyAvailabilityCheck)(db, context, plan, { log });
     const tally = (result: CheckedJob["result"]) => results.filter((r) => r.result === result).length;
-    log(`APPLIED: ${results.length} read(s): open=${tally("OPEN")} closed=${tally("CLOSED")} cannot_tell=${tally("CANNOT_TELL")} skipped=${tally("SKIPPED")} error=${tally("ERROR")} not_visible=${results.filter((r) => r.visible === false).length} decision_not_recomputed=${results.filter((r) => r.scoreKept).length}`);
+    log(`APPLIED: ${results.length} read(s): open=${tally("OPEN")} closed=${tally("CLOSED")} cannot_tell=${tally("CANNOT_TELL")} skipped=${tally("SKIPPED")} error=${tally("ERROR")} not_visible=${results.filter((r) => r.visible === false).length}`);
     const byHand = results.filter((r) => r.checkByHand).map((r) => r.line);
     log(`check by hand (CLOSED from page wording alone): ${byHand.length}${byHand.length ? ` (lines ${byHand.join(",")})` : ""}`);
     return availabilityCheckExitCode(results);

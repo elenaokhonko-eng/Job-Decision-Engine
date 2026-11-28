@@ -11,6 +11,7 @@ import { GATE_VERSION } from "../contracts/version.js";
 import { leadReadModelAvailable } from "../modules/catalog/index.js";
 import { DECIDER_VERSION, deciderVersionRefreshSql } from "../pipeline/deciderVersion.js";
 import { sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
+import { AWAITING_REMATCH_LIMIT_DAYS } from "../modules/decision/index.js";
 import { LANE_ROUTER_RULE_VERSION } from "../pipeline/laneRouter.js";
 import { DETERMINISTIC_EXTRACTOR_VERSION } from "../requirements/deterministicExtractors.js";
 import { routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
@@ -369,6 +370,22 @@ export async function returnedLeadsNotQueued(db: Queryable, workspaceId: string)
  * right after a rule-version change until the reopen seeds have drained. The default, "post", is strict
  * and runs every check.
  */
+/** A job that has waited for a re-match longer than the limit, counted from when it began to wait. */
+export async function jobsAwaitingRematchOverLimit(
+  db: Queryable,
+  workspaceId: string,
+  limitDays: number = AWAITING_REMATCH_LIMIT_DAYS,
+): Promise<ZeroCheckResult> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT canonical_job_id::text AS id
+       FROM v_job_awaiting_rematch
+      WHERE workspace_id = $1::uuid AND waiting_since < NOW() - make_interval(days => $2::int)
+      ORDER BY canonical_job_id`,
+    [workspaceId, limitDays],
+  );
+  return result("awaiting_rematch_over_limit", rows.map((row) => row.id));
+}
+
 export async function runZeroChecks(
   db: Queryable,
   workspaceId: string,
@@ -381,6 +398,7 @@ export async function runZeroChecks(
     await staleStageResults(db, workspaceId),
     await leadsInListsOrQueue(db, workspaceId),
     await returnedLeadsNotQueued(db, workspaceId),
+    await jobsAwaitingRematchOverLimit(db, workspaceId),
   ];
   return [
     await rejectedJobsWithRecommendation(db, workspaceId),

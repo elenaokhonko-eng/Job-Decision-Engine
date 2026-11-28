@@ -161,11 +161,15 @@ describe.skipIf(skipReal)("hard gate: version-refresh stamp and flagNeedsVerific
       expect(after.latest_deterministic_decision_id).toEqual(before.latest_deterministic_decision_id);
     });
 
-    it("without versionRefresh a forced re-gate still resets downstream even when the outcome is unchanged", async () => {
-      const { jobId } = await gatedJobWithDownstream("MATCHED");
+    it("without versionRefresh a forced re-gate resets the lane so it is routed again, and keeps every score and decision column", async () => {
+      const { jobId, before } = await gatedJobWithDownstream("MATCHED");
       await runHardGates(db(), { context: ctx(), canonicalJobIds: [jobId], reprocess: true });
-      const after = (await db().query(`SELECT primary_lane, recommendation_outcome FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
-      expect(after).toEqual({ primary_lane: null, recommendation_outcome: null });
+      const after = (await db().query(`SELECT * FROM canonical_jobs WHERE id = $1`, [jobId])).rows[0];
+      expect(after).toMatchObject({ primary_lane: null, lane_confidence: null, latest_match_run_id: null });
+      for (const column of DOWNSTREAM.filter((c) => !["processing_state", "primary_lane", "lane_confidence"].includes(c))) {
+        expect(after[column], column).toEqual(before[column]);
+      }
+      expect(after.latest_deterministic_decision_id).toEqual(before.latest_deterministic_decision_id);
     });
   });
 

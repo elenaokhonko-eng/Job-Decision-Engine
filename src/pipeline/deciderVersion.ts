@@ -11,7 +11,9 @@
  * collides with an unstamped row of the same inputs.
  */
 // v5: posting age no longer blocks or holds application readiness (owner decision 2026-11-27).
-export const DECIDER_VERSION = "recommendation_decider_v5" as const;
+// v6: a re-run never clears a result (owner decision): a job without a current match keeps its stored score and
+// outcome, lowered only by facts that do not depend on the score.
+export const DECIDER_VERSION = "recommendation_decider_v6" as const;
 
 /** SQL (alias `c` = canonical_jobs) true when the job's latest decision was made by another decider version. */
 export function deciderVersionRefreshSql(canonicalAlias = "c", options: { includeTestFixtures?: boolean } = {}): string {

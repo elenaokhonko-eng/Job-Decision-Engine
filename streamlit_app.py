@@ -19,7 +19,7 @@ from streamlit_application_workflow import (
 from streamlit_archive import render_archive_hold_form, render_archive_jobs
 from streamlit_database import read_only_database_ssl_options
 from streamlit_formatters import as_number, format_percent, format_score, format_signal
-from streamlit_formatters import format_career_track, safe_http_url
+from streamlit_formatters import awaiting_rematch_label, format_career_track, safe_http_url
 from streamlit_job_review import (
     LEAD_LABEL,
     lead_job_ids,
@@ -295,6 +295,12 @@ SHORTLIST_READ_MODEL_QUERY = """
     WHERE s.workspace_id = %s
     ORDER BY s.observed_at DESC NULLS LAST, s.canonical_job_id DESC
     LIMIT %s
+"""
+
+AWAITING_REMATCH_QUERY = """
+    SELECT canonical_job_id::text AS canonical_job_id, waiting_since
+    FROM v_job_awaiting_rematch
+    WHERE workspace_id = %s
 """
 
 REJECTED_READ_MODEL_QUERY = """
@@ -1025,6 +1031,22 @@ def fetch_company_culture_evidence(workspace_company_id):
         (workspace_id, workspace_company_id, 100),
     )
     return _validate_workspace_rows(rows, workspace_id, validate_company_culture_evidence_row)
+
+
+def fetch_awaiting_rematch():
+    """Jobs that keep a stored score while they wait for a re-match, as {canonical_job_id: waiting_since}."""
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(AWAITING_REMATCH_QUERY, (workspace_id,))
+    return {str(row["canonical_job_id"]): row["waiting_since"] for row in rows}
+
+
+def awaiting_mark(job):
+    job_id = str(job.get("canonical_job_id"))
+    return awaiting_rematch_label(job_id in awaiting_rematch, awaiting_rematch.get(job_id))
 
 
 def fetch_jobs_from_postgres_read_model():
@@ -1842,9 +1864,19 @@ if database_problem:
 # Fetch data
 jobs_list = fetch_jobs_from_db()
 rejected_jobs_audit = fetch_rejected_jobs_from_db()
+try:
+    awaiting_rematch = fetch_awaiting_rematch()
+except Exception as exc:
+    awaiting_rematch = {}
+    st.error(f"The awaiting re-match mark is unavailable, so a stored result may be shown unmarked: {exc}")
 
 for job in jobs_list:
     eligibility, outcome, req_score, cov_score, evidence_completeness = derive_deterministic_recommendation(job)
+    # A job that waits for a re-match keeps its stored result: the "still processing" placeholder must not hide it.
+    if str(job.get("canonical_job_id")) in awaiting_rematch and job.get("recommendation_outcome"):
+        eligibility, outcome = job.get("recommendation_eligibility"), job.get("recommendation_outcome")
+        req_score, cov_score = job.get("recommendation_requirement_score"), job.get("recommendation_coverage_score")
+        evidence_completeness = job.get("recommendation_evidence_completeness")
     job["decision_eligibility"] = eligibility
     job["decision_outcome"] = outcome
     job["decision_requirement_score"] = req_score
@@ -2310,6 +2342,8 @@ with tab_dashboard:
                     f"Interaction burden: {format_percent(ranked_job.get('interaction_burden_score'))} · "
                     f"Strategic value: {format_percent(ranked_job.get('strategic_value_score'))}"
                 )
+                if awaiting_mark(ranked_job):
+                    st.warning(awaiting_mark(ranked_job))
                 st.caption(
                     f"Decision: {ranked_job.get('recommendation_outcome')} · "
                     f"{ranked_job.get('evaluation_summary') or 'No concise evaluation summary is available.'}"
@@ -2714,6 +2748,8 @@ with tab_dashboard:
                     
                     with st.expander(f"{badge_style} {escape_markdown(title)} — {escape_markdown(company)} ({escape_markdown(status)})"):
                         st.text(f"Decision: {outcome} ({eligibility}) | Gate: {gate_status}")
+                        if awaiting_mark(job):
+                            st.warning(awaiting_mark(job))
                         if workspace_category == REVIEW_CATEGORY:
                             st.text(apply_now_exclusion_summary(job))
                         verification_action = verification_action_applies(job, workspace_category)
@@ -3041,7 +3077,9 @@ with tab_applications:
                 "Company": record.get("company"),
                 "Role": record.get("title"),
                 "Status": record.get("application_status"),
-                "Recommendation": record.get("recommendation_outcome"),
+                "Recommendation": " · ".join(
+                    part for part in (record.get("recommendation_outcome"), awaiting_mark(record)) if part
+                ),
                 "Listing": LEAD_LABEL if str(record.get("canonical_job_id")) in saved_lead_ids else "",
                 "Rank context": "Current job version" if record.get("is_current_job_version") else "Historical job version",
                 "CV": record.get("cv_document_status") or "NOT_GENERATED",
@@ -3295,6 +3333,8 @@ with tab_cv:
         st.markdown(f"**Canonical Job ID:** {selected_job.get('canonical_job_id')}")
         st.markdown(f"**Job Version ID:** {selected_job.get('job_version_id')}")
         st.markdown(f"**Company:** {selected_job.get('company')} | **Role:** {selected_job.get('title')}")
+        if awaiting_mark(selected_job):
+            st.warning(awaiting_mark(selected_job))
         url = safe_http_url(selected_job.get("canonical_url"))
         if url:
             st.markdown(f"🔗 [View Posting]({url})")

@@ -1307,21 +1307,19 @@ export async function runHardGates(
                lane_confidence = CASE WHEN $8::boolean THEN NULL ELSE lane_confidence END,
                lane_evidence = CASE WHEN $8::boolean THEN NULL ELSE lane_evidence END,
                semantic_score = CASE WHEN $8::boolean THEN 0.0 ELSE semantic_score END,
-               deterministic_match_score = CASE WHEN $8::boolean THEN NULL ELSE deterministic_match_score END,
-               deterministic_match_coverage = CASE WHEN $8::boolean THEN NULL ELSE deterministic_match_coverage END,
                latest_match_run_id = CASE WHEN $8::boolean THEN NULL ELSE latest_match_run_id END,
                latest_lane_decision_id = CASE WHEN $8::boolean THEN NULL ELSE latest_lane_decision_id END,
-               latest_deterministic_decision_id = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE latest_deterministic_decision_id END,
-               recommendation_eligibility = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_eligibility END,
-               recommendation_outcome = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_outcome END,
-               recommendation_requirement_score = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_requirement_score END,
-               recommendation_coverage_score = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_coverage_score END,
-               recommendation_evidence_completeness = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_evidence_completeness END,
-               recommendation_decided_at = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_decided_at END,
-               recommendation_score_policy = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_score_policy END,
-               recommendation_degree_asked_for = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_degree_asked_for END,
-               recommendation_role_signals = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN '[]'::jsonb ELSE recommendation_role_signals END,
-               recommendation_evidence_confidence = CASE WHEN ($8::boolean OR $1::varchar = 'HARD_REJECT') THEN NULL ELSE recommendation_evidence_confidence END,
+               latest_deterministic_decision_id = CASE WHEN $1::varchar = 'HARD_REJECT' THEN NULL ELSE latest_deterministic_decision_id END,
+               recommendation_eligibility = CASE WHEN $1::varchar = 'HARD_REJECT' THEN NULL ELSE recommendation_eligibility END,
+               recommendation_outcome = CASE WHEN $1::varchar = 'HARD_REJECT' THEN NULL ELSE recommendation_outcome END,
+               recommendation_requirement_score = CASE WHEN $1::varchar = 'HARD_REJECT' THEN NULL ELSE recommendation_requirement_score END,
+               recommendation_coverage_score = CASE WHEN $1::varchar = 'HARD_REJECT' THEN NULL ELSE recommendation_coverage_score END,
+               recommendation_evidence_completeness = CASE WHEN $1::varchar = 'HARD_REJECT' THEN NULL ELSE recommendation_evidence_completeness END,
+               recommendation_decided_at = CASE WHEN $1::varchar = 'HARD_REJECT' THEN NULL ELSE recommendation_decided_at END,
+               recommendation_score_policy = CASE WHEN $1::varchar = 'HARD_REJECT' THEN NULL ELSE recommendation_score_policy END,
+               recommendation_degree_asked_for = CASE WHEN $1::varchar = 'HARD_REJECT' THEN NULL ELSE recommendation_degree_asked_for END,
+               recommendation_role_signals = CASE WHEN $1::varchar = 'HARD_REJECT' THEN '[]'::jsonb ELSE recommendation_role_signals END,
+               recommendation_evidence_confidence = CASE WHEN $1::varchar = 'HARD_REJECT' THEN NULL ELSE recommendation_evidence_confidence END,
                updated_at         = NOW()
            WHERE workspace_id = $6
              AND id = $7
@@ -1334,9 +1332,9 @@ export async function runHardGates(
             JSON.stringify(gateResult.workability_facts),
             ctx.workspaceId,
             job.id,
-            // A version-refresh re-gate whose outcome changed keeps lane, match, decision, score and ranking columns until the
-            // recompute overwrites them (they are only cleared for HARD_REJECT, by the SQL above). A plain forced reprocess
-            // is an explicit operator reset and clears them.
+            // No re-gate clears a score, decision or ranking column: the recompute overwrites them (only a HARD_REJECT, a
+            // changed result, clears the recommendation, by the SQL above). A plain forced reprocess also resets the lane and
+            // the match and lane pointers so routing and matching run again; a version refresh keeps those too.
             reprocess && options?.versionRefresh !== true
           ]
         );

@@ -26,10 +26,18 @@ import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
 import { resolveEffectiveWorkabilityPolicy } from "./effectiveWorkabilityPolicy.js";
 import { findOnsiteException } from "./onsiteExceptions.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
+import { liftedAwaitingRematchSql, restoredAwaitingRematchSql } from "./profileMatchCurrency.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import { isRepostFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
 import { MIN_CONFIRMED_REQUIREMENTS } from "../requirements/requirementKinds.js";
 import { DECIDER_VERSION } from "./deciderVersion.js";
+import {
+  AWAITING_REMATCH_NOTE,
+  STORED_SCORE_CARRIED_NOTE,
+  keepStoredOutcome,
+  syncRematchWaits,
+  type KeptResult,
+} from "../modules/decision/index.js";
 import { applyRoleShapePenalty, assessRoleShape, roleShapeFingerprint, ROLE_SHAPE_POLICY_VERSION } from "./roleShape.js";
 import { assessCareerTrack, capOutcome, CAREER_TRACK_POLICY_VERSION, parseTrackExperience, type TrackRequirement } from "./careerTrack.js";
 import {
@@ -94,8 +102,6 @@ export interface RecommendationDeciderSummary {
   outcomeConflicts?: number;
   /** One entry per conflict: the stored and the recomputed outcome and eligibility (ids and codes only). */
   outcomeConflictDetails?: OutcomeConflictDetail[];
-  /** Jobs left untouched in `keepStoredScore` mode. */
-  scoresKept?: number;
   policySnapshotId: string;
   policySnapshotHash: string;
 }
@@ -353,14 +359,8 @@ export async function runRecommendationDecider(
      * latest_deterministic_decision_id moves to the stamped decision.
      */
     preserveStoredOutcome?: boolean;
-    /**
-     * Writes nothing for a job that has a stored requirement score when this recompute would have none (its match is
-     * no longer current). Counted in `scoresKept`.
-     */
-    keepStoredScore?: boolean;
   }
 ): Promise<RecommendationDeciderSummary> {
-  let scoresKept = 0;
   const preserveStoredOutcome = options?.preserveStoredOutcome === true;
   let outcomeConflicts = 0;
   const outcomeConflictDetails: OutcomeConflictDetail[] = [];
@@ -447,7 +447,13 @@ export async function runRecommendationDecider(
       recommendation_requirement_score: any;
       recommendation_coverage_score: any;
       recommendation_evidence_completeness: any;
+      recommendation_score_policy: string | null;
+      recommendation_degree_asked_for: string | null;
+      recommendation_role_signals: unknown;
+      recommendation_evidence_confidence: string | null;
       recommendation_decided_at: Date | null;
+      restored_awaiting_rematch: boolean;
+      lifted_awaiting_rematch: boolean;
       latest_deterministic_decision_id: string | null;
       company_name: string;
       normalized_title: string;
@@ -503,7 +509,13 @@ export async function runRecommendationDecider(
         c.recommendation_requirement_score,
         c.recommendation_coverage_score,
         c.recommendation_evidence_completeness,
+        c.recommendation_score_policy,
+        c.recommendation_degree_asked_for,
+        c.recommendation_role_signals,
+        c.recommendation_evidence_confidence,
         c.recommendation_decided_at,
+        ${restoredAwaitingRematchSql("c")} AS restored_awaiting_rematch,
+        ${liftedAwaitingRematchSql("c")} AS lifted_awaiting_rematch,
         c.latest_deterministic_decision_id,
         c.company_name,
         c.normalized_title,
@@ -638,7 +650,15 @@ export async function runRecommendationDecider(
           normalizeGateDecision(job.gate_decision) ??
           inferGateDecisionFromProcessingState(job.processing_state);
 
+        // A restored job gets its old result back, and a job a re-gate lifted out of rejection keeps what it holds: until a
+        // match completes after that, it waits for a re-match, even where an earlier match still looks current.
+        const holdsResult = job.recommendation_outcome !== null || job.recommendation_eligibility !== null
+          || job.recommendation_requirement_score !== null;
+        const restoredWaiting = job.restored_awaiting_rematch === true && holdsResult;
+        const liftedWaiting = job.lifted_awaiting_rematch === true && holdsResult;
+        const heldForRematch = restoredWaiting || liftedWaiting;
         const currentMatch =
+          !heldForRematch &&
           job.canonical_latest_job_version_id !== null &&
           job.canonical_latest_job_version_id === job.job_version_id &&
           job.match_status === "COMPLETED" &&
@@ -654,8 +674,9 @@ export async function runRecommendationDecider(
         const requiresCurrentMatch = normalizedGateDecision === "PASS";
         const matchIsUsable = !requiresCurrentMatch || currentMatch;
 
-        const requirementScorePct = matchIsUsable ? asNumber(job.deterministic_match_score) : null;
-        const coverageScorePct = matchIsUsable ? asNumber(job.deterministic_match_coverage) : null;
+        // An old score never makes a new decision: only a current match gives one, whatever the gate says.
+        const requirementScorePct = currentMatch ? asNumber(job.deterministic_match_score) : null;
+        const coverageScorePct = currentMatch ? asNumber(job.deterministic_match_coverage) : null;
 
         const rawRequirementScore =
           requirementScorePct == null ? null : Number((requirementScorePct / 100).toFixed(3));
@@ -670,13 +691,26 @@ export async function runRecommendationDecider(
             : null,
         });
         const requirementScore = applyRoleShapePenalty(rawRequirementScore, shape);
-        if (options?.keepStoredScore && requirementScore === null && job.recommendation_requirement_score !== null) {
-          await client.query("ROLLBACK");
-          scoresKept += 1;
-          continue;
-        }
         const coverageScore =
           coverageScorePct == null ? null : Number((coverageScorePct / 100).toFixed(3));
+        // A re-run never clears a result: where this recompute has no score or coverage, the stored one is carried
+        // forward. A job without a current match also keeps its stored outcome (it waits for a re-match); a current
+        // match that compared nothing is a real result, so its outcome is decided normally.
+        const storedScore = asNumber(job.recommendation_requirement_score);
+        const storedCoverage = asNumber(job.recommendation_coverage_score);
+        const carriesScore = (requirementScore === null && storedScore !== null)
+          || (coverageScore === null && storedCoverage !== null);
+        // A restored or lifted job keeps its outcome also when it never had a score (a skipped or ineligible job).
+        const keptFrom: KeptResult | null = !currentMatch && (storedScore !== null || storedCoverage !== null || heldForRematch)
+          && (job.recommendation_eligibility !== null || heldForRematch) && job.recommendation_outcome !== null
+          ? {
+              eligibility: (job.recommendation_eligibility
+                ?? (job.recommendation_outcome === "SKIP" ? "INELIGIBLE" : "VERIFY")) as KeptResult["eligibility"],
+              outcome: job.recommendation_outcome as KeptResult["outcome"],
+            }
+          : null;
+        const resultScore = requirementScore ?? storedScore;
+        const resultCoverage = coverageScore ?? storedCoverage;
         const evidenceCompleteness = computeEvidenceCompleteness(
           confirmedWorkplaceType(job.workplace_type, confirmedFacts),
           job.workability_facts
@@ -1119,6 +1153,34 @@ export async function runRecommendationDecider(
           adjustedNotes.push("application_readiness_blocked");
         }
 
+        let decisionNotes = adjustedNotes;
+        if (keptFrom) {
+          // The policy result above rests on a missing score, so it is dropped: the stored result stands, lowered only
+          // by facts that do not depend on the score.
+          const kept = keepStoredOutcome(keptFrom, {
+            gateDecision: normalizedGateDecision,
+            noMatchingLane: job.routing_disposition === "POLICY_NO_MATCH",
+            careerTrackCap: careerTrack.outcome_cap,
+            pay: compensationAssessment?.status === "BELOW_FLOOR"
+              ? compensationAssessment.is_hard_reject ? "BELOW_FLOOR_REJECT"
+                : compensationAssessment.prevents_apply_now ? "BELOW_FLOOR_HOLD" : null
+              : compensationAssessment?.prevents_apply_now ? "UNVERIFIED" : null,
+            readinessBlocked: readiness.status === "BLOCKED",
+          });
+          adjustedEligibility = kept.eligibility;
+          adjustedOutcome = kept.outcome;
+          decisionNotes = [
+            AWAITING_REMATCH_NOTE,
+            "current_match_required_but_missing_or_stale",
+            `kept_outcome:${keptFrom.outcome}`,
+            ...(restoredWaiting ? ["restored_from_archive"] : []),
+            ...(liftedWaiting ? ["lifted_from_rejection"] : []),
+            `career_track:${careerTrack.track}:${careerTrack.level}${careerTrack.fit ? `:${careerTrack.fit}` : ""}`,
+            ...kept.overrides.map((override) => `kept_outcome_override:${override}`),
+          ];
+        }
+        if (carriesScore) decisionNotes.push(STORED_SCORE_CARRIED_NOTE);
+
         if (preserveStoredOutcome
           && (job.recommendation_outcome !== adjustedOutcome || job.recommendation_eligibility !== adjustedEligibility)) {
           outcomeConflicts += 1;
@@ -1131,7 +1193,7 @@ export async function runRecommendationDecider(
             recomputed_eligibility: adjustedEligibility,
             eligibility_rule_id: evaluation.eligibilityRuleId ?? null,
             outcome_rule_id: evaluation.outcomeRuleId ?? null,
-            recomputed_notes: adjustedNotes.filter((note) => !note.startsWith("degree_asked_for")),
+            recomputed_notes: decisionNotes.filter((note) => !note.startsWith("degree_asked_for")),
           });
           throw new Error("OUTCOME_CONFLICT_ON_TERMINAL_JOB: the recomputed outcome differs from the stored one; nothing was written.");
         }
@@ -1148,16 +1210,16 @@ export async function runRecommendationDecider(
           outputs: {
             eligibility: adjustedEligibility,
             outcome: adjustedOutcome,
-            recommendation_requirement_score: requirementScore,
-            recommendation_coverage_score: coverageScore,
+            recommendation_requirement_score: resultScore,
+            recommendation_coverage_score: resultCoverage,
             recommendation_evidence_completeness: evidenceCompleteness,
           },
           trace: {
             policy_version: snapshot.decisionPolicy.policy.policy_version,
             policy_hash: snapshot.decisionPolicy.policyHash,
             policy_snapshot_id: snapshot.snapshotId,
-            eligibility_rule_id: evaluation.eligibilityRuleId,
-            outcome_rule_id: evaluation.outcomeRuleId,
+            eligibility_rule_id: keptFrom ? null : evaluation.eligibilityRuleId,
+            outcome_rule_id: keptFrom ? null : evaluation.outcomeRuleId,
             evidence_revision_hash: evidenceRevisionHash,
             readiness_fingerprint: readiness.readiness_fingerprint,
             availability_evidence_hash: availabilityEvidenceHash,
@@ -1171,7 +1233,7 @@ export async function runRecommendationDecider(
               total_penalty: shape.total_penalty,
               signals: shape.signals,
             },
-            notes: adjustedNotes,
+            notes: decisionNotes,
           },
         });
 
@@ -1203,6 +1265,10 @@ export async function runRecommendationDecider(
             workability_policy_hash: workabilityPolicyResolution.policyHash,
             career_track_policy_version: CAREER_TRACK_POLICY_VERSION,
             career_track_assessment_hash: sha256Json(careerTrack),
+            // A carried result is part of the context: the same inputs with another stored result are another decision.
+            ...(carriesScore || keptFrom
+              ? { carried_result_hash: sha256Json({ eligibility: adjustedEligibility, outcome: adjustedOutcome, score: resultScore, coverage: resultCoverage }) }
+              : {}),
             // decider_version in the context separates a decision made after migration 121 from an unstamped row with
             // the same inputs (decisions are immutable, so an old row cannot be stamped in place).
             decider_version: DECIDER_VERSION,
@@ -1341,16 +1407,18 @@ export async function runRecommendationDecider(
             ctx.workspaceId,
             adjustedEligibility,
             adjustedOutcome,
-            requirementScore,
-            coverageScore,
+            resultScore,
+            resultCoverage,
             evidenceCompleteness,
             decisionId,
             job.canonical_job_id,
             job.job_version_id,
-            requirementScore === null ? null : `${job.match_policy_version ?? "unknown_match_policy"}|${shape.policy_version}`,
-            shape.signals.find((signal) => signal.code === "DEGREE_GAP_FLAGGED")?.quote ?? null,
-            JSON.stringify(shape.signals),
-            confidence.level,
+            carriesScore ? job.recommendation_score_policy
+              : requirementScore === null ? null : `${job.match_policy_version ?? "unknown_match_policy"}|${shape.policy_version}`,
+            carriesScore ? job.recommendation_degree_asked_for
+              : shape.signals.find((signal) => signal.code === "DEGREE_GAP_FLAGGED")?.quote ?? null,
+            JSON.stringify(carriesScore ? job.recommendation_role_signals ?? [] : shape.signals),
+            carriesScore ? job.recommendation_evidence_confidence : confidence.level,
           ]
         );
 
@@ -1366,13 +1434,15 @@ export async function runRecommendationDecider(
       }
     }
 
+    // A job this run found waiting starts its clock now; one that no longer waits loses it.
+    await syncRematchWaits(client, ctx.workspaceId, jobs.map((job) => job.canonical_job_id));
+
     console.log(`Recommendation Decider complete. Updated: ${updated}`);
     return {
       updated,
       decisionsInserted,
       errors,
       outcomeConflicts,
-      scoresKept,
       outcomeConflictDetails,
       policySnapshotId: snapshot.snapshotId,
       policySnapshotHash: snapshot.snapshotHash,
